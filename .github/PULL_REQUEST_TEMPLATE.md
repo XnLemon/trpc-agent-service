@@ -1,4 +1,7 @@
-<!-- Suggested title: area: lowercase summary -->
+<!-- Suggested title: package: lowercase summary -->
+<!-- Multiple primary packages: {package/a, package/b}: lowercase summary -->
+
+<!-- Use "Fixes #123" when this PR completes an issue; otherwise use "Updates #123". -->
 
 ## What changed
 
@@ -17,8 +20,13 @@
 
 ## Testing
 
+- [ ] `./scripts/format.sh --check`
+- [ ] `./scripts/lint.sh`
+- [ ] `./scripts/build.sh`
+- [ ] `go test ./...` or `./scripts/coverage.sh`
 - [ ] Unit tests added or updated
 - [ ] Integration or end-to-end tests run where relevant
+- [ ] Race tests run for concurrency-sensitive packages
 - [ ] Manual verification performed (describe below)
 - [ ] git diff --check passes
 
