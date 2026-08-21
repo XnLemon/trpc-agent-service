@@ -14,6 +14,14 @@ type ConfigurationSnapshot struct {
 	Tenant Tenant
 }
 
+func cloneTenant(t *Tenant) *Tenant {
+	if t == nil {
+		return nil
+	}
+	clone := t.Clone()
+	return &clone
+}
+
 // NewConfigurationSnapshot creates a defensive copy for one execution.
 // A Gateway must use a tenant ID resolved from an authenticated binding.
 func NewConfigurationSnapshot(t *Tenant) (ConfigurationSnapshot, error) {
