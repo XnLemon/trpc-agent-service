@@ -284,11 +284,14 @@ BEGIN
         default_backend_profile_id = p_default_backend_profile_id,
         version = version + 1,
         updated_at = now()
-    WHERE tenant_id = p_tenant_id AND version = p_expected_version
+    -- disabled is terminal: archival work uses a separately designed path.
+    WHERE tenant_id = p_tenant_id
+      AND version = p_expected_version
+      AND status <> 'disabled'
     RETURNING version INTO v_next_version;
 
     IF NOT FOUND THEN
-        RAISE EXCEPTION 'tenant version conflict or tenant does not exist';
+        RAISE EXCEPTION 'tenant is disabled, has a version conflict, or does not exist';
     END IF;
     RETURN v_next_version;
 END;
@@ -320,7 +323,7 @@ GRANT EXECUTE ON FUNCTION update_tenant_configuration(
 COMMIT;
 ```
 
-`SECURITY DEFINER` 函数由不属于运行时连接池的专用 owner 持有；其 `search_path` 固定，且函数 owner 不得是可登录的应用账号。Admin API 只能以 `tenant_admin_writer` 调用状态迁移和配置更新函数，普通 Worker 使用 `tenant_app_writer`。配置更新函数接收完整配置快照与 `expected_version`，只会将版本递增一次并维护 `updated_at`；运行时登录角色不得继承任何对 `tenant` 的 `UPDATE` 权限。数据库 owner 和 migration role 是受控管理身份，不属于生产流量路径。
+`SECURITY DEFINER` 函数由不属于运行时连接池的专用 owner 持有；其 `search_path` 固定，且函数 owner 不得是可登录的应用账号。Admin API 只能以 `tenant_admin_writer` 调用状态迁移和配置更新函数，普通 Worker 使用 `tenant_app_writer`。配置更新函数接收完整配置快照与 `expected_version`，只会将版本递增一次并维护 `updated_at`，且拒绝 `disabled` 租户；停用后的归档或清理若需要写入，必须由后续 issue 定义独立的受控流程。运行时登录角色不得继承任何对 `tenant` 的 `UPDATE` 权限。数据库 owner 和 migration role 是受控管理身份，不属于生产流量路径。
 
 ### 与 tRPC-Agent-Go 的映射
 
