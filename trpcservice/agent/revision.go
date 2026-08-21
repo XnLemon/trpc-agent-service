@@ -32,7 +32,7 @@ const (
 
 const (
 	// SchemaVersionV1 is the initial LLMAgent configuration schema.
-	SchemaVersionV1 = 1
+	SchemaVersionV1     = 1
 	maxInstructionRunes = 65536
 	maxReferenceRunes   = 256
 )
@@ -40,9 +40,9 @@ const (
 // GenerationConfig is the provider-neutral subset materialized by the first
 // Agent App schema. Nil fields preserve provider defaults.
 type GenerationConfig struct {
-	Temperature    *float64 `json:"temperature,omitempty"`
-	TopP           *float64 `json:"top_p,omitempty"`
-	MaxOutputTokens *int    `json:"max_output_tokens,omitempty"`
+	Temperature     *float64 `json:"temperature,omitempty"`
+	TopP            *float64 `json:"top_p,omitempty"`
+	MaxOutputTokens *int     `json:"max_output_tokens,omitempty"`
 }
 
 // RuntimePolicy contains bounded execution controls captured by a published
@@ -85,33 +85,33 @@ type DraftConfiguration struct {
 // Revision is one tenant-scoped version of an Agent App definition.
 // Published revisions are immutable and content-addressed.
 type Revision struct {
-	TenantID         string
-	AppID            string
-	Revision         int64
-	State            RevisionState
-	DraftVersion     int64
-	Kind             Kind
-	SchemaVersion    int
-	Description      string
-	Instruction      string
+	TenantID          string
+	AppID             string
+	Revision          int64
+	State             RevisionState
+	DraftVersion      int64
+	Kind              Kind
+	SchemaVersion     int
+	Description       string
+	Instruction       string
 	GlobalInstruction string
-	ModelProfileID   string
-	Generation       GenerationConfig
-	Runtime          RuntimePolicy
-	Tools            []ToolAuthorization
-	ContentDigest    string
-	PublishedAt      *time.Time
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	ModelProfileID    string
+	Generation        GenerationConfig
+	Runtime           RuntimePolicy
+	Tools             []ToolAuthorization
+	ContentDigest     string
+	PublishedAt       *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // CreateRevisionInput contains trusted identity and caller-selected content for
 // a new draft. A Repository allocates the revision number inside the App scope.
 type CreateRevisionInput struct {
-	TenantID     string
-	AppID        string
-	Revision     int64
-	Kind         Kind
+	TenantID      string
+	AppID         string
+	Revision      int64
+	Kind          Kind
 	SchemaVersion int
 	Configuration DraftConfiguration
 }
@@ -242,15 +242,15 @@ func (r Revision) ComputeContentDigest() (string, error) {
 		return "", err
 	}
 	payload := struct {
-		Kind             Kind                `json:"kind"`
-		SchemaVersion    int                 `json:"schema_version"`
-		Description      string              `json:"description"`
-		Instruction      string              `json:"instruction"`
-		GlobalInstruction string             `json:"global_instruction"`
-		ModelProfileID   string              `json:"model_profile_id"`
-		Generation       GenerationConfig    `json:"generation"`
-		Runtime          RuntimePolicy       `json:"runtime"`
-		Tools            []ToolAuthorization `json:"tools"`
+		Kind              Kind                `json:"kind"`
+		SchemaVersion     int                 `json:"schema_version"`
+		Description       string              `json:"description"`
+		Instruction       string              `json:"instruction"`
+		GlobalInstruction string              `json:"global_instruction"`
+		ModelProfileID    string              `json:"model_profile_id"`
+		Generation        GenerationConfig    `json:"generation"`
+		Runtime           RuntimePolicy       `json:"runtime"`
+		Tools             []ToolAuthorization `json:"tools"`
 	}{
 		Kind:              r.Kind,
 		SchemaVersion:     r.SchemaVersion,

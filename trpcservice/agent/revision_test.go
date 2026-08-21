@@ -20,8 +20,8 @@ func validDraftConfiguration() DraftConfiguration {
 		GlobalInstruction: "Follow tenant policy.",
 		ModelProfileID:    " model-primary ",
 		Generation: GenerationConfig{
-			Temperature:    float64Pointer(0.2),
-			TopP:           float64Pointer(0.9),
+			Temperature:     float64Pointer(0.2),
+			TopP:            float64Pointer(0.9),
 			MaxOutputTokens: intPointer(2048),
 		},
 		Tools: []ToolAuthorization{
@@ -33,9 +33,9 @@ func validDraftConfiguration() DraftConfiguration {
 
 func validRevisionInput() CreateRevisionInput {
 	return CreateRevisionInput{
-		TenantID:     validTenantID,
-		AppID:        validAppID,
-		Revision:     1,
+		TenantID:      validTenantID,
+		AppID:         validAppID,
+		Revision:      1,
 		Configuration: validDraftConfiguration(),
 	}
 }
@@ -76,21 +76,45 @@ func TestNewRevisionRejectsInvalidDefinitions(t *testing.T) {
 		{name: "kind", mutate: func(input *CreateRevisionInput) { input.Kind = Kind("graph") }},
 		{name: "schema", mutate: func(input *CreateRevisionInput) { input.SchemaVersion = 2 }},
 		{name: "blank instruction", mutate: func(input *CreateRevisionInput) { input.Configuration.Instruction = " " }},
-		{name: "long instruction", mutate: func(input *CreateRevisionInput) { input.Configuration.Instruction = strings.Repeat("界", maxInstructionRunes+1) }},
-		{name: "long global instruction", mutate: func(input *CreateRevisionInput) { input.Configuration.GlobalInstruction = strings.Repeat("界", maxInstructionRunes+1) }},
+		{name: "long instruction", mutate: func(input *CreateRevisionInput) {
+			input.Configuration.Instruction = strings.Repeat("界", maxInstructionRunes+1)
+		}},
+		{name: "long global instruction", mutate: func(input *CreateRevisionInput) {
+			input.Configuration.GlobalInstruction = strings.Repeat("界", maxInstructionRunes+1)
+		}},
 		{name: "blank model", mutate: func(input *CreateRevisionInput) { input.Configuration.ModelProfileID = " " }},
-		{name: "long model", mutate: func(input *CreateRevisionInput) { input.Configuration.ModelProfileID = strings.Repeat("m", maxReferenceRunes+1) }},
+		{name: "long model", mutate: func(input *CreateRevisionInput) {
+			input.Configuration.ModelProfileID = strings.Repeat("m", maxReferenceRunes+1)
+		}},
 		{name: "temperature", mutate: func(input *CreateRevisionInput) { input.Configuration.Generation.Temperature = float64Pointer(2.1) }},
-		{name: "temperature nan", mutate: func(input *CreateRevisionInput) { input.Configuration.Generation.Temperature = float64Pointer(math.NaN()) }},
+		{name: "temperature nan", mutate: func(input *CreateRevisionInput) {
+			input.Configuration.Generation.Temperature = float64Pointer(math.NaN())
+		}},
 		{name: "top p", mutate: func(input *CreateRevisionInput) { input.Configuration.Generation.TopP = float64Pointer(0) }},
 		{name: "tokens", mutate: func(input *CreateRevisionInput) { input.Configuration.Generation.MaxOutputTokens = intPointer(0) }},
-		{name: "runtime LLM calls", mutate: func(input *CreateRevisionInput) { input.Configuration.Runtime = DefaultRuntimePolicy(); input.Configuration.Runtime.MaxLLMCalls = 0 }},
-		{name: "runtime tool calls", mutate: func(input *CreateRevisionInput) { input.Configuration.Runtime = DefaultRuntimePolicy(); input.Configuration.Runtime.MaxToolCalls = -1 }},
-		{name: "runtime parallel", mutate: func(input *CreateRevisionInput) { input.Configuration.Runtime = DefaultRuntimePolicy(); input.Configuration.Runtime.MaxParallelTools = 2 }},
-		{name: "runtime timeout", mutate: func(input *CreateRevisionInput) { input.Configuration.Runtime = DefaultRuntimePolicy(); input.Configuration.Runtime.ExecutionTimeoutSeconds = 3601 }},
+		{name: "runtime LLM calls", mutate: func(input *CreateRevisionInput) {
+			input.Configuration.Runtime = DefaultRuntimePolicy()
+			input.Configuration.Runtime.MaxLLMCalls = 0
+		}},
+		{name: "runtime tool calls", mutate: func(input *CreateRevisionInput) {
+			input.Configuration.Runtime = DefaultRuntimePolicy()
+			input.Configuration.Runtime.MaxToolCalls = -1
+		}},
+		{name: "runtime parallel", mutate: func(input *CreateRevisionInput) {
+			input.Configuration.Runtime = DefaultRuntimePolicy()
+			input.Configuration.Runtime.MaxParallelTools = 2
+		}},
+		{name: "runtime timeout", mutate: func(input *CreateRevisionInput) {
+			input.Configuration.Runtime = DefaultRuntimePolicy()
+			input.Configuration.Runtime.ExecutionTimeoutSeconds = 3601
+		}},
 		{name: "blank tool", mutate: func(input *CreateRevisionInput) { input.Configuration.Tools = []ToolAuthorization{{ToolID: " "}} }},
-		{name: "long tool", mutate: func(input *CreateRevisionInput) { input.Configuration.Tools = []ToolAuthorization{{ToolID: strings.Repeat("t", maxReferenceRunes+1)}} }},
-		{name: "duplicate tool", mutate: func(input *CreateRevisionInput) { input.Configuration.Tools = []ToolAuthorization{{ToolID: "search"}, {ToolID: " search "}} }},
+		{name: "long tool", mutate: func(input *CreateRevisionInput) {
+			input.Configuration.Tools = []ToolAuthorization{{ToolID: strings.Repeat("t", maxReferenceRunes+1)}}
+		}},
+		{name: "duplicate tool", mutate: func(input *CreateRevisionInput) {
+			input.Configuration.Tools = []ToolAuthorization{{ToolID: "search"}, {ToolID: " search "}}
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
