@@ -175,12 +175,12 @@ CREATE TABLE tenant_status_change_outbox (
     tenant_id         TEXT NOT NULL REFERENCES tenant(tenant_id),
     previous_status   TEXT NOT NULL CHECK (previous_status IN ('active', 'suspended')),
     next_status       TEXT NOT NULL CHECK (next_status IN ('active', 'suspended', 'disabled')),
-    actor_type        TEXT NOT NULL,
-    actor_id          TEXT NOT NULL,
+    actor_type        TEXT NOT NULL CHECK (length(btrim(actor_type)) > 0),
+    actor_id          TEXT NOT NULL CHECK (length(btrim(actor_id)) > 0),
     reason            TEXT NOT NULL CHECK (length(btrim(reason)) BETWEEN 1 AND 1000),
     previous_version  BIGINT NOT NULL,
     next_version      BIGINT NOT NULL,
-    correlation_id    TEXT,
+    correlation_id    TEXT NOT NULL CHECK (length(btrim(correlation_id)) > 0),
     occurred_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK ((previous_status, next_status) IN (
         ('active', 'suspended'),
@@ -198,7 +198,7 @@ CREATE OR REPLACE FUNCTION transition_tenant_status(
     p_actor_type TEXT,
     p_actor_id TEXT,
     p_reason TEXT,
-    p_correlation_id TEXT DEFAULT NULL
+    p_correlation_id TEXT
 ) RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -208,6 +208,14 @@ DECLARE
     v_previous_status TEXT;
     v_next_version BIGINT;
 BEGIN
+    IF p_actor_type IS NULL OR length(btrim(p_actor_type)) = 0
+       OR p_actor_id IS NULL OR length(btrim(p_actor_id)) = 0 THEN
+        RAISE EXCEPTION 'tenant status transition requires a non-blank actor';
+    END IF;
+    IF p_correlation_id IS NULL OR length(btrim(p_correlation_id)) = 0 THEN
+        RAISE EXCEPTION 'tenant status transition requires a non-blank correlation ID';
+    END IF;
+
     SELECT status INTO v_previous_status
     FROM public.tenant
     WHERE tenant_id = p_tenant_id
