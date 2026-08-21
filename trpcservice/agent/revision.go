@@ -304,7 +304,7 @@ func normalizeDraftConfiguration(configuration DraftConfiguration) (DraftConfigu
 	normalized := configuration
 	normalized.Description = strings.TrimSpace(configuration.Description)
 	normalized.ModelProfileID = strings.TrimSpace(configuration.ModelProfileID)
-	normalized.Generation = cloneGenerationConfig(configuration.Generation)
+	normalized.Generation = normalizeGenerationConfig(configuration.Generation)
 	if normalized.Runtime == (RuntimePolicy{}) {
 		normalized.Runtime = DefaultRuntimePolicy()
 	}
@@ -444,6 +444,19 @@ func cloneGenerationConfig(configuration GenerationConfig) GenerationConfig {
 		clone.MaxOutputTokens = &value
 	}
 	return clone
+}
+
+func normalizeGenerationConfig(configuration GenerationConfig) GenerationConfig {
+	normalized := cloneGenerationConfig(configuration)
+	if normalized.Temperature != nil && *normalized.Temperature == 0 {
+		zero := 0.0
+		normalized.Temperature = &zero
+	}
+	if normalized.TopP != nil && *normalized.TopP == 0 {
+		zero := 0.0
+		normalized.TopP = &zero
+	}
+	return normalized
 }
 
 func cloneTools(tools []ToolAuthorization) []ToolAuthorization {

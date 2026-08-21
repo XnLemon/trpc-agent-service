@@ -219,6 +219,21 @@ func TestContentDigestIsDeterministicAndSensitiveToBehavior(t *testing.T) {
 	if directNilDigest != directEmptyDigest {
 		t.Fatalf("digest must normalize external empty tool representations: %q %q", directNilDigest, directEmptyDigest)
 	}
+	positiveZero := first.Clone()
+	positiveZero.Generation.Temperature = float64Pointer(0)
+	negativeZero := first.Clone()
+	negativeZero.Generation.Temperature = float64Pointer(math.Copysign(0, -1))
+	positiveZeroDigest, err := positiveZero.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	negativeZeroDigest, err := negativeZero.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if positiveZeroDigest != negativeZeroDigest {
+		t.Fatalf("equivalent signed zero temperatures must have one digest: %q %q", positiveZeroDigest, negativeZeroDigest)
+	}
 }
 
 func TestPublishFreezesContentAndDetectsMutation(t *testing.T) {
