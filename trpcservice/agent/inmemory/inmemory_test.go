@@ -280,6 +280,88 @@ func TestAuditValidationAndRollbackGuards(t *testing.T) {
 	}
 }
 
+func TestRepositoryRejectsInvalidStaleAndMissingMutations(t *testing.T) {
+	r := NewRepository()
+	if _, err := r.Create(context.Background(), agent.CreateInput{TenantID: "bad", AppKey: "bad", DisplayName: "Bad"}); !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("expected invalid create rejection, got %v", err)
+	}
+	app := createApp(t, r, tenantOne, "errors")
+	draft := createDraft(t, r, app, draftConfiguration("errors"))
+
+	if _, err := r.UpdateMetadata(context.Background(), agent.UpdateMetadataInput{
+		TenantID: tenantOne, AppID: app.AppID, ExpectedVersion: app.Version + 1, DisplayName: "Stale",
+	}); !errors.Is(err, agent.ErrConflict) {
+		t.Fatalf("expected metadata conflict, got %v", err)
+	}
+	if _, err := r.UpdateMetadata(context.Background(), agent.UpdateMetadataInput{
+		TenantID: tenantOne, AppID: app.AppID, ExpectedVersion: app.Version, DisplayName: "",
+	}); !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("expected invalid metadata rejection, got %v", err)
+	}
+	invalidConfiguration := draftConfiguration("invalid")
+	invalidConfiguration.Instruction = ""
+	if _, err := r.CreateDraft(context.Background(), agent.CreateDraftInput{
+		TenantID: tenantOne, AppID: app.AppID, ExpectedAppVersion: app.Version, Configuration: invalidConfiguration,
+	}); !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("expected invalid draft rejection, got %v", err)
+	}
+	if _, err := r.UpdateDraft(context.Background(), agent.UpdateDraftInput{
+		TenantID: tenantOne, AppID: app.AppID, Revision: 99,
+		ExpectedAppVersion: app.Version, ExpectedDraftVersion: 1, Configuration: draftConfiguration("missing"),
+	}); !errors.Is(err, agent.ErrNotFound) {
+		t.Fatalf("expected missing draft rejection, got %v", err)
+	}
+	if _, err := r.UpdateDraft(context.Background(), agent.UpdateDraftInput{
+		TenantID: tenantOne, AppID: app.AppID, Revision: draft.Revision,
+		ExpectedAppVersion: app.Version, ExpectedDraftVersion: draft.DraftVersion, Configuration: invalidConfiguration,
+	}); !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("expected invalid draft update rejection, got %v", err)
+	}
+	if _, err := r.GetRevision(context.Background(), tenantOne, app.AppID, 99); !errors.Is(err, agent.ErrNotFound) {
+		t.Fatalf("expected missing revision lookup rejection, got %v", err)
+	}
+
+	stalePublish := publishInput(app, draft)
+	stalePublish.ExpectedDraftVersion++
+	if _, _, _, err := r.Publish(context.Background(), stalePublish); !errors.Is(err, agent.ErrConflict) {
+		t.Fatalf("expected stale publication conflict, got %v", err)
+	}
+	publishedApp, _, _, err := r.Publish(context.Background(), publishInput(app, draft))
+	if err != nil {
+		t.Fatal(err)
+	}
+	republish := publishInput(publishedApp, draft)
+	if _, _, _, err := r.Publish(context.Background(), republish); !errors.Is(err, agent.ErrImmutableRevision) {
+		t.Fatalf("expected immutable re-publication rejection, got %v", err)
+	}
+	if _, _, err := r.Rollback(context.Background(), agent.RollbackInput{
+		TenantID: tenantOne, AppID: app.AppID, TargetRevision: draft.Revision,
+		ExpectedAppVersion: publishedApp.Version, Metadata: changeMetadata(),
+	}); !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("expected same-target rollback rejection, got %v", err)
+	}
+	if _, _, err := r.Rollback(context.Background(), agent.RollbackInput{
+		TenantID: tenantOne, AppID: app.AppID, TargetRevision: 99,
+		ExpectedAppVersion: publishedApp.Version, Metadata: changeMetadata(),
+	}); !errors.Is(err, agent.ErrNotFound) {
+		t.Fatalf("expected missing rollback target rejection, got %v", err)
+	}
+	if _, _, err := r.TransitionStatus(context.Background(), agent.TransitionStatusInput{
+		TenantID: tenantOne, AppID: app.AppID, ExpectedVersion: publishedApp.Version + 1,
+		NextStatus: agent.StatusSuspended, Metadata: changeMetadata(),
+	}); !errors.Is(err, agent.ErrConflict) {
+		t.Fatalf("expected stale transition conflict, got %v", err)
+	}
+	tooLong := changeMetadata()
+	tooLong.Reason = string(make([]rune, 1001))
+	if _, _, err := r.TransitionStatus(context.Background(), agent.TransitionStatusInput{
+		TenantID: tenantOne, AppID: app.AppID, ExpectedVersion: publishedApp.Version,
+		NextStatus: agent.StatusSuspended, Metadata: tooLong,
+	}); !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("expected oversized audit reason rejection, got %v", err)
+	}
+}
+
 func TestOperationsHonorContextCancellationWhileWaiting(t *testing.T) {
 	r := NewRepository()
 	app := createApp(t, r, tenantOne, "cancel")
@@ -393,6 +475,22 @@ func TestWriterLockHonorsCancellationWhileWaiting(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("waiting writer did not observe cancellation")
+	}
+}
+
+func TestInternalDefensiveBranches(t *testing.T) {
+	if cloneApp(nil) != nil || cloneRevision(nil) != nil {
+		t.Fatal("nil domain values must remain nil across clone boundaries")
+	}
+	future := time.Now().UTC().Add(time.Hour)
+	if got := nextTime(future); !got.Equal(future) {
+		t.Fatalf("monotonic clock guard moved backwards: %v", got)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	var mutex contextRWMutex
+	if err := mutex.rlock(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled read lock returned %v", err)
 	}
 }
 
