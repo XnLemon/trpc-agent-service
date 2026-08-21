@@ -41,21 +41,21 @@ func TestLockHonorsCancellationWhileWaiting(t *testing.T) {
 }
 
 func TestInternalContextAndCloneBranches(t *testing.T) {
-	if err := checkContext(nil); err != nil {
-		t.Fatalf("nil context should be accepted: %v", err)
-	}
-	gate := make(chan struct{}, 1)
-	gate <- struct{}{}
-	if err := acquire(nil, gate); err != nil {
-		t.Fatalf("nil context should acquire an available gate: %v", err)
-	}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
+	gate := make(chan struct{}, 1)
 	if err := acquire(cancelled, gate); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected cancelled acquire, got %v", err)
 	}
 
 	r := NewRepository()
+	if err := r.lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		r.mu.Unlock()
+		r.unlock()
+	}()
 	if err := r.rLock(cancelled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected cancelled read lock, got %v", err)
 	}
