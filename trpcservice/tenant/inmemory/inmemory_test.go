@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
 )
 
 func createInput(key string) tenant.CreateInput {
