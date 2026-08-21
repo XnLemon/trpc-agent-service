@@ -168,6 +168,8 @@ ALTER TABLE tenant
 状态不是普通配置字段。运行时数据库角色不得直接更新 `tenant.status`，而是只能执行受限的状态迁移函数；该函数锁定 tenant 行、校验期望版本和允许的迁移，在同一事务中更新状态并写入 Outbox。以下 DDL 给出最小边界；完整 `audit_log` schema 仍由后续 issue 定义。
 
 ```sql
+BEGIN;
+
 CREATE TABLE tenant_status_change_outbox (
     event_id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     tenant_id         TEXT NOT NULL REFERENCES tenant(tenant_id),
@@ -257,9 +259,16 @@ GRANT UPDATE (
     audit_retention_days, log_masking_level, trace_sampling_rate,
     default_agent_app_id, default_backend_profile_id, version, updated_at
 ) ON tenant TO tenant_admin_writer;
+-- PostgreSQL grants EXECUTE on new functions to PUBLIC by default. Revoke it
+-- before the role-specific grant while this migration transaction is open.
+REVOKE ALL ON FUNCTION transition_tenant_status(
+    TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, TEXT
+) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION transition_tenant_status(
     TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, TEXT
 ) TO tenant_admin_writer;
+
+COMMIT;
 ```
 
 `SECURITY DEFINER` 函数由不属于运行时连接池的专用 owner 持有；其 `search_path` 固定，且函数 owner 不得是可登录的应用账号。Admin API 只能以 `tenant_admin_writer` 调用该函数，普通 Worker 使用 `tenant_app_writer`。运行时登录角色不得继承任何对 `tenant` 的表级 `UPDATE` 权限；数据库 owner 和 migration role 是受控管理身份，不属于生产流量路径。
