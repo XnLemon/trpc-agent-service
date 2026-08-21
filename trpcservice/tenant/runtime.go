@@ -1,0 +1,73 @@
+package tenant
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+)
+
+type contextKey struct{}
+
+// ConfigurationSnapshot is immutable tenant data for one Worker execution.
+// It never contains secrets.
+type ConfigurationSnapshot struct {
+	Tenant Tenant
+}
+
+// NewConfigurationSnapshot creates a defensive copy for one execution.
+// A Gateway must use a tenant ID resolved from an authenticated binding.
+func NewConfigurationSnapshot(t *Tenant) (ConfigurationSnapshot, error) {
+	if t == nil {
+		return ConfigurationSnapshot{}, fmt.Errorf("%w: tenant snapshot is required", ErrInvalid)
+	}
+	if err := validateTenantID(t.TenantID); err != nil {
+		return ConfigurationSnapshot{}, err
+	}
+	if t.Version < 1 {
+		return ConfigurationSnapshot{}, fmt.Errorf("%w: tenant version must be positive", ErrInvalid)
+	}
+	return ConfigurationSnapshot{Tenant: *cloneTenant(t)}, nil
+}
+
+// WithConfigurationSnapshot carries a fixed configuration for one execution.
+func WithConfigurationSnapshot(ctx context.Context, snapshot ConfigurationSnapshot) context.Context {
+	return context.WithValue(ctx, contextKey{}, ConfigurationSnapshot{Tenant: *cloneTenant(&snapshot.Tenant)})
+}
+
+// ConfigurationSnapshotFromContext returns a defensive copy.
+func ConfigurationSnapshotFromContext(ctx context.Context) (ConfigurationSnapshot, bool) {
+	snapshot, ok := ctx.Value(contextKey{}).(ConfigurationSnapshot)
+	if !ok {
+		return ConfigurationSnapshot{}, false
+	}
+	return ConfigurationSnapshot{Tenant: *cloneTenant(&snapshot.Tenant)}, true
+}
+
+// RunnerIdentity contains collision-free identity values for a Runner.
+type RunnerIdentity struct {
+	UserID    string
+	SessionID string
+}
+
+// NewRunnerIdentity namespaces external IDs without ambiguous concatenation.
+func NewRunnerIdentity(tenantID, externalUserID, externalSessionID string) (RunnerIdentity, error) {
+	if err := validateTenantID(tenantID); err != nil {
+		return RunnerIdentity{}, err
+	}
+	userID, err := namespacedID(tenantID, externalUserID)
+	if err != nil {
+		return RunnerIdentity{}, err
+	}
+	sessionID, err := namespacedID(tenantID, externalSessionID)
+	if err != nil {
+		return RunnerIdentity{}, err
+	}
+	return RunnerIdentity{UserID: userID, SessionID: sessionID}, nil
+}
+
+func namespacedID(tenantID, externalID string) (string, error) {
+	if externalID == "" {
+		return "", fmt.Errorf("%w: external identity is required", ErrInvalid)
+	}
+	return strconv.Itoa(len(tenantID)) + ":" + tenantID + ":" + strconv.Itoa(len(externalID)) + ":" + externalID, nil
+}
