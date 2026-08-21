@@ -75,6 +75,31 @@ func (t Tenant) Clone() Tenant {
 	return c
 }
 
+// Validate checks all tenant root invariants. It is useful at runtime when a
+// snapshot came from an external adapter rather than NewTenant.
+func (t Tenant) Validate() error {
+	if err := validateTenantID(t.TenantID); err != nil {
+		return err
+	}
+	key, err := normalizeTenantKey(t.TenantKey)
+	if err != nil {
+		return err
+	}
+	if key != t.TenantKey {
+		return fmt.Errorf("%w: tenant key must be normalized", ErrInvalid)
+	}
+	if t.Status != StatusActive && t.Status != StatusSuspended && t.Status != StatusDisabled {
+		return fmt.Errorf("%w: unknown status %q", ErrInvalid, t.Status)
+	}
+	if err := validateConfiguration(t.DisplayName, t.RateLimitRPM, t.MaxConcurrentExecutions, t.MonthlyTokenBudget, t.MonthlySpendLimitMinor, t.BillingCurrency, t.AuditRetentionDays, t.LogMaskingLevel, t.TraceSamplingRate); err != nil {
+		return err
+	}
+	if t.Version < 1 || t.CreatedAt.IsZero() || t.UpdatedAt.IsZero() {
+		return fmt.Errorf("%w: version and timestamps must be initialized", ErrInvalid)
+	}
+	return nil
+}
+
 // CreateInput contains the full initial tenant snapshot. An empty TenantID
 // generates a time-ordered, non-enumerable t_ + Crockford ULID-like ID.
 type CreateInput struct {
@@ -183,12 +208,13 @@ func NewTenant(input CreateInput) (*Tenant, error) {
 		return nil, err
 	}
 	now := time.Now().UTC()
-	return &Tenant{
+	tenant := &Tenant{
 		TenantID: id, TenantKey: key, DisplayName: strings.TrimSpace(input.DisplayName), Status: status,
 		RateLimitRPM: cloneInt64(input.RateLimitRPM), MaxConcurrentExecutions: cloneInt64(input.MaxConcurrentExecutions), MonthlyTokenBudget: cloneInt64(input.MonthlyTokenBudget), MonthlySpendLimitMinor: cloneInt64(input.MonthlySpendLimitMinor), BillingCurrency: input.BillingCurrency,
 		AuditRetentionDays: input.AuditRetentionDays, LogMaskingLevel: input.LogMaskingLevel, TraceSamplingRate: input.TraceSamplingRate,
 		DefaultAgentAppID: cloneString(input.DefaultAgentAppID), DefaultBackendProfileID: cloneString(input.DefaultBackendProfileID), Version: 1, CreatedAt: now, UpdatedAt: now,
-	}, nil
+	}
+	return tenant, nil
 }
 
 // CanAcceptExecution applies the runtime gate described in issue #4.

@@ -158,3 +158,17 @@ func TestTenantIdentityHelpers(t *testing.T) {
 		t.Fatal("expected valid currency")
 	}
 }
+
+func TestTenantValidateRejectsMutableIdentityAndInvalidLifecycle(t *testing.T) {
+	tenant, err := NewTenant(validCreate("validate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tenant.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	tenant.TenantKey = "UPPERCASE"
+	if !errors.Is(tenant.Validate(), ErrInvalid) {
+		t.Fatal("expected unnormalized key rejection")
+	}
+}
