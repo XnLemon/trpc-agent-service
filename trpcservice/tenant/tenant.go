@@ -76,8 +76,8 @@ func (t Tenant) Clone() Tenant {
 	return c
 }
 
-// CreateInput contains the full initial tenant snapshot. An empty TenantID
-// generates a time-ordered, non-enumerable t_ + Crockford ULID-like ID.
+// CreateInput contains the full initial tenant snapshot. TenantID is generated
+// by the service so request callers cannot choose the isolation key.
 type CreateInput struct {
 	TenantKey   string
 	DisplayName string
