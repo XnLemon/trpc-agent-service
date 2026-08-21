@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
 func TestLockHonorsCancellationWhileWaiting(t *testing.T) {
@@ -36,4 +38,35 @@ func TestLockHonorsCancellationWhileWaiting(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("cancellable lock did not return after cancellation")
 	}
+}
+
+func TestInternalContextAndCloneBranches(t *testing.T) {
+	if err := checkContext(nil); err != nil {
+		t.Fatalf("nil context should be accepted: %v", err)
+	}
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	if err := acquire(nil, gate); err != nil {
+		t.Fatalf("nil context should acquire an available gate: %v", err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := acquire(cancelled, gate); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancelled acquire, got %v", err)
+	}
+
+	r := NewRepository()
+	if err := r.rLock(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancelled read lock, got %v", err)
+	}
+
+	value := int64(1)
+	text := "value"
+	if cloneInt64(&value) == nil || cloneString(&text) == nil {
+		t.Fatal("non-nil clone helpers must return copies")
+	}
+	if cloneTenant(nil) != nil {
+		t.Fatal("nil tenant clone must remain nil")
+	}
+	var _ tenant.Repository = r
 }
