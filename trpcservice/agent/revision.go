@@ -237,7 +237,10 @@ func (r Revision) Validate() error {
 // ComputeContentDigest returns the deterministic SHA-256 digest of executable
 // content. Publication metadata and draft bookkeeping are excluded.
 func (r Revision) ComputeContentDigest() (string, error) {
-	configuration := r.Configuration()
+	configuration, err := normalizeDraftConfiguration(r.Configuration())
+	if err != nil {
+		return "", err
+	}
 	if err := validateRevisionDefinition(r.Kind, r.SchemaVersion, configuration); err != nil {
 		return "", err
 	}
@@ -374,6 +377,9 @@ func validateRuntimePolicy(policy RuntimePolicy) error {
 }
 
 func normalizeTools(tools []ToolAuthorization) ([]ToolAuthorization, error) {
+	if len(tools) == 0 {
+		return []ToolAuthorization{}, nil
+	}
 	normalized := cloneTools(tools)
 	seen := make(map[string]struct{}, len(normalized))
 	for i := range normalized {
@@ -444,7 +450,9 @@ func cloneTools(tools []ToolAuthorization) []ToolAuthorization {
 	if tools == nil {
 		return nil
 	}
-	return append([]ToolAuthorization(nil), tools...)
+	clone := make([]ToolAuthorization, len(tools))
+	copy(clone, tools)
+	return clone
 }
 
 func cloneTime(value *time.Time) *time.Time {

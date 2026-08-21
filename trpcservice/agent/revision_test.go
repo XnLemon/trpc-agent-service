@@ -178,6 +178,32 @@ func TestContentDigestIsDeterministicAndSensitiveToBehavior(t *testing.T) {
 	if changedDigest == firstDigest {
 		t.Fatal("behavioral configuration change must alter digest")
 	}
+	nilToolsInput := validRevisionInput()
+	nilToolsInput.Configuration.Tools = nil
+	nilTools, err := NewRevision(nilToolsInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyToolsInput := validRevisionInput()
+	emptyToolsInput.Configuration.Tools = []ToolAuthorization{}
+	emptyTools, err := NewRevision(emptyToolsInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nilTools.Tools == nil || emptyTools.Tools == nil {
+		t.Fatal("empty tool allowlists must use the canonical non-nil representation")
+	}
+	nilDigest, err := nilTools.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyDigest, err := emptyTools.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nilDigest != emptyDigest {
+		t.Fatalf("equivalent empty tool allowlists must have one digest: %q %q", nilDigest, emptyDigest)
+	}
 }
 
 func TestPublishFreezesContentAndDetectsMutation(t *testing.T) {
