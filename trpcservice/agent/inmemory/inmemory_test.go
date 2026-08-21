@@ -492,6 +492,44 @@ func TestInternalDefensiveBranches(t *testing.T) {
 	if err := mutex.rlock(cancelled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled read lock returned %v", err)
 	}
+	if err := mutex.lock(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled write lock returned %v", err)
+	}
+
+	assertPanics(t, func() { mutex.unlock() })
+	assertPanics(t, func() { mutex.runlock() })
+
+	if err := mutex.lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	readerAcquired := make(chan error, 1)
+	go func() {
+		err := mutex.rlock(context.Background())
+		if err == nil {
+			mutex.runlock()
+		}
+		readerAcquired <- err
+	}()
+	time.Sleep(25 * time.Millisecond)
+	mutex.unlock()
+	select {
+	case err := <-readerAcquired:
+		if err != nil {
+			t.Fatalf("reader failed after writer wakeup: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reader did not reacquire after writer release")
+	}
+}
+
+func assertPanics(t *testing.T, operation func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected operation to panic")
+		}
+	}()
+	operation()
 }
 
 func createInput(tenantID, key string) agent.CreateInput {

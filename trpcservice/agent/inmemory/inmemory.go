@@ -441,9 +441,6 @@ func conflict(expected, actual int64) error {
 }
 
 func checkContext(ctx context.Context) error {
-	if ctx == nil {
-		return nil
-	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
