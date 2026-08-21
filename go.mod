@@ -1,3 +1,3 @@
-module github.com/XnLemon/trpc-agent-service
+module github.com/liuzengh/trpc-agent-service
 
 go 1.21

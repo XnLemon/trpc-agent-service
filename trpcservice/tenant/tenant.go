@@ -258,7 +258,14 @@ func validateTenantID(id string) error {
 }
 
 func validCurrency(currency string) bool {
-	return iso4217Currencies[currency]
+	return iso4217Currencies[currency] && !iso4217NonMonetaryCodes[currency]
+}
+
+// iso4217NonMonetaryCodes identifies ISO-4217 codes that are not spendable
+// currencies and therefore cannot interpret a monetary budget amount.
+var iso4217NonMonetaryCodes = map[string]bool{
+	"XAG": true, "XAU": true, "XBA": true, "XBB": true, "XBC": true, "XBD": true,
+	"XDR": true, "XPD": true, "XPT": true, "XSU": true, "XTS": true, "XUA": true, "XXX": true,
 }
 
 // iso4217Currencies is the set of active ISO-4217 alphabetic currency codes

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
 // InMemoryRepository is a single-process repository for development and

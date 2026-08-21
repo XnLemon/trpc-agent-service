@@ -152,7 +152,7 @@
 ## 快速开始
 
 ```bash
-git clone https://github.com/XnLemon/trpc-agent-service.git
+git clone https://github.com/liuzengh/trpc-agent-service.git
 cd trpc-agent-service
 
 ./scripts/build.sh
