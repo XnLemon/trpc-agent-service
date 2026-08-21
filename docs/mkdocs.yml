@@ -1,0 +1,39 @@
+site_name: tRPC-Agent-Service
+site_description: 基于 tRPC-Agent-Go 的多租户节点化 Agent 部署平台
+site_url: https://xnlemon.github.io/trpc-agent-service/
+repo_url: https://github.com/XnLemon/trpc-agent-service
+repo_name: XnLemon/trpc-agent-service
+edit_uri: edit/main/docs/docs/
+
+theme:
+  name: material
+  language: zh
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: 切换到深色模式
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: 切换到浅色模式
+
+nav:
+  - 首页: index.md
+  - 架构设计: architecture.md
+  - 数据模型: data-model.md
+  - 运维方案: ops.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - toc:
+      permalink: true
