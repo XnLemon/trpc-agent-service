@@ -24,7 +24,9 @@
 CREATE TABLE tenant (
     -- 身份：ULID 可排序，但不应暴露为可枚举的业务编号
     tenant_id       TEXT PRIMARY KEY
-                    CHECK (tenant_id ~ '^t_[0-9A-HJKMNP-TV-Z]{26}$'),
+                    -- ULID's first payload character is 0-7 (the remaining
+                    -- 25 characters use the Crockford alphabet).
+                    CHECK (tenant_id ~ '^t_[0-7][0-9A-HJKMNP-TV-Z]{25}$'),
     tenant_key      TEXT NOT NULL UNIQUE
                     CHECK (tenant_key ~ '^[a-z][a-z0-9-]{1,63}$'),
     display_name    TEXT NOT NULL
