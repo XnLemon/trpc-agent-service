@@ -1,6 +1,7 @@
 # 数据模型
 
-> 设计分阶段推进：本阶段完成 `tenant` 根模型；其余核心表（`agent_app`、`backend_profile`、`channel_binding`、`session`、`message_event`、`memory`、`summary`、`audit_log`）只保留边界和顺序占位。
+> 设计分阶段推进：`tenant` 根模型已经完成，`agent_app` 的稳定身份、发布版本和运行时边界见
+> [Agent App 模型与发布边界](agent-app-model.md)。其余核心表继续按依赖顺序保留占位。
 
 ## Tenant 根模型
 
@@ -352,8 +353,8 @@ COMMIT;
 ## 其余核心表（占位）
 
 ```text
-agent_app         Agent 应用（租户级，发布版本、模型与工具授权） ← 下一步
-backend_profile   数据后端档案（Session / Memory / Knowledge 路由）
+agent_app         Agent 应用（租户级，发布版本、模型与工具授权）→ 已完成设计
+backend_profile   数据后端档案（Session / Memory / Knowledge 路由）← 下一步
 channel_binding   IM 通道绑定（tenant + channel + 账号 → agent_app）
 session           会话（tenant_id、session_id、状态、TTL）
 message_event     消息与会话事件（session 内有序、幂等）
