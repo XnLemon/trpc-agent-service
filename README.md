@@ -112,13 +112,16 @@
 ```txt
 |-- README.md              # 说明文档，包含设计、安装、使用
 |-- go.mod                 # Go module 定义
-|-- build.sh               # 构建项目
-|-- clean.sh               # 清理中间产物
-|-- coverage.sh            # 运行单测覆盖率
-|-- format.sh              # 格式化 Go 代码
-|-- lint.sh                # 静态检查
-|-- start.sh               # 启动服务
-|-- stop.sh                # 停止服务
+|-- .github
+|   `-- workflows          # CI 流程（PR / push 触发）
+|-- scripts
+|   |-- build.sh           # 构建项目
+|   |-- clean.sh           # 清理中间产物
+|   |-- coverage.sh        # 运行单测覆盖率
+|   |-- format.sh          # 格式化 Go 代码（--check 为 CI 校验模式）
+|   |-- lint.sh            # 静态检查
+|   |-- start.sh           # 启动服务
+|   `-- stop.sh            # 停止服务
 |-- data                   # 服务运行时数据
 |-- docs                   # 各模块说明与架构设计文档
 |-- cmd
@@ -137,18 +140,27 @@
     `-- workspace          # 工作目录，包含本地、容器等沙箱环境
 ```
 
+## CI
+
+`.github/workflows/ci.yml` 在 push 到 `main` 和提交 PR 时自动运行：
+
+- **Format & Lint**：`gofmt` 校验、`go vet`、`golangci-lint`
+- **Build, Test & Coverage**：构建、单测覆盖率、上传 [Codecov](https://codecov.io)、清理
+
+覆盖率上传使用仓库 Secret `CODECOV_TOKEN`（见 Codecov 仓库设置页获取），未配置时上传步骤不阻断 CI。
+
 ## 快速开始
 
 ```bash
 git clone https://github.com/liuzengh/trpc-agent-service.git
 cd trpc-agent-service
 
-./build.sh
-./start.sh
+./scripts/build.sh
+./scripts/start.sh
 ```
 
 停止服务：
 
 ```bash
-./stop.sh
+./scripts/stop.sh
 ```
