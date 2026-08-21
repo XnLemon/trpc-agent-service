@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestConfigurationSnapshotIsolatedFromContextAndSource(t *testing.T) {
@@ -139,5 +140,27 @@ func TestRunnerIdentityRejectsInvalidInputs(t *testing.T) {
 				t.Fatalf("expected ErrInvalid, got %v", err)
 			}
 		})
+	}
+}
+
+func TestConfigurationSnapshotRejectsInvalidExternalTenant(t *testing.T) {
+	tenant, err := NewTenant(validCreate("snapshot-invalid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant.TenantKey = "Not-Normalized"
+	if _, err := NewConfigurationSnapshot(tenant); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("expected invalid snapshot, got %v", err)
+	}
+}
+
+func TestConfigurationSnapshotRequiresCompleteRootState(t *testing.T) {
+	tenant, err := NewTenant(validCreate("snapshot-state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant.CreatedAt = time.Time{}
+	if err := tenant.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("expected incomplete tenant rejection, got %v", err)
 	}
 }
