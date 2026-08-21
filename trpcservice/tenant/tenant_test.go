@@ -172,8 +172,23 @@ func TestTenantValidateRejectsMutableIdentityAndInvalidLifecycle(t *testing.T) {
 	if err := tenant.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	tenant.TenantKey = "UPPERCASE"
-	if !errors.Is(tenant.Validate(), ErrInvalid) {
-		t.Fatal("expected unnormalized key rejection")
+
+	tests := []struct {
+		name   string
+		mutate func(*Tenant)
+	}{
+		{name: "malformed key", mutate: func(tenant *Tenant) { tenant.TenantKey = "!" }},
+		{name: "unnormalized key", mutate: func(tenant *Tenant) { tenant.TenantKey = "UPPERCASE" }},
+		{name: "unknown status", mutate: func(tenant *Tenant) { tenant.Status = Status("unknown") }},
+		{name: "invalid configuration", mutate: func(tenant *Tenant) { tenant.DisplayName = "" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := tenant.Clone()
+			test.mutate(&invalid)
+			if !errors.Is(invalid.Validate(), ErrInvalid) {
+				t.Fatal("expected invalid tenant rejection")
+			}
+		})
 	}
 }
