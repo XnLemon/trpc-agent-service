@@ -306,11 +306,14 @@ END;
 $$;
 
 -- Runtime roles are provisioned without table ownership, inherited broad DML,
--- or any UPDATE grant. All configuration and lifecycle mutations are
+-- or direct tenant reads. All configuration and lifecycle mutations are
 -- function-only, so version and updated_at cannot be independently changed.
 REVOKE ALL PRIVILEGES ON tenant FROM PUBLIC;
-REVOKE UPDATE ON tenant FROM tenant_app_writer, tenant_admin_writer;
-GRANT SELECT ON tenant TO tenant_app_writer, tenant_admin_writer;
+-- Workers receive tenant-scoped configuration snapshots from the control plane;
+-- they must not enumerate tenant configuration through a shared database role.
+REVOKE SELECT, UPDATE ON tenant FROM tenant_app_writer;
+-- Cross-tenant root-table reads are an explicit Admin control-plane capability.
+GRANT SELECT ON tenant TO tenant_admin_writer;
 -- PostgreSQL grants EXECUTE on new functions to PUBLIC by default. Revoke it
 -- before the role-specific grants while this migration transaction is open.
 REVOKE ALL ON FUNCTION transition_tenant_status(
@@ -331,13 +334,14 @@ GRANT EXECUTE ON FUNCTION update_tenant_configuration(
 COMMIT;
 ```
 
-`SECURITY DEFINER` 函数由不属于运行时连接池的专用 owner 持有；其 `search_path` 固定，且函数 owner 不得是可登录的应用账号。Admin API 只能以 `tenant_admin_writer` 调用状态迁移和配置更新函数，普通 Worker 使用 `tenant_app_writer`。配置更新函数接收完整配置快照与 `expected_version`，只会将版本递增一次并维护 `updated_at`，且拒绝 `disabled` 租户；停用后的归档或清理若需要写入，必须由后续 issue 定义独立的受控流程。运行时登录角色不得继承任何对 `tenant` 的 `UPDATE` 权限。数据库 owner 和 migration role 是受控管理身份，不属于生产流量路径。
+`SECURITY DEFINER` 函数由不属于运行时连接池的专用 owner 持有；其 `search_path` 固定，且函数 owner 不得是可登录的应用账号。Admin API 只能以 `tenant_admin_writer` 调用状态迁移和配置更新函数；该角色也是唯一拥有跨租户根表读取权限的运行时控制平面角色。普通 Worker 使用 `tenant_app_writer`，没有 `tenant` 的 `SELECT` 或 `UPDATE` 权限。Gateway 验证 IM 回调并解析可信 `tenant_id` 后，由控制平面生成只包含该租户、固定 `version` 的配置快照并随任务下发；Worker 只能消费快照，不能通过用户输入指定租户或查询根表。配置更新函数接收完整配置快照与 `expected_version`，只会将版本递增一次并维护 `updated_at`，且拒绝 `disabled` 租户；停用后的归档或清理若需要写入，必须由后续 issue 定义独立的受控流程。数据库 owner 和 migration role 是受控管理身份，不属于生产流量路径。
 
 ### 与 tRPC-Agent-Go 的映射
 
 | 平台边界 | 具体约定 |
 | --- | --- |
 | 可信租户解析 | Gateway 验证 IM 回调和 `channel_binding` 后得到 `tenant_id`；不接受未验证的请求头或用户输入作为租户 ID，并将其写入受控 `context.Context`。 |
+| 租户配置读取 | 控制平面只在可信 `tenant_id` 已确定后读取根表，并将该租户的固定版本配置快照下发给 Worker；`tenant_app_writer` 无根表读取权限，不能枚举或跨租户查询。 |
 | Runner 身份 | 以结构化、无歧义的编码将 `tenant_id` 与外部用户/会话标识组合到 Runner 的 `userID` / `sessionID` 命名空间；持久化查询仍显式带 `tenant_id`，不把 key prefix 当作唯一隔离。 |
 | Agent 装配 | Agent Factory 根据已发布的 tenant/app 配置快照创建或复用 Agent；一次执行固定配置版本，避免热更新造成半个请求使用两套配置。模型和工具密钥从 Secret Manager 按租户授权注入。 |
 | 可观测性 | Span attributes 写入 `tenant.id`、`tenant.version`、`agent_app.id` 和 `trace_id`；指标的租户维度须评估高基数与访问控制，成本归集从 usage/audit 事件完成。 |
