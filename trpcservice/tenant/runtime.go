@@ -11,7 +11,15 @@ type contextKey struct{}
 // ConfigurationSnapshot is immutable tenant data for one Worker execution.
 // It never contains secrets.
 type ConfigurationSnapshot struct {
-	Tenant Tenant
+	tenant *Tenant
+}
+
+// Tenant returns a defensive copy of the tenant data captured by the snapshot.
+func (s ConfigurationSnapshot) Tenant() Tenant {
+	if s.tenant == nil {
+		return Tenant{}
+	}
+	return s.tenant.Clone()
 }
 
 func cloneTenant(t *Tenant) *Tenant {
@@ -34,21 +42,24 @@ func NewConfigurationSnapshot(t *Tenant) (ConfigurationSnapshot, error) {
 	if !t.CanAcceptExecution() {
 		return ConfigurationSnapshot{}, fmt.Errorf("%w: tenant status %q cannot accept execution", ErrInvalid, t.Status)
 	}
-	return ConfigurationSnapshot{Tenant: *cloneTenant(t)}, nil
+	return ConfigurationSnapshot{tenant: cloneTenant(t)}, nil
 }
 
 // WithConfigurationSnapshot carries a fixed configuration for one execution.
 func WithConfigurationSnapshot(ctx context.Context, snapshot ConfigurationSnapshot) context.Context {
-	return context.WithValue(ctx, contextKey{}, ConfigurationSnapshot{Tenant: *cloneTenant(&snapshot.Tenant)})
+	if snapshot.tenant == nil {
+		return context.WithValue(ctx, contextKey{}, ConfigurationSnapshot{})
+	}
+	return context.WithValue(ctx, contextKey{}, ConfigurationSnapshot{tenant: cloneTenant(snapshot.tenant)})
 }
 
 // ConfigurationSnapshotFromContext returns a defensive copy.
 func ConfigurationSnapshotFromContext(ctx context.Context) (ConfigurationSnapshot, bool) {
 	snapshot, ok := ctx.Value(contextKey{}).(ConfigurationSnapshot)
-	if !ok {
+	if !ok || snapshot.tenant == nil {
 		return ConfigurationSnapshot{}, false
 	}
-	return ConfigurationSnapshot{Tenant: *cloneTenant(&snapshot.Tenant)}, true
+	return ConfigurationSnapshot{tenant: cloneTenant(snapshot.tenant)}, true
 }
 
 // RunnerIdentity contains collision-free identity values for a Runner.
