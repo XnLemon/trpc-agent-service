@@ -275,6 +275,9 @@ func (r Revision) Publish(at time.Time) (Revision, error) {
 	if r.State != RevisionStateDraft {
 		return Revision{}, ErrImmutableRevision
 	}
+	if err := r.Validate(); err != nil {
+		return Revision{}, err
+	}
 	if at.IsZero() || at.Before(r.UpdatedAt) {
 		return Revision{}, fmt.Errorf("%w: publication time must follow the latest draft update", ErrInvalid)
 	}

@@ -251,4 +251,9 @@ func TestRevisionValidateRejectsMalformedPublicationState(t *testing.T) {
 	if _, err := edited.Publish(edited.UpdatedAt); err != nil {
 		t.Fatalf("expected publication at the latest draft update boundary to succeed, got %v", err)
 	}
+	corrupted := draft.Clone()
+	corrupted.ContentDigest = strings.Repeat("0", 64)
+	if _, err := corrupted.Publish(corrupted.UpdatedAt); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("expected malformed draft receiver to be rejected before publication, got %v", err)
+	}
 }
