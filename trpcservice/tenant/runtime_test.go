@@ -66,6 +66,21 @@ func TestConfigurationSnapshotRejectsMissingOrInvalidTenant(t *testing.T) {
 	}
 }
 
+func TestConfigurationSnapshotRequiresActiveTenant(t *testing.T) {
+	for _, status := range []Status{StatusSuspended, StatusDisabled} {
+		t.Run(string(status), func(t *testing.T) {
+			tenant, err := NewTenant(validCreate("snapshot-" + string(status)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tenant.Status = status
+			if _, err := NewConfigurationSnapshot(tenant); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("expected non-active tenant to be rejected, got %v", err)
+			}
+		})
+	}
+}
+
 func TestConfigurationSnapshotFromContextRequiresSnapshot(t *testing.T) {
 	snapshot, ok := ConfigurationSnapshotFromContext(context.Background())
 	if ok || snapshot.Tenant.TenantID != "" {

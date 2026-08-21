@@ -31,6 +31,9 @@ func NewConfigurationSnapshot(t *Tenant) (ConfigurationSnapshot, error) {
 	if err := validateTenantID(t.TenantID); err != nil {
 		return ConfigurationSnapshot{}, err
 	}
+	if !t.CanAcceptExecution() {
+		return ConfigurationSnapshot{}, fmt.Errorf("%w: tenant status %q cannot accept execution", ErrInvalid, t.Status)
+	}
 	if t.Version < 1 {
 		return ConfigurationSnapshot{}, fmt.Errorf("%w: tenant version must be positive", ErrInvalid)
 	}
