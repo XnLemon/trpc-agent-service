@@ -15,13 +15,16 @@ import (
 // tests. It does not provide cross-node sharing or durability.
 type InMemoryRepository struct {
 	mu    sync.RWMutex
+	gate  chan struct{}
 	byID  map[string]*tenant.Tenant
 	byKey map[string]string
 }
 
 // NewInMemoryRepository creates an empty repository.
 func NewInMemoryRepository() *InMemoryRepository {
-	return &InMemoryRepository{byID: make(map[string]*tenant.Tenant), byKey: make(map[string]string)}
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	return &InMemoryRepository{gate: gate, byID: make(map[string]*tenant.Tenant), byKey: make(map[string]string)}
 }
 
 // NewRepository is the concise constructor for the InMemory implementation.
@@ -37,7 +40,10 @@ func (r *InMemoryRepository) Create(ctx context.Context, input tenant.CreateInpu
 	if err != nil {
 		return nil, err
 	}
-	r.mu.Lock()
+	if err := r.lock(ctx); err != nil {
+		return nil, err
+	}
+	defer r.unlock()
 	defer r.mu.Unlock()
 	if err := checkContext(ctx); err != nil {
 		return nil, err
@@ -58,7 +64,10 @@ func (r *InMemoryRepository) Get(ctx context.Context, tenantID string) (*tenant.
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	r.mu.RLock()
+	if err := r.rLock(ctx); err != nil {
+		return nil, err
+	}
+	defer r.rUnlock()
 	defer r.mu.RUnlock()
 	if err := checkContext(ctx); err != nil {
 		return nil, err
@@ -83,7 +92,10 @@ func (r *InMemoryRepository) UpdateConfiguration(ctx context.Context, input tena
 	if err := tenant.ValidateConfiguration(input.DisplayName, input.RateLimitRPM, input.MaxConcurrentExecutions, input.MonthlyTokenBudget, input.MonthlySpendLimitMinor, input.BillingCurrency, input.AuditRetentionDays, input.LogMaskingLevel, input.TraceSamplingRate); err != nil {
 		return nil, err
 	}
-	r.mu.Lock()
+	if err := r.lock(ctx); err != nil {
+		return nil, err
+	}
+	defer r.unlock()
 	defer r.mu.Unlock()
 	if err := checkContext(ctx); err != nil {
 		return nil, err
@@ -123,7 +135,10 @@ func (r *InMemoryRepository) TransitionStatus(ctx context.Context, input tenant.
 	if err := validateMetadata(input.Metadata); err != nil {
 		return nil, tenant.StatusChangeEvent{}, err
 	}
-	r.mu.Lock()
+	if err := r.lock(ctx); err != nil {
+		return nil, tenant.StatusChangeEvent{}, err
+	}
+	defer r.unlock()
 	defer r.mu.Unlock()
 	if err := checkContext(ctx); err != nil {
 		return nil, tenant.StatusChangeEvent{}, err
@@ -205,6 +220,39 @@ func checkContext(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
+		return nil
+	}
+}
+
+func (r *InMemoryRepository) lock(ctx context.Context) error {
+	if err := acquire(ctx, r.gate); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	return nil
+}
+
+func (r *InMemoryRepository) unlock() { r.gate <- struct{}{} }
+
+func (r *InMemoryRepository) rLock(ctx context.Context) error {
+	if err := acquire(ctx, r.gate); err != nil {
+		return err
+	}
+	r.mu.RLock()
+	return nil
+}
+
+func (r *InMemoryRepository) rUnlock() { r.gate <- struct{}{} }
+
+func acquire(ctx context.Context, gate <-chan struct{}) error {
+	if ctx == nil {
+		<-gate
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-gate:
 		return nil
 	}
 }

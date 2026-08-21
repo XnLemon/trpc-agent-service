@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"strings"
 	"time"
@@ -78,7 +79,6 @@ func (t Tenant) Clone() Tenant {
 // CreateInput contains the full initial tenant snapshot. An empty TenantID
 // generates a time-ordered, non-enumerable t_ + Crockford ULID-like ID.
 type CreateInput struct {
-	TenantID    string
 	TenantKey   string
 	DisplayName string
 	Status      Status
@@ -154,14 +154,9 @@ func NewTenant(input CreateInput) (*Tenant, error) {
 	if err != nil {
 		return nil, err
 	}
-	id := input.TenantID
-	if id == "" {
-		id, err = newTenantID()
-		if err != nil {
-			return nil, fmt.Errorf("generate tenant id: %w", err)
-		}
-	} else if err := validateTenantID(id); err != nil {
-		return nil, err
+	id, err := newTenantID()
+	if err != nil {
+		return nil, fmt.Errorf("generate tenant id: %w", err)
 	}
 	status := input.Status
 	if status == "" {
@@ -222,7 +217,7 @@ func validateConfiguration(displayName string, rate, concurrent, tokens, spend *
 	if masking != MaskingNone && masking != MaskingBasic && masking != MaskingStrict {
 		return fmt.Errorf("%w: unknown masking level", ErrInvalid)
 	}
-	if sampling < 0 || sampling > 1 {
+	if math.IsNaN(sampling) || math.IsInf(sampling, 0) || sampling < 0 || sampling > 1 {
 		return fmt.Errorf("%w: trace sampling must be between 0 and 1", ErrInvalid)
 	}
 	return nil
@@ -263,16 +258,39 @@ func validateTenantID(id string) error {
 }
 
 func validCurrency(currency string) bool {
-	if len(currency) != 3 {
-		return false
-	}
-	for _, c := range currency {
-		if c < 'A' || c > 'Z' {
-			return false
-		}
-	}
-	return true
+	return iso4217Currencies[currency]
 }
+
+// iso4217Currencies is the set of active ISO-4217 alphabetic currency codes
+// accepted by the tenant configuration contract.
+var iso4217Currencies = map[string]bool{
+	"AED": true, "AFN": true, "ALL": true, "AMD": true, "ANG": true, "AOA": true, "ARS": true, "AUD": true, "AWG": true, "AZN": true,
+	"BAM": true, "BBD": true, "BDT": true, "BGN": true, "BHD": true, "BIF": true, "BMD": true, "BND": true, "BOB": true, "BOV": true, "BRL": true, "BSD": true, "BTN": true, "BWP": true, "BYN": true, "BZD": true,
+	"CAD": true, "CDF": true, "CHE": true, "CHF": true, "CHW": true, "CLF": true, "CLP": true, "CNY": true, "COP": true, "COU": true, "CRC": true, "CUC": true, "CUP": true, "CVE": true, "CZK": true,
+	"DJF": true, "DKK": true, "DOP": true, "DZD": true,
+	"EGP": true, "ERN": true, "ETB": true, "EUR": true,
+	"FJD": true, "FKP": true, "GBP": true, "GEL": true, "GHS": true, "GIP": true, "GMD": true, "GNF": true, "GTQ": true, "GYD": true,
+	"HKD": true, "HNL": true, "HTG": true, "HUF": true,
+	"IDR": true, "ILS": true, "INR": true, "IQD": true, "IRR": true, "ISK": true,
+	"JMD": true, "JOD": true, "JPY": true,
+	"KES": true, "KGS": true, "KHR": true, "KMF": true, "KPW": true, "KRW": true, "KWD": true, "KYD": true, "KZT": true,
+	"LAK": true, "LBP": true, "LKR": true, "LRD": true, "LSL": true, "LYD": true,
+	"MAD": true, "MDL": true, "MGA": true, "MKD": true, "MMK": true, "MNT": true, "MOP": true, "MRU": true, "MUR": true, "MVR": true, "MWK": true, "MXN": true, "MXV": true, "MYR": true, "MZN": true,
+	"NAD": true, "NGN": true, "NIO": true, "NOK": true, "NPR": true, "NZD": true,
+	"OMR": true,
+	"PAB": true, "PEN": true, "PGK": true, "PHP": true, "PKR": true, "PLN": true, "PYG": true,
+	"QAR": true,
+	"RON": true, "RSD": true, "RUB": true, "RWF": true,
+	"SAR": true, "SBD": true, "SCR": true, "SDG": true, "SEK": true, "SGD": true, "SHP": true, "SLE": true, "SLL": true, "SOS": true, "SRD": true, "SSP": true, "STN": true, "SVC": true, "SYP": true, "SZL": true,
+	"THB": true, "TJS": true, "TMT": true, "TND": true, "TOP": true, "TRY": true, "TTD": true, "TWD": true, "TZS": true,
+	"UAH": true, "UGX": true, "USD": true, "USN": true, "UYI": true, "UYU": true, "UYW": true, "UZS": true,
+	"VED": true, "VES": true, "VND": true, "VUV": true,
+	"WST": true,
+	"XAF": true, "XAG": true, "XAU": true, "XBA": true, "XBB": true, "XBC": true, "XBD": true, "XCD": true, "XDR": true, "XOF": true, "XPD": true, "XPF": true, "XPT": true, "XSU": true, "XTS": true, "XUA": true, "XXX": true,
+	"YER": true,
+	"ZAR": true, "ZMW": true, "ZWL": true,
+}
+
 func cloneInt64(v *int64) *int64 {
 	if v == nil {
 		return nil

@@ -2,6 +2,7 @@ package tenant
 
 import (
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -90,7 +91,6 @@ func TestTenantCloneAndExecutionGate(t *testing.T) {
 func TestNewTenantRejectsInvalidIdentityAndStatus(t *testing.T) {
 	tests := []CreateInput{
 		{TenantKey: "1bad", DisplayName: "Example", AuditRetentionDays: 1, LogMaskingLevel: MaskingBasic},
-		{TenantID: "bad", TenantKey: "valid", DisplayName: "Example", AuditRetentionDays: 1, LogMaskingLevel: MaskingBasic},
 		{TenantKey: "valid", DisplayName: "Example", Status: StatusDisabled, AuditRetentionDays: 1, LogMaskingLevel: MaskingBasic},
 		{TenantKey: "valid", DisplayName: "Example", Status: Status("unknown"), AuditRetentionDays: 1, LogMaskingLevel: MaskingBasic},
 	}
@@ -123,6 +123,8 @@ func TestValidateConfigurationBoundaries(t *testing.T) {
 		{"retention", ValidateConfiguration("Example", nil, nil, nil, nil, "", 0, MaskingBasic, 0)},
 		{"masking", ValidateConfiguration("Example", nil, nil, nil, nil, "", 1, LogMaskingLevel("unknown"), 0)},
 		{"sampling", ValidateConfiguration("Example", nil, nil, nil, nil, "", 1, MaskingBasic, -0.1)},
+		{"nan sampling", ValidateConfiguration("Example", nil, nil, nil, nil, "", 1, MaskingBasic, math.NaN())},
+		{"infinite sampling", ValidateConfiguration("Example", nil, nil, nil, nil, "", 1, MaskingBasic, math.Inf(1))},
 	}
 	for _, test := range tests {
 		if !errors.Is(test.err, ErrInvalid) {
@@ -149,7 +151,7 @@ func TestTenantIdentityHelpers(t *testing.T) {
 			t.Fatalf("expected invalid ID %q", id)
 		}
 	}
-	for _, currency := range []string{"", "US", "usd", "US1"} {
+	for _, currency := range []string{"", "US", "usd", "US1", "ZZZ"} {
 		if validCurrency(currency) {
 			t.Fatalf("expected invalid currency %q", currency)
 		}
