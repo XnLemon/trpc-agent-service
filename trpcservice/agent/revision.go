@@ -257,13 +257,13 @@ func (r Revision) ComputeContentDigest() (string, error) {
 	}{
 		Kind:              r.Kind,
 		SchemaVersion:     r.SchemaVersion,
-		Description:       r.Description,
-		Instruction:       r.Instruction,
-		GlobalInstruction: r.GlobalInstruction,
-		ModelProfileID:    r.ModelProfileID,
-		Generation:        cloneGenerationConfig(r.Generation),
-		Runtime:           r.Runtime,
-		Tools:             cloneTools(r.Tools),
+		Description:       configuration.Description,
+		Instruction:       configuration.Instruction,
+		GlobalInstruction: configuration.GlobalInstruction,
+		ModelProfileID:    configuration.ModelProfileID,
+		Generation:        cloneGenerationConfig(configuration.Generation),
+		Runtime:           configuration.Runtime,
+		Tools:             cloneTools(configuration.Tools),
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

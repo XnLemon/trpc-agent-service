@@ -204,6 +204,21 @@ func TestContentDigestIsDeterministicAndSensitiveToBehavior(t *testing.T) {
 	if nilDigest != emptyDigest {
 		t.Fatalf("equivalent empty tool allowlists must have one digest: %q %q", nilDigest, emptyDigest)
 	}
+	directNil := emptyTools.Clone()
+	directNil.Tools = nil
+	directEmpty := emptyTools.Clone()
+	directEmpty.Tools = []ToolAuthorization{}
+	directNilDigest, err := directNil.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	directEmptyDigest, err := directEmpty.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if directNilDigest != directEmptyDigest {
+		t.Fatalf("digest must normalize external empty tool representations: %q %q", directNilDigest, directEmptyDigest)
+	}
 }
 
 func TestPublishFreezesContentAndDetectsMutation(t *testing.T) {
