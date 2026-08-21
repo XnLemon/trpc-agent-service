@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 mkdir -p "$ROOT/bin" "$ROOT/data"
 if [[ ! -x "$ROOT/bin/trpc-service" ]]; then
-  "$ROOT/build.sh"
+  "$ROOT/scripts/build.sh"
 fi
 
 PID_FILE="$ROOT/data/trpc-service.pid"

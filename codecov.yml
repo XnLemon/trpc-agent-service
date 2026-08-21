@@ -1,0 +1,13 @@
+# Codecov status checks (shown on PRs).
+# The hard CI gate lives in scripts/coverage.sh --min (see .github/workflows/ci.yml);
+# this file makes the same 85% target visible in Codecov reports and PR comments.
+coverage:
+  status:
+    project:
+      default:
+        target: 85% # required coverage for the whole project
+        threshold: 0%
+    patch:
+      default:
+        target: 85% # required coverage for changed lines in a PR
+        threshold: 0%

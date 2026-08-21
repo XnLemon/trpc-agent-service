@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PID_FILE="$ROOT/data/trpc-service.pid"
 
 if [[ ! -f "$PID_FILE" ]]; then
