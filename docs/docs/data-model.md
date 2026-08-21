@@ -83,7 +83,7 @@ CREATE TRIGGER tenant_identity_immutable
 BEFORE UPDATE ON tenant
 FOR EACH ROW EXECUTE FUNCTION tenant_reject_identity_change();
 
--- 由数据库触发器或每次 UPDATE 语句维护 updated_at。
+-- 配置更新函数使用以下乐观锁谓词，并负责版本递增和 updated_at。
 -- UPDATE ... WHERE tenant_id = $1 AND version = $2
 --   SET ..., version = version + 1, updated_at = now();
 -- 受影响行数为 0 时返回 optimistic_conflict，不覆盖其他管理员的更新。
@@ -247,31 +247,80 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION update_tenant_configuration(
+    p_tenant_id TEXT,
+    p_expected_version BIGINT,
+    p_display_name TEXT,
+    p_rate_limit_rpm BIGINT,
+    p_max_concurrent_executions BIGINT,
+    p_monthly_token_budget BIGINT,
+    p_monthly_spend_limit_minor BIGINT,
+    p_billing_currency CHAR(3),
+    p_audit_retention_days INT,
+    p_log_masking_level TEXT,
+    p_trace_sampling_rate REAL,
+    p_default_agent_app_id TEXT,
+    p_default_backend_profile_id TEXT
+) RETURNS BIGINT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    v_next_version BIGINT;
+BEGIN
+    -- A full, validated configuration snapshot avoids ambiguous patch/null semantics.
+    UPDATE public.tenant
+    SET display_name = p_display_name,
+        rate_limit_rpm = p_rate_limit_rpm,
+        max_concurrent_executions = p_max_concurrent_executions,
+        monthly_token_budget = p_monthly_token_budget,
+        monthly_spend_limit_minor = p_monthly_spend_limit_minor,
+        billing_currency = p_billing_currency,
+        audit_retention_days = p_audit_retention_days,
+        log_masking_level = p_log_masking_level,
+        trace_sampling_rate = p_trace_sampling_rate,
+        default_agent_app_id = p_default_agent_app_id,
+        default_backend_profile_id = p_default_backend_profile_id,
+        version = version + 1,
+        updated_at = now()
+    WHERE tenant_id = p_tenant_id AND version = p_expected_version
+    RETURNING version INTO v_next_version;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'tenant version conflict or tenant does not exist';
+    END IF;
+    RETURN v_next_version;
+END;
+$$;
+
 -- Runtime roles are provisioned without table ownership, inherited broad DML,
--- or a table-level UPDATE grant. Only the Admin API may update these
--- non-lifecycle columns directly; status remains function-only.
+-- or any UPDATE grant. All configuration and lifecycle mutations are
+-- function-only, so version and updated_at cannot be independently changed.
 REVOKE ALL PRIVILEGES ON tenant FROM PUBLIC;
 REVOKE UPDATE ON tenant FROM tenant_app_writer, tenant_admin_writer;
 GRANT SELECT ON tenant TO tenant_app_writer, tenant_admin_writer;
-GRANT UPDATE (
-    display_name, rate_limit_rpm, max_concurrent_executions,
-    monthly_token_budget, monthly_spend_limit_minor, billing_currency,
-    audit_retention_days, log_masking_level, trace_sampling_rate,
-    default_agent_app_id, default_backend_profile_id, version, updated_at
-) ON tenant TO tenant_admin_writer;
 -- PostgreSQL grants EXECUTE on new functions to PUBLIC by default. Revoke it
--- before the role-specific grant while this migration transaction is open.
+-- before the role-specific grants while this migration transaction is open.
 REVOKE ALL ON FUNCTION transition_tenant_status(
     TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, TEXT
 ) FROM PUBLIC;
+REVOKE ALL ON FUNCTION update_tenant_configuration(
+    TEXT, BIGINT, TEXT, BIGINT, BIGINT, BIGINT, BIGINT, CHAR(3), INT,
+    TEXT, REAL, TEXT, TEXT
+) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION transition_tenant_status(
     TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, TEXT
+) TO tenant_admin_writer;
+GRANT EXECUTE ON FUNCTION update_tenant_configuration(
+    TEXT, BIGINT, TEXT, BIGINT, BIGINT, BIGINT, BIGINT, CHAR(3), INT,
+    TEXT, REAL, TEXT, TEXT
 ) TO tenant_admin_writer;
 
 COMMIT;
 ```
 
-`SECURITY DEFINER` 函数由不属于运行时连接池的专用 owner 持有；其 `search_path` 固定，且函数 owner 不得是可登录的应用账号。Admin API 只能以 `tenant_admin_writer` 调用该函数，普通 Worker 使用 `tenant_app_writer`。运行时登录角色不得继承任何对 `tenant` 的表级 `UPDATE` 权限；数据库 owner 和 migration role 是受控管理身份，不属于生产流量路径。
+`SECURITY DEFINER` 函数由不属于运行时连接池的专用 owner 持有；其 `search_path` 固定，且函数 owner 不得是可登录的应用账号。Admin API 只能以 `tenant_admin_writer` 调用状态迁移和配置更新函数，普通 Worker 使用 `tenant_app_writer`。配置更新函数接收完整配置快照与 `expected_version`，只会将版本递增一次并维护 `updated_at`；运行时登录角色不得继承任何对 `tenant` 的 `UPDATE` 权限。数据库 owner 和 migration role 是受控管理身份，不属于生产流量路径。
 
 ### 与 tRPC-Agent-Go 的映射
 
