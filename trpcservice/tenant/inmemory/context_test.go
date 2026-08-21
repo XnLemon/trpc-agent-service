@@ -15,7 +15,6 @@ func TestLockHonorsCancellationWhileWaiting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() {
-		r.mu.Unlock()
 		r.unlock()
 	}()
 
@@ -43,17 +42,11 @@ func TestLockHonorsCancellationWhileWaiting(t *testing.T) {
 func TestInternalContextAndCloneBranches(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	gate := make(chan struct{}, 1)
-	if err := acquire(cancelled, gate); !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected cancelled acquire, got %v", err)
-	}
-
 	r := NewRepository()
 	if err := r.lock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		r.mu.Unlock()
 		r.unlock()
 	}()
 	if err := r.rLock(cancelled); !errors.Is(err, context.Canceled) {
@@ -71,7 +64,7 @@ func TestInternalContextAndCloneBranches(t *testing.T) {
 	var _ tenant.Repository = r
 }
 
-func TestOperationsCancelWhileWaitingForGate(t *testing.T) {
+func TestOperationsCancelWhileWaitingForLock(t *testing.T) {
 	r := NewRepository()
 	created, err := r.Create(context.Background(), contextCreateInput("waiting"))
 	if err != nil {
@@ -81,7 +74,6 @@ func TestOperationsCancelWhileWaitingForGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() {
-		r.mu.Unlock()
 		r.unlock()
 	}()
 
@@ -108,8 +100,33 @@ func TestOperationsCancelWhileWaitingForGate(t *testing.T) {
 	}
 	for range contexts {
 		if err := (<-results).err; !errors.Is(err, context.Canceled) {
-			t.Fatalf("expected cancellation while waiting for gate, got %v", err)
+			t.Fatalf("expected cancellation while waiting for lock, got %v", err)
 		}
+	}
+}
+
+func TestReadLocksRemainConcurrent(t *testing.T) {
+	r := NewRepository()
+	if err := r.rLock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer r.rUnlock()
+
+	acquired := make(chan error, 1)
+	go func() {
+		err := r.rLock(context.Background())
+		if err == nil {
+			r.rUnlock()
+		}
+		acquired <- err
+	}()
+	select {
+	case err := <-acquired:
+		if err != nil {
+			t.Fatalf("second reader failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second reader was serialized behind the first reader")
 	}
 }
 

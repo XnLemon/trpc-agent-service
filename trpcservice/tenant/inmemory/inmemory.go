@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -14,17 +13,14 @@ import (
 // InMemoryRepository is a single-process repository for development and
 // tests. It does not provide cross-node sharing or durability.
 type InMemoryRepository struct {
-	mu    sync.RWMutex
-	gate  chan struct{}
+	mu    contextRWMutex
 	byID  map[string]*tenant.Tenant
 	byKey map[string]string
 }
 
 // NewInMemoryRepository creates an empty repository.
 func NewInMemoryRepository() *InMemoryRepository {
-	gate := make(chan struct{}, 1)
-	gate <- struct{}{}
-	return &InMemoryRepository{gate: gate, byID: make(map[string]*tenant.Tenant), byKey: make(map[string]string)}
+	return &InMemoryRepository{byID: make(map[string]*tenant.Tenant), byKey: make(map[string]string)}
 }
 
 // NewRepository is the concise constructor for the InMemory implementation.
@@ -44,7 +40,6 @@ func (r *InMemoryRepository) Create(ctx context.Context, input tenant.CreateInpu
 		return nil, err
 	}
 	defer r.unlock()
-	defer r.mu.Unlock()
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
@@ -68,7 +63,6 @@ func (r *InMemoryRepository) Get(ctx context.Context, tenantID string) (*tenant.
 		return nil, err
 	}
 	defer r.rUnlock()
-	defer r.mu.RUnlock()
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
@@ -96,7 +90,6 @@ func (r *InMemoryRepository) UpdateConfiguration(ctx context.Context, input tena
 		return nil, err
 	}
 	defer r.unlock()
-	defer r.mu.Unlock()
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
@@ -139,7 +132,6 @@ func (r *InMemoryRepository) TransitionStatus(ctx context.Context, input tenant.
 		return nil, tenant.StatusChangeEvent{}, err
 	}
 	defer r.unlock()
-	defer r.mu.Unlock()
 	if err := checkContext(ctx); err != nil {
 		return nil, tenant.StatusChangeEvent{}, err
 	}
@@ -225,34 +217,13 @@ func checkContext(ctx context.Context) error {
 }
 
 func (r *InMemoryRepository) lock(ctx context.Context) error {
-	if err := acquire(ctx, r.gate); err != nil {
-		return err
-	}
-	r.mu.Lock()
-	return nil
+	return r.mu.lock(ctx)
 }
 
-func (r *InMemoryRepository) unlock() { r.gate <- struct{}{} }
+func (r *InMemoryRepository) unlock() { r.mu.unlock() }
 
 func (r *InMemoryRepository) rLock(ctx context.Context) error {
-	if err := acquire(ctx, r.gate); err != nil {
-		return err
-	}
-	r.mu.RLock()
-	return nil
+	return r.mu.rlock(ctx)
 }
 
-func (r *InMemoryRepository) rUnlock() { r.gate <- struct{}{} }
-
-func acquire(ctx context.Context, gate <-chan struct{}) error {
-	if ctx == nil {
-		<-gate
-		return nil
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-gate:
-		return nil
-	}
-}
+func (r *InMemoryRepository) rUnlock() { r.mu.runlock() }
