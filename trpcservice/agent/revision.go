@@ -218,8 +218,8 @@ func (r Revision) Validate() error {
 			return fmt.Errorf("%w: draft revision cannot contain publication metadata", ErrInvalid)
 		}
 	case RevisionStatePublished:
-		if r.PublishedAt == nil || r.PublishedAt.IsZero() || r.PublishedAt.Before(r.CreatedAt) {
-			return fmt.Errorf("%w: published revision requires an ordered publication time", ErrInvalid)
+		if r.PublishedAt == nil || r.PublishedAt.IsZero() || r.PublishedAt.Before(r.CreatedAt) || !r.PublishedAt.Equal(r.UpdatedAt) {
+			return fmt.Errorf("%w: published revision requires matching publication and update times", ErrInvalid)
 		}
 		digest, err := r.ComputeContentDigest()
 		if err != nil {

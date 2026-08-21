@@ -256,4 +256,26 @@ func TestRevisionValidateRejectsMalformedPublicationState(t *testing.T) {
 	if _, err := corrupted.Publish(corrupted.UpdatedAt); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("expected malformed draft receiver to be rejected before publication, got %v", err)
 	}
+	published, err := draft.Publish(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*Revision)
+	}{
+		{name: "publication after update", mutate: func(revision *Revision) {
+			later := revision.PublishedAt.Add(time.Second)
+			revision.PublishedAt = &later
+		}},
+		{name: "update after publication", mutate: func(revision *Revision) { revision.UpdatedAt = revision.UpdatedAt.Add(time.Second) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := published.Clone()
+			test.mutate(&invalid)
+			if !errors.Is(invalid.Validate(), ErrInvalid) {
+				t.Fatalf("expected mismatched publication bookkeeping rejection: %+v", invalid)
+			}
+		})
+	}
 }
