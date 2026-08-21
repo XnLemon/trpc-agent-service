@@ -31,6 +31,9 @@ func NewConfigurationSnapshot(t *Tenant) (ConfigurationSnapshot, error) {
 	if err := t.Validate(); err != nil {
 		return ConfigurationSnapshot{}, err
 	}
+	if !t.CanAcceptExecution() {
+		return ConfigurationSnapshot{}, fmt.Errorf("%w: tenant status %q cannot accept execution", ErrInvalid, t.Status)
+	}
 	return ConfigurationSnapshot{Tenant: *cloneTenant(t)}, nil
 }
 

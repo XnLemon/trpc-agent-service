@@ -5,16 +5,15 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
 // InMemoryRepository is a single-process repository for development and
 // tests. It does not provide cross-node sharing or durability.
 type InMemoryRepository struct {
-	mu    sync.RWMutex
+	mu    contextRWMutex
 	byID  map[string]*tenant.Tenant
 	byKey map[string]string
 }
@@ -37,8 +36,10 @@ func (r *InMemoryRepository) Create(ctx context.Context, input tenant.CreateInpu
 	if err != nil {
 		return nil, err
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	if err := r.lock(ctx); err != nil {
+		return nil, err
+	}
+	defer r.unlock()
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
@@ -58,8 +59,10 @@ func (r *InMemoryRepository) Get(ctx context.Context, tenantID string) (*tenant.
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	if err := r.rLock(ctx); err != nil {
+		return nil, err
+	}
+	defer r.rUnlock()
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
@@ -83,8 +86,10 @@ func (r *InMemoryRepository) UpdateConfiguration(ctx context.Context, input tena
 	if err := tenant.ValidateConfiguration(input.DisplayName, input.RateLimitRPM, input.MaxConcurrentExecutions, input.MonthlyTokenBudget, input.MonthlySpendLimitMinor, input.BillingCurrency, input.AuditRetentionDays, input.LogMaskingLevel, input.TraceSamplingRate); err != nil {
 		return nil, err
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	if err := r.lock(ctx); err != nil {
+		return nil, err
+	}
+	defer r.unlock()
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
@@ -123,8 +128,10 @@ func (r *InMemoryRepository) TransitionStatus(ctx context.Context, input tenant.
 	if err := validateMetadata(input.Metadata); err != nil {
 		return nil, tenant.StatusChangeEvent{}, err
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	if err := r.lock(ctx); err != nil {
+		return nil, tenant.StatusChangeEvent{}, err
+	}
+	defer r.unlock()
 	if err := checkContext(ctx); err != nil {
 		return nil, tenant.StatusChangeEvent{}, err
 	}
@@ -208,3 +215,15 @@ func checkContext(ctx context.Context) error {
 		return nil
 	}
 }
+
+func (r *InMemoryRepository) lock(ctx context.Context) error {
+	return r.mu.lock(ctx)
+}
+
+func (r *InMemoryRepository) unlock() { r.mu.unlock() }
+
+func (r *InMemoryRepository) rLock(ctx context.Context) error {
+	return r.mu.rlock(ctx)
+}
+
+func (r *InMemoryRepository) rUnlock() { r.mu.runlock() }

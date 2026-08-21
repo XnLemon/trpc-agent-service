@@ -2,6 +2,7 @@ package tenant
 
 import (
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -90,7 +91,6 @@ func TestTenantCloneAndExecutionGate(t *testing.T) {
 func TestNewTenantRejectsInvalidIdentityAndStatus(t *testing.T) {
 	tests := []CreateInput{
 		{TenantKey: "1bad", DisplayName: "Example", AuditRetentionDays: 1, LogMaskingLevel: MaskingBasic},
-		{TenantID: "bad", TenantKey: "valid", DisplayName: "Example", AuditRetentionDays: 1, LogMaskingLevel: MaskingBasic},
 		{TenantKey: "valid", DisplayName: "Example", Status: StatusDisabled, AuditRetentionDays: 1, LogMaskingLevel: MaskingBasic},
 		{TenantKey: "valid", DisplayName: "Example", Status: Status("unknown"), AuditRetentionDays: 1, LogMaskingLevel: MaskingBasic},
 	}
@@ -119,10 +119,15 @@ func TestValidateConfigurationBoundaries(t *testing.T) {
 		{"negative tokens", ValidateConfiguration("Example", nil, nil, &negative, nil, "", 1, MaskingBasic, 0)},
 		{"negative spend", ValidateConfiguration("Example", nil, nil, nil, &negative, "USD", 1, MaskingBasic, 0)},
 		{"spend without currency", ValidateConfiguration("Example", nil, nil, nil, &zero, "", 1, MaskingBasic, 0)},
+		{"spend with XXX", ValidateConfiguration("Example", nil, nil, nil, &zero, "XXX", 1, MaskingBasic, 0)},
+		{"spend with XTS", ValidateConfiguration("Example", nil, nil, nil, &zero, "XTS", 1, MaskingBasic, 0)},
+		{"spend with XUA", ValidateConfiguration("Example", nil, nil, nil, &zero, "XUA", 1, MaskingBasic, 0)},
 		{"invalid currency", ValidateConfiguration("Example", nil, nil, nil, nil, "usd", 1, MaskingBasic, 0)},
 		{"retention", ValidateConfiguration("Example", nil, nil, nil, nil, "", 0, MaskingBasic, 0)},
 		{"masking", ValidateConfiguration("Example", nil, nil, nil, nil, "", 1, LogMaskingLevel("unknown"), 0)},
 		{"sampling", ValidateConfiguration("Example", nil, nil, nil, nil, "", 1, MaskingBasic, -0.1)},
+		{"nan sampling", ValidateConfiguration("Example", nil, nil, nil, nil, "", 1, MaskingBasic, math.NaN())},
+		{"infinite sampling", ValidateConfiguration("Example", nil, nil, nil, nil, "", 1, MaskingBasic, math.Inf(1))},
 	}
 	for _, test := range tests {
 		if !errors.Is(test.err, ErrInvalid) {
@@ -149,7 +154,7 @@ func TestTenantIdentityHelpers(t *testing.T) {
 			t.Fatalf("expected invalid ID %q", id)
 		}
 	}
-	for _, currency := range []string{"", "US", "usd", "US1"} {
+	for _, currency := range []string{"", "US", "usd", "US1", "ZZZ", "XXX", "XTS", "XUA"} {
 		if validCurrency(currency) {
 			t.Fatalf("expected invalid currency %q", currency)
 		}

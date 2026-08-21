@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
 )
 
 func createInput(key string) tenant.CreateInput {
@@ -53,10 +53,8 @@ func TestRepositoryRejectsDuplicateIdentity(t *testing.T) {
 	if _, err := r.Create(context.Background(), createInput("DUPLICATE")); !errors.Is(err, tenant.ErrDuplicateKey) {
 		t.Fatalf("expected duplicate normalized key, got %v", err)
 	}
-	input := createInput("different")
-	input.TenantID = first.TenantID
-	if _, err := r.Create(context.Background(), input); !errors.Is(err, tenant.ErrDuplicateKey) {
-		t.Fatalf("expected duplicate ID, got %v", err)
+	if first.TenantID == "" {
+		t.Fatal("repository must generate tenant IDs")
 	}
 }
 

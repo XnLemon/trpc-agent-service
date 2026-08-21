@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/liuzengh/trpc-agent-service/trpcservice"
+	"github.com/XnLemon/trpc-agent-service/trpcservice"
 )
 
 func main() {

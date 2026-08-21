@@ -5,7 +5,7 @@
 ## 一次执行的边界
 
 1. Channel Adapter 验签、用绑定关系解析可信的 tenant_id，不得接受请求头或消息载荷中的 tenant ID。
-2. 控制面以该 ID 读取 tenant，先执行 tenant.Validate，再创建 tenant.ConfigurationSnapshot。快照包含固定 version，不含模型 API key、IM token 或后端密码。
+2. 控制面以该 ID 读取 tenant，先执行 `tenant.Validate` 校验完整根实体不变量；只有 `active` tenant 才能创建新的 `tenant.ConfigurationSnapshot`。快照包含固定 version，不含模型 API key、IM token 或后端密码；创建快照后 tenant 被暂停不会影响该次执行收尾。
 3. Gateway 用 tenant.WithConfigurationSnapshot 将快照放入执行的 context.Context，然后将同一个 context 传给 tRPC-Agent-Go 的 runner.Runner、Tool 和 Storage 调用。
 4. Worker 在执行期间只消费快照。配置更新会产生新的 tenant version，只影响后续执行，避免一次执行混用两套配置。
 
