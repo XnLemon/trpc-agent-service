@@ -3,6 +3,7 @@ package inmemory_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -139,6 +140,19 @@ func TestTransitionRejectsInvalidMetadata(t *testing.T) {
 	input.Metadata.CorrelationID = " "
 	if _, _, err := r.TransitionStatus(context.Background(), input); !errors.Is(err, tenant.ErrInvalid) {
 		t.Fatalf("expected invalid metadata, got %v", err)
+	}
+}
+
+func TestTransitionRejectsOversizedAuditReason(t *testing.T) {
+	r := inmemory.NewRepository()
+	created, err := r.Create(context.Background(), createInput("reason-limit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := transitionInput(created.TenantID, created.Version, tenant.StatusSuspended)
+	input.Metadata.Reason = strings.Repeat("a", 1001)
+	if _, _, err := r.TransitionStatus(context.Background(), input); !errors.Is(err, tenant.ErrInvalid) {
+		t.Fatalf("expected invalid transition metadata, got %v", err)
 	}
 }
 

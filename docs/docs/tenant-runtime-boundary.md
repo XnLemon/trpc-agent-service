@@ -25,3 +25,5 @@ ConfigurationSnapshot 只允许通过受校验的构造器创建，不暴露可�
 | Agent、Tool、Channel | Runner、Agent 编排、Tool/MCP、OpenClaw Channel | 未实现 |
 
 InMemoryRepository 只适用于单进程开发和测试：数据不持久化，也不会跨 Worker 同步。Redis、SQL、向量库、对象存储、数据迁移和跨节点一致性仍由后续 issue 单独定义和实现。
+
+状态迁移在 InMemory 闭环中要求非空的 actor、reason 与 correlation ID；reason 最长 1000 个字符。返回的 StatusChangeEvent 是后续审计/Outbox 适配器的输入，不等同于完整 audit_log 实现。
