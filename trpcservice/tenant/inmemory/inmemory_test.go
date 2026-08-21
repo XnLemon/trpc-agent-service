@@ -3,6 +3,7 @@ package inmemory_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -139,6 +140,36 @@ func TestTransitionRejectsInvalidMetadata(t *testing.T) {
 	input.Metadata.CorrelationID = " "
 	if _, _, err := r.TransitionStatus(context.Background(), input); !errors.Is(err, tenant.ErrInvalid) {
 		t.Fatalf("expected invalid metadata, got %v", err)
+	}
+}
+
+func TestTransitionAuditReasonCharacterLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		reason  string
+		wantErr bool
+	}{
+		{name: "exactly 1000 characters", reason: strings.Repeat("a", 1000)},
+		{name: "1001 characters", reason: strings.Repeat("a", 1001), wantErr: true},
+		{name: "multibyte characters", reason: strings.Repeat("界", 500)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			r := inmemory.NewRepository()
+			created, err := r.Create(context.Background(), createInput("reason-limit-"+strings.ReplaceAll(test.name, " ", "-")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := transitionInput(created.TenantID, created.Version, tenant.StatusSuspended)
+			input.Metadata.Reason = test.reason
+			_, _, err = r.TransitionStatus(context.Background(), input)
+			if test.wantErr && !errors.Is(err, tenant.ErrInvalid) {
+				t.Fatalf("expected invalid transition metadata, got %v", err)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("expected valid transition metadata, got %v", err)
+			}
+		})
 	}
 }
 
