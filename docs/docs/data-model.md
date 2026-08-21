@@ -14,7 +14,7 @@
 - 根表字段会在 Gateway 鉴权和调度路径高频读取，窄表便于缓存和版本失效；不把低频配置 JSONB 载入每次请求。
 - 关联表可以通过外键、租户复合唯一键和独立状态表达完整性，避免 JSONB 或仅靠 key prefix 造成跨租户引用。
 
-`tenant_id` 是不可变的内部隔离键；`tenant_key` 是规范化且不可变的机器键；`display_name` 只用于展示，可以修改，不能用于路由或会话命名空间。
+`tenant_id` 是不可变的内部隔离键；`tenant_key` 是规范化且不可变的机器键；`display_name` 只用于展示，可以修改，不能用于路由或会话命名空间。`tenant_key` 的规范形式为 2 至 64 个小写 ASCII 字符，首字符为字母，其余字符只能是字母、数字或连字符。Admin API 应先执行 trim 和小写化，再校验该 grammar；数据库只接受已经规范化的值，因而不会悄悄把不同输入折叠成同一个唯一键。
 
 ### PostgreSQL DDL
 
@@ -26,7 +26,7 @@ CREATE TABLE tenant (
     tenant_id       TEXT PRIMARY KEY
                     CHECK (tenant_id ~ '^t_[0-9A-HJKMNP-TV-Z]{26}$'),
     tenant_key      TEXT NOT NULL UNIQUE
-                    CHECK (tenant_key = lower(tenant_key) AND length(tenant_key) BETWEEN 2 AND 64),
+                    CHECK (tenant_key ~ '^[a-z][a-z0-9-]{1,63}$'),
     display_name    TEXT NOT NULL
                     CHECK (length(btrim(display_name)) BETWEEN 1 AND 200),
 
@@ -64,6 +64,24 @@ CREATE TABLE tenant (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- tenant_id 和 tenant_key 为不可变标识。
+CREATE OR REPLACE FUNCTION tenant_reject_identity_change()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.tenant_key IS DISTINCT FROM OLD.tenant_key THEN
+        RAISE EXCEPTION 'tenant identity is immutable';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER tenant_identity_immutable
+BEFORE UPDATE ON tenant
+FOR EACH ROW EXECUTE FUNCTION tenant_reject_identity_change();
 
 -- 由数据库触发器或每次 UPDATE 语句维护 updated_at。
 -- UPDATE ... WHERE tenant_id = $1 AND version = $2
@@ -111,7 +129,7 @@ ALTER TABLE tenant
 | 字段 | 语义 | 消费组件 |
 | --- | --- | --- |
 | `tenant_id` | 全链路不可变隔离键；所有租户归属表显式携带 | Gateway、Worker、Storage、Audit、Telemetry |
-| `tenant_key` | 规范化机器键；用于管理 API、配置和指标维度，不承载展示语义 | Admin API、配置缓存 |
+| `tenant_key` | 不可变的规范化 ASCII slug；用于管理 API、配置和指标维度，不承载展示语义 | Admin API、配置缓存 |
 | `display_name` | 可修改的运营展示名，不参与鉴权、路由或 session key | Admin API、控制台 |
 | `status` | 入口闸门和生命周期状态 | Gateway、Worker、Admin API |
 | `rate_limit_rpm` | 租户入口每分钟请求上限；`NULL` 不限，`0` 拒绝新请求 | Gateway |
@@ -146,6 +164,105 @@ ALTER TABLE tenant
 - `disabled`：终态，不再路由流量；只允许受控的管理和审计读取，数据按保留策略归档/清理。
 - 每次迁移必须在同一事务中写入状态变更审计或 Outbox 事件，至少包含 actor、reason、旧/新状态、发生时间、变更前后的 `version` 及 correlation/trace ID。
 - 状态检查不能只依赖长 TTL 缓存；应按 `version` 主动失效，确保暂停/停用及时生效。
+
+状态不是普通配置字段。运行时数据库角色不得直接更新 `tenant.status`，而是只能执行受限的状态迁移函数；该函数锁定 tenant 行、校验期望版本和允许的迁移，在同一事务中更新状态并写入 Outbox。以下 DDL 给出最小边界；完整 `audit_log` schema 仍由后续 issue 定义。
+
+```sql
+CREATE TABLE tenant_status_change_outbox (
+    event_id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id         TEXT NOT NULL REFERENCES tenant(tenant_id),
+    previous_status   TEXT NOT NULL CHECK (previous_status IN ('active', 'suspended')),
+    next_status       TEXT NOT NULL CHECK (next_status IN ('active', 'suspended', 'disabled')),
+    actor_type        TEXT NOT NULL,
+    actor_id          TEXT NOT NULL,
+    reason            TEXT NOT NULL CHECK (length(btrim(reason)) BETWEEN 1 AND 1000),
+    previous_version  BIGINT NOT NULL,
+    next_version      BIGINT NOT NULL,
+    correlation_id    TEXT,
+    occurred_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((previous_status, next_status) IN (
+        ('active', 'suspended'),
+        ('active', 'disabled'),
+        ('suspended', 'active'),
+        ('suspended', 'disabled')
+    )),
+    CHECK (next_version = previous_version + 1)
+);
+
+CREATE OR REPLACE FUNCTION transition_tenant_status(
+    p_tenant_id TEXT,
+    p_expected_version BIGINT,
+    p_next_status TEXT,
+    p_actor_type TEXT,
+    p_actor_id TEXT,
+    p_reason TEXT,
+    p_correlation_id TEXT DEFAULT NULL
+) RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    v_previous_status TEXT;
+    v_next_version BIGINT;
+BEGIN
+    SELECT status INTO v_previous_status
+    FROM public.tenant
+    WHERE tenant_id = p_tenant_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'tenant % does not exist', p_tenant_id;
+    END IF;
+    IF v_previous_status = 'disabled' THEN
+        RAISE EXCEPTION 'disabled tenant cannot be re-enabled';
+    END IF;
+    IF (v_previous_status, p_next_status) NOT IN (
+        ('active', 'suspended'),
+        ('active', 'disabled'),
+        ('suspended', 'active'),
+        ('suspended', 'disabled')
+    ) THEN
+        RAISE EXCEPTION 'invalid tenant status transition: % -> %',
+            v_previous_status, p_next_status;
+    END IF;
+
+    UPDATE public.tenant
+    SET status = p_next_status, version = version + 1, updated_at = now()
+    WHERE tenant_id = p_tenant_id AND version = p_expected_version
+    RETURNING version INTO v_next_version;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'tenant version conflict';
+    END IF;
+
+    INSERT INTO public.tenant_status_change_outbox (
+        tenant_id, previous_status, next_status, actor_type, actor_id, reason,
+        previous_version, next_version, correlation_id
+    ) VALUES (
+        p_tenant_id, v_previous_status, p_next_status, p_actor_type, p_actor_id,
+        p_reason, p_expected_version, v_next_version, p_correlation_id
+    );
+END;
+$$;
+
+-- Runtime roles are provisioned without table ownership, inherited broad DML,
+-- or a table-level UPDATE grant. Only the Admin API may update these
+-- non-lifecycle columns directly; status remains function-only.
+REVOKE ALL PRIVILEGES ON tenant FROM PUBLIC;
+REVOKE UPDATE ON tenant FROM tenant_app_writer, tenant_admin_writer;
+GRANT SELECT ON tenant TO tenant_app_writer, tenant_admin_writer;
+GRANT UPDATE (
+    display_name, rate_limit_rpm, max_concurrent_executions,
+    monthly_token_budget, monthly_spend_limit_minor, billing_currency,
+    audit_retention_days, log_masking_level, trace_sampling_rate,
+    default_agent_app_id, default_backend_profile_id, version, updated_at
+) ON tenant TO tenant_admin_writer;
+GRANT EXECUTE ON FUNCTION transition_tenant_status(
+    TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, TEXT
+) TO tenant_admin_writer;
+```
+
+`SECURITY DEFINER` 函数由不属于运行时连接池的专用 owner 持有；其 `search_path` 固定，且函数 owner 不得是可登录的应用账号。Admin API 只能以 `tenant_admin_writer` 调用该函数，普通 Worker 使用 `tenant_app_writer`。运行时登录角色不得继承任何对 `tenant` 的表级 `UPDATE` 权限；数据库 owner 和 migration role 是受控管理身份，不属于生产流量路径。
 
 ### 与 tRPC-Agent-Go 的映射
 
