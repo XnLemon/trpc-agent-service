@@ -63,6 +63,28 @@ type Tenant struct {
 	UpdatedAt time.Time
 }
 
+// Clone returns a defensive copy suitable for repository boundaries.
+func (t Tenant) Clone() Tenant {
+	c := t
+	c.RateLimitRPM = cloneInt64(t.RateLimitRPM)
+	c.MaxConcurrentExecutions = cloneInt64(t.MaxConcurrentExecutions)
+	c.MonthlyTokenBudget = cloneInt64(t.MonthlyTokenBudget)
+	c.MonthlySpendLimitMinor = cloneInt64(t.MonthlySpendLimitMinor)
+	c.DefaultAgentAppID = cloneString(t.DefaultAgentAppID)
+	c.DefaultBackendProfileID = cloneString(t.DefaultBackendProfileID)
+	return c
+}
+
+// cloneTenant keeps package-local runtime code on stacked branches independent
+// of the concrete repository implementation package.
+func cloneTenant(t *Tenant) *Tenant {
+	if t == nil {
+		return nil
+	}
+	c := t.Clone()
+	return &c
+}
+
 // CreateInput contains the full initial tenant snapshot. An empty TenantID
 // generates a time-ordered, non-enumerable t_ + Crockford ULID-like ID.
 type CreateInput struct {
@@ -214,6 +236,11 @@ func validateConfiguration(displayName string, rate, concurrent, tokens, spend *
 		return fmt.Errorf("%w: trace sampling must be between 0 and 1", ErrInvalid)
 	}
 	return nil
+}
+
+// ValidateConfiguration validates a complete configuration snapshot.
+func ValidateConfiguration(displayName string, rate, concurrent, tokens, spend *int64, currency string, retention int, masking LogMaskingLevel, sampling float64) error {
+	return validateConfiguration(displayName, rate, concurrent, tokens, spend, currency, retention, masking, sampling)
 }
 
 func normalizeTenantKey(key string) (string, error) {
