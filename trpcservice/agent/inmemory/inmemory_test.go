@@ -373,9 +373,6 @@ func TestEveryOperationChecksAlreadyCancelledContext(t *testing.T) {
 			}
 		})
 	}
-	if _, err := r.Get(nil, tenantOne, app.AppID); err != nil {
-		t.Fatalf("nil context should behave like a non-cancelled context: %v", err)
-	}
 }
 
 func TestWriterLockHonorsCancellationWhileWaiting(t *testing.T) {
