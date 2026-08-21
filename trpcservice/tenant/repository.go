@@ -10,15 +10,3 @@ type Repository interface {
 	UpdateConfiguration(context.Context, UpdateConfigurationInput) (*Tenant, error)
 	TransitionStatus(context.Context, TransitionStatusInput) (*Tenant, StatusChangeEvent, error)
 }
-
-func checkContext(ctx context.Context) error {
-	if ctx == nil {
-		return nil
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		return nil
-	}
-}
