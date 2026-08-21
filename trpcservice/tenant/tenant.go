@@ -75,16 +75,6 @@ func (t Tenant) Clone() Tenant {
 	return c
 }
 
-// cloneTenant keeps package-local runtime code on stacked branches independent
-// of the concrete repository implementation package.
-func cloneTenant(t *Tenant) *Tenant {
-	if t == nil {
-		return nil
-	}
-	c := t.Clone()
-	return &c
-}
-
 // CreateInput contains the full initial tenant snapshot. An empty TenantID
 // generates a time-ordered, non-enumerable t_ + Crockford ULID-like ID.
 type CreateInput struct {
