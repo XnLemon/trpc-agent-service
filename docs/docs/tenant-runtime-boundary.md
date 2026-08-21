@@ -9,7 +9,7 @@
 3. Gateway 用 tenant.WithConfigurationSnapshot 将快照放入执行的 context.Context，然后将同一个 context 传给 tRPC-Agent-Go 的 runner.Runner、Tool 和 Storage 调用。
 4. Worker 在执行期间只消费快照。配置更新会产生新的 tenant version，只影响后续执行，避免一次执行混用两套配置。
 
-ConfigurationSnapshotFromContext 会返回副本，因此调用方不能修改其他组件看见的租户状态。
+ConfigurationSnapshot 只允许通过受校验的构造器创建，不暴露可直接写入的 tenant 字段；Tenant() accessor 和 ConfigurationSnapshotFromContext 都返回副本，因此调用方不能伪造或修改其他组件看见的租户状态。未初始化的快照不会被放入 context，也会遮蔽 context 中已有的快照。
 
 ## Runner 身份
 

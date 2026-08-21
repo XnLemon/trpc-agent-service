@@ -21,23 +21,41 @@ func TestConfigurationSnapshotIsolatedFromContextAndSource(t *testing.T) {
 	tenant.DisplayName = "changed after snapshot"
 	ctx := WithConfigurationSnapshot(context.Background(), snapshot)
 	fromContext, ok := ConfigurationSnapshotFromContext(ctx)
-	if !ok || fromContext.Tenant.DisplayName != "Example" {
+	fromTenant := fromContext.Tenant()
+	if !ok || fromTenant.DisplayName != "Example" {
 		t.Fatalf("unexpected context snapshot: %+v", fromContext)
 	}
-	if fromContext.Tenant.DefaultAgentAppID == nil || *fromContext.Tenant.DefaultAgentAppID != "app-original" {
-		t.Fatalf("snapshot lost pointer configuration: %+v", fromContext.Tenant.DefaultAgentAppID)
+	if fromTenant.DefaultAgentAppID == nil || *fromTenant.DefaultAgentAppID != "app-original" {
+		t.Fatalf("snapshot lost pointer configuration: %+v", fromTenant.DefaultAgentAppID)
 	}
-	fromContext.Tenant.DisplayName = "caller mutation"
-	*fromContext.Tenant.DefaultAgentAppID = "caller-app-mutation"
+	fromTenant.DisplayName = "caller mutation"
+	*fromTenant.DefaultAgentAppID = "caller-app-mutation"
 	again, _ := ConfigurationSnapshotFromContext(ctx)
-	if again.Tenant.DisplayName != "Example" {
+	againTenant := again.Tenant()
+	if againTenant.DisplayName != "Example" {
 		t.Fatal("context exposed mutable snapshot")
 	}
-	if again.Tenant.DefaultAgentAppID == nil || *again.Tenant.DefaultAgentAppID != "app-original" {
+	if againTenant.DefaultAgentAppID == nil || *againTenant.DefaultAgentAppID != "app-original" {
 		t.Fatal("context exposed mutable pointer configuration")
 	}
-	if again.Tenant.Version != snapshot.Tenant.Version {
-		t.Fatalf("snapshot version changed: got %d want %d", again.Tenant.Version, snapshot.Tenant.Version)
+	if againTenant.Version != snapshot.Tenant().Version {
+		t.Fatalf("snapshot version changed: got %d want %d", againTenant.Version, snapshot.Tenant().Version)
+	}
+}
+
+func TestWithConfigurationSnapshotRejectsUninitializedSnapshot(t *testing.T) {
+	tenant, err := NewTenant(validCreate("snapshot-reject-uninitialized"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := NewConfigurationSnapshot(tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithConfigurationSnapshot(context.Background(), snapshot)
+	ctx = WithConfigurationSnapshot(ctx, ConfigurationSnapshot{})
+	if snapshot, ok := ConfigurationSnapshotFromContext(ctx); ok {
+		t.Fatalf("uninitialized snapshot entered context: %+v", snapshot)
 	}
 }
 
@@ -83,7 +101,7 @@ func TestConfigurationSnapshotRequiresActiveTenant(t *testing.T) {
 
 func TestConfigurationSnapshotFromContextRequiresSnapshot(t *testing.T) {
 	snapshot, ok := ConfigurationSnapshotFromContext(context.Background())
-	if ok || snapshot.Tenant.TenantID != "" {
+	if ok || snapshot.Tenant().TenantID != "" {
 		t.Fatalf("expected no snapshot, got %+v, ok=%t", snapshot, ok)
 	}
 	if cloneTenant(nil) != nil {
