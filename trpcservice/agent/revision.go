@@ -275,8 +275,8 @@ func (r Revision) Publish(at time.Time) (Revision, error) {
 	if r.State != RevisionStateDraft {
 		return Revision{}, ErrImmutableRevision
 	}
-	if at.IsZero() || at.Before(r.CreatedAt) {
-		return Revision{}, fmt.Errorf("%w: publication time must follow creation", ErrInvalid)
+	if at.IsZero() || at.Before(r.UpdatedAt) {
+		return Revision{}, fmt.Errorf("%w: publication time must follow the latest draft update", ErrInvalid)
 	}
 	published := r.Clone()
 	digest, err := published.ComputeContentDigest()

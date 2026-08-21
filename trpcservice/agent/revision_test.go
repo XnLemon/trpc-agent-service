@@ -243,4 +243,12 @@ func TestRevisionValidateRejectsMalformedPublicationState(t *testing.T) {
 	if _, err := draft.Publish(draft.CreatedAt.Add(-time.Second)); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("expected publication ordering rejection, got %v", err)
 	}
+	edited := draft.Clone()
+	edited.UpdatedAt = draft.CreatedAt.Add(2 * time.Second)
+	if _, err := edited.Publish(draft.CreatedAt.Add(time.Second)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("expected publication before the latest draft update to be rejected, got %v", err)
+	}
+	if _, err := edited.Publish(edited.UpdatedAt); err != nil {
+		t.Fatalf("expected publication at the latest draft update boundary to succeed, got %v", err)
+	}
 }
