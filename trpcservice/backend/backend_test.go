@@ -206,10 +206,18 @@ func TestProfileValidateRejectsCorruptRoot(t *testing.T) {
 		name   string
 		mutate func(*Profile)
 	}{
+		{name: "tenant ID", mutate: func(profile *Profile) { profile.TenantID = "t_bad" }},
 		{name: "profile ID", mutate: func(profile *Profile) { profile.ProfileID = "bp_bad" }},
+		{name: "profile key grammar", mutate: func(profile *Profile) { profile.ProfileKey = "bad_key" }},
 		{name: "key normalization", mutate: func(profile *Profile) { profile.ProfileKey = "Primary" }},
+		{name: "metadata grammar", mutate: func(profile *Profile) { profile.DisplayName = "" }},
 		{name: "metadata normalization", mutate: func(profile *Profile) { profile.DisplayName += " " }},
 		{name: "status", mutate: func(profile *Profile) { profile.Status = "unknown" }},
+		{name: "catalog", mutate: func(profile *Profile) { profile.SchemaVersion = 2 }},
+		{name: "active session", mutate: func(profile *Profile) {
+			profile.Bindings = profile.Bindings[1:]
+			profile.ContentDigest = contentDigest(profile.SchemaVersion, profile.Bindings)
+		}},
 		{name: "version", mutate: func(profile *Profile) { profile.Version = 0 }},
 		{name: "created time", mutate: func(profile *Profile) { profile.CreatedAt = time.Time{} }},
 		{name: "time order", mutate: func(profile *Profile) { profile.UpdatedAt = profile.CreatedAt.Add(-time.Second) }},
@@ -222,6 +230,30 @@ func TestProfileValidateRejectsCorruptRoot(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want ErrInvalid", err)
 			}
 		})
+	}
+}
+
+func TestCapabilityCanonicalOrderCoversClosedSet(t *testing.T) {
+	catalog := newTestCatalog(t)
+	bindings := []CapabilityBinding{
+		{Capability: CapabilityAudit, Provider: "inmemory"},
+		{Capability: CapabilityArtifact, Provider: "inmemory"},
+		{Capability: CapabilityKnowledge, Provider: "inmemory"},
+		{Capability: CapabilityMemory, Provider: "inmemory"},
+		{Capability: CapabilitySession, Provider: "inmemory"},
+	}
+	normalized, err := catalog.NormalizeBindings(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Capability{CapabilitySession, CapabilityMemory, CapabilityKnowledge, CapabilityArtifact, CapabilityAudit}
+	for i, capability := range want {
+		if normalized[i].Capability != capability {
+			t.Fatalf("normalized capability %d = %q, want %q", i, normalized[i].Capability, capability)
+		}
+	}
+	if rank := capabilityRank("unknown"); rank != len(want) {
+		t.Fatalf("unknown capability rank = %d", rank)
 	}
 }
 
@@ -243,11 +275,19 @@ func TestProviderCatalogRejectsInvalidSchemas(t *testing.T) {
 		{name: "unknown capability", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{"unknown"}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden}}},
 		{name: "duplicate capability", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession, CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden}}},
 		{name: "field policy", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, SecretRefPolicy: FieldForbidden}}},
+		{name: "unknown option kind", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"mode": {Kind: "unknown"}}}}},
+		{name: "bounds on string", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"mode": {Kind: OptionString, MinInteger: &minimum}}}}},
 		{name: "forbidden schemes", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, EndpointSchemes: []string{"postgres"}, SecretRefPolicy: FieldForbidden}}},
 		{name: "missing schemes", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldRequired, SecretRefPolicy: FieldForbidden}}},
+		{name: "unnormalized scheme", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldRequired, EndpointSchemes: []string{"Postgres"}, SecretRefPolicy: FieldForbidden}}},
+		{name: "duplicate scheme", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldRequired, EndpointSchemes: []string{"postgres", "postgres"}, SecretRefPolicy: FieldForbidden}}},
 		{name: "sensitive option", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"password": {Kind: OptionString}}}}},
 		{name: "required default", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"pool": {Kind: OptionInteger, Required: true, DefaultValue: &defaultValue}}}}},
 		{name: "enum values", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"mode": {Kind: OptionEnum}}}}},
+		{name: "invalid enum value", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"mode": {Kind: OptionEnum, AllowedValues: []string{"\n"}}}}}},
+		{name: "duplicate enum value", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"mode": {Kind: OptionEnum, AllowedValues: []string{"safe", "SAFE"}}}}}},
+		{name: "values on string", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"mode": {Kind: OptionString, AllowedValues: []string{"safe"}}}}}},
+		{name: "invalid default", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"pool": {Kind: OptionInteger, DefaultValue: stringPointer("many")}}}}},
 		{name: "integer bounds", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"pool": {Kind: OptionInteger, MinInteger: &maximum, MaxInteger: &minimum}}}}},
 		{name: "duplicate registration", specs: []ProviderSpec{valid, valid}},
 	}
@@ -270,11 +310,14 @@ func TestProviderCatalogRejectsInvalidBindingsWithoutLeakingValues(t *testing.T)
 	}{
 		{name: "unknown capability", mutate: func(binding *CapabilityBinding) { binding.Capability = "unknown" }},
 		{name: "unknown provider", mutate: func(binding *CapabilityBinding) { binding.Provider = "mysql" }},
+		{name: "invalid provider", mutate: func(binding *CapabilityBinding) { binding.Provider = "1bad" }},
 		{name: "endpoint required", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "" }},
 		{name: "endpoint scheme", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "https://db.example.com" }},
 		{name: "endpoint user info", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://user:password@db.example.com" }},
 		{name: "endpoint query", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com?token=" + secretValue }},
 		{name: "endpoint fragment", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com#secret" }},
+		{name: "endpoint control", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com/bad\npath" }},
+		{name: "endpoint absolute", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "://not-a-uri" }},
 		{name: "secret required", mutate: func(binding *CapabilityBinding) { binding.SecretRef = "" }},
 		{name: "secret grammar", mutate: func(binding *CapabilityBinding) { binding.SecretRef = "secret ref with spaces" }},
 		{name: "unknown option", mutate: func(binding *CapabilityBinding) { binding.Options["unknown"] = secretValue }},
@@ -282,6 +325,8 @@ func TestProviderCatalogRejectsInvalidBindingsWithoutLeakingValues(t *testing.T)
 		{name: "required option", mutate: func(binding *CapabilityBinding) { delete(binding.Options, "database") }},
 		{name: "integer", mutate: func(binding *CapabilityBinding) { binding.Options["pool_size"] = "many" }},
 		{name: "integer maximum", mutate: func(binding *CapabilityBinding) { binding.Options["pool_size"] = "101" }},
+		{name: "integer minimum", mutate: func(binding *CapabilityBinding) { binding.Options["pool_size"] = "0" }},
+		{name: "empty value", mutate: func(binding *CapabilityBinding) { binding.Options["database"] = " " }},
 		{name: "boolean", mutate: func(binding *CapabilityBinding) { binding.Options["read_only"] = "sometimes" }},
 		{name: "enum", mutate: func(binding *CapabilityBinding) { binding.Options["ssl_mode"] = "unsafe" }},
 	}
@@ -310,6 +355,52 @@ func TestProviderCatalogRejectsInvalidBindingsWithoutLeakingValues(t *testing.T)
 	forbidden = CapabilityBinding{Capability: CapabilityMemory, Provider: "inmemory", SecretRef: "secret://memory"}
 	if _, err := catalog.NormalizeBindings([]CapabilityBinding{forbidden}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("forbidden SecretRef error = %v", err)
+	}
+}
+
+func TestProviderCatalogNilAndHelperBoundaries(t *testing.T) {
+	var catalog *ProviderCatalog
+	if _, err := catalog.NormalizeBindings(sessionBinding()); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil catalog error = %v", err)
+	}
+	if _, _, err := normalizeConfiguration(1, sessionBinding(), nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil configuration catalog error = %v", err)
+	}
+
+	if validProviderName("") || validProviderName("1provider") || validProviderName("provider!") || validProviderName(strings.Repeat("p", 65)) {
+		t.Fatal("invalid provider name passed validation")
+	}
+	if validOptionKey("") || validOptionKey("1option") || validOptionKey("option-") || validOptionKey(strings.Repeat("o", 65)) {
+		t.Fatal("invalid option key passed validation")
+	}
+	if validScheme("") || validScheme("1http") || validScheme("http_") {
+		t.Fatal("invalid endpoint scheme passed validation")
+	}
+	if !validProviderName("provider_1") || !validOptionKey("option_1") || !validScheme("https+v1") {
+		t.Fatal("valid provider grammar was rejected")
+	}
+	if _, err := normalizeOptionValue("value", OptionSpec{Kind: "unknown"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unknown option kind error = %v", err)
+	}
+
+	if bindingsEqual(nil, sessionBinding()) || stringMapsEqual(nil, map[string]string{"a": ""}) {
+		t.Fatal("different collection lengths compared equal")
+	}
+	if stringMapsEqual(map[string]string{"a": ""}, map[string]string{"b": ""}) {
+		t.Fatal("different map keys with empty values compared equal")
+	}
+	if cloneBindings(nil) != nil || cloneStringMap(nil) != nil {
+		t.Fatal("nil clone did not preserve nil")
+	}
+
+	if err := validateProfileID("bp_81ARZ3NDEKTSV4RRFFQ69G5FAV"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid ULID padding error = %v", err)
+	}
+	if err := validateProfileID("bp_01ARZ3NDEKTSV4RRFFQ69G5FAI"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid Crockford character error = %v", err)
+	}
+	if _, err := normalizeProfileKey("bad_key"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid interior profile key error = %v", err)
 	}
 }
 
