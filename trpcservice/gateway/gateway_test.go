@@ -5,12 +5,14 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	agentinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	channelsinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -20,7 +22,7 @@ import (
 func TestPrincipalKindsCannotBeForgedAcrossAuthenticationPaths(t *testing.T) {
 	tenantID := "t_01J1K9ZQTVE4PAWF1TSB2WMHNP"
 	appID := "app_01J1K9ZQTVE4PAWF1TSB2WMHNP"
-	apiPrincipal, err := NewAPIPrincipal(tenantID, appID, "api-subject")
+	apiPrincipal, err := newAPIPrincipal(APIIdentity{TenantID: tenantID, AppID: appID, SubjectID: "api-subject"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +59,7 @@ func TestPrincipalKindsCannotBeForgedAcrossAuthenticationPaths(t *testing.T) {
 	if _, err := NewChannelPrincipal(bad); err == nil {
 		t.Fatal("invalid channel route unexpectedly succeeded")
 	}
-	if _, err := NewAPIPrincipal(tenantID, "tenant-not-app", "subject"); err == nil {
+	if _, err := newAPIPrincipal(APIIdentity{TenantID: tenantID, AppID: "tenant-not-app", SubjectID: "subject"}); err == nil {
 		t.Fatal("invalid API app ID unexpectedly succeeded")
 	}
 }
@@ -99,7 +101,7 @@ func TestPlanResolverBuildsFixedPlanFromRepositoryInterfaces(t *testing.T) {
 	if !resolver.Ready() {
 		t.Fatal("resolver is not ready with complete dependencies")
 	}
-	principal, err := NewAPIPrincipal(fixture.tenant.TenantID, fixture.app.AppID, "api-subject")
+	principal, err := newAPIPrincipal(APIIdentity{TenantID: fixture.tenant.TenantID, AppID: fixture.app.AppID, SubjectID: "api-subject"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +132,7 @@ func TestPlanResolverBuildsFixedPlanFromRepositoryInterfaces(t *testing.T) {
 	}
 
 	otherTenant := principal
-	otherTenant, err = NewAPIPrincipal("t_01J1K9ZQTVE4PAWF1TSB2WMHNQ", fixture.app.AppID, "api-subject")
+	otherTenant, err = newAPIPrincipal(APIIdentity{TenantID: "t_01J1K9ZQTVE4PAWF1TSB2WMHNQ", AppID: fixture.app.AppID, SubjectID: "api-subject"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +150,7 @@ func TestPlanResolverPreservesCancellationAndRedactsDependencyFailures(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	principal, err := NewAPIPrincipal(fixture.tenant.TenantID, fixture.app.AppID, "api-subject")
+	principal, err := newAPIPrincipal(APIIdentity{TenantID: fixture.tenant.TenantID, AppID: fixture.app.AppID, SubjectID: "api-subject"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +172,7 @@ func TestPlanResolverPreservesCancellationAndRedactsDependencyFailures(t *testin
 
 func mustAPIPrincipal(t *testing.T, tenantID, appID string) Principal {
 	t.Helper()
-	principal, err := NewAPIPrincipal(tenantID, appID, "api-subject")
+	principal, err := newAPIPrincipal(APIIdentity{TenantID: tenantID, AppID: appID, SubjectID: "api-subject"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,17 +187,40 @@ func newTrustedRoutingTarget(t *testing.T, fixture gatewayFixture) channels.Rout
 	if err != nil {
 		t.Fatal(err)
 	}
-	binding, err := channels.NewBinding(channels.CreateInput{
+	channelRepo := channelsinmemory.NewInMemoryRepository()
+	binding, _, err := channelRepo.Create(context.Background(), channels.CreateInput{
 		TenantID: fixture.tenant.TenantID, BindingKey: "gateway-test-binding", Channel: channels.ChannelWeCom,
 		ProviderAccountID: "corp-gateway", PublicRouteKeyDigest: routeDigest, AppID: fixture.app.AppID,
 		SecretRef: "secret/gateway-test", Protocol: channels.ProtocolConfiguration{
 			WeCom: &channels.WeComProtocolConfiguration{CorpID: "corp-gateway", ReceiveID: "receive"},
-		}, Status: channels.StatusActive,
+		}, Metadata: channels.ChangeMetadata{ActorType: "test", ActorID: "gateway", Reason: "fixture", CorrelationID: "gateway"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	verified, err := channels.NewVerifiedBinding(*binding)
+	binding, _, err = channelRepo.Activate(context.Background(), channels.TransitionStatusInput{
+		TenantID: binding.TenantID, BindingID: binding.BindingID, ExpectedVersion: binding.Version,
+		Metadata: channels.ChangeMetadata{ActorType: "test", ActorID: "gateway", Reason: "fixture", CorrelationID: "gateway"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "offline-gateway-secret"
+	resolver := channelsinmemory.NewFakeCandidateResolver(channelRepo, map[channels.SecretScope]string{{TenantID: binding.TenantID, SecretRef: binding.SecretRef}: secret})
+	candidates, err := channelRepo.LookupCandidates(context.Background(), channels.ChannelWeCom, routeDigest)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("gateway route discovery failed: candidates=%d err=%v", len(candidates), err)
+	}
+	handle, err := resolver.ResolveCandidate(context.Background(), channels.CandidateSecretRequest{Candidate: candidates[0], Purpose: channels.PurposeWebhookVerification})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verification := channels.VerificationRequest{
+		Purpose: channels.PurposeWebhookVerification, Timestamp: time.Now().UTC(), Nonce: "gateway-nonce",
+		MessageDigest: strings.Repeat("a", 64), ReceiveID: "receive",
+	}
+	verification.Signature = channelsinmemory.SignFakeRequest(secret, verification)
+	verified, err := resolver.Verify(context.Background(), handle, verification)
 	if err != nil {
 		t.Fatal(err)
 	}

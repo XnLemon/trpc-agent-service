@@ -98,6 +98,16 @@ type CandidateIndex interface {
 	LookupCandidates(context.Context, Channel, string) ([]CandidateBindingContext, error)
 }
 
+// CandidateConsumer is the private control-plane surface needed by the
+// package-owned offline verifier. Keeping candidate consumption behind this
+// interface lets the verifier mint proof-bearing results without exposing a
+// public shape-only VerifiedBinding constructor.
+type CandidateConsumer interface {
+	CandidateIndex
+	Get(context.Context, string, string) (*Binding, error)
+	ConsumeCandidate(context.Context, CandidateBindingContext) (*Binding, error)
+}
+
 // PrepareCreatedChange validates the initial Binding and builds its audit
 // event without mutating repository state.
 func PrepareCreatedChange(binding Binding, metadata ChangeMetadata) (ChangeEvent, error) {

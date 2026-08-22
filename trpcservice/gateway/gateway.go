@@ -61,9 +61,18 @@ type Principal struct {
 	routingTarget channels.RoutingTarget
 }
 
-// NewAPIPrincipal seals an API credential's already-authenticated Tenant/App
-// mapping. The credential itself never enters this value.
-func NewAPIPrincipal(tenantID, appID, subjectID string) (Principal, error) {
+// APIIdentity is the fixed mapping returned by an API Authenticator. Request
+// body and header fields must never be used as this value.
+type APIIdentity struct {
+	TenantID  string
+	AppID     string
+	SubjectID string
+}
+
+// newAPIPrincipal is intentionally private. Only the Gateway authentication
+// pipeline can turn an Authenticator result into a trusted principal.
+func newAPIPrincipal(identity APIIdentity) (Principal, error) {
+	tenantID, appID, subjectID := identity.TenantID, identity.AppID, identity.SubjectID
 	if err := validateScopedID(tenantID, "t_", "tenant"); err != nil {
 		return Principal{}, err
 	}
@@ -95,7 +104,7 @@ func NewChannelPrincipal(target channels.RoutingTarget) (Principal, error) {
 func (p Principal) Validate() error {
 	switch p.kind {
 	case PrincipalAPI:
-		if _, err := NewAPIPrincipal(p.tenantID, p.appID, p.subjectID); err != nil {
+		if _, err := newAPIPrincipal(APIIdentity{TenantID: p.tenantID, AppID: p.appID, SubjectID: p.subjectID}); err != nil {
 			return err
 		}
 	case PrincipalChannel:
