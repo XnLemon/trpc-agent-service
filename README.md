@@ -130,7 +130,7 @@
 - [x] 实现 LLMAgent Revision 版本模型、草稿、不可变发布和内容摘要
 - [x] 定义 Agent Repository 并提供租户隔离、并发安全的 InMemory 实现
 - [ ] 实现 Channel Binding 领域模型
-- [ ] 实现 Backend Profile 领域模型
+- [x] 实现 Backend Profile 领域模型
 - [ ] 实现租户、Agent、通道和后端配置的 Admin API
 - [x] 实现 Agent App 草稿更新、原子发布和版本回滚
 - [ ] 实现配置缓存失效、租户级灰度和租户配置版本回滚
@@ -151,6 +151,7 @@
 
 - [x] 完成 Tenant 根模型的 PostgreSQL DDL、约束、生命周期和框架映射设计
 - [x] 完成 Agent App/Revision 的 PostgreSQL DDL、发布事务、回滚和框架映射设计
+- [x] 完成 Backend Profile 的 PostgreSQL DDL、生命周期、运行时快照和框架映射设计
 - [ ] 将 Tenant、Agent App/Revision DDL 落地为数据库 migration
 - [ ] 补齐 channel binding、session、event、memory、summary、artifact 和 audit log 的可执行 DDL
 - [ ] 定义 Session、Memory、Summary、Knowledge、Artifact 和 Audit 的统一访问接口
