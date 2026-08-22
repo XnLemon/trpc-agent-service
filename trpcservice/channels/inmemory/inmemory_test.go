@@ -121,6 +121,42 @@ func TestRepositoryCreateUsesInjectedClockForLifecycle(t *testing.T) {
 	}
 }
 
+func TestCandidateStorePrunesAndBoundsAbandonedLookups(t *testing.T) {
+	base := time.Date(2020, time.January, 2, 3, 4, 5, 0, time.UTC)
+	clock := &testClock{now: base}
+	repo := NewInMemoryRepository(Options{Clock: clock.Now, CandidateTTL: 2 * time.Second, MaxCandidates: 2})
+	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeCom, "candidate-capacity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := mustCreate(t, repo, bindingInput("t_00000000000000000000000008", "candidate-capacity", "corp-candidate-capacity", routeDigest))
+	if _, _, err := repo.Activate(context.Background(), channels.TransitionStatusInput{TenantID: binding.TenantID, BindingID: binding.BindingID, ExpectedVersion: binding.Version, Metadata: validMetadata()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.LookupCandidates(context.Background(), channels.ChannelWeCom, routeDigest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.LookupCandidates(context.Background(), channels.ChannelWeCom, routeDigest); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(repo.candidates); got != 2 {
+		t.Fatalf("expected two retained candidates, got %d", got)
+	}
+	if _, err := repo.LookupCandidates(context.Background(), channels.ChannelWeCom, routeDigest); !errors.Is(err, channels.ErrCandidateUnavailable) {
+		t.Fatalf("candidate capacity was not enforced: %v", err)
+	}
+	if got := len(repo.candidates); got != 2 {
+		t.Fatalf("candidate store exceeded configured capacity: got %d", got)
+	}
+	clock.now = base.Add(3 * time.Second)
+	if _, err := repo.LookupCandidates(context.Background(), channels.ChannelWeCom, routeDigest); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(repo.candidates); got != 1 {
+		t.Fatalf("expired candidates were not pruned before minting: got %d", got)
+	}
+}
+
 func TestRepositoryLifecycleExpectedVersionAndCandidateInvalidation(t *testing.T) {
 	clock := &testClock{now: time.Now().UTC().Add(time.Hour)}
 	repo := NewInMemoryRepository(Options{Clock: clock.Now, CandidateTTL: 2 * time.Second})

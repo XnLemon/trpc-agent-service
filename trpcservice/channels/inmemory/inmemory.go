@@ -15,6 +15,10 @@ import (
 
 const defaultCandidateTTL = channels.DefaultCandidateTTL
 
+// DefaultMaxCandidates bounds retained public candidate capabilities in the
+// local repository. Production indexes must apply their own capacity policy.
+const DefaultMaxCandidates = 4096
+
 type bindingScope struct {
 	tenantID  string
 	bindingID string
@@ -42,8 +46,9 @@ type candidateRecord struct {
 
 // Options configures the local candidate lifetime and test clock.
 type Options struct {
-	CandidateTTL time.Duration
-	Clock        func() time.Time
+	CandidateTTL  time.Duration
+	Clock         func() time.Time
+	MaxCandidates int
 }
 
 // InMemoryRepository is a single-process Repository and CandidateIndex. It
@@ -52,6 +57,7 @@ type InMemoryRepository struct {
 	mu             contextRWMutex
 	clock          func() time.Time
 	candidateTTL   time.Duration
+	maxCandidates  int
 	byID           map[bindingScope]*channels.Binding
 	byKey          map[bindingKeyScope]string
 	routeIndex     map[routeScope]map[bindingScope]struct{}
@@ -60,9 +66,10 @@ type InMemoryRepository struct {
 }
 
 // NewInMemoryRepository creates an empty repository. A zero Options value uses
-// a 30-second candidate TTL and the UTC wall clock.
+// a 30-second candidate TTL, the default candidate capacity, and the UTC wall
+// clock.
 func NewInMemoryRepository(options ...Options) *InMemoryRepository {
-	configuration := Options{CandidateTTL: defaultCandidateTTL, Clock: func() time.Time { return time.Now().UTC() }}
+	configuration := Options{CandidateTTL: defaultCandidateTTL, Clock: func() time.Time { return time.Now().UTC() }, MaxCandidates: DefaultMaxCandidates}
 	if len(options) > 0 {
 		if options[0].CandidateTTL > 0 {
 			configuration.CandidateTTL = options[0].CandidateTTL
@@ -70,12 +77,15 @@ func NewInMemoryRepository(options ...Options) *InMemoryRepository {
 		if options[0].Clock != nil {
 			configuration.Clock = options[0].Clock
 		}
+		if options[0].MaxCandidates > 0 {
+			configuration.MaxCandidates = options[0].MaxCandidates
+		}
 	}
 	if configuration.CandidateTTL > channels.MaxCandidateLifetime {
 		configuration.CandidateTTL = channels.MaxCandidateLifetime
 	}
 	return &InMemoryRepository{
-		clock: configuration.Clock, candidateTTL: configuration.CandidateTTL,
+		clock: configuration.Clock, candidateTTL: configuration.CandidateTTL, maxCandidates: configuration.MaxCandidates,
 		byID: make(map[bindingScope]*channels.Binding), byKey: make(map[bindingKeyScope]string),
 		routeIndex:     make(map[routeScope]map[bindingScope]struct{}),
 		activeAccounts: make(map[accountScope]bindingScope), candidates: make(map[string]candidateRecord),
@@ -272,6 +282,9 @@ func (r *InMemoryRepository) LookupCandidates(ctx context.Context, channel chann
 		}
 	}
 	if len(scopes) == 0 {
+		return nil, channels.ErrCandidateUnavailable
+	}
+	if len(scopes) > r.maxCandidates-len(r.candidates) {
 		return nil, channels.ErrCandidateUnavailable
 	}
 	sort.Slice(scopes, func(i, j int) bool {
