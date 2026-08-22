@@ -411,6 +411,14 @@ message_event(
   created_at, committed_at
 )
 
+tool_invocation(
+  tenant_id, invocation_id, event_id, session_id, tool_name,
+  tool_capability_digest, idempotency_key, request_digest, request_ref,
+  status, attempts, claim_owner, claim_token, lease_expires_at,
+  fencing_token, provider_receipt_ref, result_ref, last_error,
+  created_at, dispatched_at, reconciled_at, resolved_at
+)
+
 reply_outbox(
   tenant_id, reply_id, idempotency_key, segment_id,
   segment_index, segment_count, payload_ref, status, attempts,
@@ -451,6 +459,15 @@ audit_log(
   `tenant_id + binding_id + channel + external_message_id` 计算。`running` 还必须持有
   execution owner、claim token、lease deadline、heartbeat、attempts 和 fencing token；只有
   当前 fence 才能提交 Runner event、state、tool receipt 或 reply outbox。
+- `tool_invocation` 以 `(tenant_id, invocation_id)` 为主键，并以
+  `(tenant_id, event_id, idempotency_key)` 防止一次执行重复派发；`request_digest` 必须与
+  首次准备记录一致。外部副作用前先 durable 写入 `prepared`，再以 claim owner、lease、
+  fencing token CAS 为 `dispatching`，调用供应商时始终复用同一个外部幂等键。回执落库只能由
+  当前 fence 完成：`prepared`、`dispatching`、`accepted`、`rejected`、`unknown`、
+  `reconciling`、`manual` 和 `failed` 都是显式状态；超时/崩溃先进入 `unknown`/`reconciling`，
+  按原 key 查询 provider receipt。
+  已接受不得重跑；确认未接受且工具声明安全幂等时才能回到 `prepared` 重排；无供应商幂等或
+  结果仍不明的副作用必须进入 `manual`/DLQ，不能自动重试。
 - `reply_outbox` 以 `(tenant_id, reply_id, segment_index)` 唯一约束分段顺序，以
   `(tenant_id, segment_id)` 和出站幂等键防止同一分段重复发送；状态至少区分 `pending`、
   `sending`、`reconciling`、`sent`、`retryable`、`unknown` 和 `failed`，并保存 attempts、
@@ -488,15 +505,20 @@ Channel Binding 仍必须在持久化列中保留 binding、channel 和外部身
 ```text
 received → running → completed ──materialize outbox/CAS──> reply_pending → replied
      │          │          │              │
+     │          └─ lease expired → execution-reconciling
      └──────────┴──────────┴──────────────┴→ failed / DLQ
+
+execution-reconciling ──safe repair + new fence──> running
+                      └─ unsafe/unknown side effect ──> failed / DLQ
 ```
 
-`running` 的执行租约过期时进入 `execution-reconciling`，而不是由 HTTP 回调重复路径直接启动
-第二个 Runner；修复成功才以新 fencing token 回到 `running`/`retryable`，副作用无法对账则进入
-`failed/DLQ`。旧 Worker 的 heartbeat、event/state、Tool receipt 和 outbox 写入都因 fence 不
-匹配而被拒绝，保证队列重投递不会覆盖新执行。
+`execution-reconciling` 是 `message_event.status` 的持久化修复状态，不是 reply outbox 的
+`retryable`。`running` 的执行租约过期时进入该状态，而不是由 HTTP 回调重复路径直接启动第二个
+Runner；修复成功才以新 fencing token 回到 `running`，副作用无法对账则进入 `failed/DLQ`。
+旧 Worker 的 heartbeat、event/state、Tool receipt 和 outbox 写入都因 fence 不匹配而被拒绝，
+保证队列重投递不会覆盖新执行。
 
-回调层在 `running` 收到重复请求时只返回确认，不再创建 Runner；这与队列任务重投递是两种
+回调层在 `running` 或 `execution-reconciling` 收到重复请求时只返回确认，不再创建 Runner；这与队列重投递是两种
 路径。只有 Worker/Queue 发现 execution lease 过期后，才能 CAS 抢占新的 owner 和 fencing
 token，并先进入执行修复：检查最后提交的 event、每个 Tool 的外部幂等键和 provider receipt。
 已确认的 Tool 不得重跑；没有不可逆副作用且可以从最后 event 安全恢复时才重新排队，副作用

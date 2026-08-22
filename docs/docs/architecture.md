@@ -38,7 +38,7 @@ Model Profile 和 Backend Profile，构造一个带版本、摘要和租户边�
 | --- | --- | --- | --- |
 | Admin API | 租户、App、Profile、Binding 的管理、发布、回滚、审计入口 | Admin API → 控制面 Repository | 控制面模型已实现；HTTP API 为平台新增 |
 | Config/Registry | 版本校验、同租户引用、Factory/Storage 注册和缓存失效 | 控制面 → Gateway/Worker 快照 | Registry/快照边界已有；分布式缓存为平台新增 |
-| Secret Resolver | 在已知候选 Binding 或固定 Profile 作用域内返回一次性 secret handle | Adapter/Gateway → Resolver；Resolver 不反向选租户 | Resolver 接口已有；KMS/Secret Manager 为平台新增 |
+| Secret Resolver | 公开入站用不含 `tenant_id` 的 `CandidateBindingContext` 返回一次性验签 handle；验签后按固定 Tenant/Profile 作用域解析执行 Secret | Adapter/Gateway → Resolver；Resolver 不反向选租户 | Resolver 接口已有；candidate-scoped API、KMS/Secret Manager 为平台新增 |
 | Channel Adapter | 解析供应商回调、校验协议、验签/解密、转换统一消息和出站回复 | IM ↔ Adapter ↔ Gateway | 包占位；真实 WeCom/Telegram Adapter 为平台新增 |
 | Agent Gateway | 限流、候选绑定路由、可信租户建立、幂等记录、快照装配和队列投递 | Adapter → Gateway → Worker/Queue | 平台新增 |
 | Agent Worker | 消费固定执行计划，调用 Runner、Model、Tool 和 Storage，生成回复事件 | Gateway/Queue → Worker → 上游能力 | 最小 Runner spine 已有；服务化 Worker 为平台新增 |
@@ -137,9 +137,9 @@ flowchart LR
   W -->|同步 HTTPS callback| CA
   T -->|同步 HTTPS webhook| CA
   CA -->|仅查候选 Binding| R
-  R -->|候选 binding + secret_ref| CA
-  CA -->|候选作用域请求| SR
-  SR -->|一次性 scoped secret handle| CA
+  R -->|opaque CandidateBindingContext；不含 tenant_id/secret value| CA
+  CA -->|ResolveCandidate；purpose=webhook verification| SR
+  SR -->|一次性 ScopedVerifierHandle| CA
   WK -->|profile-scoped secret request| SR
   WK --> SS
   WK --> MM
@@ -226,10 +226,12 @@ Channel Binding 是外部账号到同一租户 Agent App 的稳定控制面对�
 | `created_at`、`updated_at` | 控制面审计和失效依据 |
 
 Admin 操作必须显式传 `tenant_id + binding_id`，并验证 Binding、App、Secret ref 都属于该
-租户。入站请求只能以公开账号、corp 标识或受控 route key 查找候选 Binding；候选返回的
-`tenant_id` 只是查找范围，不能直接写入请求上下文。Adapter 在候选绑定作用域内解析
-Secret，用供应商的 token/signature、时间戳、nonce、密文和 receive ID 完成验签/解密；只有
-验签成功后才生成可信 `tenant_id`，再创建 `tenant + channel + message_id` 幂等键。
+租户。入站请求只能以公开账号、corp 标识或受控 route key 查找候选 Binding；候选查找返回
+不含 `tenant_id` 或 Secret 值的 `CandidateBindingContext`，不能直接写入请求上下文。Adapter
+把该 context 交给 `ResolveCandidate`，由 Resolver 在候选索引内绑定用途和短时 token，返回
+一次性验签/解密 handle；再用供应商的 token/signature、时间戳、nonce、密文和 receive ID
+完成验签/解密。只有验签成功后才生成可信 `tenant_id`，再创建
+`tenant + channel + message_id` 幂等键；执行阶段才调用现有 Tenant-scoped `Resolve`。
 
 默认安全策略是不允许同一个供应商账号跨租户复用：同一 `channel + provider_account_id`
 的 active Binding 只能属于一个 Tenant；同租户也不能有两个 active Binding 竞争同一外部
@@ -301,9 +303,9 @@ sequenceDiagram
   WX->>CA: HTTPS callback(msg_signature,timestamp,nonce,Encrypt)
   CA->>CA: 生成 request_id，关联/创建 trace_id
   CA->>RI: 用公开 route/corp 标识查询候选 Binding
-  RI-->>CA: 候选 binding_id/候选租户范围（不可信上下文）
-  CA->>SR: 在候选 binding 作用域解析 webhook secret handle
-  SR-->>CA: 一次性验签/解密能力（不返回给领域对象）
+  RI-->>CA: CandidateBindingContext（provider/binding/route digest/opaque token；无 tenant_id/secret value）
+  CA->>SR: ResolveCandidate（purpose=webhook verification）
+  SR-->>CA: 一次性 ScopedVerifierHandle（不返回给领域对象）
   CA->>CA: 校验时间窗、nonce、msg_signature、AES 解密和 receive_id
   alt 验签失败
     CA-->>WX: 拒绝/固定错误响应，不创建可信 tenant_id
@@ -324,6 +326,10 @@ sequenceDiagram
         W->>R: context + userID + sessionID + model.Message
         R->>TL: 输入/工具白名单、权限、预算、危险操作确认
         TL-->>R: allow / deny / approval required
+        R->>ST: 外部 Tool 前 durable 写入 tool_invocation=prepared（key + request digest）
+        R->>TL: 以 invocation key 派发 Tool；当前 execution fence 随请求传递
+        TL-->>R: provider receipt / rejected / timeout
+        R->>ST: CAS 写入 accepted/rejected/unknown（保存 provider receipt，校验 fence）
         R->>ST: 写入 event，CAS 更新 Session/State
         R->>ST: Memory durable write；异步投递向量索引
         R->>ST: Audit(tool/model/decision/cost/trace)
@@ -364,7 +370,7 @@ sequenceDiagram
       end
     else 唯一键冲突（并发或重复投递）
       ID-->>G: 返回已有状态和 cached_reply_ref
-      alt received 或 running
+      alt received、running 或 execution-reconciling
         G-->>CA: 2xx；CAS 失败者不加载 plan、不启动第二个 Runner
       else completed、reply_pending 或 replied
         G->>O: 校验 reply_id/segment_count；缺段时从缓存修复，再 claim 可发送分段
@@ -374,12 +380,19 @@ sequenceDiagram
   end
 ```
 
-回调重复与队列任务重投递必须分开处理：Gateway 对 `running` 的重复回调只返回 2xx，不启动
+回调重复与队列任务重投递必须分开处理：Gateway 对 `running` 或 `execution-reconciling` 的重复回调只返回 2xx，不启动
 第二个 Runner；只有 execution lease 过期后，Queue/Worker 才能用新的 owner、claim token 和
 fencing token 进入 `execution-reconciling`。修复器检查最后 event、Tool 外部幂等键和 provider
 receipt；已经提交的 Tool 不重跑，结果不明的外部副作用进入 failed/DLQ/人工处理，只有安全可
 恢复的任务才重新排队。旧 Worker 的 heartbeat、event/state、Tool receipt 和 outbox 写入必须
 因 fence 不匹配而被拒绝。
+
+任何可能产生外部副作用的 Tool 都必须先持久化 `tool_invocation` 的 `prepared` 记录，包含
+`invocation_id`、外部幂等键、request digest、Tool capability digest 和待调用引用，再以当前
+execution fence 进入 `dispatching`。供应商回执或超时分别落为 `accepted`/`rejected` 或
+`unknown`；租约回收先进入 `reconciling` 并按原幂等键查询。已接受不重跑，确认未接受且工具
+声明安全幂等时才回到 `prepared`，结果不明或没有供应商幂等能力则进入 `manual`/DLQ，不能
+自动重放副作用。
 
 `completed` 表示执行结果和 reply cache 已持久化，但还不是可发送状态。Worker 必须先以幂等键
 物化完整 `reply_outbox` 分段，再把 `completed` CAS 为 `reply_pending`；同一 provider 使用事务，
@@ -432,21 +445,24 @@ Redis 后端可用 Lua/事务/Stream 在同一 keyspace 内原子分配序号和
 ```text
 received ──claim/CAS──> running ──execution commit──> completed
     │                         │                             │
-    │                         └─ crash/timeout ────────────> failed
+    │                         └─ lease expired ────────> execution-reconciling
     │                                                         │
-    └─ invalid/duplicate                              retryable? ──> running
+    └─ invalid/duplicate                                   failed / DLQ
+
+execution-reconciling ──safe repair + new fence──> running
+                      └─ unsafe/unknown side effect ──> failed + DLQ
 
 completed ──materialize outbox/CAS──> reply_pending ──send success──> replied
                                    │
                                    └─ retry budget exhausted ──> failed + DLQ
 ```
 
-`running` 的执行租约过期时进入 `execution-reconciling`，而不是由 HTTP 回调重复路径直接
-启动第二个 Runner；修复成功才以新 fencing token 回到 `running`/`retryable`，副作用无法对账
-则进入 `failed/DLQ`。旧 Worker 的 heartbeat、event/state、Tool receipt 和 outbox 写入都因
+`running` 的执行租约过期时把 `message_event.status` 置为 `execution-reconciling`，而不是由
+HTTP 回调重复路径直接启动第二个 Runner；修复成功才以新 fencing token 回到 `running`，副作用
+无法对账则进入 `failed/DLQ`。旧 Worker 的 heartbeat、event/state、Tool receipt 和 outbox 写入都因
 fence 不匹配而被拒绝，保证队列重投递不会覆盖新执行。
 
-回调层在 `running` 收到重复请求时只返回确认，不再创建 Runner；这与队列任务重投递是两种
+回调层在 `running` 或 `execution-reconciling` 收到重复请求时只返回确认，不再创建 Runner；这与队列任务重投递是两种
 路径。只有 Worker/Queue 发现 execution lease 过期后，才能 CAS 抢占新的 owner 和 fencing
 token，并先对账已提交 event、每个 Tool 的外部幂等键和 provider receipt。已确认的 Tool 不得
 重跑；没有不可逆副作用且可以从最后 event 安全恢复时才重新排队，副作用结果不明则进入

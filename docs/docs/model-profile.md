@@ -164,9 +164,23 @@ type SecretScope struct {
     SecretRef string
 }
 
+type CandidateBindingContext struct {
+    Provider             string
+    BindingID            string
+    PublicRouteKeyDigest string
+    CandidateToken       string // opaque, short-lived, contains no trusted tenant_id
+}
+
+type CandidateSecretRequest struct {
+    Candidate CandidateBindingContext
+    Purpose   string // e.g. webhook verification/decryption
+}
+
 type SecretValue struct { /* value is private and redacted when formatted */ }
+type ScopedVerifierHandle struct { /* one-time capability; not serializable */ }
 
 type SecretResolver interface {
+    ResolveCandidate(context.Context, CandidateSecretRequest) (ScopedVerifierHandle, error)
     Resolve(context.Context, SecretScope) (SecretValue, error)
 }
 
@@ -179,15 +193,26 @@ type ModelFactory interface {
 
 - `SecretScope` 必须同时包含可信 `tenant_id` 和 `secret_ref`；没有全局 `Resolve(ref)` 入口。
 - `tenant_id` 必须来自已认证的 Tenant snapshot/Execution Plan，而非请求体、header 或模型输出。
+- 公开 route 的验签发生在建立可信 `tenant_id` 之前，不能调用上面的租户级 `Resolve`。Channel
+  Adapter 先用公开 route/provider 查候选 Binding，得到只含 `provider`、`binding_id`、route
+  digest 和短时 opaque `candidate_token` 的 `CandidateBindingContext`；其中不带 `tenant_id`，
+  也不接受请求体自带的 `secret_ref`。`ResolveCandidate` 在全局候选索引内校验 Binding 状态和
+  Secret 引用，返回只供一次验签/解密使用的 `ScopedVerifierHandle`。
+- `CandidateToken` 由 Registry/Resolver 绑定候选 Binding、用途和过期时间后签发；不得由 URL、
+  header、消息正文或候选 `tenant_id` 自行拼接。验签失败不创建租户事件，也不进入租户级存储。
+- 验签成功并加载可信 Tenant snapshot 后，才允许按现有 `SecretScope{TenantID, SecretRef}`
+  调用租户级 `Resolve`；候选 handle 和其中的 Secret 值都不得传给 Runner 或领域对象。
 - Resolver 失败返回固定、可分类但不带底层凭据的错误；原始 KMS 错误不能直接进入日志、trace 或响应。
 - `SecretValue` 只能作为一次 Model Factory 调用的临时参数；不得写回 Profile、Snapshot、Plan、
   `ModelFactoryInput`、cache key、audit event 或 context value。
 - Model Factory 自身的错误也必须在平台边界脱敏，避免回显 token、完整 credential 或可还原 DSN。
 - `SecretRef` 可以留在无密钥配置和摘要中，但 Secret 值不能出现在任何可序列化结构中。
 
-Resolver 调用顺序固定为：验证计划 → 读取无密钥 `ModelFactoryInput` → 按 schema 分支处理
-`secret_ref`：required 必须非空并解析一次，optional 仅在引用存在时解析，forbidden 拒绝任何引用；
-没有引用时不调用 Resolver，并把显式的空 `SecretValue` 直接传给 Model Factory → 丢弃临时值。
+Resolver 调用顺序分为两条路径：入站路径先做候选发现 → `ResolveCandidate` → 验签/解密 →
+建立可信 Tenant；执行路径再验证 Execution Plan → 读取无密钥 `ModelFactoryInput` → 按 schema
+分支处理 `secret_ref`：required 必须非空并解析一次，optional 仅在引用存在时解析，forbidden
+拒绝任何引用；没有引用时不调用租户级 Resolver，并把显式的空 `SecretValue` 直接传给 Model
+Factory → 丢弃临时值。候选 handle 也必须在 Channel Adapter 返回前销毁。
 Factory 缓存只能缓存不含 Secret 的模型配置或由 Factory 自行管理的安全 client 句柄；本阶段不实现
 client cache。空 Secret 不是全局或空引用查询。
 
