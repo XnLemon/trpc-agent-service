@@ -241,13 +241,16 @@ Admin 操作必须显式传 `tenant_id + binding_id`，并验证 Binding、App�
 
 外部身份映射不使用昵称、邮箱或可变显示名：
 
-- 单聊 `external_user_id` 使用供应商稳定 ID；Runner 的 `userID` 使用 Tenant 命名空间的
-  无碰撞编码，持久化查询仍显式带 `tenant_id`。
+- 单聊 `external_user_id` 使用供应商稳定 ID；平台先以结构化/长度前缀编码构造
+  `binding_scoped_user = Encode(binding_id, external_user_id)`，再把它交给
+  `tenant.NewRunnerIdentity`，使 Runner 的 `userID` 和持久化查询都保留 Tenant 与 Binding 边界。
 - 群聊的 `external_chat_id` 必须进入 `external_session_id`；同一用户在不同群中得到不同
   Session。
 - 线程/话题再加入 `external_thread_id`；没有线程能力的通道使用空值但不伪造固定线程。
 - 内部 identity 的映射保存 `binding_id`、channel、外部 user/chat/thread 原值的加密或
-  脱敏引用，跨 Tenant 永不复用 Session。
+  脱敏引用；`binding_scoped_session = Encode(binding_id, external_session_id)` 后才调用现有
+  `tenant.NewRunnerIdentity(tenant_id, binding_scoped_user, binding_scoped_session)`。跨 Binding
+  和跨 Tenant 永不复用 Runner UserID/SessionID。
 
 ### 企业微信与 Telegram 协议取舍
 
@@ -318,7 +321,7 @@ sequenceDiagram
       alt claim 成功
         G->>CP: 加载 Tenant/App Revision/Model/Backend
         CP-->>G: 固定版本、摘要和无密钥 ExecutionPlan 输入
-        G->>G: 生成外部 user/chat/thread → Runner identity/session_id
+        G->>G: Encode(binding_id, external user/chat/thread) → Runner identity/session_id
         G-->>WX: 5 秒内返回确认
         G->>Q: 投递执行任务（幂等键 + plan key + message ref）
         Q->>W: 消费任务，校验 plan 未被伪造
@@ -334,8 +337,8 @@ sequenceDiagram
         R->>ST: Memory durable write；异步投递向量索引
         R->>ST: Audit(tool/model/decision/cost/trace)
         R-->>W: Runner Event（文本/工具/错误/结束）
-        W->>ID: CAS running → completed，保存 reply cache ref
-        W->>O: 幂等写入每个 segment pending（稳定 segment_id/顺序/幂等键）
+        W->>ID: CAS running → completed，固定 reply_id/cache_ref/segment_count
+        W->>O: 按 tenant+event+reply 幂等写入每个 segment pending（稳定顺序/幂等键）
         W->>ID: CAS completed → reply_pending（仅在 segment_count 完整可见后）
         W->>ST: summary 按 event_seq 异步 CAS（只读取已 durable 的 Memory）
         loop 按 segment_index 处理分段
@@ -394,10 +397,11 @@ execution fence 进入 `dispatching`。供应商回执或超时分别落为 `acc
 声明安全幂等时才回到 `prepared`，结果不明或没有供应商幂等能力则进入 `manual`/DLQ，不能
 自动重放副作用。
 
-`completed` 表示执行结果和 reply cache 已持久化，但还不是可发送状态。Worker 必须先以幂等键
-物化完整 `reply_outbox` 分段，再把 `completed` CAS 为 `reply_pending`；同一 provider 使用事务，
-跨 provider 则使用 durable repair marker。若 Worker 在两步之间崩溃，行保持 `completed`，修复器
-根据 reply cache ref 补齐分段并再次 CAS；任何 `reply_pending` 行都必须能找到完整 segment_count，
+`completed` 表示执行结果、`reply_id`、`reply_cache_ref` 和 `segment_count` 已持久化，但还不是可发送
+状态。Worker 必须先以 tenant+event+reply 关联和幂等键物化完整 `reply_outbox` 分段，再把
+`completed` CAS 为 `reply_pending`；同一 provider 使用事务，跨 provider 则使用 durable repair
+marker。若 Worker 在两步之间崩溃，行保持 `completed`，修复器根据 event 上的 `reply_cache_ref` 和
+`segment_count` 补齐分段并再次 CAS；任何 `reply_pending` 行都必须能找到完整 segment_count，
 否则进入 repair 而不能直接标记 `replied`。时序中 `message_event` 的唯一性和 Session 顺序由共享 Storage Adapter 保证；队列至少一次
 投递不是重复执行的借口。`completed` 但回复失败时重放缓存回复，不重新调用模型或具有副作用
 的 Tool；只有明确标记为安全、幂等的步骤才允许重试。回复 Outbox 还必须以
@@ -432,7 +436,9 @@ Redis 后端可用 Lua/事务/Stream 在同一 keyspace 内原子分配序号和
    event，不覆盖他人状态；
 4. Memory 先写可追溯的 durable entry，再异步建立向量索引；如果 Memory 不能提交，不能
    创建可发送的回复 outbox，必须进入补偿/repair；
-5. event、state 和 Memory 成功提交后写入 `reply_outbox`，以 event 范围和幂等键关联回复；
+5. event、state 和 Memory 成功提交后，在 `message_event` 上固定 `reply_id`、`reply_cache_ref`
+   和 `segment_count`，再按 `(tenant_id, event_id, reply_id, segment_index)` 写入 `reply_outbox`；
+   outbox 必须有 event 外键/关联，不能由孤立 `reply_id` 推断归属；
 6. summary 记录 `base_event_seq`，在 outbox 之后从已 durable 的 event/Memory 异步重建并 CAS，
    失败则保留事件和 Memory、重排摘要任务。索引延迟只影响检索新鲜度，不影响租户授权、
    Session 顺序或审计事实。

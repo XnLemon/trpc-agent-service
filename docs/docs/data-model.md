@@ -408,6 +408,7 @@ message_event(
   payload_ref, payload_digest, status, request_id, trace_id,
   execution_owner, execution_claim_token, execution_lease_expires_at,
   execution_fencing_token, execution_heartbeat_at, execution_attempts,
+  reply_id, reply_cache_ref, segment_count,
   created_at, committed_at
 )
 
@@ -420,7 +421,7 @@ tool_invocation(
 )
 
 reply_outbox(
-  tenant_id, reply_id, idempotency_key, segment_id,
+  tenant_id, event_id, reply_id, idempotency_key, segment_id,
   segment_index, segment_count, payload_ref, status, attempts,
   next_attempt_at, claim_owner, claim_token, lease_expires_at,
   fencing_token, provider_message_id, last_error, last_reconciled_at,
@@ -458,7 +459,9 @@ audit_log(
   `(tenant_id, binding_id, external_message_id)` 唯一约束；`idempotency_key` 由验签后的
   `tenant_id + binding_id + channel + external_message_id` 计算。`running` 还必须持有
   execution owner、claim token、lease deadline、heartbeat、attempts 和 fencing token；只有
-  当前 fence 才能提交 Runner event、state、tool receipt 或 reply outbox。
+  当前 fence 才能提交 Runner event、state、tool receipt 或 reply outbox。`completed` 之前必须
+  在同一执行提交中固定 `reply_id`、`reply_cache_ref` 和 `segment_count`；它们是后续物化和修复
+  的唯一聚合来源，不能从自由文本或孤立 outbox 行推断。
 - `tool_invocation` 以 `(tenant_id, invocation_id)` 为主键，并以
   `(tenant_id, event_id, idempotency_key)` 防止一次执行重复派发；`request_digest` 必须与
   首次准备记录一致。外部副作用前先 durable 写入 `prepared`，再以 claim owner、lease、
@@ -468,8 +471,10 @@ audit_log(
   按原 key 查询 provider receipt。
   已接受不得重跑；确认未接受且工具声明安全幂等时才能回到 `prepared` 重排；无供应商幂等或
   结果仍不明的副作用必须进入 `manual`/DLQ，不能自动重试。
-- `reply_outbox` 以 `(tenant_id, reply_id, segment_index)` 唯一约束分段顺序，以
-  `(tenant_id, segment_id)` 和出站幂等键防止同一分段重复发送；状态至少区分 `pending`、
+- `reply_outbox` 以 `(tenant_id, event_id)` 外键关联 `message_event`，并以
+  `(tenant_id, reply_id, segment_index)` 唯一约束分段顺序；`reply_id` 必须等于关联 event 的
+  `reply_id`，`segment_count` 必须等于 event 的固定值。另以 `(tenant_id, segment_id)` 和
+  出站幂等键防止同一分段重复发送；状态至少区分 `pending`、
   `sending`、`reconciling`、`sent`、`retryable`、`unknown` 和 `failed`，并保存 attempts、
   下次重试时间、claim owner、租约截止时间、fencing token 和供应商回执。`sending`/`unknown`
   的租约过期后，只有持有新 fence 的 Worker 才能把分段置为 `reconciling` 并按原出站幂等键
@@ -493,10 +498,14 @@ group:   tenant + binding + external_chat_id
 thread:  tenant + binding + external_chat_id + external_thread_id
 ```
 
-实现时使用长度前缀或结构化编码，避免简单字符串拼接碰撞；现有
-`tenant.NewRunnerIdentity` 已提供 Tenant 与外部用户/Session 的无歧义命名空间，但未来
-Channel Binding 仍必须在持久化列中保留 binding、channel 和外部身份。相同外部用户在不同
-租户、不同 Binding 或不同群聊中不得共享 `session_id`。
+实现时使用长度前缀或结构化编码，避免简单字符串拼接碰撞；由于现有
+`tenant.NewRunnerIdentity(tenantID, externalUserID, externalSessionID)` 没有 `binding_id` 参数，
+平台必须先构造 `binding_scoped_user = Encode(binding_id, external_user_id)` 和
+`binding_scoped_session = Encode(binding_id, external_session_id)`，再调用该构造器。Binding
+Adapter 的 conformance test 必须证明：同一 Tenant、用户和外部 Session 在两个 Binding 下生成
+不同的 Runner UserID/SessionID；同一 Binding 重放仍稳定；不同群聊/线程也不碰撞。Channel
+Binding 仍必须在持久化列中保留 binding、channel 和外部身份，不能把未声明的 Adapter 拼接当作
+隔离契约。
 
 ## 消息状态与提交顺序
 
@@ -534,11 +543,13 @@ Memory，重排 Summary 任务。SQL Adapter 可以把 event/state/outbox 放在
 Adapter 必须使用经过验证的 Lua/Stream/事务边界；无法原子提交时必须声明最终一致并提供
 补偿和 repair cursor。向量索引延迟不能影响 Tenant 权限、Session 顺序或 Audit。
 
-`completed` 只表示执行结果和 reply cache 已持久化；只有完整的 `reply_outbox` 分段已经幂等
-写入并通过 CAS/事务后，消息才可进入 `reply_pending`。同一 provider 把分段写入和状态转换
+`completed` 只表示执行结果以及 event 上固定的 `reply_id`、`reply_cache_ref` 和 `segment_count`
+已持久化；只有完整的 `reply_outbox` 分段以同一 `tenant_id + event_id + reply_id` 关联并幂等
+写入、通过 CAS/事务后，消息才可进入 `reply_pending`。同一 provider 把分段写入和状态转换
 放在一个事务；跨 provider 使用 durable repair marker。若 Worker 在物化分段前崩溃，修复器
-从 reply cache ref 补齐缺失分段；若 `reply_pending` 缺段，也只能进入 repair，不能直接进入
-`replied`。因此每个 `reply_pending` 都有可恢复的 segment_count，且不会重新运行 Runner。
+按 event 的 reply cache ref 和 segment_count 补齐缺失分段；若 `reply_pending` 缺段，也只能
+进入 repair，不能直接进入 `replied`。因此每个 `reply_pending` 都有可恢复的 segment_count，
+且不会重新运行 Runner，也不会把另一 event 的 outbox 归入本次回复。
 
 ## 多后端职责矩阵
 

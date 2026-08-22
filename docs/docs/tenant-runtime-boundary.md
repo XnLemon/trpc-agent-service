@@ -13,7 +13,21 @@ ConfigurationSnapshot 只允许通过受校验的构造器创建，不暴露可�
 
 ## Runner 身份
 
-使用 tenant.NewRunnerIdentity(tenantID, externalUserID, externalSessionID) 构造 Runner 所需的 userID 和 sessionID。编码是长度前缀格式，避免 tenant + external 的简单拼接发生碰撞。IM Adapter 决定 externalSessionID：单聊通常由外部用户标识组成，群聊必须包含外部群标识。无论 Runner 使用什么字符串，平台的持久化查询仍必须将独立的 tenant_id 作为条件，不能把 key 前缀视为唯一隔离手段。
+现有 `tenant.NewRunnerIdentity(tenantID, externalUserID, externalSessionID)` 没有 `binding_id`
+参数，因此平台 Adapter 必须先构造 binding-scoped 输入，再调用它：
+
+```text
+binding_scoped_user = Encode(binding_id, external_user_id)
+binding_scoped_session = Encode(binding_id, external_session_id)
+tenant.NewRunnerIdentity(tenant_id, binding_scoped_user, binding_scoped_session)
+```
+
+`Encode` 使用长度前缀或结构化编码，避免简单字符串拼接发生碰撞。IM Adapter 决定
+`externalSessionID`：单聊通常由外部用户标识组成，群聊必须包含外部群标识；平台再把
+`binding_id` 纳入 UserID 和 SessionID。Binding Adapter 的 conformance test 必须验证同一
+Tenant、用户和外部 Session 在不同 Binding 下生成不同的 Runner UserID/SessionID，同一 Binding
+重放保持稳定。无论 Runner 使用什么字符串，平台的持久化查询仍必须将独立的 `tenant_id` 和
+`binding_id` 作为条件，不能把 key 前缀视为唯一授权隔离手段。
 
 ## 可直接复用与当前限制
 

@@ -123,7 +123,8 @@ error_type、cost、request_id、trace_id、actor、reason、occurred_at 和前�
 
 `completed` 只在执行结果和 reply cache 持久化后成立；必须先幂等物化完整 reply outbox，再 CAS
 为 `reply_pending`。发现 `completed` 缺段或 `reply_pending` 缺段时，按 cache ref 和 repair
-cursor 补齐，不重新运行 Runner，也不能跳过分段直接标记 `replied`。
+cursor 补齐；修复必须按 `tenant_id + event_id + reply_id` 关联 event，校验 `segment_count`，
+不重新运行 Runner，也不能把另一 event 的 outbox 归入本次回复或跳过分段直接标记 `replied`。
 
 ### Model、Tool 或数据库故障
 
