@@ -98,8 +98,10 @@ error_type、cost、request_id、trace_id、actor、reason、occurred_at 和前�
   失败 payload 直接当可信 Tenant，也不为了“止重试”而跳过验签。
 - `running`/`completed`/`reply_pending`/`replied` 的重复请求只返回确认或重放缓存回复；
   不重新执行模型和副作用 Tool。
-- 多段回复按 `reply_id + segment_index` 查看 outbox；只重试明确未发送或可重试的 segment，
-  先用供应商回执/查询处理 `unknown`，全部 segment 确认成功后才把聚合状态置为 `replied`。
+- 多段回复按 `reply_id + segment_index` 查看 outbox；发送前检查 owner、lease deadline 和
+  fencing token，过期 `sending`/`unknown` 先用原幂等键向供应商对账，确认未接受后再换新 fence
+  进入 retryable；全部 segment 确认成功后才把聚合状态置为 `replied`，仍不明的分段保留
+  unknown 并告警/DLQ，不能盲目重发。
 - 乱序事件进入 pending/repair，按外部序号或收到时间保留，不修改已经提交的旧 event_seq。
 
 ### Session CAS 冲突或 outbox 堵塞
@@ -108,6 +110,10 @@ error_type、cost、request_id、trace_id、actor、reason、occurred_at 和前�
 冲突可按固定次数重新读取最新 state 并重放未提交 event；持续冲突时对该 Session 限流或串行
 化，而不是无限扩大重试。Outbox 堵塞时暂停新回复发送的扩容，保留幂等记录，修复 provider
 或消费者后按 cursor 重放，并监控重复发送保护。
+
+提交屏障固定为 `event/state → durable Memory → reply outbox → async Summary`：Memory 写入
+失败时不放行可发送的 outbox，进入 repair；Memory 已成功而 Summary 失败时保留事件和 Memory，
+只重排 Summary，不回滚或重新执行 Runner。
 
 ### Model、Tool 或数据库故障
 

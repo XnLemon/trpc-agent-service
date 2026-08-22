@@ -412,7 +412,8 @@ message_event(
 reply_outbox(
   tenant_id, reply_id, idempotency_key, segment_id,
   segment_index, segment_count, payload_ref, status, attempts,
-  next_attempt_at, provider_message_id, last_error,
+  next_attempt_at, claim_owner, claim_token, lease_expires_at,
+  fencing_token, provider_message_id, last_error, last_reconciled_at,
   created_at, sent_at
 )
 
@@ -448,9 +449,12 @@ audit_log(
   `tenant_id + binding_id + channel + external_message_id` 计算。
 - `reply_outbox` 以 `(tenant_id, reply_id, segment_index)` 唯一约束分段顺序，以
   `(tenant_id, segment_id)` 和出站幂等键防止同一分段重复发送；状态至少区分 `pending`、
-  `sending`、`sent`、`retryable`、`unknown` 和 `failed`，并保存 attempts、下次重试时间和
-  供应商回执。只有同一 `reply_id` 的全部分段确认 `sent` 后，`message_event` 才能进入
-  `replied`；结果不明的分段先进入 `unknown`，不能盲目重发。
+  `sending`、`reconciling`、`sent`、`retryable`、`unknown` 和 `failed`，并保存 attempts、
+  下次重试时间、claim owner、租约截止时间、fencing token 和供应商回执。`sending`/`unknown`
+  的租约过期后，只有持有新 fence 的 Worker 才能把分段置为 `reconciling` 并按原出站幂等键
+  查询供应商；已接受才转 `sent`，确认未接受才转 `retryable`，仍不明则保留 `unknown` 并
+  进入告警/DLQ。只有同一 `reply_id` 的全部分段确认 `sent` 后，`message_event` 才能进入
+  `replied`，不能用超时直接重发。
 - `memory_entry` 和 `session_summary` 的正文可以放对象存储，但 SQL 仍保存租户、digest、
   权限、版本和来源 event；向量库只保存可重建的索引，不是权限或审计真相。
 - `audit_log` 使用 append-only 写入；`digest`/`previous_digest` 可形成租户内 hash chain，
@@ -489,10 +493,12 @@ received → running → completed → reply_pending → replied
 单独的幂等键或人工确认。
 
 推荐顺序是：唯一写入入站事实 → 以 Session version/CAS 或事务分配 `event_seq` → 提交 event
-和 state → 写 reply outbox → 异步生成 summary → 写 durable Memory 并异步索引。SQL Adapter
-可以把 event/state/outbox 放在同一事务；Redis Adapter 必须使用经过验证的 Lua/Stream/事务
-边界；无法原子提交时必须声明最终一致并提供补偿和 repair cursor。向量索引延迟不能影响
-Tenant 权限、Session 顺序或 Audit。
+和 state → 写 durable Memory（以 `source_event_id` 关联）→ 写 reply outbox → 异步生成 Summary
+并以 `base_event_seq` CAS。这样 Summary 明确只反映已经 durable 的 Memory；Memory 写失败时
+不创建可发送的 outbox，任务进入补偿/repair，Memory 成功而 Summary 失败则保留事件和
+Memory，重排 Summary 任务。SQL Adapter 可以把 event/state/outbox 放在同一事务；Redis
+Adapter 必须使用经过验证的 Lua/Stream/事务边界；无法原子提交时必须声明最终一致并提供
+补偿和 repair cursor。向量索引延迟不能影响 Tenant 权限、Session 顺序或 Audit。
 
 ## 多后端职责矩阵
 

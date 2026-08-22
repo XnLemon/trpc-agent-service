@@ -73,11 +73,12 @@ flowchart LR
     A[Admin API]
     C[(SQL 控制面<br/>Tenant/App/Profile/Binding)]
     S[Secret Manager]
+    SR[Secret Resolver]
     R[Registry / Config Cache]
     A --> C
     A --> R
     R -.-> C
-    R --> S
+    SR --> S
   end
 
   subgraph DP[数据面]
@@ -136,8 +137,10 @@ flowchart LR
   W -->|同步 HTTPS callback| CA
   T -->|同步 HTTPS webhook| CA
   CA -->|仅查候选 Binding| R
-  R -->|候选句柄，不建立可信租户上下文| CA
-  CA -->|Secret handle| S
+  R -->|候选 binding + secret_ref| CA
+  CA -->|候选作用域请求| SR
+  SR -->|一次性 scoped secret handle| CA
+  WK -->|profile-scoped secret request| SR
   WK --> SS
   WK --> MM
   WK --> KN
@@ -308,40 +311,63 @@ sequenceDiagram
   else 验签成功
     CA->>G: 规范化消息 + tenant_id + binding_id + external_message_id
     G->>ID: 唯一写入 tenant+channel+message_id，状态 received
-    alt duplicate running/completed/replied
-      ID-->>G: 返回已有状态和 cached_reply_ref
-      G-->>CA: 2xx；不重复执行，必要时重放未完成回复
-    else first delivery
-      G->>CP: 加载 Tenant/App Revision/Model/Backend
-      CP-->>G: 固定版本、摘要和无密钥 ExecutionPlan 输入
-      G->>G: 生成外部 user/chat/thread → Runner identity/session_id
+    alt 唯一写入成功（首次投递）
       G->>ID: CAS received → running；保存 request/trace/idempotency key
-      G-->>WX: 5 秒内返回确认
-      G->>Q: 投递执行任务（幂等键 + plan key + message ref）
-      Q->>W: 消费任务，校验 plan 未被伪造
-      W->>R: context + userID + sessionID + model.Message
-      R->>TL: 输入/工具白名单、权限、预算、危险操作确认
-      TL-->>R: allow / deny / approval required
-      R->>ST: 写入 event，CAS 更新 Session/State
-      R->>ST: Memory durable write；异步投递向量索引
-      R->>ST: Audit(tool/model/decision/cost/trace)
-      R-->>W: Runner Event（文本/工具/错误/结束）
-      W->>ST: 固化 event/state，summary 按 event_seq 异步 CAS
-      W->>ID: CAS running → completed/reply_pending，保存 reply cache ref
-      W->>O: 为每个 segment 写 pending（稳定 segment_id/顺序/幂等键）
-      loop 按 segment_index 处理未发送分段
-        O->>CA: 异步发送一个 segment
-        CA->>WX2: 分段/卡片/媒体主动回复
-        alt 成功
-          WX2-->>CA: provider receipt/message_id
-          CA->>O: CAS pending → sent，保存 receipt
-        else 可重试或结果不确定
-          WX2-->>CA: 429/timeout/error
-          CA->>O: CAS → retryable/unknown，递增 attempts
+      alt claim 成功
+        G->>CP: 加载 Tenant/App Revision/Model/Backend
+        CP-->>G: 固定版本、摘要和无密钥 ExecutionPlan 输入
+        G->>G: 生成外部 user/chat/thread → Runner identity/session_id
+        G-->>WX: 5 秒内返回确认
+        G->>Q: 投递执行任务（幂等键 + plan key + message ref）
+        Q->>W: 消费任务，校验 plan 未被伪造
+        W->>R: context + userID + sessionID + model.Message
+        R->>TL: 输入/工具白名单、权限、预算、危险操作确认
+        TL-->>R: allow / deny / approval required
+        R->>ST: 写入 event，CAS 更新 Session/State
+        R->>ST: Memory durable write；异步投递向量索引
+        R->>ST: Audit(tool/model/decision/cost/trace)
+        R-->>W: Runner Event（文本/工具/错误/结束）
+        W->>ID: CAS running → completed/reply_pending，保存 reply cache ref
+        W->>O: 为每个 segment 写 pending（稳定 segment_id/顺序/幂等键）
+        W->>ST: summary 按 event_seq 异步 CAS（只读取已 durable 的 Memory）
+        loop 按 segment_index 处理分段
+          O->>O: CAS claim pending/retryable 或过期 sending（owner/lease/fence）
+          O->>CA: 异步发送一个 segment
+          CA->>WX2: 分段/卡片/媒体主动回复
+          alt 成功
+            WX2-->>CA: provider receipt/message_id
+            CA->>O: CAS sending → sent，保存 receipt 和 fence
+          else 可重试或结果不确定
+            WX2-->>CA: 429/timeout/error
+            CA->>O: CAS → retryable/unknown，递增 attempts
+          end
         end
+        O->>O: 过期 sending/unknown → reconciling（新 fence）
+        O->>CA: 按出站幂等键查询供应商回执
+        alt 已接受
+          CA-->>O: provider receipt/message_id
+          O->>O: CAS reconciling → sent
+        else 确认未接受
+          CA-->>O: 未找到回执
+          O->>O: CAS reconciling → retryable
+        else 仍无法确认
+          CA-->>O: 查询超时/结果不明
+          O->>O: 保持 unknown，告警或进入 DLQ，不盲目重发
+        end
+        O->>ID: 全部分段 sent → CAS reply_pending → replied
+        O->>ID: 预算耗尽/无法确认 → failed/DLQ，保留未发送分段
+      else CAS loser
+        ID-->>G: 已由其他请求 claim
+        G-->>CA: 2xx；不加载 plan、不启动第二个 Runner
       end
-      O->>ID: 全部分段 sent → CAS reply_pending → replied
-      O->>ID: 预算耗尽/无法确认 → failed/DLQ，保留未发送分段
+    else 唯一键冲突（并发或重复投递）
+      ID-->>G: 返回已有状态和 cached_reply_ref
+      alt received 或 running
+        G-->>CA: 2xx；CAS 失败者不加载 plan、不启动第二个 Runner
+      else completed、reply_pending 或 replied
+        G->>O: 按 reply_id 读取缓存或 claim 可发送分段
+        G-->>CA: 2xx；只重放回复，不重新执行 Runner
+      end
     end
   end
 ```
@@ -350,8 +376,12 @@ sequenceDiagram
 投递不是重复执行的借口。`completed` 但回复失败时重放缓存回复，不重新调用模型或具有副作用
 的 Tool；只有明确标记为安全、幂等的步骤才允许重试。回复 Outbox 还必须以
 `reply_id + segment_index` 建立稳定的分段幂等记录，保存顺序、状态、attempts 和供应商回执。
-聚合消息只有在全部分段为 `sent` 后才能进入 `replied`；请求超时但供应商结果不明时，优先
-使用供应商查询或其幂等能力确认；未确认前进入 `unknown`，不能盲目重发造成重复消息。
+每个分段发送前都要以 CAS 抢占 `owner`、`lease_expires_at` 和单调 `fencing_token`；只有持有
+最新 fence 的 Worker 才能提交发送结果。Worker 崩溃后，过期的 `sending` 或 `unknown` 先进入
+`reconciling`，用同一个出站幂等键向供应商查询；确认已接受才标记 `sent`，确认未接受才换
+新 fence 进入 `retryable`，仍不明则保留 `unknown` 并告警/DLQ，不能直接重发。聚合消息只有在
+全部分段为 `sent` 后才能进入 `replied`；请求超时但供应商结果不明时，优先使用供应商查询
+或其幂等能力确认；未确认前进入 `unknown`，不能盲目重发造成重复消息。
 
 ## 6. 数据同步、顺序与幂等
 
@@ -374,11 +404,12 @@ Redis 后端可用 Lua/事务/Stream 在同一 keyspace 内原子分配序号和
 2. 抢占执行状态并追加用户 event，分配 `event_seq`；
 3. Runner 事件按序写入，使用 CAS 更新 Session state；冲突时重新读取最新版本并重放未提交
    event，不覆盖他人状态；
-4. event 与 state 成功提交后写入 `reply_outbox`，以 event 范围和幂等键关联回复；
-5. summary 记录 `base_event_seq`，在异步任务中从最新事件重建并 CAS，失败则丢弃旧摘要任务
-   并重排；
-6. Memory 先写可追溯的 durable entry，再异步建立向量索引。索引延迟只影响检索新鲜度，
-   不影响租户授权、Session 顺序或审计事实。
+4. Memory 先写可追溯的 durable entry，再异步建立向量索引；如果 Memory 不能提交，不能
+   创建可发送的回复 outbox，必须进入补偿/repair；
+5. event、state 和 Memory 成功提交后写入 `reply_outbox`，以 event 范围和幂等键关联回复；
+6. summary 记录 `base_event_seq`，在 outbox 之后从已 durable 的 event/Memory 异步重建并 CAS，
+   失败则保留事件和 Memory、重排摘要任务。索引延迟只影响检索新鲜度，不影响租户授权、
+   Session 顺序或审计事实。
 
 若 event、state 和 outbox 不能在同一 provider 事务中完成，Adapter 必须使用显式 outbox、
 补偿状态和可重放事件，并在文档中声明最终一致；不能以“调用顺序”冒充原子提交。
