@@ -108,6 +108,7 @@ type CreateInput struct {
 	Status        Status
 	SchemaVersion int
 	Bindings      []CapabilityBinding
+	Metadata      ChangeMetadata
 }
 
 // NewProfile validates, normalizes, and constructs a Backend Profile.
