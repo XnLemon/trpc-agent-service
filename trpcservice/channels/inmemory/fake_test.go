@@ -30,6 +30,24 @@ func TestFakeResolverIsCoveredInsideItsOwningPackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	invalidCandidate := candidate
+	invalidCandidate.ConfigDigest = "bad"
+	if _, err := resolver.ResolveCandidate(context.Background(), channels.CandidateSecretRequest{Candidate: invalidCandidate, Purpose: channels.PurposeWebhookVerification}); !errors.Is(err, channels.ErrVerificationFailed) {
+		t.Fatalf("invalid candidate shape was accepted: %v", err)
+	}
+	unknownCandidate := candidate
+	unknownCandidate.CandidateToken = "unknown-token"
+	if _, err := resolver.ResolveCandidate(context.Background(), channels.CandidateSecretRequest{Candidate: unknownCandidate, Purpose: channels.PurposeWebhookVerification}); !errors.Is(err, channels.ErrVerificationFailed) {
+		t.Fatalf("unknown candidate token was accepted: %v", err)
+	}
+	missingSecretResolver := NewFakeCandidateResolver(repo, map[channels.SecretScope]string{}, FakeResolverOptions{Clock: clock.Now})
+	missingSecretCandidate, err := firstCandidate(t, repo, channels.ChannelWeCom, routeDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := missingSecretResolver.ResolveCandidate(context.Background(), channels.CandidateSecretRequest{Candidate: missingSecretCandidate, Purpose: channels.PurposeWebhookVerification}); !errors.Is(err, channels.ErrVerificationFailed) {
+		t.Fatalf("missing fake secret was accepted: %v", err)
+	}
 
 	purposeMismatch := candidate
 	purposeMismatch.Purpose = channels.VerificationPurpose("other-purpose")
@@ -51,6 +69,14 @@ func TestFakeResolverIsCoveredInsideItsOwningPackage(t *testing.T) {
 	}
 	if _, err := resolver.Verify(context.Background(), handle, request); !errors.Is(err, channels.ErrVerificationFailed) {
 		t.Fatalf("fake verifier handle was reusable: %v", err)
+	}
+	forgedSource := resolvePackageHandle(t, repo, resolver, routeDigest)
+	forgedHandle, err := channels.NewScopedVerifierHandle(forgedSource.Token(), channels.VerificationPurpose("other-purpose"), forgedSource.ExpiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Verify(context.Background(), forgedHandle, request); !errors.Is(err, channels.ErrVerificationFailed) {
+		t.Fatalf("forged-purpose fake handle was accepted: %v", err)
 	}
 
 	badCandidate, err := firstCandidate(t, repo, channels.ChannelWeCom, routeDigest)

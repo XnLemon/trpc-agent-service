@@ -167,12 +167,6 @@ func normalizeProtocolConfiguration(channel Channel, configuration ProtocolConfi
 		if err != nil {
 			return ProtocolConfiguration{}, err
 		}
-		if err := validateOptionalProtocolValue(normalized.WeCom.CorpID, "corp id"); err != nil {
-			return ProtocolConfiguration{}, err
-		}
-		if err := validateOptionalProtocolValue(normalized.WeCom.ReceiveID, "receive id"); err != nil {
-			return ProtocolConfiguration{}, err
-		}
 	}
 	if normalized.Telegram != nil {
 		var err error
@@ -194,16 +188,6 @@ func normalizeProtocolValue(value, label string) (string, error) {
 		return "", fmt.Errorf("%w: %s is invalid", ErrInvalid, label)
 	}
 	return value, nil
-}
-
-func validateOptionalProtocolValue(value, label string) error {
-	if value == "" {
-		return nil
-	}
-	if len([]rune(value)) > maxProtocolValueLength || hasControl(value) {
-		return fmt.Errorf("%w: %s is invalid", ErrInvalid, label)
-	}
-	return nil
 }
 
 func normalizeAPIBaseURL(value string) (string, error) {

@@ -97,6 +97,19 @@ func TestBindingRejectsUnknownChannelAndProtocolCrossing(t *testing.T) {
 	if _, err := NewBinding(badURL); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("non-HTTPS Telegram API URL was accepted: %v", err)
 	}
+	badURL.Protocol = ProtocolConfiguration{Telegram: &TelegramProtocolConfiguration{APIBaseURL: "https://api.example.com/path"}}
+	if _, err := NewBinding(badURL); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("non-origin Telegram API URL was accepted: %v", err)
+	}
+	badURL.Protocol = ProtocolConfiguration{Telegram: &TelegramProtocolConfiguration{APIBaseURL: "https://" + strings.Repeat("a", 260) + ".com"}}
+	if _, err := NewBinding(badURL); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("oversized Telegram API URL was accepted: %v", err)
+	}
+	badProtocol := base
+	badProtocol.Protocol = ProtocolConfiguration{WeCom: &WeComProtocolConfiguration{CorpID: "bad\nvalue"}}
+	if _, err := NewBinding(badProtocol); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("control protocol value was accepted: %v", err)
+	}
 	var configuration ProtocolConfiguration
 	if err := json.Unmarshal([]byte(`{"wecom":{"token":"must-not-be-stored"}}`), &configuration); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unknown or credential-shaped protocol field was accepted: %v", err)
@@ -183,6 +196,18 @@ func TestNewBindingAndBindingValidationRejectMalformedState(t *testing.T) {
 	}
 	if _, err := DigestPublicRouteKey(ChannelWeCom, strings.Repeat("x", 1025)); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unbounded route key was accepted: %v", err)
+	}
+	if (Binding{Status: StatusDisabled}).CanTransitionTo(StatusActive) {
+		t.Fatal("disabled Binding reported a resumable transition")
+	}
+	if ValidatePublicRouteKeyDigest(strings.Repeat("g", 64)) == nil {
+		t.Fatal("non-hex route digest was accepted")
+	}
+	if err := validateTenantID("t_80000000000000000000000000"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid ULID padding was accepted: %v", err)
+	}
+	if err := validateTenantID("t_0000000000000000000000000I"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid Crockford character was accepted: %v", err)
 	}
 }
 
@@ -296,6 +321,11 @@ func TestProtocolJSONAndCandidateValidationErrors(t *testing.T) {
 			t.Fatalf("invalid protocol JSON was accepted: %s -> %v", raw, err)
 		}
 	}
+	for _, raw := range []string{`{"wecom":{}} {}`, `{"wecom":{}} trailing`} {
+		if err := configuration.UnmarshalJSON([]byte(raw)); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("direct invalid protocol JSON was accepted: %s -> %v", raw, err)
+		}
+	}
 	valid := time.Now().UTC()
 	digest := strings.Repeat("a", 64)
 	candidate, err := NewCandidateBindingContext(ChannelWeCom, digest, 1, digest, PurposeWebhookVerification, "token", valid, valid.Add(time.Second))
@@ -310,6 +340,7 @@ func TestProtocolJSONAndCandidateValidationErrors(t *testing.T) {
 		{name: "route", mutate: func(value *CandidateBindingContext) { value.PublicRouteKeyDigest = "bad" }},
 		{name: "version", mutate: func(value *CandidateBindingContext) { value.BindingVersion = 0 }},
 		{name: "config", mutate: func(value *CandidateBindingContext) { value.ConfigDigest = "bad" }},
+		{name: "config characters", mutate: func(value *CandidateBindingContext) { value.ConfigDigest = strings.Repeat("g", 64) }},
 		{name: "purpose", mutate: func(value *CandidateBindingContext) { value.Purpose = "" }},
 		{name: "token", mutate: func(value *CandidateBindingContext) { value.CandidateToken = "" }},
 		{name: "issued", mutate: func(value *CandidateBindingContext) { value.IssuedAt = time.Time{} }},

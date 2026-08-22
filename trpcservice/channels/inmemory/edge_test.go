@@ -194,3 +194,71 @@ func TestRepositoryReadLocksAllowConcurrentReaders(t *testing.T) {
 		t.Fatal("second reader was serialized")
 	}
 }
+
+func TestContextMutexWakePathsAndPanicGuards(t *testing.T) {
+	assertPanics(t, func() { (&contextRWMutex{}).unlock() })
+	assertPanics(t, func() { (&contextRWMutex{}).runlock() })
+
+	mutex := contextRWMutex{}
+	if err := mutex.lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	writerAcquired := make(chan error, 1)
+	go func() {
+		if err := mutex.lock(context.Background()); err != nil {
+			writerAcquired <- err
+			return
+		}
+		mutex.unlock()
+		writerAcquired <- nil
+	}()
+	time.Sleep(25 * time.Millisecond)
+	mutex.unlock()
+	select {
+	case err := <-writerAcquired:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting writer did not acquire after wake")
+	}
+
+	if err := mutex.lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	readerAcquired := make(chan error, 1)
+	go func() {
+		if err := mutex.rlock(context.Background()); err != nil {
+			readerAcquired <- err
+			return
+		}
+		mutex.runlock()
+		readerAcquired <- nil
+	}()
+	time.Sleep(25 * time.Millisecond)
+	mutex.unlock()
+	select {
+	case err := <-readerAcquired:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting reader did not acquire after wake")
+	}
+}
+
+func assertPanics(t *testing.T, function func()) {
+	t.Helper()
+	deferred := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				deferred = true
+			}
+		}()
+		function()
+	}()
+	if !deferred {
+		t.Fatal("function did not panic")
+	}
+}
