@@ -489,16 +489,10 @@ AS $$
 DECLARE
     v_default_profile_id TEXT;
     v_previous_status TEXT;
+    v_previous_version BIGINT;
     v_digest TEXT;
     v_next_version BIGINT;
 BEGIN
-    IF p_actor_type IS NULL OR length(btrim(p_actor_type)) = 0
-       OR p_actor_id IS NULL OR length(btrim(p_actor_id)) = 0
-       OR p_correlation_id IS NULL OR length(btrim(p_correlation_id)) = 0
-       OR p_reason IS NULL OR length(btrim(p_reason)) NOT BETWEEN 1 AND 1000 THEN
-        RAISE EXCEPTION 'backend profile transition requires valid audit metadata';
-    END IF;
-
     -- All operations that change Tenant defaults or Profile status use the
     -- same Tenant -> Profile lock order.
     SELECT default_backend_profile_id INTO v_default_profile_id
@@ -509,12 +503,24 @@ BEGIN
         RAISE EXCEPTION 'tenant does not exist';
     END IF;
 
-    SELECT status, content_digest INTO v_previous_status, v_digest
+    SELECT status, version, content_digest
+    INTO v_previous_status, v_previous_version, v_digest
     FROM public.backend_profile
     WHERE tenant_id = p_tenant_id AND profile_id = p_profile_id
     FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'backend profile does not exist';
+    END IF;
+
+    IF v_previous_version <> p_expected_version THEN
+        RAISE EXCEPTION 'backend profile version conflict';
+    END IF;
+
+    IF p_actor_type IS NULL OR length(btrim(p_actor_type)) = 0
+       OR p_actor_id IS NULL OR length(btrim(p_actor_id)) = 0
+       OR p_correlation_id IS NULL OR length(btrim(p_correlation_id)) = 0
+       OR p_reason IS NULL OR length(btrim(p_reason)) NOT BETWEEN 1 AND 1000 THEN
+        RAISE EXCEPTION 'backend profile transition requires valid audit metadata';
     END IF;
 
     IF (v_previous_status, p_next_status) NOT IN (
@@ -568,7 +574,7 @@ BEGIN
         v_previous_status, p_next_status,
         v_digest, v_digest,
         p_actor_type, p_actor_id, p_reason, p_correlation_id,
-        p_expected_version, v_next_version
+        v_previous_version, v_next_version
     );
     RETURN v_next_version;
 END;
