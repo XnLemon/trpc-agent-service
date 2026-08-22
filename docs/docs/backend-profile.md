@@ -224,7 +224,8 @@ InMemory 只用于单进程开发和测试，不提供持久化、跨进程一�
 ## 不可变执行快照
 
 `BackendExecutionSnapshot` 封闭保存 Tenant 和 Profile 的防御性副本。构造器接收既有的
-`tenant.ConfigurationSnapshot` 与 Profile，并校验：
+`tenant.ConfigurationSnapshot`、Profile，以及接受该 Profile 时使用的同一个不可变 Catalog，
+并校验：
 
 1. Tenant snapshot 有效且 Tenant active。
 2. Profile 自身全部不变量和 digest 有效。
