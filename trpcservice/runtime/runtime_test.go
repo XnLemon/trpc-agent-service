@@ -164,7 +164,8 @@ func TestNewRunnerRejectsInvalidInputsAndFactoryFailures(t *testing.T) {
 			t.Errorf("sessions.Close() error = %v", err)
 		}
 	}()
-	if _, err := NewRunner(nil, plan, nil, &runtimeModelFactory{}, sessions); err == nil {
+	var nilContext context.Context
+	if _, err := NewRunner(nilContext, plan, nil, &runtimeModelFactory{}, sessions); err == nil {
 		t.Fatal("nil runner context unexpectedly succeeded")
 	}
 	if _, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{}, nil); err == nil {
