@@ -195,6 +195,61 @@ func TestPlanResolverPreservesCancellationAndRedactsDependencyFailures(t *testin
 	}
 }
 
+func TestPlanResolverStopsAfterLateRepositoryCancellation(t *testing.T) {
+	for name, wrap := range map[string]func(gatewayFixture, context.CancelFunc) PlanResolverConfig{
+		"model": func(fixture gatewayFixture, cancel context.CancelFunc) PlanResolverConfig {
+			return PlanResolverConfig{
+				Tenants: fixture.tenants, Apps: fixture.apps,
+				Models:   cancelAfterModelGet{Repository: fixture.models, cancel: cancel},
+				Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+			}
+		},
+		"backend": func(fixture gatewayFixture, cancel context.CancelFunc) PlanResolverConfig {
+			return PlanResolverConfig{
+				Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models,
+				Backends:     cancelAfterBackendGet{Repository: fixture.backends, cancel: cancel},
+				ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newGatewayFixture(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			resolver, err := NewPlanResolver(wrap(fixture, cancel))
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := resolver.Resolve(ctx, mustAPIPrincipal(t, fixture.tenant.TenantID, fixture.app.AppID))
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Resolve() plan=%+v err=%v, want context.Canceled", plan, err)
+			}
+		})
+	}
+}
+
+type cancelAfterModelGet struct {
+	model.Repository
+	cancel context.CancelFunc
+}
+
+func (repository cancelAfterModelGet) Get(ctx context.Context, tenantID, profileID string) (*model.Profile, error) {
+	profile, err := repository.Repository.Get(ctx, tenantID, profileID)
+	repository.cancel()
+	return profile, err
+}
+
+type cancelAfterBackendGet struct {
+	backend.Repository
+	cancel context.CancelFunc
+}
+
+func (repository cancelAfterBackendGet) Get(ctx context.Context, tenantID, profileID string) (*backend.Profile, error) {
+	profile, err := repository.Repository.Get(ctx, tenantID, profileID)
+	repository.cancel()
+	return profile, err
+}
+
 func mustAPIPrincipal(t *testing.T, tenantID, appID string) Principal {
 	t.Helper()
 	authenticated, err := newAuthenticatedAPI(APIIdentity{TenantID: tenantID, AppID: appID, SubjectID: "api-subject"})

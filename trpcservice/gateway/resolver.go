@@ -93,6 +93,9 @@ func (resolver *PlanResolver) Resolve(ctx context.Context, principal Principal) 
 	if err != nil || modelValue == nil {
 		return runtime.ExecutionPlan{}, resolver.planError(ctx)
 	}
+	if err := ctx.Err(); err != nil {
+		return runtime.ExecutionPlan{}, err
+	}
 	if tenantValue.DefaultBackendProfileID == nil {
 		return runtime.ExecutionPlan{}, ErrPlanUnavailable
 	}
@@ -100,12 +103,18 @@ func (resolver *PlanResolver) Resolve(ctx context.Context, principal Principal) 
 	if err != nil || backendValue == nil {
 		return runtime.ExecutionPlan{}, resolver.planError(ctx)
 	}
+	if err := ctx.Err(); err != nil {
+		return runtime.ExecutionPlan{}, err
+	}
 	plan, err := runtime.NewExecutionPlan(tenantSnapshot, appValue, revisionValue, modelValue, resolver.modelCatalog, backendValue, resolver.backendCatalog)
 	if err != nil {
 		return runtime.ExecutionPlan{}, ErrPlanUnavailable
 	}
 	if _, err := plan.CacheKey(); err != nil {
 		return runtime.ExecutionPlan{}, ErrPlanUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return runtime.ExecutionPlan{}, err
 	}
 	return plan, nil
 }
