@@ -380,18 +380,132 @@ COMMIT;
 | 可观测性 | Span attributes 写入 `tenant.id`、`tenant.version`、`agent_app.id` 和 `trace_id`；指标的租户维度须评估高基数与访问控制，成本归集从 usage/audit 事件完成。 |
 | 取消与状态 | Worker 用 `context.Context` 传递取消；suspended/disabled 只阻断新执行，不绕过已接受请求的收尾和事件排空策略。 |
 
-## 其余核心表（占位）
+## Channel Binding 与消息数据模型
+
+本节是 Issue #24 的逻辑模型设计，不是已经执行的 PostgreSQL migration。**现有实现**包含
+Tenant、Agent App/Revision、Model Profile、Backend Profile 和无密钥执行快照；下面的
+Channel/Session/Event/Memory/Summary/Audit 表属于**平台新增**。所有生产 Repository 都必须
+把 `tenant_id` 作为显式参数和列，字符串 namespace 只能防碰撞，不能替代授权或复合约束。
+
+### 稳定身份与约束
 
 ```text
-agent_app         Agent 应用（租户级，发布版本、模型与工具授权）→ 已完成设计
-backend_profile   数据后端档案（Session / Memory / Knowledge / Artifact / Audit）→ 已完成设计
-model_profile     模型档案（provider / model / generation / secret_ref）→ Issue #22 设计先行
-channel_binding   IM 通道绑定（tenant + channel + 账号 → agent_app）
-session           会话（tenant_id、session_id、状态、TTL）
-message_event     消息与会话事件（session 内有序、幂等）
-memory            长期记忆（租户 + 用户维度，可检索）
-summary           会话摘要（滚动压缩）
-audit_log         审计日志（tenant、channel、user、tool、decision、cost、trace_id）
+channel_binding(
+  tenant_id, binding_id, channel, provider_account_id,
+  public_route_key_digest, app_id, secret_ref,
+  status, version, config_digest, created_at, updated_at
+)
+
+session(
+  tenant_id, session_id, binding_id, app_id,
+  external_user_id, external_chat_id, external_thread_id,
+  status, state_version, last_event_seq, expires_at, created_at, updated_at
+)
+
+message_event(
+  tenant_id, event_id, session_id, binding_id,
+  external_message_id, idempotency_key, event_seq, kind,
+  payload_ref, payload_digest, status, request_id, trace_id,
+  created_at, committed_at
+)
+
+memory_entry(
+  tenant_id, memory_id, user_id, session_id, source_event_id,
+  content_ref, content_digest, visibility, index_status, created_at
+)
+
+session_summary(
+  tenant_id, session_id, summary_version, base_event_seq,
+  content_ref, content_digest, status, created_at, updated_at
+)
+
+audit_log(
+  tenant_id, audit_id, binding_id, channel, user_id, session_id,
+  agent_app_id, revision, model_profile_id, tool_name, decision,
+  event_seq, latency_ms, error_type, cost_minor, request_id, trace_id,
+  actor_type, actor_id, reason, occurred_at, previous_digest, digest
+)
 ```
 
-后续 issue 必须延续 `tenant_id` 显式列和同租户复合约束，不能通过共享的全局 ID 或隐含前缀绕过租户边界。
+建议约束如下：
+
+- `channel_binding` 的主键为 `(tenant_id, binding_id)`，`app_id` 通过同租户复合外键引用
+  `agent_app`；`secret_ref` 只引用 Secret Manager，不允许保存 secret 值。
+- `public_route_key_digest` 仅用于候选发现。相同 `channel + provider_account_id` 的
+  active Binding 只能归属一个 Tenant；若未来支持共享账号，必须新增明确的共享模型，不能
+  删除这条唯一性约束。
+- `session` 的主键为 `(tenant_id, session_id)`，并以 `(tenant_id, binding_id, 外部身份
+  元组)` 建唯一约束。外部身份元组由 Adapter 按通道定义，不使用昵称或可变展示名。
+- `message_event` 同时有 `(tenant_id, session_id, event_seq)` 唯一约束和
+  `(tenant_id, binding_id, external_message_id)` 唯一约束；`idempotency_key` 由验签后的
+  `tenant_id + binding_id + channel + external_message_id` 计算。
+- `memory_entry` 和 `session_summary` 的正文可以放对象存储，但 SQL 仍保存租户、digest、
+  权限、版本和来源 event；向量库只保存可重建的索引，不是权限或审计真相。
+- `audit_log` 使用 append-only 写入；`digest`/`previous_digest` 可形成租户内 hash chain，
+  长期归档再使用 WORM 或等价不可篡改策略。
+
+`tenant_id` 不能从 `external_user_id`、URL 前缀或 Runner 的字符串 key 反推。Gateway 在
+验签成功后才创建可信租户上下文；Storage Adapter 每一次读写都接收该上下文中的显式租户
+边界，并拒绝调用者传入不一致的租户值。
+
+### Session identity 规则
+
+```text
+direct:  tenant + binding + external_user_id
+group:   tenant + binding + external_chat_id
+thread:  tenant + binding + external_chat_id + external_thread_id
+```
+
+实现时使用长度前缀或结构化编码，避免简单字符串拼接碰撞；现有
+`tenant.NewRunnerIdentity` 已提供 Tenant 与外部用户/Session 的无歧义命名空间，但未来
+Channel Binding 仍必须在持久化列中保留 binding、channel 和外部身份。相同外部用户在不同
+租户、不同 Binding 或不同群聊中不得共享 `session_id`。
+
+## 消息状态与提交顺序
+
+`message_event.status` 与入站幂等记录共同表达以下状态机：
+
+```text
+received → running → completed → reply_pending → replied
+     │          │          │              │
+     └──────────┴──────────┴──────────────┴→ failed / DLQ
+```
+
+在 `running` 收到重复请求时只返回确认，不再创建 Runner；`completed` 或 `reply_pending`
+时使用缓存回复引用重试出站；`replied` 直接返回已完成；`failed` 只有在错误可重试且没有
+不可逆副作用时才能重新排队。模型输出不是天然幂等，扣费、发送、工单和外部写操作必须有
+单独的幂等键或人工确认。
+
+推荐顺序是：唯一写入入站事实 → 以 Session version/CAS 或事务分配 `event_seq` → 提交 event
+和 state → 写 reply outbox → 异步生成 summary → 写 durable Memory 并异步索引。SQL Adapter
+可以把 event/state/outbox 放在同一事务；Redis Adapter 必须使用经过验证的 Lua/Stream/事务
+边界；无法原子提交时必须声明最终一致并提供补偿和 repair cursor。向量索引延迟不能影响
+Tenant 权限、Session 顺序或 Audit。
+
+## 多后端职责矩阵
+
+| 后端 | 适合存储 | 一致性/延迟 | 成本与运维取舍 |
+| --- | --- | --- | --- |
+| InMemory | 单进程测试、开发期 Session/Memory | 进程内 mutex；重启丢失、无跨节点可见性 | 最低成本；不能用于生产或迁移源 |
+| Redis | 幂等、Queue、低延迟 Session/Event、短期 cache | 单 key 原子能力强；跨 key、故障转移和持久化需看配置 | 运维简单、低延迟；内存成本和数据耐久性要评估 |
+| PostgreSQL/MySQL | 控制面、Session/Event/State、Summary、Audit、Memory 正文 | 事务/CAS/复合约束适合作为权威源；副本读取可能延迟 | 查询和审计能力强；连接、锁、分片和容量需运营 |
+| Vector DB | Knowledge/Memory embedding 与检索索引 | 最终一致；不能与 SQL event 假设跨库事务 | 检索性能好；重建、维度和 provider 迁移成本高 |
+| S3/对象存储 | Artifact、原始文档、较大的 Memory/审计归档 | 以具体 provider 合同为准；metadata 仍需 SQL | 单位成本低；权限、生命周期和清理必须额外管理 |
+
+一次执行选择的 Backend Profile version 必须写入 `ExecutionPlan` 和审计。Redis → SQL 或本地
+向量库 → 远端向量库都通过新的 Profile version 迁移：全量复制、双写、增量追平、digest/序号
+校验、shadow read、只切新执行、保留旧版本和可回滚窗口。不能在同一次执行中跨两套后端，
+也不能因为两个 provider 都叫“Session”就声称它们有相同的事务语义。
+
+## tRPC-Agent-Go 映射与当前边界
+
+| 数据/运行时责任 | 可直接复用 | 平台新增 |
+| --- | --- | --- |
+| Session Event 生命周期 | `session.Service`、Runner event 和 context | Tenant-scoped Adapter、CAS/序号、SQL/Redis conformance test |
+| Memory/Knowledge | `memory.Service`、Knowledge/VectorStore 接口 | Tenant 分区、异步索引、权限过滤和迁移 |
+| Artifact | `artifact.Service` | Tenant bucket/prefix、digest、生命周期和审计引用 |
+| Audit | OpenTelemetry 可复用为 trace | 独立 append-only audit adapter；sampling 不能代替审计 |
+| Agent 执行 | Runner、LLMAgent、Tool/MCP、Plugin/Guardrail | Gateway、Binding、幂等、策略和回复 Outbox |
+
+当前 Go 代码没有实现上述 Channel/Session/Memory/Audit 生产表、客户端或 migration；文档的
+逻辑模型用于约束后续 issue，不能作为已完成的数据库交付物。

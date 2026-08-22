@@ -206,13 +206,16 @@
 
 ### 设计交付物
 
-- [ ] 将架构设计扩充为 2000–4000 字的完整方案
-- [ ] 补全包含 Gateway、Worker、Channel、Storage、Guardrail、Telemetry 和外部系统的架构图
-- [ ] 补全“企业微信消息 → Agent → Tool → Session/Memory → IM 回复”核心时序图
-- [ ] 完成数据同步、消息幂等和多后端一致性取舍专项说明
-- [ ] 对比至少两种 IM 通道的协议、限制和回复机制
-- [ ] 列出至少 8 个生产风险及对应缓解措施
-- [ ] 持续标注可直接复用的 tRPC-Agent-Go 能力与平台新增模块边界
+- [x] 将架构设计扩充为 2000–4000 字的完整方案（Issue #24，文档设计已完成）
+- [x] 补全包含 Gateway、Worker、Channel、Storage、Guardrail、Telemetry 和外部系统的架构图
+- [x] 补全“企业微信消息 → Agent → Tool → Session/Memory → IM 回复”核心时序图
+- [x] 完成数据同步、消息幂等和多后端一致性取舍专项说明
+- [x] 对比至少两种 IM 通道的协议、限制和回复机制
+- [x] 列出至少 8 个生产风险及对应缓解措施
+- [x] 持续标注可直接复用的 tRPC-Agent-Go 能力与平台新增模块边界
+
+> Issue #24 只完成架构、数据模型和运维文档；Channel Binding、Gateway、真实 IM/Storage
+> Adapter、迁移工具和生产告警仍未实现。
 
 ## 代码目录
 

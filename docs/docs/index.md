@@ -15,6 +15,8 @@
 
 - [Model Profile、Secret Resolver 与最小 Runner 链路](model-profile.md)：Issue #22 的文档先行设计，
   固定模型解析、密钥边界、Execution Plan 和 tRPC-Agent-Go Runner 的纵向契约。
+- [生产架构设计](architecture.md)：Issue #24 的控制面/数据面拓扑、可信 Channel Binding、
+  企业微信全链路、幂等、迁移和能力边界设计。文档交付不等于对应生产代码已实现。
 
 ## 快速开始
 
@@ -34,9 +36,9 @@ cd trpc-agent-service
 
 ## 文档导航
 
-- [架构设计](architecture.md) — 组件拓扑、消息链路、租户隔离
-- [数据模型](data-model.md) — 核心表结构、多后端适配、数据同步
-- [运维方案](ops.md) — 监控审计、故障恢复、容量评估
+- [架构设计](architecture.md) — 组件拓扑、可信路由、消息链路、数据同步和多后端迁移
+- [数据模型](data-model.md) — 核心表结构、Session/Event/Memory/Summary/Audit 和租户约束
+- [运维方案](ops.md) — 发布灰度、监控审计、故障恢复、容量模型和生产风险清单
 
 ## CI
 

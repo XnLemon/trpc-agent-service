@@ -10,7 +10,9 @@ docs/
     |-- index.md         # 首页
     |-- architecture.md  # 架构设计
     |-- data-model.md    # 数据模型
-    `-- ops.md           # 运维方案
+    |-- ops.md           # 运维方案
+    |-- assets/           # 文档图片资产（含架构总览图）
+    `-- javascripts/     # Mermaid 等页面增强脚本
 ```
 
 ## 本地构建
