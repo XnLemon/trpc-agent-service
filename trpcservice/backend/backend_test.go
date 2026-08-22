@@ -328,6 +328,7 @@ func TestProviderCatalogRejectsInvalidBindingsWithoutLeakingValues(t *testing.T)
 		{name: "endpoint user info", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://user:password@db.example.com" }},
 		{name: "endpoint query", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com?token=" + secretValue }},
 		{name: "endpoint fragment", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com#secret" }},
+		{name: "endpoint empty fragment", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com#" }},
 		{name: "endpoint control", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com/bad\npath" }},
 		{name: "endpoint encoded null", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com/%00" }},
 		{name: "endpoint encoded newline", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com/%0A" }},
@@ -504,6 +505,7 @@ func TestEndpointAuthorityValidation(t *testing.T) {
 	valid := map[string]string{
 		"DNS case":       "https://QDRANT.EXAMPLE.COM:6333",
 		"DNS root":       "https://qdrant.example.com.",
+		"encoded path":   "https://qdrant.example.com/%23documents",
 		"IPv4":           "https://127.0.0.1:6333",
 		"IPv6":           "https://[2001:db8::1]:6333",
 		"IPv6 with zone": "https://[fe80::1%25ETH0]:6333",

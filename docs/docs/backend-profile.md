@@ -469,7 +469,8 @@ FOR EACH ROW EXECUTE FUNCTION backend_profile_require_valid_bindings();
 生命周期入口必须锁定 Profile、校验 expected version 和默认引用，并原子写 Outbox。以下函数
 展示 suspend/resume/disable 的完整数据库语义；Catalog 校验过的完整配置替换采用相同锁定和
 Outbox 模式，但 binding payload 仍由严格解码的 SQL Repository 传入，不能在 SQL 中猜测
-provider schema。
+provider schema。disabled 是终态门禁：锁定并确认对象存在后，所有 mutation 都先返回 disabled，
+再判断 expected version；这样当前或陈旧调用在 InMemory 与 SQL adapter 中具有相同错误分类。
 
 ```sql
 CREATE OR REPLACE FUNCTION transition_backend_profile_status(
@@ -510,6 +511,10 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'backend profile does not exist';
+    END IF;
+
+    IF v_previous_status = 'disabled' THEN
+        RAISE EXCEPTION 'backend profile is disabled';
     END IF;
 
     IF v_previous_version <> p_expected_version THEN

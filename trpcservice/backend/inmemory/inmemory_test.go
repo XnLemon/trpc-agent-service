@@ -148,6 +148,12 @@ func TestLifecycleTransitionsAndResumeValidation(t *testing.T) {
 	if _, _, err := repository.TransitionStatus(context.Background(), transitionInput(disabled, backend.StatusActive)); !errors.Is(err, backend.ErrDisabled) {
 		t.Fatalf("disabled transition error = %v", err)
 	}
+	if _, _, err := repository.UpdateConfiguration(context.Background(), updateInput(resumed, "stale-disabled", sessionBindings())); !errors.Is(err, backend.ErrDisabled) {
+		t.Fatalf("stale disabled update error = %v", err)
+	}
+	if _, _, err := repository.TransitionStatus(context.Background(), transitionInput(resumed, backend.StatusSuspended)); !errors.Is(err, backend.ErrDisabled) {
+		t.Fatalf("stale disabled transition error = %v", err)
+	}
 
 	suspendedOnly, _, err := repository.Create(context.Background(), backend.CreateInput{
 		TenantID: tenantOne, ProfileKey: "no-session", DisplayName: "No Session", Status: backend.StatusSuspended,

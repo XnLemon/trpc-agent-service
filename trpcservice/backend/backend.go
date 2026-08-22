@@ -598,6 +598,9 @@ func normalizeEndpoint(endpoint string, policy FieldPolicy, schemes map[string]s
 	if len(endpoint) > maxEndpointLength || hasControl(endpoint) {
 		return "", fmt.Errorf("%w: endpoint is invalid", ErrInvalid)
 	}
+	if strings.Contains(endpoint, "#") {
+		return "", fmt.Errorf("%w: endpoint cannot contain a fragment", ErrInvalid)
+	}
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Hostname() == "" ||
 		parsed.Opaque != "" || strings.Contains(parsed.Host, ",") {
