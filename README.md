@@ -130,7 +130,7 @@
 - [x] 实现 LLMAgent Revision 版本模型、草稿、不可变发布和内容摘要
 - [x] 定义 Agent Repository 并提供租户隔离、并发安全的 InMemory 实现
 - [ ] 实现 Channel Binding 领域模型
-- [ ] 实现 Backend Profile 领域模型
+- [x] 实现 Backend Profile 领域模型
 - [ ] 实现租户、Agent、通道和后端配置的 Admin API
 - [x] 实现 Agent App 草稿更新、原子发布和版本回滚
 - [ ] 实现配置缓存失效、租户级灰度和租户配置版本回滚

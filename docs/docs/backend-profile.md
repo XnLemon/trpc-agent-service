@@ -350,8 +350,8 @@ CREATE TABLE backend_profile_change_outbox (
 ```
 
 以下触发器封住不能只靠根表 `CHECK` 表达的跨表不变量。两条 constraint trigger 都是
-deferred，使受控事务可以先替换 bindings 再提交根状态，但事务结束时 active Profile 必须有
-Session binding。
+deferred，使受控事务可以先替换 bindings 再提交根状态，但事务结束时所有非 disabled Profile
+必须至少有一个 binding，且 active Profile 必须有 Session binding。
 
 ```sql
 CREATE OR REPLACE FUNCTION backend_profile_reject_disabled_insert()
@@ -406,7 +406,7 @@ CREATE TRIGGER backend_profile_binding_identity_immutable
 BEFORE UPDATE ON backend_profile_binding
 FOR EACH ROW EXECUTE FUNCTION backend_profile_binding_reject_identity_change();
 
-CREATE OR REPLACE FUNCTION backend_profile_require_active_session()
+CREATE OR REPLACE FUNCTION backend_profile_require_valid_bindings()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
@@ -433,6 +433,15 @@ BEGIN
         RETURN NULL;
     END IF;
 
+    IF v_status <> 'disabled' AND NOT EXISTS (
+        SELECT 1
+        FROM backend_profile_binding
+        WHERE tenant_id = v_tenant_id
+          AND profile_id = v_profile_id
+    ) THEN
+        RAISE EXCEPTION 'non-disabled backend profile requires at least one binding';
+    END IF;
+
     IF v_status = 'active' AND NOT EXISTS (
         SELECT 1
         FROM backend_profile_binding
@@ -446,15 +455,15 @@ BEGIN
 END;
 $$;
 
-CREATE CONSTRAINT TRIGGER backend_profile_active_session_guard
+CREATE CONSTRAINT TRIGGER backend_profile_root_bindings_guard
 AFTER INSERT OR UPDATE OF status ON backend_profile
 DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW EXECUTE FUNCTION backend_profile_require_active_session();
+FOR EACH ROW EXECUTE FUNCTION backend_profile_require_valid_bindings();
 
-CREATE CONSTRAINT TRIGGER backend_profile_binding_active_session_guard
+CREATE CONSTRAINT TRIGGER backend_profile_binding_rows_guard
 AFTER INSERT OR UPDATE OR DELETE ON backend_profile_binding
 DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW EXECUTE FUNCTION backend_profile_require_active_session();
+FOR EACH ROW EXECUTE FUNCTION backend_profile_require_valid_bindings();
 ```
 
 生命周期入口必须锁定 Profile、校验 expected version 和默认引用，并原子写 Outbox。以下函数
