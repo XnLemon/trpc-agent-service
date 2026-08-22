@@ -126,15 +126,21 @@
 - [x] 实现不可变运行时配置快照和带租户命名空间的 Runner 用户/会话身份
 - [x] 覆盖租户隔离、并发更新、Context 取消和运行时边界测试
 - [ ] 实现 PostgreSQL/MySQL 租户 Repository 和数据库 migration
-- [ ] 实现 Agent App、Agent Version、Channel Binding 和 Backend Profile 领域模型
+- [x] 实现租户级 Agent App 根模型和生命周期
+- [x] 实现 LLMAgent Revision 版本模型、草稿、不可变发布和内容摘要
+- [x] 定义 Agent Repository 并提供租户隔离、并发安全的 InMemory 实现
+- [ ] 实现 Channel Binding 领域模型
+- [ ] 实现 Backend Profile 领域模型
 - [ ] 实现租户、Agent、通道和后端配置的 Admin API
-- [ ] 实现配置发布、缓存失效、租户级灰度和版本回滚
+- [x] 实现 Agent App 草稿更新、原子发布和版本回滚
+- [ ] 实现配置缓存失效、租户级灰度和租户配置版本回滚
 - [ ] 接入 KMS/Secret Manager，禁止密钥进入运行时快照、日志和 trace
 
 ### Gateway 与 Agent Worker
 
 - [ ] 引入并初始化 tRPC-Agent-Go，建立可执行的 `runner.Runner`
 - [ ] 实现 Agent Registry，按 `tenant_id + agent_app_id + version` 加载 Agent
+- [x] 实现 Tenant + App + Revision 不可变执行快照、Factory Cache Key 和无密钥 Factory 输入契约
 - [ ] 实现 Gateway 的鉴权、租户解析、Agent 路由、限流和请求去重
 - [ ] 实现普通及流式对话 API，并贯穿 `request_id` / `trace_id`
 - [ ] 实现无状态 Worker 和基于共享 Session/Memory 后端的水平扩展
@@ -144,7 +150,9 @@
 ### 数据模型、多后端与同步
 
 - [x] 完成 Tenant 根模型的 PostgreSQL DDL、约束、生命周期和框架映射设计
-- [ ] 补齐 agent app、channel binding、session、event、memory、summary、artifact 和 audit log 的可执行 DDL
+- [x] 完成 Agent App/Revision 的 PostgreSQL DDL、发布事务、回滚和框架映射设计
+- [ ] 将 Tenant、Agent App/Revision DDL 落地为数据库 migration
+- [ ] 补齐 channel binding、session、event、memory、summary、artifact 和 audit log 的可执行 DDL
 - [ ] 定义 Session、Memory、Summary、Knowledge、Artifact 和 Audit 的统一访问接口
 - [ ] 实现租户级 Backend Registry/Factory 和后端路由
 - [ ] 接入 InMemory、Redis 及 PostgreSQL/MySQL Session 后端
@@ -181,6 +189,8 @@
 
 ### 可靠性、运维与测试
 
+- [x] 覆盖 Agent App/Revision 边界、租户隔离、发布回滚、并发冲突、Context 取消和执行快照测试
+- [x] 对 Agent App 和 InMemory Repository 运行 race 与重复稳定性测试
 - [ ] 实现模型、工具、数据库和 IM 故障的超时、重试、熔断及降级策略
 - [ ] 实现 IM 异步重试队列、指数退避和死信处理
 - [ ] 完成容量模型，并对并发 Session、Redis/SQL QPS 和 IM 峰值进行压测
