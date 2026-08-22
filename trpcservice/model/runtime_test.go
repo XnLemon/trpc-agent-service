@@ -227,7 +227,8 @@ func TestModelExecutionSnapshotRejectsInvalidStatesAndInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ResolveAndBuild(nil, input, nil, &recordingFactory{}); !errors.Is(err, ErrInvalid) {
+	var nilContext context.Context
+	if _, err := ResolveAndBuild(nilContext, input, nil, &recordingFactory{}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("nil context error = %v", err)
 	}
 	if _, err := ResolveAndBuild(context.Background(), input, nil, nil); !errors.Is(err, ErrInvalid) {

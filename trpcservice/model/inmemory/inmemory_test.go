@@ -194,11 +194,12 @@ func TestRepositoryOperationsCancelWhileWaitingForLock(t *testing.T) {
 
 func TestRepositoryContextAndMissingIdentityBoundaries(t *testing.T) {
 	repository := NewRepository(inmemoryTestCatalog(t))
-	created, _, err := repository.Create(nil, inmemoryCreateInput("tenant-one", "nil-context"))
+	var nilContext context.Context
+	created, _, err := repository.Create(nilContext, inmemoryCreateInput("tenant-one", "nil-context"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fetched, err := repository.Get(nil, created.TenantID, created.ProfileID); err != nil || fetched == nil {
+	if fetched, err := repository.Get(nilContext, created.TenantID, created.ProfileID); err != nil || fetched == nil {
 		t.Fatalf("nil-context Get = %+v, %v", fetched, err)
 	}
 	updated, _, err := repository.UpdateConfiguration(nil, modelprofile.UpdateConfigurationInput{
