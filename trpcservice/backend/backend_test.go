@@ -282,6 +282,8 @@ func TestProviderCatalogRejectsInvalidSchemas(t *testing.T) {
 		{name: "unnormalized scheme", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldRequired, EndpointSchemes: []string{"Postgres"}, SecretRefPolicy: FieldForbidden}}},
 		{name: "duplicate scheme", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldRequired, EndpointSchemes: []string{"postgres", "postgres"}, SecretRefPolicy: FieldForbidden}}},
 		{name: "sensitive option", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"password": {Kind: OptionString}}}}},
+		{name: "sensitive option suffix", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"api_key_v2": {Kind: OptionString}}}}},
+		{name: "sensitive connection suffix", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"connection_string_primary": {Kind: OptionString}}}}},
 		{name: "required default", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"pool": {Kind: OptionInteger, Required: true, DefaultValue: &defaultValue}}}}},
 		{name: "enum values", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"mode": {Kind: OptionEnum}}}}},
 		{name: "invalid enum value", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"mode": {Kind: OptionEnum, AllowedValues: []string{"\n"}}}}}},
@@ -322,6 +324,7 @@ func TestProviderCatalogRejectsInvalidBindingsWithoutLeakingValues(t *testing.T)
 		{name: "secret grammar", mutate: func(binding *CapabilityBinding) { binding.SecretRef = "secret ref with spaces" }},
 		{name: "unknown option", mutate: func(binding *CapabilityBinding) { binding.Options["unknown"] = secretValue }},
 		{name: "sensitive option", mutate: func(binding *CapabilityBinding) { binding.Options["api_key"] = secretValue }},
+		{name: "sensitive option suffix", mutate: func(binding *CapabilityBinding) { binding.Options["private_key_pem"] = secretValue }},
 		{name: "required option", mutate: func(binding *CapabilityBinding) { delete(binding.Options, "database") }},
 		{name: "integer", mutate: func(binding *CapabilityBinding) { binding.Options["pool_size"] = "many" }},
 		{name: "integer maximum", mutate: func(binding *CapabilityBinding) { binding.Options["pool_size"] = "101" }},
@@ -355,6 +358,22 @@ func TestProviderCatalogRejectsInvalidBindingsWithoutLeakingValues(t *testing.T)
 	forbidden = CapabilityBinding{Capability: CapabilityMemory, Provider: "inmemory", SecretRef: "secret://memory"}
 	if _, err := catalog.NormalizeBindings([]CapabilityBinding{forbidden}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("forbidden SecretRef error = %v", err)
+	}
+}
+
+func TestEndpointNormalizationPreservesIPv6ZoneCase(t *testing.T) {
+	catalog := newTestCatalog(t)
+	binding := CapabilityBinding{
+		Capability: CapabilityKnowledge, Provider: "qdrant",
+		Endpoint: "https://[fe80::1%25ETH0]:6333",
+		Options:  map[string]string{"collection": "documents"},
+	}
+	normalized, err := catalog.NormalizeBindings([]CapabilityBinding{binding})
+	if err != nil {
+		t.Fatalf("NormalizeBindings() error = %v", err)
+	}
+	if got := normalized[0].Endpoint; got != binding.Endpoint {
+		t.Fatalf("normalized IPv6 endpoint = %q, want %q", got, binding.Endpoint)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"hash"
 	"math/big"
+	"net"
 	"net/url"
 	"sort"
 	"strconv"
@@ -603,7 +604,14 @@ func normalizeEndpoint(endpoint string, policy FieldPolicy, schemes map[string]s
 		return "", fmt.Errorf("%w: endpoint cannot contain credentials, query, or fragment", ErrInvalid)
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	parsed.Host = strings.ToLower(parsed.Host)
+	if !strings.HasPrefix(parsed.Host, "[") {
+		hostname := strings.ToLower(parsed.Hostname())
+		if port := parsed.Port(); port != "" {
+			parsed.Host = net.JoinHostPort(hostname, port)
+		} else {
+			parsed.Host = hostname
+		}
+	}
 	if _, exists := schemes[parsed.Scheme]; !exists {
 		return "", fmt.Errorf("%w: endpoint scheme is not allowed", ErrInvalid)
 	}
@@ -706,12 +714,22 @@ func sensitiveOptionKey(key string) bool {
 			return true
 		}
 	}
+	compact := strings.ReplaceAll(key, "_", "")
+	for _, sequence := range sensitiveOptionSequences {
+		if strings.Contains(compact, sequence) {
+			return true
+		}
+	}
 	return false
 }
 
 var sensitiveOptionKeys = map[string]struct{}{
 	"api_key": {}, "access_key": {}, "secret_key": {}, "private_key": {},
 	"connection_string": {},
+}
+
+var sensitiveOptionSequences = []string{
+	"apikey", "accesskey", "secretkey", "privatekey", "connectionstring",
 }
 
 func validScheme(scheme string) bool {
