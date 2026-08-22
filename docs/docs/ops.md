@@ -98,6 +98,8 @@ error_type、cost、request_id、trace_id、actor、reason、occurred_at 和前�
   失败 payload 直接当可信 Tenant，也不为了“止重试”而跳过验签。
 - `running`/`completed`/`reply_pending`/`replied` 的重复请求只返回确认或重放缓存回复；
   不重新执行模型和副作用 Tool。
+- 多段回复按 `reply_id + segment_index` 查看 outbox；只重试明确未发送或可重试的 segment，
+  先用供应商回执/查询处理 `unknown`，全部 segment 确认成功后才把聚合状态置为 `replied`。
 - 乱序事件进入 pending/repair，按外部序号或收到时间保留，不修改已经提交的旧 event_seq。
 
 ### Session CAS 冲突或 outbox 堵塞

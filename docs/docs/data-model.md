@@ -409,6 +409,13 @@ message_event(
   created_at, committed_at
 )
 
+reply_outbox(
+  tenant_id, reply_id, idempotency_key, segment_id,
+  segment_index, segment_count, payload_ref, status, attempts,
+  next_attempt_at, provider_message_id, last_error,
+  created_at, sent_at
+)
+
 memory_entry(
   tenant_id, memory_id, user_id, session_id, source_event_id,
   content_ref, content_digest, visibility, index_status, created_at
@@ -439,6 +446,11 @@ audit_log(
 - `message_event` 同时有 `(tenant_id, session_id, event_seq)` 唯一约束和
   `(tenant_id, binding_id, external_message_id)` 唯一约束；`idempotency_key` 由验签后的
   `tenant_id + binding_id + channel + external_message_id` 计算。
+- `reply_outbox` 以 `(tenant_id, reply_id, segment_index)` 唯一约束分段顺序，以
+  `(tenant_id, segment_id)` 和出站幂等键防止同一分段重复发送；状态至少区分 `pending`、
+  `sending`、`sent`、`retryable`、`unknown` 和 `failed`，并保存 attempts、下次重试时间和
+  供应商回执。只有同一 `reply_id` 的全部分段确认 `sent` 后，`message_event` 才能进入
+  `replied`；结果不明的分段先进入 `unknown`，不能盲目重发。
 - `memory_entry` 和 `session_summary` 的正文可以放对象存储，但 SQL 仍保存租户、digest、
   权限、版本和来源 event；向量库只保存可重建的索引，不是权限或审计真相。
 - `audit_log` 使用 append-only 写入；`digest`/`previous_digest` 可形成租户内 hash chain，

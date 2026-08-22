@@ -269,6 +269,11 @@ Secret，用供应商的 token/signature、时间戳、nonce、密文和 receive
 `hash(tenant_id || binding_id || channel || external_message_id)` 计算。Secret 值永远不
 进入以下任何 ID、事件、日志或错误。
 
+验签失败时不能调用租户级 Session、Memory 或 Audit Adapter。Adapter 可以把
+`request_id`、`trace_id`、候选 route digest、时间窗结果和失败类别写入不带租户授权语义的
+全局入口安全 sink，用于检测伪造和重放；只有验签成功后，Tenant-scoped Audit 才能记录租户
+级事件。全局 sink 也不得保存 Secret 或未经必要脱敏的回调正文。
+
 ```mermaid
 sequenceDiagram
   autonumber
@@ -280,6 +285,7 @@ sequenceDiagram
   participant G as Agent Gateway
   participant ID as Idempotency Store
   participant CP as Control Plane
+  participant SEC as Global Ingress Security Sink
   participant Q as Execution Queue
   participant W as Agent Worker
   participant R as Runner / Agent
@@ -298,7 +304,7 @@ sequenceDiagram
   CA->>CA: 校验时间窗、nonce、msg_signature、AES 解密和 receive_id
   alt 验签失败
     CA-->>WX: 拒绝/固定错误响应，不创建可信 tenant_id
-    CA->>ST: 仅记录候选路由和失败原因（无 Secret、无租户授权事件）
+    CA->>SEC: 记录 request/trace、route digest 和失败类别（无 tenant 授权事件）
   else 验签成功
     CA->>G: 规范化消息 + tenant_id + binding_id + external_message_id
     G->>ID: 唯一写入 tenant+channel+message_id，状态 received
@@ -322,18 +328,30 @@ sequenceDiagram
       R-->>W: Runner Event（文本/工具/错误/结束）
       W->>ST: 固化 event/state，summary 按 event_seq 异步 CAS
       W->>ID: CAS running → completed/reply_pending，保存 reply cache ref
-      W->>O: 原子/Outbox 记录分段回复任务
-      O->>CA: 异步发送；失败按退避重试
-      CA->>WX2: 分段/卡片/媒体主动回复
-      WX2-->>CA: 成功或可重试错误
-      CA->>ID: CAS reply_pending → replied；最终失败 → failed/DLQ
+      W->>O: 为每个 segment 写 pending（稳定 segment_id/顺序/幂等键）
+      loop 按 segment_index 处理未发送分段
+        O->>CA: 异步发送一个 segment
+        CA->>WX2: 分段/卡片/媒体主动回复
+        alt 成功
+          WX2-->>CA: provider receipt/message_id
+          CA->>O: CAS pending → sent，保存 receipt
+        else 可重试或结果不确定
+          WX2-->>CA: 429/timeout/error
+          CA->>O: CAS → retryable/unknown，递增 attempts
+        end
+      end
+      O->>ID: 全部分段 sent → CAS reply_pending → replied
+      O->>ID: 预算耗尽/无法确认 → failed/DLQ，保留未发送分段
     end
   end
 ```
 
 时序中 `message_event` 的唯一性和 Session 顺序由共享 Storage Adapter 保证；队列至少一次
 投递不是重复执行的借口。`completed` 但回复失败时重放缓存回复，不重新调用模型或具有副作用
-的 Tool；只有明确标记为安全、幂等的步骤才允许重试。
+的 Tool；只有明确标记为安全、幂等的步骤才允许重试。回复 Outbox 还必须以
+`reply_id + segment_index` 建立稳定的分段幂等记录，保存顺序、状态、attempts 和供应商回执。
+聚合消息只有在全部分段为 `sent` 后才能进入 `replied`；请求超时但供应商结果不明时，优先
+使用供应商查询或其幂等能力确认；未确认前进入 `unknown`，不能盲目重发造成重复消息。
 
 ## 6. 数据同步、顺序与幂等
 
@@ -383,7 +401,10 @@ completed ──enqueue reply──> reply_pending ──send success──> rep
 回复引用；在 `reply_pending` 时只重试发送；在 `replied` 时返回已完成；在 `failed` 时依据
 错误是否可重试和 Tool/模型副作用标记决定重排或人工处理。模型生成通常可以重新计算但不
 保证字节相同，发送、扣费、写外部系统、创建工单等副作用默认不可安全重试，必须用外部
-幂等键、确认步骤或人工恢复隔离。
+幂等键、确认步骤或人工恢复隔离。对于一个有多个分段的回复，消息级状态之外还要记录
+`segment_id`、`segment_index`、`segment_count`、`pending/sending/sent/retryable/unknown/failed`、
+尝试次数、`provider_message_id` 和最后错误；只有所有 segment 都已确认发送，消息级状态才
+能从 `reply_pending` 变为 `replied`。
 
 ### 事件与租户约束
 
