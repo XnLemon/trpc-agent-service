@@ -305,6 +305,9 @@ type ProviderSpec struct {
 	Models          []string
 	EndpointPolicy  FieldPolicy
 	EndpointSchemes []string
+	// EndpointHosts contains the exact normalized hostnames or IP addresses
+	// accepted for an endpoint. IPv6 entries are written without brackets.
+	EndpointHosts   []string
 	SecretRefPolicy FieldPolicy
 	Options         map[string]OptionSpec
 }
@@ -314,6 +317,7 @@ type compiledProviderSpec struct {
 	models          map[string]struct{}
 	endpointPolicy  FieldPolicy
 	endpointSchemes map[string]struct{}
+	endpointHosts   map[string]struct{}
 	secretRefPolicy FieldPolicy
 	options         map[string]OptionSpec
 }
@@ -357,7 +361,7 @@ func (c *ProviderCatalog) NormalizeConfiguration(configuration Configuration) (C
 	if _, exists := spec.models[modelName]; !exists {
 		return Configuration{}, fmt.Errorf("%w: model is not registered for provider", ErrInvalid)
 	}
-	endpoint, err := normalizeEndpoint(configuration.Endpoint, spec.endpointPolicy, spec.endpointSchemes)
+	endpoint, err := normalizeEndpoint(configuration.Endpoint, spec.endpointPolicy, spec.endpointSchemes, spec.endpointHosts)
 	if err != nil {
 		return Configuration{}, err
 	}
@@ -418,6 +422,23 @@ func compileProviderSpec(spec ProviderSpec) (compiledProviderSpec, error) {
 	if spec.EndpointPolicy != FieldForbidden && len(schemes) == 0 {
 		return compiledProviderSpec{}, fmt.Errorf("%w: endpoint schema requires an allowed scheme", ErrInvalid)
 	}
+	hosts := make(map[string]struct{}, len(spec.EndpointHosts))
+	for _, host := range spec.EndpointHosts {
+		normalized, err := normalizeEndpointHost(host)
+		if err != nil || normalized != host {
+			return compiledProviderSpec{}, fmt.Errorf("%w: endpoint host is invalid", ErrInvalid)
+		}
+		if _, exists := hosts[normalized]; exists {
+			return compiledProviderSpec{}, fmt.Errorf("%w: duplicate endpoint host", ErrInvalid)
+		}
+		hosts[normalized] = struct{}{}
+	}
+	if spec.EndpointPolicy == FieldForbidden && len(hosts) != 0 {
+		return compiledProviderSpec{}, fmt.Errorf("%w: forbidden endpoint cannot declare hosts", ErrInvalid)
+	}
+	if spec.EndpointPolicy != FieldForbidden && len(hosts) == 0 {
+		return compiledProviderSpec{}, fmt.Errorf("%w: endpoint schema requires an allowed host", ErrInvalid)
+	}
 	options := make(map[string]OptionSpec, len(spec.Options))
 	for key, option := range spec.Options {
 		normalizedKey := strings.ToLower(strings.TrimSpace(key))
@@ -432,7 +453,7 @@ func compileProviderSpec(spec ProviderSpec) (compiledProviderSpec, error) {
 	}
 	return compiledProviderSpec{
 		provider: provider, models: models, endpointPolicy: spec.EndpointPolicy,
-		endpointSchemes: schemes, secretRefPolicy: spec.SecretRefPolicy, options: options,
+		endpointSchemes: schemes, endpointHosts: hosts, secretRefPolicy: spec.SecretRefPolicy, options: options,
 	}, nil
 }
 
@@ -483,7 +504,7 @@ func compileOptionSpec(spec OptionSpec) (OptionSpec, error) {
 	return compiled, nil
 }
 
-func normalizeEndpoint(endpoint string, policy FieldPolicy, schemes map[string]struct{}) (string, error) {
+func normalizeEndpoint(endpoint string, policy FieldPolicy, schemes, hosts map[string]struct{}) (string, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
 		if policy == FieldRequired {
@@ -501,6 +522,9 @@ func normalizeEndpoint(endpoint string, policy FieldPolicy, schemes map[string]s
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" || strings.Contains(parsed.Host, ",") || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return "", fmt.Errorf("%w: endpoint is invalid", ErrInvalid)
 	}
+	if hasControl(parsed.Path) {
+		return "", fmt.Errorf("%w: endpoint path is invalid", ErrInvalid)
+	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	if _, exists := schemes[parsed.Scheme]; !exists {
 		return "", fmt.Errorf("%w: endpoint scheme is not allowed", ErrInvalid)
@@ -508,11 +532,28 @@ func normalizeEndpoint(endpoint string, policy FieldPolicy, schemes map[string]s
 	if err := normalizeEndpointAuthority(parsed); err != nil {
 		return "", err
 	}
+	host, err := normalizeEndpointHost(parsed.Hostname())
+	if err != nil {
+		return "", err
+	}
+	if _, exists := hosts[host]; !exists {
+		return "", fmt.Errorf("%w: endpoint host is not allowed", ErrInvalid)
+	}
 	canonical := parsed.String()
 	if len(canonical) > maxEndpointLen {
 		return "", fmt.Errorf("%w: normalized endpoint is too long", ErrInvalid)
 	}
 	return canonical, nil
+}
+
+func normalizeEndpointHost(hostname string) (string, error) {
+	if ip := net.ParseIP(hostname); ip != nil {
+		return ip.String(), nil
+	}
+	if !validDNSHostname(hostname) {
+		return "", fmt.Errorf("%w: endpoint hostname is invalid", ErrInvalid)
+	}
+	return strings.ToLower(strings.TrimSuffix(hostname, ".")), nil
 }
 
 func normalizeEndpointAuthority(parsed *url.URL) error {
@@ -805,12 +846,33 @@ func validOptionKey(value string) bool {
 }
 
 func sensitiveOptionKey(value string) bool {
-	for _, sensitive := range []string{"api-key", "api_key", "credential", "dsn", "password", "passphrase", "secret", "token"} {
-		if value == sensitive || strings.Contains(value, sensitive) {
+	if _, exists := sensitiveOptionKeys[value]; exists {
+		return true
+	}
+	separatorNormalized := strings.NewReplacer("-", "_").Replace(value)
+	for _, part := range strings.Split(separatorNormalized, "_") {
+		switch part {
+		case "password", "passwd", "pwd", "token", "secret", "credential", "credentials", "dsn":
+			return true
+		}
+	}
+	compact := strings.NewReplacer("_", "", "-", "").Replace(value)
+	for _, sequence := range sensitiveOptionSequences {
+		if strings.Contains(compact, sequence) {
 			return true
 		}
 	}
 	return false
+}
+
+var sensitiveOptionKeys = map[string]struct{}{
+	"api_key": {}, "access_key": {}, "secret_key": {}, "private_key": {},
+	"connection_string": {},
+}
+
+var sensitiveOptionSequences = []string{
+	"apikey", "accesskey", "secretkey", "privatekey", "connectionstring",
+	"password", "passwd", "pwd", "passphrase", "token", "secret", "credential", "credentials", "dsn",
 }
 
 func hasControl(value string) bool {

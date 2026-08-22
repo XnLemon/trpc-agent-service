@@ -82,12 +82,14 @@ func TestProfileSchemaRejectsUnknownAndCredentialBearingConfiguration(t *testing
 }
 
 func TestProviderCatalogRejectsSensitiveOptionSchemas(t *testing.T) {
-	_, err := NewProviderCatalog(ProviderSpec{
-		Provider: "unsafe", Models: []string{"chat"}, EndpointPolicy: FieldForbidden,
-		SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"api_key": {Kind: OptionString}},
-	})
-	if !errors.Is(err, ErrInvalid) {
-		t.Fatalf("sensitive option schema error = %v", err)
+	for _, key := range []string{"api_key", "access_key", "private_key", "connection_string", "client_password", "db_pwd", "signing_secret", "provider_dsn"} {
+		_, err := NewProviderCatalog(ProviderSpec{
+			Provider: "unsafe", Models: []string{"chat"}, EndpointPolicy: FieldForbidden,
+			SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{key: {Kind: OptionString}},
+		})
+		if !errors.Is(err, ErrInvalid) {
+			t.Errorf("sensitive option schema %q error = %v", key, err)
+		}
 	}
 }
 
@@ -135,8 +137,8 @@ func modelTestCatalog(t *testing.T) *ProviderCatalog {
 				"mode": {Kind: OptionEnum, DefaultValue: &defaultMode, AllowedValues: []string{"fast", "safe"}},
 			},
 		},
-		ProviderSpec{Provider: "public", Models: []string{"chat"}, EndpointPolicy: FieldOptional, EndpointSchemes: []string{"https"}, SecretRefPolicy: FieldOptional},
-		ProviderSpec{Provider: "secured", Models: []string{"chat"}, EndpointPolicy: FieldRequired, EndpointSchemes: []string{"https"}, SecretRefPolicy: FieldRequired},
+		ProviderSpec{Provider: "public", Models: []string{"chat"}, EndpointPolicy: FieldOptional, EndpointSchemes: []string{"https"}, EndpointHosts: []string{"example.test", "127.0.0.1", "2001:db8::1"}, SecretRefPolicy: FieldOptional},
+		ProviderSpec{Provider: "secured", Models: []string{"chat"}, EndpointPolicy: FieldRequired, EndpointSchemes: []string{"https"}, EndpointHosts: []string{"example.test", "127.0.0.1", "2001:db8::1"}, SecretRefPolicy: FieldRequired},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -230,6 +232,11 @@ func TestProviderCatalogRejectsMalformedSchemasAndCompilesOptionDefaults(t *test
 		{Provider: "fake", Models: []string{"chat"}, EndpointPolicy: FieldOptional, EndpointSchemes: []string{"https", "https"}, SecretRefPolicy: FieldForbidden},
 		{Provider: "fake", Models: []string{"chat"}, EndpointPolicy: FieldForbidden, EndpointSchemes: []string{"https"}, SecretRefPolicy: FieldForbidden},
 		{Provider: "fake", Models: []string{"chat"}, EndpointPolicy: FieldOptional, SecretRefPolicy: FieldForbidden},
+		{Provider: "fake", Models: []string{"chat"}, EndpointPolicy: FieldOptional, EndpointSchemes: []string{"https"}, SecretRefPolicy: FieldForbidden},
+		{Provider: "fake", Models: []string{"chat"}, EndpointPolicy: FieldForbidden, EndpointHosts: []string{"example.test"}, SecretRefPolicy: FieldForbidden},
+		{Provider: "fake", Models: []string{"chat"}, EndpointPolicy: FieldOptional, EndpointSchemes: []string{"https"}, EndpointHosts: []string{"Example.test"}, SecretRefPolicy: FieldForbidden},
+		{Provider: "fake", Models: []string{"chat"}, EndpointPolicy: FieldOptional, EndpointSchemes: []string{"https"}, EndpointHosts: []string{"example.test", "example.test"}, SecretRefPolicy: FieldForbidden},
+		{Provider: "fake", Models: []string{"chat"}, EndpointPolicy: FieldOptional, EndpointSchemes: []string{"https"}, EndpointHosts: []string{"example..test"}, SecretRefPolicy: FieldForbidden},
 		{Provider: "fake", Models: []string{"chat"}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"bad key": {Kind: OptionString}}},
 	}
 	for index, spec := range invalidProviders {
@@ -273,8 +280,8 @@ func TestProviderCatalogRejectsMalformedSchemasAndCompilesOptionDefaults(t *test
 }
 
 func TestProviderConfigurationBoundaryNormalization(t *testing.T) {
-	public := ProviderSpec{Provider: "public", Models: []string{"chat"}, EndpointPolicy: FieldOptional, EndpointSchemes: []string{"https"}, SecretRefPolicy: FieldOptional}
-	secured := ProviderSpec{Provider: "secured", Models: []string{"chat"}, EndpointPolicy: FieldRequired, EndpointSchemes: []string{"https"}, SecretRefPolicy: FieldRequired}
+	public := ProviderSpec{Provider: "public", Models: []string{"chat"}, EndpointPolicy: FieldOptional, EndpointSchemes: []string{"https"}, EndpointHosts: []string{"example.test", "127.0.0.1", "2001:db8::1"}, SecretRefPolicy: FieldOptional}
+	secured := ProviderSpec{Provider: "secured", Models: []string{"chat"}, EndpointPolicy: FieldRequired, EndpointSchemes: []string{"https"}, EndpointHosts: []string{"example.test", "127.0.0.1", "2001:db8::1"}, SecretRefPolicy: FieldRequired}
 	catalog, err := NewProviderCatalog(public, secured)
 	if err != nil {
 		t.Fatal(err)
@@ -295,6 +302,7 @@ func TestProviderConfigurationBoundaryNormalization(t *testing.T) {
 		"https://example.test/v1?token=value", "https://example.test/v1#fragment", "https://example.test:",
 		"https://example.test:0", "https://example.test:65536", "https://example..test", "https://-example.test",
 		"https://example-.test", "https://example_test", "https://example.test,other",
+		"https://attacker.example", "https://example.test/%00", "https://example.test/%0A",
 	}
 	for _, endpoint := range invalidEndpoints {
 		if _, err := catalog.NormalizeConfiguration(Configuration{Provider: "public", Model: "chat", Endpoint: endpoint}); !errors.Is(err, ErrInvalid) {
@@ -306,13 +314,13 @@ func TestProviderConfigurationBoundaryNormalization(t *testing.T) {
 			t.Errorf("valid endpoint %q error = %v", endpoint, err)
 		}
 	}
-	if _, err := normalizeEndpoint("https://example.test", FieldForbidden, nil); !errors.Is(err, ErrInvalid) {
+	if _, err := normalizeEndpoint("https://example.test", FieldForbidden, nil, nil); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("forbidden endpoint error = %v", err)
 	}
-	if _, err := normalizeEndpoint("", FieldRequired, nil); !errors.Is(err, ErrInvalid) {
+	if _, err := normalizeEndpoint("", FieldRequired, nil, nil); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("empty required endpoint error = %v", err)
 	}
-	if _, err := normalizeEndpoint("https://example.test", FieldOptional, map[string]struct{}{"https": {}}); err != nil {
+	if _, err := normalizeEndpoint("https://example.test", FieldOptional, map[string]struct{}{"https": {}}, map[string]struct{}{"example.test": {}}); err != nil {
 		t.Fatal(err)
 	}
 	parsed := &url.URL{Scheme: "https", Host: "example.test:443"}
@@ -419,7 +427,12 @@ func TestOptionSecretGenerationAndPrimitiveValidation(t *testing.T) {
 	if !validOptionKey("option_1") || validOptionKey("bad key") {
 		t.Fatal("validOptionKey classification is wrong")
 	}
-	if !sensitiveOptionKey("api-key") || !sensitiveOptionKey("custom-token-value") || sensitiveOptionKey("mode") {
+	for _, key := range []string{"api-key", "api_key", "access_key", "private-key", "connection_string", "custom-token-value", "client_password", "db_pwd", "signing_secret", "provider_dsn"} {
+		if !sensitiveOptionKey(key) {
+			t.Errorf("sensitiveOptionKey(%q) = false", key)
+		}
+	}
+	if sensitiveOptionKey("mode") || sensitiveOptionKey("format") {
 		t.Fatal("sensitiveOptionKey classification is wrong")
 	}
 	if !hasControl("line\n") || hasControl("plain") || !hasSpace("has space") || hasSpace("compact") {

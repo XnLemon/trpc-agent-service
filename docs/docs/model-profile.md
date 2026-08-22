@@ -108,7 +108,7 @@ type Configuration struct {
 | --- | --- |
 | `provider` | 规范化的小写 provider 名称；未注册 provider 拒绝 |
 | `model` | 该 provider 的 allowlist 模型名；未知模型拒绝 |
-| `endpoint` | provider schema 明确允许时才接受；只允许 allowlist 的 URL scheme/host；拒绝 userinfo、query、fragment、控制字符和超长值；Endpoint 不是 DSN |
+| `endpoint` | provider schema 明确允许时才接受；`EndpointSchemes` 与 `EndpointHosts` 都必须命中精确 allowlist（IPv6 host 在 schema 中不带方括号）；拒绝 userinfo、query、fragment、控制字符和超长值；Endpoint 不是 DSN |
 | `options` | key 必须在 provider schema 中；值按 string/boolean/integer/enum 规则规范化；未知 key 拒绝 |
 | `secret_ref` | opaque 引用；provider 可声明 required/optional/forbidden；绝不保存 Secret 值 |
 | `generation` | 只允许受控的 `temperature`、`top_p`、`max_output_tokens` 等字段，并在 schema 版本中固定语义 |
