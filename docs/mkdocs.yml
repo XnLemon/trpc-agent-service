@@ -29,6 +29,7 @@ nav:
   - 首页: index.md
   - 架构设计: architecture.md
   - 数据模型: data-model.md
+  - Channel Binding: channel-binding.md
   - Tenant 运行时边界: tenant-runtime-boundary.md
   - Agent App 模型: agent-app-model.md
   - Backend Profile 模型: backend-profile.md

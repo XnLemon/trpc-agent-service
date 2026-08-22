@@ -38,6 +38,7 @@ cd trpc-agent-service
 
 - [架构设计](architecture.md) — 组件拓扑、可信路由、消息链路、数据同步和多后端迁移
 - [数据模型](data-model.md) — 核心表结构、Session/Event/Memory/Summary/Audit 和租户约束
+- [Channel Binding](channel-binding.md) — 租户级通道绑定、候选发现与可信入站路由
 - [运维方案](ops.md) — 发布灰度、监控审计、故障恢复、容量模型和生产风险清单
 
 ## CI

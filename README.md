@@ -129,7 +129,7 @@
 - [x] 实现租户级 Agent App 根模型和生命周期
 - [x] 实现 LLMAgent Revision 版本模型、草稿、不可变发布和内容摘要
 - [x] 定义 Agent Repository 并提供租户隔离、并发安全的 InMemory 实现
-- [ ] 实现 Channel Binding 领域模型
+- [x] 实现租户级 Channel Binding 领域模型、候选索引与可信入站路由边界
 - [x] 实现 Backend Profile 领域模型
 - [x] 完成 Model Profile、Secret Resolver 与最小 Runner 链路设计
 - [x] 实现 Model Profile 控制面、Secret Resolver 契约和最小 Runner 链路

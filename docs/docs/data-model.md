@@ -2,7 +2,9 @@
 
 > 设计分阶段推进：`tenant` 根模型已经完成，`agent_app` 的稳定身份、发布版本和运行时边界见
 > [Agent App 模型与发布边界](agent-app-model.md)，数据后端选择见
-> [Backend Profile 控制面与运行时边界](backend-profile.md)。其余核心表继续按依赖顺序保留占位。
+> [Backend Profile 控制面与运行时边界](backend-profile.md)，Channel Binding 的候选索引、
+> 可信验证和 identity 细节见 [Channel Binding 与可信入站路由](channel-binding.md)。其余核心表
+> 继续按依赖顺序保留占位。
 
 ## Tenant 根模型
 
