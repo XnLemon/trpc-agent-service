@@ -1,7 +1,8 @@
 # 数据模型
 
 > 设计分阶段推进：`tenant` 根模型已经完成，`agent_app` 的稳定身份、发布版本和运行时边界见
-> [Agent App 模型与发布边界](agent-app-model.md)。其余核心表继续按依赖顺序保留占位。
+> [Agent App 模型与发布边界](agent-app-model.md)，数据后端选择见
+> [Backend Profile 控制面与运行时边界](backend-profile.md)。其余核心表继续按依赖顺序保留占位。
 
 ## Tenant 根模型
 
@@ -107,11 +108,16 @@ CREATE TABLE agent_app (
     UNIQUE (tenant_id, app_id)
 );
 
+-- 完整字段、binding 子表、约束和 Outbox 见 Backend Profile 设计；
+-- 这里保留默认引用所依赖的复合键形状。
 CREATE TABLE backend_profile (
     tenant_id  TEXT NOT NULL REFERENCES tenant(tenant_id),
-    profile_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL
+               CHECK (profile_id ~ '^bp_[0-7][0-9A-HJKMNP-TV-Z]{25}$'),
+    profile_key TEXT NOT NULL
+                CHECK (profile_key ~ '^[a-z][a-z0-9-]{1,63}$'),
     PRIMARY KEY (tenant_id, profile_id),
-    UNIQUE (tenant_id, profile_id)
+    UNIQUE (tenant_id, profile_key)
 );
 
 ALTER TABLE tenant
@@ -354,7 +360,7 @@ COMMIT;
 
 ```text
 agent_app         Agent 应用（租户级，发布版本、模型与工具授权）→ 已完成设计
-backend_profile   数据后端档案（Session / Memory / Knowledge 路由）← 下一步
+backend_profile   数据后端档案（Session / Memory / Knowledge / Artifact / Audit）→ 已完成设计
 channel_binding   IM 通道绑定（tenant + channel + 账号 → agent_app）
 session           会话（tenant_id、session_id、状态、TTL）
 message_event     消息与会话事件（session 内有序、幂等）

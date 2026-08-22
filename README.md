@@ -151,6 +151,7 @@
 
 - [x] 完成 Tenant 根模型的 PostgreSQL DDL、约束、生命周期和框架映射设计
 - [x] 完成 Agent App/Revision 的 PostgreSQL DDL、发布事务、回滚和框架映射设计
+- [x] 完成 Backend Profile 的 PostgreSQL DDL、生命周期、运行时快照和框架映射设计
 - [ ] 将 Tenant、Agent App/Revision DDL 落地为数据库 migration
 - [ ] 补齐 channel binding、session、event、memory、summary、artifact 和 audit log 的可执行 DDL
 - [ ] 定义 Session、Memory、Summary、Knowledge、Artifact 和 Audit 的统一访问接口
