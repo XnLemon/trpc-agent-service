@@ -128,17 +128,21 @@ Secret ref 的值或协议 payload。
 
 ```go
 type CandidateBindingContext struct {
-    Channel        Channel
-    BindingVersion int64
-    ConfigDigest   string
-    IssuedAt       time.Time
-    ExpiresAt      time.Time
-    // handle is opaque and single-use; it is not a binding_id or tenant_id.
+    Channel                Channel
+    PublicRouteKeyDigest   string
+    BindingVersion         int64
+    ConfigDigest           string
+    CandidateToken         string // opaque, short-lived, single-use
+    IssuedAt               time.Time
+    ExpiresAt              time.Time
 }
 ```
 
-候选 Context 的 handle 只在短 TTL 内有效。Resolver 必须把它绑定到明确的用途，例如
-`webhook-verification`，消费成功后返回一次性 `ScopedVerifierHandle`。Verifier 只接受供应商
+`CandidateToken` 是候选索引签发的 opaque bearer capability；它不是 `binding_id`、`tenant_id`、
+`app_id`、`secret_ref` 或 Secret 值，也不能由 URL、header 或 payload 自行拼接。候选 Context
+及 token 都只在短 TTL 内有效，调用方修改返回副本不能改变索引内部状态。Resolver 必须把
+token 绑定到唯一候选和明确用途，例如 `webhook-verification`，消费成功后返回一次性
+`ScopedVerifierHandle`。Verifier 只接受供应商
 的 signature/token、timestamp、nonce、密文摘要和 receive ID 等协议输入；它不能接受调用方
 提供的 `tenant_id`，也不能让 payload/header 选择 App。
 
