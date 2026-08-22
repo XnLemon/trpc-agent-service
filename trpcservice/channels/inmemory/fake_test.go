@@ -139,6 +139,11 @@ func TestFakeResolverIsCoveredInsideItsOwningPackage(t *testing.T) {
 	if _, err := resolver.Verify(context.Background(), expiredCandidateReplayHandle, successRequest); !errors.Is(err, channels.ErrVerificationFailed) {
 		t.Fatalf("nonce replay after candidate expiry was accepted: %v", err)
 	}
+	clock.now = base.Add(time.Minute)
+	boundaryReplayHandle := resolvePackageHandle(t, repo, resolver, routeDigest)
+	if _, err := resolver.Verify(context.Background(), boundaryReplayHandle, successRequest); !errors.Is(err, channels.ErrVerificationFailed) {
+		t.Fatalf("nonce replay at the timestamp-window boundary was accepted: %v", err)
+	}
 
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()

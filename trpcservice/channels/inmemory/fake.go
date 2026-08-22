@@ -182,7 +182,7 @@ func (r *FakeCandidateResolver) Verify(ctx context.Context, handle channels.Scop
 	nonceKey := state.binding.TenantID + "\x00" + state.binding.BindingID + "\x00" + request.Nonce
 	r.mu.Lock()
 	for key, expiry := range r.usedNonces {
-		if !now.Before(expiry) {
+		if now.After(expiry) {
 			delete(r.usedNonces, key)
 		}
 	}
