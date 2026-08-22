@@ -240,6 +240,15 @@ type RoutingTarget struct {
 	Channel           Channel
 	ProviderAccountID string
 	ConfigDigest      string
+	capability        *routingTargetCapability
+}
+
+// routingTargetCapability retains the verifier-owned snapshot that created a
+// RoutingTarget. Keeping the expected fields private makes the public route
+// value tamper-evident: callers cannot mint the capability or change a copied
+// target without failing validation.
+type routingTargetCapability struct {
+	verified VerifiedBinding
 }
 
 // NewRoutingTarget validates the trusted Tenant snapshot, current Binding,
@@ -265,16 +274,40 @@ func NewRoutingTarget(tenantSnapshot tenant.ConfigurationSnapshot, binding *Bind
 	if tenantValue.TenantID != binding.TenantID || tenantValue.TenantID != app.TenantID || verified.TenantID != binding.TenantID || verified.AppID != binding.AppID || verified.BindingID != binding.BindingID || verified.BindingVersion != binding.Version || verified.AppID != app.AppID || verified.Channel != binding.Channel || verified.ProviderAccountID != binding.ProviderAccountID || verified.ConfigDigest != binding.ConfigDigest {
 		return RoutingTarget{}, fmt.Errorf("%w: trusted tenant, binding, app, and verifier scopes do not match", ErrVerificationFailed)
 	}
-	return RoutingTarget{
+	routingTarget := RoutingTarget{
 		TenantID: tenantValue.TenantID, BindingID: binding.BindingID, BindingVersion: binding.Version,
 		AppID: app.AppID, Channel: binding.Channel, ProviderAccountID: binding.ProviderAccountID,
 		ConfigDigest: binding.ConfigDigest,
-	}, nil
+	}
+	routingTarget.capability = &routingTargetCapability{verified: VerifiedBinding{
+		TenantID:          routingTarget.TenantID,
+		BindingID:         routingTarget.BindingID,
+		BindingVersion:    routingTarget.BindingVersion,
+		AppID:             routingTarget.AppID,
+		Channel:           routingTarget.Channel,
+		ProviderAccountID: routingTarget.ProviderAccountID,
+		ConfigDigest:      routingTarget.ConfigDigest,
+	}}
+	return routingTarget, nil
 }
 
 // Validate checks the non-secret target identity.
 func (target RoutingTarget) Validate() error {
-	verified := VerifiedBinding(target)
+	if target.capability == nil {
+		return fmt.Errorf("%w: routing target was not created by the trusted boundary", ErrVerificationFailed)
+	}
+	verified := VerifiedBinding{
+		TenantID:          target.TenantID,
+		BindingID:         target.BindingID,
+		BindingVersion:    target.BindingVersion,
+		AppID:             target.AppID,
+		Channel:           target.Channel,
+		ProviderAccountID: target.ProviderAccountID,
+		ConfigDigest:      target.ConfigDigest,
+	}
+	if verified != target.capability.verified {
+		return fmt.Errorf("%w: routing target was modified after trusted creation", ErrVerificationFailed)
+	}
 	return verified.Validate()
 }
 

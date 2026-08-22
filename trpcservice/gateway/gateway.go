@@ -188,7 +188,7 @@ func (m InboundMessage) Normalize() (InboundMessage, error) {
 }
 
 func validateExternalID(value, label string) error {
-	if value == "" || hasControl(value) || len([]rune(value)) > maxExternalIDRunes {
+	if strings.TrimSpace(value) == "" || hasControl(value) || len([]rune(value)) > maxExternalIDRunes {
 		return fmt.Errorf("%w: %s is invalid", ErrInvalid, label)
 	}
 	return nil

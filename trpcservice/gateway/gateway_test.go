@@ -31,10 +31,16 @@ func TestPrincipalKindsCannotBeForgedAcrossAuthenticationPaths(t *testing.T) {
 		t.Fatal("API principal exposed a Channel routing target")
 	}
 
-	target := channels.RoutingTarget{
+	fabricated := channels.RoutingTarget{
 		TenantID: tenantID, BindingID: "cb_01J1K9ZQTVE4PAWF1TSB2WMHNP", BindingVersion: 1,
 		AppID: appID, Channel: channels.ChannelWeCom, ProviderAccountID: "corp-a", ConfigDigest: strings.Repeat("a", 64),
 	}
+	if _, err := NewChannelPrincipal(fabricated); err == nil {
+		t.Fatal("shape-valid fabricated channel route unexpectedly succeeded")
+	}
+
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
 	channelPrincipal, err := NewChannelPrincipal(target)
 	if err != nil {
 		t.Fatal(err)
@@ -71,6 +77,7 @@ func TestInboundMessageNormalizesTextAndRejectsUnsupportedInput(t *testing.T) {
 		"missing user":         {Content: "hello", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"},
 		"missing conversation": {Content: "hello", ExternalUserID: "user"},
 		"control identity":     {Content: "hello", ExternalUserID: "user\n", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"},
+		"blank identity":       {Content: "hello", ExternalUserID: " ", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := input.Normalize(); !errors.Is(err, ErrInvalid) {
@@ -108,10 +115,7 @@ func TestPlanResolverBuildsFixedPlanFromRepositoryInterfaces(t *testing.T) {
 		t.Fatalf("unexpected plan key: %+v", key)
 	}
 
-	routingTarget := channels.RoutingTarget{
-		TenantID: fixture.tenant.TenantID, BindingID: "cb_01J1K9ZQTVE4PAWF1TSB2WMHNP", BindingVersion: 1,
-		AppID: fixture.app.AppID, Channel: channels.ChannelTelegram, ProviderAccountID: "bot-a", ConfigDigest: strings.Repeat("b", 64),
-	}
+	routingTarget := newTrustedRoutingTarget(t, fixture)
 	channelPrincipal, err := NewChannelPrincipal(routingTarget)
 	if err != nil {
 		t.Fatal(err)
@@ -174,6 +178,37 @@ func mustAPIPrincipal(t *testing.T, tenantID, appID string) Principal {
 }
 
 func errString(err error) string { return err.Error() }
+
+func newTrustedRoutingTarget(t *testing.T, fixture gatewayFixture) channels.RoutingTarget {
+	t.Helper()
+	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeCom, "gateway-test-route")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := channels.NewBinding(channels.CreateInput{
+		TenantID: fixture.tenant.TenantID, BindingKey: "gateway-test-binding", Channel: channels.ChannelWeCom,
+		ProviderAccountID: "corp-gateway", PublicRouteKeyDigest: routeDigest, AppID: fixture.app.AppID,
+		SecretRef: "secret/gateway-test", Protocol: channels.ProtocolConfiguration{
+			WeCom: &channels.WeComProtocolConfiguration{CorpID: "corp-gateway", ReceiveID: "receive"},
+		}, Status: channels.StatusActive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, err := channels.NewVerifiedBinding(*binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := tenant.NewConfigurationSnapshot(fixture.tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := channels.NewRoutingTarget(snapshot, binding, fixture.app, verified)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
 
 type gatewayFixture struct {
 	tenant         *tenant.Tenant
