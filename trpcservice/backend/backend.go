@@ -597,7 +597,8 @@ func normalizeEndpoint(endpoint string, policy FieldPolicy, schemes map[string]s
 		return "", fmt.Errorf("%w: endpoint is invalid", ErrInvalid)
 	}
 	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" {
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Hostname() == "" ||
+		parsed.Opaque != "" || strings.Contains(parsed.Host, ",") {
 		return "", fmt.Errorf("%w: endpoint must be an absolute network URI", ErrInvalid)
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {

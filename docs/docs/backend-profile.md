@@ -98,6 +98,8 @@ Catalog 允许后续适配器逐步注册 tRPC-Agent-Go 已支持的 provider，
 
 - trim 后最长 2048 字符，不允许控制字符。
 - URI 不允许 userinfo、query 或 fragment，因而不能携带用户名、密码或签名参数。
+- 第一版只接受单一 hostname authority；多节点/故障转移列表必须由后续 provider schema 以
+  结构化字段建模，不能塞入逗号分隔的 endpoint 字符串。
 - provider schema 决定 endpoint 是否必需以及允许的 scheme。
 
 `options` 使用 `map[string]string`，避免任意 JSON 类型穿过运行时边界。Catalog 只接受显式
