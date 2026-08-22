@@ -58,31 +58,21 @@ type Principal struct {
 	tenantID      string
 	appID         string
 	subjectID     string
+	apiProof      *apiAuthProof
 	routingTarget channels.RoutingTarget
 }
 
-// APIIdentity is the fixed mapping returned by an API Authenticator. Request
-// body and header fields must never be used as this value.
-type APIIdentity struct {
-	TenantID  string
-	AppID     string
-	SubjectID string
-}
-
-// newAPIPrincipal is intentionally private. Only the Gateway authentication
-// pipeline can turn an Authenticator result into a trusted principal.
-func newAPIPrincipal(identity APIIdentity) (Principal, error) {
-	tenantID, appID, subjectID := identity.TenantID, identity.AppID, identity.SubjectID
-	if err := validateScopedID(tenantID, "t_", "tenant"); err != nil {
-		return Principal{}, err
+// newAPIPrincipal is intentionally private. Only a proof-bearing result from
+// an APIAuthenticator can cross this boundary into a trusted Principal.
+func newAPIPrincipal(authenticated AuthenticatedAPI) (Principal, error) {
+	if err := authenticated.Validate(); err != nil {
+		return Principal{}, fmt.Errorf("%w: API authentication result: %v", ErrUnauthenticated, err)
 	}
-	if err := validateScopedID(appID, "app_", "agent app"); err != nil {
-		return Principal{}, err
-	}
-	if err := validateExternalID(subjectID, "API subject"); err != nil {
-		return Principal{}, err
-	}
-	return Principal{kind: PrincipalAPI, tenantID: tenantID, appID: appID, subjectID: subjectID}, nil
+	identity := authenticated.identity
+	return Principal{
+		kind: PrincipalAPI, tenantID: identity.TenantID, appID: identity.AppID,
+		subjectID: identity.SubjectID, apiProof: authenticated.proof,
+	}, nil
 }
 
 // NewChannelPrincipal seals a RoutingTarget produced by the Issue #26
@@ -104,7 +94,10 @@ func NewChannelPrincipal(target channels.RoutingTarget) (Principal, error) {
 func (p Principal) Validate() error {
 	switch p.kind {
 	case PrincipalAPI:
-		if _, err := newAPIPrincipal(APIIdentity{TenantID: p.tenantID, AppID: p.appID, SubjectID: p.subjectID}); err != nil {
+		if p.apiProof == nil || p.apiProof.identity.TenantID != p.tenantID || p.apiProof.identity.AppID != p.appID || p.apiProof.identity.SubjectID != p.subjectID {
+			return fmt.Errorf("%w: API principal proof is missing or inconsistent", ErrInvalid)
+		}
+		if err := p.apiProof.validate(); err != nil {
 			return err
 		}
 	case PrincipalChannel:

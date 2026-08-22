@@ -15,6 +15,11 @@ import (
 type FakeResolverOptions = channels.FakeResolverOptions
 type FakeCandidateResolver = channels.FakeCandidateResolver
 
+const (
+	DefaultFakeMaxClockSkew = channels.DefaultFakeMaxClockSkew
+	DefaultFakeMaxHandles   = channels.DefaultFakeMaxHandles
+)
+
 func NewFakeCandidateResolver(repo *InMemoryRepository, secrets map[channels.SecretScope]string, options ...FakeResolverOptions) *FakeCandidateResolver {
 	return channels.NewFakeCandidateResolver(repo, secrets, options...)
 }

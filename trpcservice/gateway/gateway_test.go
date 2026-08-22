@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +23,11 @@ import (
 func TestPrincipalKindsCannotBeForgedAcrossAuthenticationPaths(t *testing.T) {
 	tenantID := "t_01J1K9ZQTVE4PAWF1TSB2WMHNP"
 	appID := "app_01J1K9ZQTVE4PAWF1TSB2WMHNP"
-	apiPrincipal, err := newAPIPrincipal(APIIdentity{TenantID: tenantID, AppID: appID, SubjectID: "api-subject"})
+	authenticated, err := newAuthenticatedAPI(APIIdentity{TenantID: tenantID, AppID: appID, SubjectID: "api-subject"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiPrincipal, err := newAPIPrincipal(authenticated)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,8 +64,38 @@ func TestPrincipalKindsCannotBeForgedAcrossAuthenticationPaths(t *testing.T) {
 	if _, err := NewChannelPrincipal(bad); err == nil {
 		t.Fatal("invalid channel route unexpectedly succeeded")
 	}
-	if _, err := newAPIPrincipal(APIIdentity{TenantID: tenantID, AppID: "tenant-not-app", SubjectID: "subject"}); err == nil {
+	if _, err := newAuthenticatedAPI(APIIdentity{TenantID: tenantID, AppID: "tenant-not-app", SubjectID: "subject"}); err == nil {
 		t.Fatal("invalid API app ID unexpectedly succeeded")
+	}
+}
+
+func TestAPIAuthenticatorIsTheOnlyPublicPrincipalIssuer(t *testing.T) {
+	identity := APIIdentity{TenantID: "t_01J1K9ZQTVE4PAWF1TSB2WMHNP", AppID: "app_01J1K9ZQTVE4PAWF1TSB2WMHNP", SubjectID: "subject"}
+	authenticator, err := NewStaticAPIAuthenticator(map[string]APIIdentity{"credential": identity})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest("POST", "/v1/chat", nil)
+	request.Header.Set("Authorization", "Bearer credential")
+	result, err := authenticator.Authenticate(request.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := newAPIPrincipal(result)
+	if err != nil || principal.Kind() != PrincipalAPI || principal.TenantID() != identity.TenantID || principal.AppID() != identity.AppID {
+		t.Fatalf("authenticated principal = %+v, err=%v", principal, err)
+	}
+	if _, err := newAPIPrincipal(AuthenticatedAPI{}); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("zero authenticator result was accepted: %v", err)
+	}
+	mutated := result
+	mutated.identity.TenantID = "t_01J1K9ZQTVE4PAWF1TSB2WMHNQ"
+	if _, err := newAPIPrincipal(mutated); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("mutated authenticator result was accepted: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer unknown")
+	if _, err := authenticator.Authenticate(request.Context(), request); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("unknown credential was accepted: %v", err)
 	}
 }
 
@@ -101,10 +136,7 @@ func TestPlanResolverBuildsFixedPlanFromRepositoryInterfaces(t *testing.T) {
 	if !resolver.Ready() {
 		t.Fatal("resolver is not ready with complete dependencies")
 	}
-	principal, err := newAPIPrincipal(APIIdentity{TenantID: fixture.tenant.TenantID, AppID: fixture.app.AppID, SubjectID: "api-subject"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	principal := mustAPIPrincipal(t, fixture.tenant.TenantID, fixture.app.AppID)
 	plan, err := resolver.Resolve(context.Background(), principal)
 	if err != nil {
 		t.Fatal(err)
@@ -131,11 +163,7 @@ func TestPlanResolverBuildsFixedPlanFromRepositoryInterfaces(t *testing.T) {
 		t.Fatalf("channel plan key = %+v, err=%v, API key=%+v", channelKey, err, key)
 	}
 
-	otherTenant := principal
-	otherTenant, err = newAPIPrincipal(APIIdentity{TenantID: "t_01J1K9ZQTVE4PAWF1TSB2WMHNQ", AppID: fixture.app.AppID, SubjectID: "api-subject"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	otherTenant := mustAPIPrincipal(t, "t_01J1K9ZQTVE4PAWF1TSB2WMHNQ", fixture.app.AppID)
 	if _, err := resolver.Resolve(context.Background(), otherTenant); !errors.Is(err, ErrPlanUnavailable) {
 		t.Fatalf("cross-tenant plan error = %v", err)
 	}
@@ -150,10 +178,7 @@ func TestPlanResolverPreservesCancellationAndRedactsDependencyFailures(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	principal, err := newAPIPrincipal(APIIdentity{TenantID: fixture.tenant.TenantID, AppID: fixture.app.AppID, SubjectID: "api-subject"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	principal := mustAPIPrincipal(t, fixture.tenant.TenantID, fixture.app.AppID)
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := resolver.Resolve(canceled, principal); !errors.Is(err, context.Canceled) {
@@ -172,7 +197,11 @@ func TestPlanResolverPreservesCancellationAndRedactsDependencyFailures(t *testin
 
 func mustAPIPrincipal(t *testing.T, tenantID, appID string) Principal {
 	t.Helper()
-	principal, err := newAPIPrincipal(APIIdentity{TenantID: tenantID, AppID: appID, SubjectID: "api-subject"})
+	authenticated, err := newAuthenticatedAPI(APIIdentity{TenantID: tenantID, AppID: appID, SubjectID: "api-subject"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := newAPIPrincipal(authenticated)
 	if err != nil {
 		t.Fatal(err)
 	}
