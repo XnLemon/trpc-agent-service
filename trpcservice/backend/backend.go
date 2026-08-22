@@ -605,18 +605,96 @@ func normalizeEndpoint(endpoint string, policy FieldPolicy, schemes map[string]s
 		return "", fmt.Errorf("%w: endpoint cannot contain credentials, query, or fragment", ErrInvalid)
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if !strings.HasPrefix(parsed.Host, "[") {
-		hostname := strings.ToLower(parsed.Hostname())
-		if port := parsed.Port(); port != "" {
-			parsed.Host = net.JoinHostPort(hostname, port)
-		} else {
-			parsed.Host = hostname
-		}
+	if err := normalizeEndpointAuthority(parsed); err != nil {
+		return "", err
 	}
 	if _, exists := schemes[parsed.Scheme]; !exists {
 		return "", fmt.Errorf("%w: endpoint scheme is not allowed", ErrInvalid)
 	}
 	return parsed.String(), nil
+}
+
+func normalizeEndpointAuthority(parsed *url.URL) error {
+	authority := parsed.Host
+	hostname := parsed.Hostname()
+	port := parsed.Port()
+	if strings.HasPrefix(authority, "[") {
+		closingBracket := strings.LastIndex(authority, "]")
+		if closingBracket < 0 {
+			return fmt.Errorf("%w: endpoint host is invalid", ErrInvalid)
+		}
+		suffix := authority[closingBracket+1:]
+		if suffix != "" && (!strings.HasPrefix(suffix, ":") || port == "") {
+			return fmt.Errorf("%w: endpoint port is invalid", ErrInvalid)
+		}
+		address, zone := hostname, ""
+		zoneIndex := strings.LastIndex(hostname, "%")
+		if zoneIndex >= 0 {
+			address, zone = hostname[:zoneIndex], hostname[zoneIndex+1:]
+		}
+		if net.ParseIP(address) == nil || !strings.Contains(address, ":") || (zoneIndex >= 0 && !validZone(zone)) {
+			return fmt.Errorf("%w: endpoint IPv6 host is invalid", ErrInvalid)
+		}
+	} else {
+		if strings.Count(authority, ":") > 1 || (strings.Contains(authority, ":") && port == "") {
+			return fmt.Errorf("%w: endpoint host or port is invalid", ErrInvalid)
+		}
+		if net.ParseIP(hostname) == nil && !validDNSHostname(hostname) {
+			return fmt.Errorf("%w: endpoint hostname is invalid", ErrInvalid)
+		}
+		hostname = strings.ToLower(hostname)
+		if port != "" {
+			parsed.Host = net.JoinHostPort(hostname, port)
+		} else {
+			parsed.Host = hostname
+		}
+	}
+	if port != "" {
+		portNumber, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || portNumber == 0 {
+			return fmt.Errorf("%w: endpoint port is invalid", ErrInvalid)
+		}
+	}
+	return nil
+}
+
+func validDNSHostname(hostname string) bool {
+	if len(hostname) == 0 || len(hostname) > 253 {
+		return false
+	}
+	hostname = strings.TrimSuffix(hostname, ".")
+	if hostname == "" {
+		return false
+	}
+	for _, label := range strings.Split(hostname, ".") {
+		if len(label) == 0 || len(label) > 63 || !asciiLetterOrDigit(label[0]) || !asciiLetterOrDigit(label[len(label)-1]) {
+			return false
+		}
+		for i := 1; i < len(label)-1; i++ {
+			if !asciiLetterOrDigit(label[i]) && label[i] != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func asciiLetterOrDigit(value byte) bool {
+	return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9')
+}
+
+func validZone(zone string) bool {
+	if zone == "" || len(zone) > 64 {
+		return false
+	}
+	for _, value := range zone {
+		if (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+			(value >= '0' && value <= '9') || value == '_' || value == '-' || value == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func normalizeSecretRef(secretRef string, policy FieldPolicy) (string, error) {

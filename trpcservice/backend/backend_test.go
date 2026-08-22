@@ -322,6 +322,9 @@ func TestProviderCatalogRejectsInvalidBindingsWithoutLeakingValues(t *testing.T)
 		{name: "endpoint absolute", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "://not-a-uri" }},
 		{name: "endpoint hostname", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://:5432" }},
 		{name: "endpoint multi host", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://HOST1:5432,HOST2:5432" }},
+		{name: "endpoint multi colon", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://host1:1234:host2:5432" }},
+		{name: "endpoint invalid DNS", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://bad_host:5432" }},
+		{name: "endpoint invalid port", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com:70000" }},
 		{name: "secret required", mutate: func(binding *CapabilityBinding) { binding.SecretRef = "" }},
 		{name: "secret grammar", mutate: func(binding *CapabilityBinding) { binding.SecretRef = "secret ref with spaces" }},
 		{name: "unknown option", mutate: func(binding *CapabilityBinding) { binding.Options["unknown"] = secretValue }},
@@ -370,12 +373,64 @@ func TestEndpointNormalizationPreservesIPv6ZoneCase(t *testing.T) {
 		Endpoint: "https://[fe80::1%25ETH0]:6333",
 		Options:  map[string]string{"collection": "documents"},
 	}
-	normalized, err := catalog.NormalizeBindings([]CapabilityBinding{binding})
+	profile, err := NewProfile(CreateInput{
+		TenantID: testTenantID, ProfileKey: "ipv6", DisplayName: "IPv6",
+		Status: StatusSuspended, Bindings: []CapabilityBinding{binding},
+	}, catalog)
 	if err != nil {
-		t.Fatalf("NormalizeBindings() error = %v", err)
+		t.Fatalf("NewProfile() error = %v", err)
 	}
-	if got := normalized[0].Endpoint; got != binding.Endpoint {
+	if got := profile.Bindings[0].Endpoint; got != binding.Endpoint {
 		t.Fatalf("normalized IPv6 endpoint = %q, want %q", got, binding.Endpoint)
+	}
+	if err := profile.Validate(catalog); err != nil {
+		t.Fatalf("Profile.Validate() after normalization error = %v", err)
+	}
+}
+
+func TestEndpointAuthorityValidation(t *testing.T) {
+	catalog := newTestCatalog(t)
+	valid := map[string]string{
+		"DNS case":       "https://QDRANT.EXAMPLE.COM:6333",
+		"DNS root":       "https://qdrant.example.com.",
+		"IPv4":           "https://127.0.0.1:6333",
+		"IPv6":           "https://[2001:db8::1]:6333",
+		"IPv6 with zone": "https://[fe80::1%25ETH0]:6333",
+	}
+	for name, endpoint := range valid {
+		t.Run(name, func(t *testing.T) {
+			bindings, err := catalog.NormalizeBindings([]CapabilityBinding{{
+				Capability: CapabilityKnowledge, Provider: "qdrant", Endpoint: endpoint,
+				Options: map[string]string{"collection": "documents"},
+			}})
+			if err != nil {
+				t.Fatalf("NormalizeBindings(%q) error = %v", endpoint, err)
+			}
+			if len(bindings) != 1 {
+				t.Fatalf("NormalizeBindings(%q) returned %d bindings", endpoint, len(bindings))
+			}
+		})
+	}
+
+	invalid := []string{
+		"https://-qdrant.example.com:6333",
+		"https://qdrant-.example.com:6333",
+		"https://qdrant..example.com:6333",
+		"https://qdrant.example.com:0",
+		"https://[127.0.0.1]:6333",
+		"https://[fe80::1%25]:6333",
+		"https://[fe80::1%25bad%21zone]:6333",
+	}
+	for _, endpoint := range invalid {
+		t.Run(endpoint, func(t *testing.T) {
+			_, err := catalog.NormalizeBindings([]CapabilityBinding{{
+				Capability: CapabilityKnowledge, Provider: "qdrant", Endpoint: endpoint,
+				Options: map[string]string{"collection": "documents"},
+			}})
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("NormalizeBindings(%q) error = %v, want ErrInvalid", endpoint, err)
+			}
+		})
 	}
 }
 
