@@ -108,7 +108,7 @@ type Configuration struct {
 | --- | --- |
 | `provider` | 规范化的小写 provider 名称；未注册 provider 拒绝 |
 | `model` | 该 provider 的 allowlist 模型名；未知模型拒绝 |
-| `endpoint` | provider schema 明确允许时才接受；只允许声明的 URL scheme 和有效 authority |
+| `endpoint` | provider schema 明确允许时才接受；只允许 allowlist 的 URL scheme/host；拒绝 userinfo、query、fragment、控制字符和超长值；Endpoint 不是 DSN |
 | `options` | key 必须在 provider schema 中；值按 string/boolean/integer/enum 规则规范化；未知 key 拒绝 |
 | `secret_ref` | opaque 引用；provider 可声明 required/optional/forbidden；绝不保存 Secret 值 |
 | `generation` | 只允许受控的 `temperature`、`top_p`、`max_output_tokens` 等字段，并在 schema 版本中固定语义 |
@@ -185,9 +185,11 @@ type ModelFactory interface {
 - Model Factory 自身的错误也必须在平台边界脱敏，避免回显 token、完整 credential 或可还原 DSN。
 - `SecretRef` 可以留在无密钥配置和摘要中，但 Secret 值不能出现在任何可序列化结构中。
 
-Resolver 调用顺序固定为：验证计划 → 读取无密钥 `ModelFactoryInput` → 用计划中的 Tenant ID 构造
-`SecretScope` → 解析一次 → 直接传给 Model Factory → 丢弃临时值。Factory 缓存只能缓存不含 Secret
-的模型配置或由 Factory 自行管理的安全 client 句柄；本阶段不实现 client cache。
+Resolver 调用顺序固定为：验证计划 → 读取无密钥 `ModelFactoryInput` → 按 schema 分支处理
+`secret_ref`：required 必须非空并解析一次，optional 仅在引用存在时解析，forbidden 拒绝任何引用；
+没有引用时不调用 Resolver，并把显式的空 `SecretValue` 直接传给 Model Factory → 丢弃临时值。
+Factory 缓存只能缓存不含 Secret 的模型配置或由 Factory 自行管理的安全 client 句柄；本阶段不实现
+client cache。空 Secret 不是全局或空引用查询。
 
 ## 3. Execution Plan
 
@@ -206,8 +208,9 @@ Tenant snapshot
 
 1. Tenant snapshot 已由受保护构造器生成且为 `active`。
 2. App、Revision、Model Profile、Backend Profile 的 `TenantID` 全部相同。
-3. App 为 `active`，Revision 为 `published` 且等于 App 的 `current_revision`。
-4. Revision 的 `ModelProfileID` 与传入 Model Profile ID 相同。
+3. App 为 `active`，Revision 为 `published`、属于同一个 App（`Revision.AppID == App.AppID`），
+   且等于 App 的 `current_revision`。
+4. Revision 的 `ModelProfileID` 与传入 Model Profile ID 相同；同租户不同 App 的 Revision 也必须拒绝。
 5. Model Profile 和 Backend Profile 均为 `active`；Backend Profile 仍满足其 Session binding 门禁。
 6. 所有摘要、版本、时间和 schema 不变量都能重新验证。
 
@@ -248,10 +251,13 @@ Runner 装配逻辑为：
 3. 将 Agent 输入的受控 generation 参数映射到上游 `model.GenerationConfig`，构造
    `llmagent.New`；不把 Revision 的未知字段或平台配置 map 直接传给上游。
 4. 将 Backend 的 Session binding 映射到已选择的 Session service；本阶段的集成测试使用
-   上游 `session/inmemory.NewSessionService()`，不实现真实后端 adapter。
+   上游 `session/inmemory.NewSessionService()`，并在其外层包裹固定 Tenant 的
+   `TenantSessionService`，不实现真实持久化后端 adapter。
 5. 使用上游 `runner.NewRunner(appID, llmAgent, runner.WithSessionService(sessionService))`。
-6. 用 `tenant.NewRunnerIdentity` 生成无歧义的 `userID`/`sessionID`。Session 持久化未来仍须显式带
-   `tenant_id`，Runner 的字符串命名空间只是第二层防碰撞。
+6. 用 `tenant.NewRunnerIdentity` 生成无歧义的 `userID`/`sessionID`，再由
+   `TenantSessionService` 把所有 app/user/session/state 操作固定到 Plan 的 Tenant。Runner 的
+   字符串命名空间只是第二层防碰撞，不能替代 adapter 的授权检查；双租户 conformance test
+   必须证明相同外部 user/session ID 不能跨租户读取或追加事件。
 
 一次普通消息的测试链路如下：
 
@@ -311,13 +317,14 @@ fake model 只用于测试，不模拟真实 provider 认证，也不读取环�
 
 ### Secret 与 Snapshot
 
-- Resolver 没有 tenant scope 时不被调用；跨租户 scope 被拒绝。
+- required/optional/forbidden secret_ref 分支分别要求解析、条件解析和拒绝引用；无引用不调用 Resolver；跨租户 scope 被拒绝。
 - resolver/factory 的底层错误被替换为脱敏错误；测试 Secret 值不会出现在 `Error()`、序列化结果或日志输入中。
 - Snapshot、Factory input 和 cache key 固定版本/摘要且不含 Secret 或 live client。
 
 ### Plan 与 Runner
 
-- 拒绝跨租户对象、非 active Tenant/App/Model/Backend、非当前 published Revision、Revision 模型引用不匹配和不完整 snapshot。
+- 拒绝跨租户对象、非 active Tenant/App/Model/Backend、不同 App 的 Revision、非当前 published Revision、Revision 模型引用不匹配和不完整 snapshot。
+- Tenant-scoped Session adapter 的双租户 conformance test 拒绝跨租户 `GetSession`、`AppendEvent` 和 state 操作。
 - 离线测试完整消费 Event stream，最终回复与 InMemory Session 状态一致。
 - 取消 context 后模型、Runner、消费者和 Event channel 都在 bounded timeout 内退出。
 - 控制面对象在 Plan 创建后变更，不改变本次执行的 Factory input/cache identity。
