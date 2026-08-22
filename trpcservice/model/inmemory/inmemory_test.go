@@ -245,17 +245,18 @@ func TestRepositoryContextAndMissingIdentityBoundaries(t *testing.T) {
 
 func TestContextRWMutexDirectCancellationAndMisusePaths(t *testing.T) {
 	mutex := contextRWMutex{}
-	if err := mutex.lock(nil); err != nil {
+	var nilContext context.Context
+	if err := mutex.lock(nilContext); err != nil {
 		t.Fatal(err)
 	}
 	mutex.unlock()
-	if err := mutex.rlock(nil); err != nil {
+	if err := mutex.rlock(nilContext); err != nil {
 		t.Fatal(err)
 	}
 	mutex.runlock()
 	closed := make(chan struct{})
 	close(closed)
-	if err := waitContext(nil, closed); err != nil {
+	if err := waitContext(nilContext, closed); err != nil {
 		t.Fatal(err)
 	}
 	cancelled, cancel := context.WithCancel(context.Background())
