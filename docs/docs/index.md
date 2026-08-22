@@ -11,6 +11,11 @@
 - **治理与可观测**：Plugin / Guardrail、OpenTelemetry、租户级审计与成本统计
 - **故障恢复**：降级策略、灰度发布、租户级配置回滚
 
+## 当前运行时设计
+
+- [Model Profile、Secret Resolver 与最小 Runner 链路](model-profile.md)：Issue #22 的文档先行设计，
+  固定模型解析、密钥边界、Execution Plan 和 tRPC-Agent-Go Runner 的纵向契约。
+
 ## 快速开始
 
 ```bash

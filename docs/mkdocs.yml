@@ -32,6 +32,7 @@ nav:
   - Tenant 运行时边界: tenant-runtime-boundary.md
   - Agent App 模型: agent-app-model.md
   - Backend Profile 模型: backend-profile.md
+  - Model Profile 与 Runner 链路: model-profile.md
   - 运维方案: ops.md
 
 markdown_extensions:
