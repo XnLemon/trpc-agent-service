@@ -341,6 +341,7 @@ CREATE TABLE backend_profile_change_outbox (
         OR
         (event_type <> 'created'
          AND previous_status IS NOT NULL
+         AND previous_digest IS NOT NULL
          AND previous_digest ~ '^[0-9a-f]{64}$'
          AND previous_version >= 1)
     )

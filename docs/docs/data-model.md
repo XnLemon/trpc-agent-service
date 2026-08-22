@@ -116,6 +116,8 @@ CREATE TABLE backend_profile (
                CHECK (profile_id ~ '^bp_[0-7][0-9A-HJKMNP-TV-Z]{25}$'),
     profile_key TEXT NOT NULL
                 CHECK (profile_key ~ '^[a-z][a-z0-9-]{1,63}$'),
+    status      TEXT NOT NULL DEFAULT 'active'
+                CHECK (status IN ('active', 'suspended', 'disabled')),
     PRIMARY KEY (tenant_id, profile_id),
     UNIQUE (tenant_id, profile_key)
 );
