@@ -169,6 +169,7 @@ type CandidateBindingContext struct {
     PublicRouteKeyDigest string
     BindingVersion       int64
     ConfigDigest         string
+    Purpose              string
     CandidateToken       string // opaque, short-lived, single-use capability
     IssuedAt             time.Time
     ExpiresAt            time.Time

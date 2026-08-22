@@ -95,8 +95,10 @@ CREATE UNIQUE INDEX channel_binding_active_account_idx
 
 Admin Repository 的 `Create/Get/Update/Activate/Suspend/Resume/Disable` 都接收显式
 `tenant_id + binding_id`。Binding key 只在 `(tenant_id, binding_key)` 内唯一，因此不同租户
-可以使用相同的 key。激活和可信快照边界都必须校验 Tenant active、Binding active、App 属于
-同一 Tenant 且 App 可执行；不能因为两个对象的字符串 ID 看起来相似就跳过复合归属检查。
+可以使用相同的 key。当前 InMemory 生命周期边界校验 Binding 自身的状态、版本和 active 账号
+唯一性；它不偷偷加载跨聚合的 Tenant/App。可信快照边界 `NewRoutingTarget` 必须再校验 Tenant
+active、Binding active、App 属于同一 Tenant 且 App 可执行；不能因为两个对象的字符串 ID 看起来
+相似就跳过复合归属检查。
 
 ## 生命周期与版本
 
@@ -132,13 +134,15 @@ type CandidateBindingContext struct {
     PublicRouteKeyDigest   string
     BindingVersion         int64
     ConfigDigest           string
+    Purpose                VerificationPurpose
     CandidateToken         string // opaque, short-lived, single-use
     IssuedAt               time.Time
     ExpiresAt              time.Time
 }
 ```
 
-`CandidateToken` 是候选索引签发的 opaque bearer capability；它不是 `binding_id`、`tenant_id`、
+`Purpose` 固定候选只能用于 `webhook-verification` 这一候选用途；Resolver 不得把同一个候选
+转换成别的用途。`CandidateToken` 是候选索引签发的 opaque bearer capability；它不是 `binding_id`、`tenant_id`、
 `app_id`、`secret_ref` 或 Secret 值，也不能由 URL、header 或 payload 自行拼接。候选 Context
 及 token 都只在短 TTL 内有效，调用方修改返回副本不能改变索引内部状态。Resolver 必须把
 token 绑定到唯一候选和明确用途，例如 `webhook-verification`，消费成功后返回一次性
