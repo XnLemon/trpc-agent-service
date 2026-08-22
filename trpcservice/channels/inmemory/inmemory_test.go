@@ -98,6 +98,29 @@ func TestRepositoryIsTenantScopedAndCandidateLookupIsRedacted(t *testing.T) {
 	}
 }
 
+func TestRepositoryCreateUsesInjectedClockForLifecycle(t *testing.T) {
+	base := time.Date(2020, time.January, 2, 3, 4, 5, 0, time.UTC)
+	clock := &testClock{now: base}
+	repo := NewInMemoryRepository(Options{Clock: clock.Now})
+	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeCom, "injected-clock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := mustCreate(t, repo, bindingInput("t_00000000000000000000000006", "injected-clock", "corp-clock", routeDigest))
+	if !binding.CreatedAt.Equal(base) || !binding.UpdatedAt.Equal(base) {
+		t.Fatalf("create ignored injected clock: created=%s updated=%s", binding.CreatedAt, binding.UpdatedAt)
+	}
+	activated, _, err := repo.Activate(context.Background(), channels.TransitionStatusInput{
+		TenantID: binding.TenantID, BindingID: binding.BindingID, ExpectedVersion: binding.Version, Metadata: validMetadata(),
+	})
+	if err != nil {
+		t.Fatalf("create followed by lifecycle mutation failed with injected clock: %v", err)
+	}
+	if !activated.UpdatedAt.Equal(base) || activated.Status != channels.StatusActive {
+		t.Fatalf("unexpected activated binding: %+v", activated)
+	}
+}
+
 func TestRepositoryLifecycleExpectedVersionAndCandidateInvalidation(t *testing.T) {
 	clock := &testClock{now: time.Now().UTC().Add(time.Hour)}
 	repo := NewInMemoryRepository(Options{Clock: clock.Now, CandidateTTL: 2 * time.Second})

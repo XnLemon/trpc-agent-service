@@ -250,8 +250,16 @@ type Binding struct {
 	UpdatedAt            time.Time
 }
 
-// NewBinding validates, normalizes, and constructs a new Binding.
+// NewBinding validates, normalizes, and constructs a new Binding using the
+// wall clock.
 func NewBinding(input CreateInput) (*Binding, error) {
+	return NewBindingAt(input, time.Now().UTC())
+}
+
+// NewBindingAt validates, normalizes, and constructs a new Binding at the
+// supplied UTC time. Repositories with an injectable clock should use this
+// constructor so creation and later lifecycle mutations share one time source.
+func NewBindingAt(input CreateInput, now time.Time) (*Binding, error) {
 	if err := validateTenantID(input.TenantID); err != nil {
 		return nil, err
 	}
@@ -295,7 +303,10 @@ func NewBinding(input CreateInput) (*Binding, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate channel binding id: %w", err)
 	}
-	now := time.Now().UTC()
+	now = now.UTC()
+	if now.IsZero() {
+		return nil, fmt.Errorf("%w: binding creation time must be initialized", ErrInvalid)
+	}
 	binding := &Binding{
 		TenantID: input.TenantID, BindingID: id, BindingKey: key, Channel: input.Channel,
 		ProviderAccountID: providerAccountID, PublicRouteKeyDigest: routeDigest,

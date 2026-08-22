@@ -174,7 +174,12 @@ func (r *FakeCandidateResolver) Verify(ctx context.Context, handle channels.Scop
 		r.mu.Unlock()
 		return channels.VerifiedBinding{}, channels.ErrVerificationFailed
 	}
-	r.usedNonces[nonceKey] = state.expiresAt
+	nonceExpiry := request.Timestamp.Add(r.maxClockSkew)
+	minimumExpiry := now.Add(r.maxClockSkew)
+	if minimumExpiry.After(nonceExpiry) {
+		nonceExpiry = minimumExpiry
+	}
+	r.usedNonces[nonceKey] = nonceExpiry
 	r.mu.Unlock()
 	return channels.NewVerifiedBinding(*current)
 }

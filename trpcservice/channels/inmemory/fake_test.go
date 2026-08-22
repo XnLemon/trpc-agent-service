@@ -135,6 +135,10 @@ func TestFakeResolverIsCoveredInsideItsOwningPackage(t *testing.T) {
 	if _, err := resolver.Verify(context.Background(), expiringHandle, expiringRequest); !errors.Is(err, channels.ErrVerificationFailed) {
 		t.Fatalf("expired fake handle was accepted: %v", err)
 	}
+	expiredCandidateReplayHandle := resolvePackageHandle(t, repo, resolver, routeDigest)
+	if _, err := resolver.Verify(context.Background(), expiredCandidateReplayHandle, successRequest); !errors.Is(err, channels.ErrVerificationFailed) {
+		t.Fatalf("nonce replay after candidate expiry was accepted: %v", err)
+	}
 
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()

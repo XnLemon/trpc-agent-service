@@ -93,7 +93,7 @@ func (r *InMemoryRepository) Create(ctx context.Context, input channels.CreateIn
 	if err := checkContext(ctx); err != nil {
 		return nil, channels.ChangeEvent{}, err
 	}
-	binding, err := channels.NewBinding(input)
+	binding, err := channels.NewBindingAt(input, r.nowUTC())
 	if err != nil {
 		return nil, channels.ChangeEvent{}, err
 	}
