@@ -1,0 +1,354 @@
+# Model Profile、Secret Resolver 与最小 Runner 链路
+
+> 本文是 Issue #22 的设计与实现契约：
+> [runtime: implement tenant-scoped Model Profile and minimal Runner execution spine](https://github.com/XnLemon/trpc-agent-service/issues/22)。
+> 文档先于代码提交，代码必须遵守本文的租户边界、快照和生命周期语义。
+
+## 目标与边界
+
+Tenant、Agent App/Revision 和 Backend Profile 已经可以各自生成不可变、无密钥的运行时输入，
+但 `Revision.ModelProfileID` 还没有解析边界，也没有一次消息真正进入 tRPC-Agent-Go 的
+`runner.Runner`。本阶段补齐这条最小纵向链路：
+
+```text
+trusted Tenant snapshot
+        │
+        ├── Agent App + published Revision ──┐
+        ├── active Model Profile             ├── Execution Plan
+        └── active Backend Profile ───────────┘
+                         │
+                         ▼
+          model.Factory + Storage Factory
+                         │
+                         ▼
+            LLMAgent → Runner → Session
+                         │
+                         ▼
+             complete Event stream / reply
+```
+
+本 Issue 的实现范围：
+
+- 租户级 Model Profile 根实体、配置 schema、生命周期、乐观锁版本、摘要和 InMemory Repository。
+- 不包含 Secret 值的 `ModelExecutionSnapshot`、可比较 `FactoryCacheKey` 和 `ModelFactoryInput`。
+- 显式携带 `tenant_id + secret_ref` 的 Secret Resolver 契约，以及脱敏的错误边界。
+- 将 Tenant、当前 published Agent Revision、active Model Profile 和 active Backend Profile
+  组合成一次执行固定的 `ExecutionPlan`。
+- 固定兼容的 tRPC-Agent-Go 版本，使用其 `LLMAgent`、`Runner`、`Session` 和 `Event` 能力。
+- 离线 deterministic fake model + InMemory Session 的集成测试，以及取消和 Event channel 收尾测试。
+
+本阶段明确不包含 Channel Binding、HTTP Gateway/Admin API、真实模型请求、生产 KMS/Vault、
+PostgreSQL migration、Redis/SQL/向量库/S3 adapter、OTel exporter、计费和跨节点配置缓存。
+
+## 设计阶段 ledger
+
+文档阶段先固定以下可观察契约；代码阶段逐项实现并用测试证明：
+
+| Ledger 项 | 文档阶段结论 | 代码阶段验证 |
+| --- | --- | --- |
+| Model Profile 身份 | `(tenant_id, model_profile_id)` 稳定；`profile_key` 仅在租户内唯一且不可变 | ID/key/时间/version/摘要边界测试 |
+| 配置 schema | provider、model、endpoint、generation、allowlisted options、opaque `secret_ref`；未知 provider/model/option 拒绝 | Catalog 与配置归一化测试 |
+| 生命周期 | `active`、`suspended`、`disabled`；disabled 是终态；新执行只允许 active | 状态转换和执行门禁测试 |
+| 并发与存储 | 完整配置替换、expected version、Context-aware lock、线程安全和防御性副本 | InMemory Repository 测试与 race |
+| Secret 边界 | Resolver 只接收可信 tenant scope；解析结果只传给 Model Factory | tenant scope、错误脱敏和无泄露测试 |
+| Execution Plan | 固定所有参与对象的 ID、version、revision、content digest；拒绝跨租户/过期/非 active 输入 | Plan 构造失败场景测试 |
+| Runner spine | 复用上游协议；普通消息进入 Runner，完整 Event stream 写入 InMemory Session | 离线纵向集成测试 |
+| 取消与收尾 | 取消 context 后 Runner 和消费者都退出；消费者继续 drain 直到 channel 关闭 | bounded cancellation test |
+| 文档与验证 | README 进度、MkDocs 导航和数据模型链接同步 | format/lint/build/test/MkDocs strict/diff check |
+
+## 1. Model Profile 控制面
+
+### 1.1 身份、版本和时间
+
+Model Profile 与 Backend Profile 采用相同的租户边界约定：
+
+- `tenant_id` 来自认证后的控制面上下文，不能由模型配置或用户消息选择。
+- `model_profile_id` 由服务生成，使用 `mp_` 前缀的 Crockford/ULID 风格稳定 ID。
+- `profile_key` 规范化为 `[a-z][a-z0-9-]{1,63}`，创建后不可修改；同一个 key 可以在不同租户重复。
+- `version` 从 1 开始，完整配置更新和状态迁移各递增一次。
+- `created_at`、`updated_at` 使用 UTC；更新时不得早于现有 `updated_at`。
+- `content_digest` 是规范化配置的 SHA-256 小写十六进制摘要，不包含时间、actor 或 Secret 值。
+
+建议的领域结构如下。字段是控制面数据，不代表运行时客户端：
+
+```go
+type Profile struct {
+    TenantID      string
+    ProfileID     string
+    ProfileKey    string
+    DisplayName   string
+    Description   string
+    Status        Status
+    SchemaVersion int
+    Configuration Configuration
+    ContentDigest string
+    Version       int64
+    CreatedAt     time.Time
+    UpdatedAt     time.Time
+}
+
+type Configuration struct {
+    Provider   string
+    Model      string
+    Endpoint   string
+    Options    map[string]string
+    SecretRef  string
+    Generation GenerationConfig
+}
+```
+
+领域对象、Repository 返回值和快照访问器都必须返回深拷贝。特别是 `Options` 不能把调用方
+持有的 map 直接留在 Repository 或 Snapshot 内部。
+
+### 1.2 Provider schema 与 generation 参数
+
+配置不是任意 JSON。Provider Catalog 是由受信代码注册的不可变 schema，每个 provider 明确声明：
+
+| 字段 | 约束 |
+| --- | --- |
+| `provider` | 规范化的小写 provider 名称；未注册 provider 拒绝 |
+| `model` | 该 provider 的 allowlist 模型名；未知模型拒绝 |
+| `endpoint` | provider schema 明确允许时才接受；只允许声明的 URL scheme 和有效 authority |
+| `options` | key 必须在 provider schema 中；值按 string/boolean/integer/enum 规则规范化；未知 key 拒绝 |
+| `secret_ref` | opaque 引用；provider 可声明 required/optional/forbidden；绝不保存 Secret 值 |
+| `generation` | 只允许受控的 `temperature`、`top_p`、`max_output_tokens` 等字段，并在 schema 版本中固定语义 |
+
+`options` 的 map 只是控制面表达方式，不是未知字段的逃生通道。schema 版本不支持时必须 fail
+closed；JSON 解码使用 `DisallowUnknownFields` 或等价的显式解码逻辑，不能静默吞掉新字段。
+敏感 option key（如 `api_key`、`password`、`token`、`dsn`、`credential`）即使被错误注册也拒绝。
+
+配置被接受前依次执行：
+
+1. 校验 schema version、身份引用和字段长度。
+2. 校验 provider/model/endpoint/secret_ref 和 option allowlist。
+3. 物化 schema 默认值，排序稳定字段，复制所有 map/pointer。
+4. 对规范化结构做确定性序列化并计算 `content_digest`。
+
+摘要可以包含 `secret_ref`，因为切换引用必须令未来 Factory cache key 变化；摘要不能包含该引用
+解析出的值，也不能包含 client、连接池、函数指针或其他运行时对象。
+
+### 1.3 生命周期与乐观锁
+
+```text
+                         ┌──────────────┐
+                         │   disabled   │  terminal
+                         └──────▲───────┘
+                                │ disable
+             suspend            │
+active ─────────────────────────┘
+  ▲  │
+  │  └── suspended ── resume ──┘
+  │
+  └── active 允许更新完整配置，但每次更新都产生新 version/digest
+```
+
+实际允许的迁移为：
+
+- `active -> suspended`：阻断新执行，但保留配置并允许修复后恢复。
+- `suspended -> active`：重新校验完整配置后恢复；不能恢复一个缺少必需字段的 Profile。
+- `active -> disabled`、`suspended -> disabled`：终态；之后拒绝更新、恢复和新执行。
+- 新建只能是 `active` 或 `suspended`，不能直接是 `disabled`。
+
+配置更新和状态迁移都接收 `expected_version`。版本不匹配返回可识别的 conflict 错误，不能
+覆盖并发修改。`InMemory Repository` 的每次操作在开始、等待锁后和提交前检查 `Context`；读锁
+和写锁都必须能在取消时返回，而不是永远等待。
+
+## 2. Secret Resolver 边界
+
+Secret Resolver 是平台与真实 KMS/Vault/Secret Manager 之间的窄契约，本 Issue 只提供接口和 fake
+实现测试，不提供生产 Secret Manager：
+
+```go
+type SecretScope struct {
+    TenantID  string
+    SecretRef string
+}
+
+type SecretValue struct { /* value is private and redacted when formatted */ }
+
+type SecretResolver interface {
+    Resolve(context.Context, SecretScope) (SecretValue, error)
+}
+
+type ModelFactory interface {
+    New(context.Context, ModelFactoryInput, SecretValue) (trpcmodel.Model, error)
+}
+```
+
+边界规则：
+
+- `SecretScope` 必须同时包含可信 `tenant_id` 和 `secret_ref`；没有全局 `Resolve(ref)` 入口。
+- `tenant_id` 必须来自已认证的 Tenant snapshot/Execution Plan，而非请求体、header 或模型输出。
+- Resolver 失败返回固定、可分类但不带底层凭据的错误；原始 KMS 错误不能直接进入日志、trace 或响应。
+- `SecretValue` 只能作为一次 Model Factory 调用的临时参数；不得写回 Profile、Snapshot、Plan、
+  `ModelFactoryInput`、cache key、audit event 或 context value。
+- Model Factory 自身的错误也必须在平台边界脱敏，避免回显 token、完整 credential 或可还原 DSN。
+- `SecretRef` 可以留在无密钥配置和摘要中，但 Secret 值不能出现在任何可序列化结构中。
+
+Resolver 调用顺序固定为：验证计划 → 读取无密钥 `ModelFactoryInput` → 用计划中的 Tenant ID 构造
+`SecretScope` → 解析一次 → 直接传给 Model Factory → 丢弃临时值。Factory 缓存只能缓存不含 Secret
+的模型配置或由 Factory 自行管理的安全 client 句柄；本阶段不实现 client cache。
+
+## 3. Execution Plan
+
+`ExecutionPlan` 是一次 Worker 执行的 sealed input，不是 Repository 的聚合写模型。构造函数接收
+同一个已认证的 `tenant.ConfigurationSnapshot` 和四个已校验的控制面对象：
+
+```text
+Tenant snapshot
+  ├── Agent App + current published Revision
+  │     └── Revision.ModelProfileID
+  ├── Model Profile
+  └── Tenant.DefaultBackendProfileID → Backend Profile
+```
+
+构造时连续验证：
+
+1. Tenant snapshot 已由受保护构造器生成且为 `active`。
+2. App、Revision、Model Profile、Backend Profile 的 `TenantID` 全部相同。
+3. App 为 `active`，Revision 为 `published` 且等于 App 的 `current_revision`。
+4. Revision 的 `ModelProfileID` 与传入 Model Profile ID 相同。
+5. Model Profile 和 Backend Profile 均为 `active`；Backend Profile 仍满足其 Session binding 门禁。
+6. 所有摘要、版本、时间和 schema 不变量都能重新验证。
+
+任意一项失败都拒绝创建计划，不回退到平台默认模型、其他租户 Profile 或旧缓存。计划创建后，
+控制面更新只影响新计划；本次执行继续使用计划中已经复制的版本。
+
+计划至少固定以下可比较身份：
+
+```text
+tenant_id + tenant_version
+agent_app_id + app_version + published_revision + agent_content_digest
+model_profile_id + model_profile_version + model_content_digest
+backend_profile_id + backend_profile_version + backend_content_digest
+```
+
+这些字段组成计划级 cache identity。它不能包含 Secret 值、HTTP client、Session service、
+模型实例、channel、请求消息或可变 map。对外访问器返回防御性副本，不能让调用方反向修改计划。
+
+计划向下游暴露三份无密钥输入：
+
+| 计划部分 | 下游 |
+| --- | --- |
+| `AgentExecutionSnapshot.FactoryInput()` | `llmagent.New` 的 name、description、instruction、generation 和 runtime policy |
+| `ModelExecutionSnapshot.FactoryInput()` | Model Factory 的 provider、model、endpoint、options、secret_ref 和版本/摘要 |
+| `BackendExecutionSnapshot.FactoryInput()` | Storage Factory 的 Session/Memory/Knowledge/Artifact binding |
+
+平台层只负责组合、授权和固定版本，不复制 tRPC-Agent-Go 的 Agent、Runner、Session 或 Event 协议。
+
+## 4. 最小 Runner execution spine
+
+本阶段固定 `trpc.group/trpc-go/trpc-agent-go` 的兼容版本 `v1.11.2`，版本写入根 `go.mod` 和
+`go.sum`，避免上游接口漂移影响控制面契约。
+
+Runner 装配逻辑为：
+
+1. 从 Execution Plan 读取 `AgentFactoryInput`、`ModelFactoryInput` 和 `StorageFactoryInput`。
+2. 通过显式 Tenant scope 解析 Secret，并把结果直接交给 Model Factory 得到 `model.Model`。
+3. 将 Agent 输入的受控 generation 参数映射到上游 `model.GenerationConfig`，构造
+   `llmagent.New`；不把 Revision 的未知字段或平台配置 map 直接传给上游。
+4. 将 Backend 的 Session binding 映射到已选择的 Session service；本阶段的集成测试使用
+   上游 `session/inmemory.NewSessionService()`，不实现真实后端 adapter。
+5. 使用上游 `runner.NewRunner(appID, llmAgent, runner.WithSessionService(sessionService))`。
+6. 用 `tenant.NewRunnerIdentity` 生成无歧义的 `userID`/`sessionID`。Session 持久化未来仍须显式带
+   `tenant_id`，Runner 的字符串命名空间只是第二层防碰撞。
+
+一次普通消息的测试链路如下：
+
+```text
+model.NewUserMessage("hello")
+        │
+        ▼
+runner.Run(ctx, userID, sessionID, message)
+        │
+        ├── LLMAgent 调用 deterministic fake model
+        ├── 返回 *event.Event，直至 channel close
+        └── 上游 Session service 写入有效 user/assistant event
+        │
+        ▼
+GetSession(session.Key{AppName, UserID, SessionID})
+        └── 断言最终 assistant reply 和 session.Events
+```
+
+消费者必须完整消费 Event channel。取消时的正确顺序是：
+
+```go
+events, err := runner.Run(ctx, userID, sessionID, message)
+if err != nil { return err }
+for event := range events {
+    // 处理或丢弃事件，但继续 drain 到 channel 关闭。
+}
+```
+
+不能只 `break` 然后放弃 channel，因为 Runner 可能仍在向 channel 写事件。取消由传入的
+`context.Context` 传播到模型、工具、Session 和 Runner；测试使用有界等待确认 channel 最终关闭。
+Runner、外部 Session service 和任何 fake model 的资源都由创建方明确 `Close` 或等待收尾。
+
+## 5. Deterministic fake model
+
+fake model 只用于测试，不模拟真实 provider 认证，也不读取环境变量。它实现上游 `model.Model`：
+
+- `Info().Name` 与 Model Profile 的固定 model name 对齐。
+- `GenerateContent` 不访问网络，返回一个固定的 assistant `Response`，并将 response channel 正常关闭。
+- 如果收到取消的 context，在发送响应前结束，不创建无法退出的 goroutine。
+- 测试通过 fake factory 记录收到的 `TenantID`、`SecretRef` 和 secret 是否只出现在 Factory 调用中；
+  随后检查计划、snapshot、factory input、错误和 Session state 都没有 Secret 值。
+
+该 fake 不应进入生产 provider catalog，也不应该成为真实模型 fallback。生产 provider、KMS 和模型
+客户端由后续 Issue 在相同的输入边界上实现。
+
+## 6. 验证矩阵
+
+代码阶段必须至少覆盖：
+
+### Model Profile 与 Repository
+
+- ID/key、展示字段、状态、schema、generation、endpoint、option、secret_ref、时间、version 和 digest 边界。
+- 相同 key 跨租户允许，同租户重复拒绝；跨租户读取不能成功。
+- 完整配置更新、状态迁移、disabled 终态和 expected version conflict。
+- 读写返回深拷贝；并发更新只有一个匹配版本的调用成功。
+- Context 已取消和等待锁时都及时返回。
+
+### Secret 与 Snapshot
+
+- Resolver 没有 tenant scope 时不被调用；跨租户 scope 被拒绝。
+- resolver/factory 的底层错误被替换为脱敏错误；测试 Secret 值不会出现在 `Error()`、序列化结果或日志输入中。
+- Snapshot、Factory input 和 cache key 固定版本/摘要且不含 Secret 或 live client。
+
+### Plan 与 Runner
+
+- 拒绝跨租户对象、非 active Tenant/App/Model/Backend、非当前 published Revision、Revision 模型引用不匹配和不完整 snapshot。
+- 离线测试完整消费 Event stream，最终回复与 InMemory Session 状态一致。
+- 取消 context 后模型、Runner、消费者和 Event channel 都在 bounded timeout 内退出。
+- 控制面对象在 Plan 创建后变更，不改变本次执行的 Factory input/cache identity。
+
+### 工程检查
+
+```text
+go test ./...
+go test -race ./trpcservice/model/... ./trpcservice/runtime/... ./trpcservice/backend/...
+./scripts/format.sh --check
+./scripts/lint.sh
+./scripts/build.sh
+mkdocs build --strict -f docs/mkdocs.yml
+git diff --check
+```
+
+如果本地缺少 `mkdocs` 或 `golangci-lint`，PR 必须明确记录实际跳过原因；不能把未运行的检查标记为通过。
+
+## 7. 后续边界
+
+```text
+Model Profile + Secret Resolver + minimal Runner spine  (#22)
+  └── Channel Binding
+        └── HTTP Gateway / streaming API
+              └── WeCom adapter + idempotency
+                    └── persistent repositories and production adapters
+```
+
+后续实现必须继续遵守：
+
+- `tenant_id` 是每个 Repository、Resolver、Factory 和持久化查询的显式边界。
+- 真实 Secret 只能在已授权的 Factory 短路径中出现。
+- 新执行必须从固定快照开始，不能在执行中重新读取“当前配置”。
+- Runner 的事件和取消语义由 tRPC-Agent-Go 负责，平台只管理装配、租户隔离、生命周期和资源所有权。

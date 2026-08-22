@@ -385,6 +385,7 @@ COMMIT;
 ```text
 agent_app         Agent 应用（租户级，发布版本、模型与工具授权）→ 已完成设计
 backend_profile   数据后端档案（Session / Memory / Knowledge / Artifact / Audit）→ 已完成设计
+model_profile     模型档案（provider / model / generation / secret_ref）→ Issue #22 设计先行
 channel_binding   IM 通道绑定（tenant + channel + 账号 → agent_app）
 session           会话（tenant_id、session_id、状态、TTL）
 message_event     消息与会话事件（session 内有序、幂等）

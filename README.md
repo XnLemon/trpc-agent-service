@@ -131,6 +131,8 @@
 - [x] 定义 Agent Repository 并提供租户隔离、并发安全的 InMemory 实现
 - [ ] 实现 Channel Binding 领域模型
 - [x] 实现 Backend Profile 领域模型
+- [x] 完成 Model Profile、Secret Resolver 与最小 Runner 链路设计
+- [ ] 实现 Model Profile 控制面、Secret Resolver 契约和最小 Runner 链路
 - [ ] 实现租户、Agent、通道和后端配置的 Admin API
 - [x] 实现 Agent App 草稿更新、原子发布和版本回滚
 - [ ] 实现配置缓存失效、租户级灰度和租户配置版本回滚
@@ -139,6 +141,7 @@
 ### Gateway 与 Agent Worker
 
 - [ ] 引入并初始化 tRPC-Agent-Go，建立可执行的 `runner.Runner`
+- [ ] 将 Tenant、Agent Revision、Model Profile 和 Backend Profile 组合成 Execution Plan
 - [ ] 实现 Agent Registry，按 `tenant_id + agent_app_id + version` 加载 Agent
 - [x] 实现 Tenant + App + Revision 不可变执行快照、Factory Cache Key 和无密钥 Factory 输入契约
 - [ ] 实现 Gateway 的鉴权、租户解析、Agent 路由、限流和请求去重
