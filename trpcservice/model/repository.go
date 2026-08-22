@@ -161,9 +161,10 @@ func PrepareStatusChange(current Profile, input TransitionStatusInput, catalog *
 		return Profile{}, ChangeEvent{}, err
 	}
 	eventType := EventSuspended
-	if input.NextStatus == StatusActive {
+	switch input.NextStatus {
+	case StatusActive:
 		eventType = EventResumed
-	} else if input.NextStatus == StatusDisabled {
+	case StatusDisabled:
 		eventType = EventDisabled
 	}
 	event := newChangeEvent(

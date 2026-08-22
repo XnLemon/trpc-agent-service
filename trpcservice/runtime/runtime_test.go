@@ -93,8 +93,16 @@ func TestRunnerExecutesFakeModelAndPersistsTenantScopedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer runner.Close()
-	defer sessions.Close()
+	defer func() {
+		if err := runner.Close(); err != nil {
+			t.Errorf("runner.Close() error = %v", err)
+		}
+	}()
+	defer func() {
+		if err := sessions.Close(); err != nil {
+			t.Errorf("sessions.Close() error = %v", err)
+		}
+	}()
 	identity, err := tenant.NewRunnerIdentity(fixture.root.TenantID, "external-user", "external-session")
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +142,7 @@ func TestRunnerExecutesFakeModelAndPersistsTenantScopedSession(t *testing.T) {
 		if storedEvent.Response == nil {
 			continue
 		}
-		for _, choice := range storedEvent.Response.Choices {
+		for _, choice := range storedEvent.Choices {
 			if choice.Message.Role == trpcmodel.RoleAssistant {
 				storedReply = choice.Message.Content
 			}
@@ -159,8 +167,16 @@ func TestRunnerCancellationDrainsAndClosesEventChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer runner.Close()
-	defer sessions.Close()
+	defer func() {
+		if err := runner.Close(); err != nil {
+			t.Errorf("runner.Close() error = %v", err)
+		}
+	}()
+	defer func() {
+		if err := sessions.Close(); err != nil {
+			t.Errorf("sessions.Close() error = %v", err)
+		}
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	identity, err := tenant.NewRunnerIdentity(fixture.root.TenantID, "cancel-user", "cancel-session")
 	if err != nil {
@@ -188,7 +204,11 @@ func TestTenantSessionServiceRejectsCrossTenantGetAndAppend(t *testing.T) {
 	rootOne := runtimeTenant(t, "session-tenant-one")
 	rootTwo := runtimeTenant(t, "session-tenant-two")
 	delegate := inmemory.NewSessionService()
-	defer delegate.Close()
+	defer func() {
+		if err := delegate.Close(); err != nil {
+			t.Errorf("delegate.Close() error = %v", err)
+		}
+	}()
 	serviceOne, err := NewTenantSessionService(*rootOne, delegate)
 	if err != nil {
 		t.Fatal(err)
