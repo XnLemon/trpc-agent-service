@@ -171,6 +171,60 @@ func TestFakeResolverIsCoveredInsideItsOwningPackage(t *testing.T) {
 	}
 }
 
+func TestFakeResolverPrunesAndBoundsUnverifiedHandles(t *testing.T) {
+	base := time.Now().UTC().Add(time.Hour)
+	clock := &testClock{now: base}
+	repo := NewRepository(Options{Clock: clock.Now, CandidateTTL: 2 * time.Second})
+	routeDigest, _ := channels.DigestPublicRouteKey(channels.ChannelWeCom, "handle-capacity")
+	binding := mustCreate(t, repo, bindingInput("t_00000000000000000000000007", "handle-capacity", "corp-capacity", routeDigest))
+	if _, _, err := repo.Activate(context.Background(), channels.TransitionStatusInput{TenantID: binding.TenantID, BindingID: binding.BindingID, ExpectedVersion: binding.Version, Metadata: validMetadata()}); err != nil {
+		t.Fatal(err)
+	}
+	secret := "handle-capacity-secret"
+	resolver := NewFakeResolver(repo, map[channels.SecretScope]string{{TenantID: binding.TenantID, SecretRef: binding.SecretRef}: secret}, FakeResolverOptions{Clock: clock.Now, MaxHandles: 2})
+	if _, err := resolveHandleForTest(t, repo, resolver, routeDigest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveHandleForTest(t, repo, resolver, routeDigest); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(resolver.handles); got != 2 {
+		t.Fatalf("expected two outstanding handles, got %d", got)
+	}
+	clock.now = base.Add(3 * time.Second)
+	if _, err := resolveHandleForTest(t, repo, resolver, routeDigest); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(resolver.handles); got != 1 {
+		t.Fatalf("expired handles were not pruned before minting: got %d", got)
+	}
+	if _, err := resolveHandleForTest(t, repo, resolver, routeDigest); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(resolver.handles); got != 2 {
+		t.Fatalf("expected configured handle capacity, got %d", got)
+	}
+	candidate, err := firstCandidate(t, repo, channels.ChannelWeCom, routeDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.ResolveCandidate(context.Background(), channels.CandidateSecretRequest{Candidate: candidate, Purpose: channels.PurposeWebhookVerification}); !errors.Is(err, channels.ErrVerificationFailed) {
+		t.Fatalf("handle capacity was not enforced: %v", err)
+	}
+	if got := len(resolver.handles); got != 2 {
+		t.Fatalf("handle store exceeded configured capacity: got %d", got)
+	}
+}
+
+func resolveHandleForTest(t *testing.T, repo *InMemoryRepository, resolver *FakeCandidateResolver, routeDigest string) (channels.ScopedVerifierHandle, error) {
+	t.Helper()
+	candidate, err := firstCandidate(t, repo, channels.ChannelWeCom, routeDigest)
+	if err != nil {
+		return channels.ScopedVerifierHandle{}, err
+	}
+	return resolver.ResolveCandidate(context.Background(), channels.CandidateSecretRequest{Candidate: candidate, Purpose: channels.PurposeWebhookVerification})
+}
+
 func resolvePackageHandle(t *testing.T, repo *InMemoryRepository, resolver *FakeCandidateResolver, routeDigest string) channels.ScopedVerifierHandle {
 	t.Helper()
 	candidate, err := firstCandidate(t, repo, channels.ChannelWeCom, routeDigest)

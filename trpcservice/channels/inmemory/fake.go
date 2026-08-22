@@ -20,11 +20,16 @@ import (
 // Production adapters must apply their provider-specific replay policy.
 const DefaultFakeMaxClockSkew = 5 * time.Minute
 
+// DefaultFakeMaxHandles bounds outstanding verifier capabilities in the
+// offline fake. Production adapters must apply their own capacity policy.
+const DefaultFakeMaxHandles = 4096
+
 // FakeResolverOptions configures the deterministic clock and timestamp window
 // used by FakeCandidateResolver.
 type FakeResolverOptions struct {
 	Clock        func() time.Time
 	MaxClockSkew time.Duration
+	MaxHandles   int
 }
 
 type fakeVerifierState struct {
@@ -42,6 +47,7 @@ type FakeCandidateResolver struct {
 	secrets      map[channels.SecretScope]string
 	clock        func() time.Time
 	maxClockSkew time.Duration
+	maxHandles   int
 
 	mu         sync.Mutex
 	handles    map[string]fakeVerifierState
@@ -54,7 +60,7 @@ type FakeCandidateResolver struct {
 func NewFakeCandidateResolver(repo *InMemoryRepository, secrets map[channels.SecretScope]string, options ...FakeResolverOptions) *FakeCandidateResolver {
 	configuration := FakeResolverOptions{
 		Clock:        func() time.Time { return time.Now().UTC() },
-		MaxClockSkew: DefaultFakeMaxClockSkew,
+		MaxClockSkew: DefaultFakeMaxClockSkew, MaxHandles: DefaultFakeMaxHandles,
 	}
 	if len(options) > 0 {
 		if options[0].Clock != nil {
@@ -63,6 +69,9 @@ func NewFakeCandidateResolver(repo *InMemoryRepository, secrets map[channels.Sec
 		if options[0].MaxClockSkew > 0 {
 			configuration.MaxClockSkew = options[0].MaxClockSkew
 		}
+		if options[0].MaxHandles > 0 {
+			configuration.MaxHandles = options[0].MaxHandles
+		}
 	}
 	secretCopy := make(map[channels.SecretScope]string, len(secrets))
 	for scope, secret := range secrets {
@@ -70,7 +79,8 @@ func NewFakeCandidateResolver(repo *InMemoryRepository, secrets map[channels.Sec
 	}
 	return &FakeCandidateResolver{
 		repo: repo, secrets: secretCopy, clock: configuration.Clock,
-		maxClockSkew: configuration.MaxClockSkew, handles: make(map[string]fakeVerifierState),
+		maxClockSkew: configuration.MaxClockSkew, maxHandles: configuration.MaxHandles,
+		handles:    make(map[string]fakeVerifierState),
 		usedNonces: make(map[string]time.Time),
 	}
 }
@@ -124,6 +134,11 @@ func (r *FakeCandidateResolver) ResolveCandidate(ctx context.Context, request ch
 		return channels.ScopedVerifierHandle{}, channels.ErrVerificationFailed
 	}
 	r.mu.Lock()
+	r.pruneHandlesLocked(now)
+	if len(r.handles) >= r.maxHandles {
+		r.mu.Unlock()
+		return channels.ScopedVerifierHandle{}, channels.ErrVerificationFailed
+	}
 	r.handles[token] = fakeVerifierState{binding: binding.Clone(), secret: secret, purpose: request.Purpose, expiresAt: request.Candidate.ExpiresAt}
 	r.mu.Unlock()
 	return handle, nil
@@ -140,6 +155,7 @@ func (r *FakeCandidateResolver) Verify(ctx context.Context, handle channels.Scop
 	}
 	now := r.nowUTC()
 	r.mu.Lock()
+	r.pruneHandlesLocked(now)
 	state, exists := r.handles[handle.Token()]
 	delete(r.handles, handle.Token())
 	r.mu.Unlock()
@@ -234,6 +250,14 @@ func newFakeHandleToken() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(value[:]), nil
+}
+
+func (r *FakeCandidateResolver) pruneHandlesLocked(now time.Time) {
+	for token, state := range r.handles {
+		if !now.Before(state.expiresAt) {
+			delete(r.handles, token)
+		}
+	}
 }
 
 func (r *FakeCandidateResolver) nowUTC() time.Time {
