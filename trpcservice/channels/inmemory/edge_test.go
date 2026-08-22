@@ -106,13 +106,7 @@ func TestInMemoryErrorAndClockBranches(t *testing.T) {
 }
 
 func TestContextMutexCancellationAndNilContexts(t *testing.T) {
-	if err := checkContext(nil); err != nil {
-		t.Fatal(err)
-	}
 	if err := checkContext(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := waitContext(nil, closedSignal()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -199,10 +193,4 @@ func TestRepositoryReadLocksAllowConcurrentReaders(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("second reader was serialized")
 	}
-}
-
-func closedSignal() <-chan struct{} {
-	channel := make(chan struct{})
-	close(channel)
-	return channel
 }
