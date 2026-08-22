@@ -105,6 +105,101 @@
 | IM 接入 | OpenClaw Gateway + Channel | 微信 / 企业微信等通道与租户绑定 |
 | 可观测性 | OpenTelemetry tracing / metrics | 租户维度审计、成本与合规 |
 
+## 实现进度清单
+
+> 本清单用于跟踪 README 所述平台能力的工程落地情况。`[x]` 表示已经实现并有代码或测试支撑，`[ ]` 表示尚待完成；设计文档完成不等同于对应生产代码已经实现。
+
+### 工程基础
+
+- [x] 建立 Go module、命令行入口和基础目录结构
+- [x] 提供构建、启动、停止、格式化、静态检查和覆盖率脚本
+- [x] 配置 Go CI、Codecov 和 MkDocs 文档 CI
+- [ ] 将命令行入口改造成持续运行的服务，并支持优雅停机
+- [ ] 增加 Dockerfile、Docker Compose 最小部署和 Kubernetes 生产部署清单
+- [ ] 增加配置示例、环境变量说明和可验证的端到端快速开始
+
+### 多租户控制面
+
+- [x] 实现租户根模型、配额、审计保留策略、脱敏级别和生命周期状态
+- [x] 实现租户配置校验、乐观锁版本和状态转换规则
+- [x] 定义租户 Repository 接口并提供并发安全的 InMemory 实现
+- [x] 实现不可变运行时配置快照和带租户命名空间的 Runner 用户/会话身份
+- [x] 覆盖租户隔离、并发更新、Context 取消和运行时边界测试
+- [ ] 实现 PostgreSQL/MySQL 租户 Repository 和数据库 migration
+- [ ] 实现 Agent App、Agent Version、Channel Binding 和 Backend Profile 领域模型
+- [ ] 实现租户、Agent、通道和后端配置的 Admin API
+- [ ] 实现配置发布、缓存失效、租户级灰度和版本回滚
+- [ ] 接入 KMS/Secret Manager，禁止密钥进入运行时快照、日志和 trace
+
+### Gateway 与 Agent Worker
+
+- [ ] 引入并初始化 tRPC-Agent-Go，建立可执行的 `runner.Runner`
+- [ ] 实现 Agent Registry，按 `tenant_id + agent_app_id + version` 加载 Agent
+- [ ] 实现 Gateway 的鉴权、租户解析、Agent 路由、限流和请求去重
+- [ ] 实现普通及流式对话 API，并贯穿 `request_id` / `trace_id`
+- [ ] 实现无状态 Worker 和基于共享 Session/Memory 后端的水平扩展
+- [ ] 实现 `context.Context` 取消、Runner Event 通道排空和 goroutine 生命周期管理
+- [ ] 实现健康检查、readiness、优雅摘流和服务关闭
+
+### 数据模型、多后端与同步
+
+- [x] 完成 Tenant 根模型的 PostgreSQL DDL、约束、生命周期和框架映射设计
+- [ ] 补齐 agent app、channel binding、session、event、memory、summary、artifact 和 audit log 的可执行 DDL
+- [ ] 定义 Session、Memory、Summary、Knowledge、Artifact 和 Audit 的统一访问接口
+- [ ] 实现租户级 Backend Registry/Factory 和后端路由
+- [ ] 接入 InMemory、Redis 及 PostgreSQL/MySQL Session 后端
+- [ ] 接入至少一种向量库和一种对象存储
+- [ ] 实现同一 Session 并发写入的版本/CAS/事务控制和事件序号
+- [ ] 明确并实现 event、state、summary 的更新顺序及冲突重放
+- [ ] 实现 Memory 写入后的跨节点可见性和异步向量索引
+- [ ] 实现 Redis 到 SQL、以及本地到远端向量库的租户级迁移流程
+- [ ] 实现全量复制、双写、增量追平、校验、切读和回滚工具
+
+### IM Channel Adapter
+
+- [ ] 定义统一 Channel Adapter、入站消息和出站回复接口
+- [ ] 实现外部消息到 `model.Message` / `runner.Runner.Run` 的转换
+- [ ] 实现 Runner Event 到文本、流式消息和卡片消息的转换
+- [ ] 接入企业微信或微信相关通道
+- [ ] 再接入至少一种不同 IM 通道，例如 Telegram
+- [ ] 实现 webhook 验签、账号与租户绑定、用户身份映射
+- [ ] 使用 `tenant + channel + message_id` 实现幂等去重和缓存回复
+- [ ] 实现单聊/群聊 Session ID 规则及跨群、跨租户隔离
+- [ ] 处理消息分段、频率限制、异步回复、图片/文件、撤回和失败重试
+- [ ] 增加重复投递、乱序、验签失败和跨租户访问测试
+
+### 治理、安全与可观测性
+
+- [ ] 使用 Plugin / Guardrail / Callbacks 实现租户级治理链
+- [ ] 实现工具白名单、调用前鉴权、密钥注入和危险操作二次确认
+- [ ] 实现 IM 用户权限校验、敏感信息脱敏和租户级预算控制
+- [ ] 实现包含 README 指定字段的不可篡改审计日志
+- [ ] 接入 OpenTelemetry tracing、metrics 和结构化日志
+- [ ] 串联 IM callback、Gateway、Runner、Model、Tool、Storage 和 IM reply 的 trace
+- [ ] 采集请求量、延迟、错误率、IM 成功率、token、成本和后端延迟指标
+- [ ] 提供租户级 dashboard、告警规则并控制指标 label 基数
+
+### 可靠性、运维与测试
+
+- [ ] 实现模型、工具、数据库和 IM 故障的超时、重试、熔断及降级策略
+- [ ] 实现 IM 异步重试队列、指数退避和死信处理
+- [ ] 完成容量模型，并对并发 Session、Redis/SQL QPS 和 IM 峰值进行压测
+- [ ] 完成备份恢复、故障演练和租户级发布回滚流程
+- [ ] 增加 Storage Adapter 契约测试和端到端消息链路测试
+- [ ] 增加多租户越权、密钥泄漏、并发一致性和故障注入测试
+- [ ] 在 CI 中运行 `go test -race ./...`，并设置有效覆盖率门槛
+- [ ] 增加依赖漏洞、镜像和提交密钥扫描
+
+### 设计交付物
+
+- [ ] 将架构设计扩充为 2000–4000 字的完整方案
+- [ ] 补全包含 Gateway、Worker、Channel、Storage、Guardrail、Telemetry 和外部系统的架构图
+- [ ] 补全“企业微信消息 → Agent → Tool → Session/Memory → IM 回复”核心时序图
+- [ ] 完成数据同步、消息幂等和多后端一致性取舍专项说明
+- [ ] 对比至少两种 IM 通道的协议、限制和回复机制
+- [ ] 列出至少 8 个生产风险及对应缓解措施
+- [ ] 持续标注可直接复用的 tRPC-Agent-Go 能力与平台新增模块边界
+
 ## 代码目录
 
 下面只是一个示范目录，用来说明平台需要覆盖的职责分层。实现时不必严格按这个结构组织代码，只要模块边界清晰、能对应到设计方案即可。
