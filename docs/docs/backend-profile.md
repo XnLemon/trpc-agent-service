@@ -491,8 +491,10 @@ DECLARE
     v_default_profile_id TEXT;
     v_previous_status TEXT;
     v_previous_version BIGINT;
+    v_previous_updated_at TIMESTAMPTZ;
     v_digest TEXT;
     v_next_version BIGINT;
+    v_occurred_at TIMESTAMPTZ;
 BEGIN
     -- All operations that change Tenant defaults or Profile status use the
     -- same Tenant -> Profile lock order.
@@ -504,8 +506,8 @@ BEGIN
         RAISE EXCEPTION 'tenant does not exist';
     END IF;
 
-    SELECT status, version, content_digest
-    INTO v_previous_status, v_previous_version, v_digest
+    SELECT status, version, updated_at, content_digest
+    INTO v_previous_status, v_previous_version, v_previous_updated_at, v_digest
     FROM public.backend_profile
     WHERE tenant_id = p_tenant_id AND profile_id = p_profile_id
     FOR UPDATE;
@@ -551,10 +553,14 @@ BEGIN
         RAISE EXCEPTION 'tenant default backend profile must be switched first';
     END IF;
 
+    -- now() is fixed at transaction start and may predate a lock wait. Capture
+    -- wall-clock time once after validation and never move updated_at backwards.
+    v_occurred_at := GREATEST(clock_timestamp(), v_previous_updated_at);
+
     UPDATE public.backend_profile
     SET status = p_next_status,
         version = version + 1,
-        updated_at = now()
+        updated_at = v_occurred_at
     WHERE tenant_id = p_tenant_id
       AND profile_id = p_profile_id
       AND version = p_expected_version
@@ -568,7 +574,7 @@ BEGIN
         previous_status, current_status,
         previous_digest, current_digest,
         actor_type, actor_id, reason, correlation_id,
-        previous_version, next_version
+        previous_version, next_version, occurred_at
     ) VALUES (
         CASE p_next_status
             WHEN 'suspended' THEN 'suspended'
@@ -579,7 +585,7 @@ BEGIN
         v_previous_status, p_next_status,
         v_digest, v_digest,
         p_actor_type, p_actor_id, p_reason, p_correlation_id,
-        v_previous_version, v_next_version
+        v_previous_version, v_next_version, v_occurred_at
     );
     RETURN v_next_version;
 END;
@@ -592,6 +598,9 @@ GRANT EXECUTE ON FUNCTION transition_backend_profile_status(
     TEXT, TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, TEXT
 ) TO tenant_admin_writer;
 ```
+
+SQL adapter 集成测试必须让一个早启动事务等待 Tenant/Profile 锁，证明提交后的 `updated_at` 不早于
+锁内读取的前一版本时间，且根记录与 Outbox `occurred_at` 使用同一个时间值。
 
 停用 Tenant 默认 Profile 时，Admin 编排事务必须先切换或清空
 `tenant.default_backend_profile_id`，否则拒绝停用。所有相关 SQL 路径统一使用“先锁 Tenant，
