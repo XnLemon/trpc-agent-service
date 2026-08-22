@@ -71,6 +71,23 @@ func TestNewProfileNormalizesConfiguration(t *testing.T) {
 	}
 }
 
+func TestNewProfileNormalizesUnicodeWhitespace(t *testing.T) {
+	catalog := newTestCatalog(t)
+	profile, err := NewProfile(CreateInput{
+		TenantID: testTenantID, ProfileKey: "unicode", DisplayName: "\u00a0Primary\u2003",
+		Description: "\u202fDescription\u3000", Bindings: sessionBinding(),
+	}, catalog)
+	if err != nil {
+		t.Fatalf("NewProfile() error = %v", err)
+	}
+	if profile.DisplayName != "Primary" || profile.Description != "Description" {
+		t.Fatalf("Unicode metadata was not normalized: display=%q description=%q", profile.DisplayName, profile.Description)
+	}
+	if err := profile.Validate(catalog); err != nil {
+		t.Fatalf("Profile.Validate() error = %v", err)
+	}
+}
+
 func TestProfileLifecycleAndSessionInvariant(t *testing.T) {
 	catalog := newTestCatalog(t)
 	memoryOnly := []CapabilityBinding{{Capability: CapabilityMemory, Provider: "inmemory"}}

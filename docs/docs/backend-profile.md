@@ -252,6 +252,20 @@ Factory 函数或任意 `any` 字段。其 `SecretRef` 仍只是引用；后续 
 以下 DDL 描述完整性和事务边界，本 Issue 不将其落成 migration。
 
 ```sql
+-- Match Go strings.TrimSpace/unicode.IsSpace for every boundary field that
+-- crosses between the SQL adapter and the Go Repository/runtime.
+CREATE OR REPLACE FUNCTION public.trim_backend_profile_text(value TEXT)
+RETURNS TEXT
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+AS $$
+    SELECT pg_catalog.btrim(
+        value,
+        U&'\0009\000A\000B\000C\000D\0020\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000'
+    )
+$$;
+
 CREATE TABLE backend_profile (
     tenant_id      TEXT NOT NULL REFERENCES tenant(tenant_id),
     profile_id     TEXT NOT NULL
@@ -259,10 +273,10 @@ CREATE TABLE backend_profile (
     profile_key    TEXT NOT NULL
                    CHECK (profile_key ~ '^[a-z][a-z0-9-]{1,63}$'),
     display_name   TEXT NOT NULL
-                   CHECK (display_name = btrim(display_name)
+                   CHECK (display_name = public.trim_backend_profile_text(display_name)
                           AND length(display_name) BETWEEN 1 AND 200),
     description    TEXT NOT NULL DEFAULT ''
-                   CHECK (description = btrim(description)
+                   CHECK (description = public.trim_backend_profile_text(description)
                           AND length(description) <= 2000),
     status         TEXT NOT NULL DEFAULT 'active'
                    CHECK (status IN ('active', 'suspended', 'disabled')),
@@ -325,10 +339,18 @@ CREATE TABLE backend_profile_change_outbox (
                       CHECK (current_status IN ('active', 'suspended', 'disabled')),
     previous_digest   TEXT,
     current_digest    TEXT NOT NULL CHECK (current_digest ~ '^[0-9a-f]{64}$'),
-    actor_type        TEXT NOT NULL CHECK (length(btrim(actor_type)) > 0),
-    actor_id          TEXT NOT NULL CHECK (length(btrim(actor_id)) > 0),
-    reason            TEXT NOT NULL CHECK (length(btrim(reason)) BETWEEN 1 AND 1000),
-    correlation_id    TEXT NOT NULL CHECK (length(btrim(correlation_id)) > 0),
+    actor_type        TEXT NOT NULL
+                      CHECK (actor_type = public.trim_backend_profile_text(actor_type)
+                             AND length(actor_type) > 0),
+    actor_id          TEXT NOT NULL
+                      CHECK (actor_id = public.trim_backend_profile_text(actor_id)
+                             AND length(actor_id) > 0),
+    reason            TEXT NOT NULL
+                      CHECK (reason = public.trim_backend_profile_text(reason)
+                             AND length(reason) BETWEEN 1 AND 1000),
+    correlation_id    TEXT NOT NULL
+                      CHECK (correlation_id = public.trim_backend_profile_text(correlation_id)
+                             AND length(correlation_id) > 0),
     previous_version  BIGINT NOT NULL CHECK (previous_version >= 0),
     next_version      BIGINT NOT NULL CHECK (next_version = previous_version + 1),
     occurred_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -503,10 +525,10 @@ DECLARE
     v_reason TEXT;
     v_correlation_id TEXT;
 BEGIN
-    v_actor_type := btrim(p_actor_type);
-    v_actor_id := btrim(p_actor_id);
-    v_reason := btrim(p_reason);
-    v_correlation_id := btrim(p_correlation_id);
+    v_actor_type := public.trim_backend_profile_text(p_actor_type);
+    v_actor_id := public.trim_backend_profile_text(p_actor_id);
+    v_reason := public.trim_backend_profile_text(p_reason);
+    v_correlation_id := public.trim_backend_profile_text(p_correlation_id);
 
     -- All operations that change Tenant defaults or Profile status use the
     -- same Tenant -> Profile lock order.

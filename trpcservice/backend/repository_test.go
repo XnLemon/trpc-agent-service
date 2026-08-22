@@ -216,6 +216,26 @@ func TestChangeMetadataReasonLimit(t *testing.T) {
 	}
 }
 
+func TestChangeMetadataNormalizesUnicodeWhitespace(t *testing.T) {
+	metadata := ChangeMetadata{
+		ActorType: "\u00a0admin\u2003", ActorID: "\u202fuser-1\u3000",
+		Reason: "\u205freason\u00a0", CorrelationID: "\u1680request-1\u0085",
+	}
+	normalized, err := normalizeChangeMetadata(metadata)
+	if err != nil {
+		t.Fatalf("Unicode metadata error = %v", err)
+	}
+	want := ChangeMetadata{ActorType: "admin", ActorID: "user-1", Reason: "reason", CorrelationID: "request-1"}
+	if normalized != want {
+		t.Fatalf("normalized metadata = %#v, want %#v", normalized, want)
+	}
+
+	metadata.Reason = "\u00a0"
+	if _, err := normalizeChangeMetadata(metadata); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("all-Unicode-whitespace reason error = %v", err)
+	}
+}
+
 func repositoryMetadata() ChangeMetadata {
 	return ChangeMetadata{ActorType: " admin ", ActorID: " user-1 ", Reason: " test ", CorrelationID: " request-1 "}
 }
