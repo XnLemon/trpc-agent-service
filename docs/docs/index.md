@@ -17,6 +17,9 @@
   固定模型解析、密钥边界、Execution Plan 和 tRPC-Agent-Go Runner 的纵向契约。
 - [生产架构设计](architecture.md)：Issue #24 的控制面/数据面拓扑、可信 Channel Binding、
   企业微信全链路、幂等、迁移和能力边界设计。文档交付不等于对应生产代码已实现。
+- [Gateway、Execution Plan 与 HTTP/SSE](gateway.md)：对齐 PR #25 架构验收与 Issue #26
+  可信主体，定义 Issue #28 的 Resolver、Runner Registry、Dispatch、普通/SSE API、
+  限流、幂等和服务生命周期契约。
 
 ## 快速开始
 
@@ -39,6 +42,8 @@ cd trpc-agent-service
 - [架构设计](architecture.md) — 组件拓扑、可信路由、消息链路、数据同步和多后端迁移
 - [数据模型](data-model.md) — 核心表结构、Session/Event/Memory/Summary/Audit 和租户约束
 - [Channel Binding](channel-binding.md) — 租户级通道绑定、候选发现与可信入站路由
+- [Gateway、Execution Plan 与 HTTP/SSE](gateway.md) — 可信主体、固定执行计划、Runner Registry、
+  Dispatch、健康检查、优雅停机和普通/流式 API
 - [运维方案](ops.md) — 发布灰度、监控审计、故障恢复、容量模型和生产风险清单
 
 ## CI

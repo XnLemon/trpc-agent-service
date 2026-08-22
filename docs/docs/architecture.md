@@ -1,6 +1,6 @@
 # 生产架构设计
 
-> 本页完成 Issue #24 的生产架构设计闭环。它定义后续 Channel Binding、Gateway、
+> 本页对应已合并的 PR #25（Issue #24）的生产架构设计闭环。它定义后续 Channel Binding、Gateway、
 > IM Adapter 和持久化 Adapter 的边界，但不把这些设计目标误写成已经存在的生产代码。
 
 ## 阅读约定与设计结论
@@ -9,12 +9,14 @@
 
 - **现有实现**：当前仓库已经有领域模型、测试或最小运行时代码支撑，例如 Tenant、Agent
   App/Revision、Model Profile、Backend Profile、Secret Resolver 接口、Execution Plan 和
-  最小 tRPC-Agent-Go Runner/Session 作用域。
+  最小 tRPC-Agent-Go Runner/Session 作用域；Issue #26 已把 Channel Binding 可信边界落成
+  可执行代码，Issue #28 的 Gateway 契约见 [Gateway、Execution Plan 与 HTTP/SSE](gateway.md)。
 - **可复用能力**：直接依赖 tRPC-Agent-Go 的 Runner、Agent、Tool/MCP、Session、Memory、
   Knowledge、Artifact、Plugin/Guardrail、OpenTelemetry 或 OpenClaw Channel 边界；上游
   能力存在不代表平台已经接入真实 provider。
 - **平台新增**：本平台必须实现的租户路由、控制面、绑定、幂等、队列、策略、审计和真实
-  Adapter。Issue #24 只交付设计，不实现这些模块。
+  Adapter。PR #25 只交付设计；Issue #26 已实现绑定领域/可信路由，Gateway、队列、策略、
+  审计和真实 Adapter 仍按后续 Issue 分阶段交付。
 
 本方案的核心结论是：Channel Adapter 只负责协议适配和可信入站证明，Gateway 负责租户和
 应用路由，Worker 负责一次固定快照的执行，Storage Adapter 负责显式租户分区；四者不能
@@ -37,11 +39,11 @@ Model Profile 和 Backend Profile，构造一个带版本、摘要和租户边�
 | 组件 | 主要职责 | 调用方向 | 状态 |
 | --- | --- | --- | --- |
 | Admin API | 租户、App、Profile、Binding 的管理、发布、回滚、审计入口 | Admin API → 控制面 Repository | 控制面模型已实现；HTTP API 为平台新增 |
-| Config/Registry | 版本校验、同租户引用、Factory/Storage 注册和缓存失效 | 控制面 → Gateway/Worker 快照 | Registry/快照边界已有；分布式缓存为平台新增 |
+| Config/Registry | 版本校验、同租户引用、Factory/Storage 注册和缓存失效 | 控制面 → Gateway/Worker 快照 | Execution Plan/快照边界已有；Issue #28 交付进程内 Runner Registry，分布式失效仍为后续工作 |
 | Secret Resolver | 公开入站用不含 `tenant_id` 的 `CandidateBindingContext` 返回一次性验签 handle；验签后按固定 Tenant/Profile 作用域解析执行 Secret | Adapter/Gateway → Resolver；Resolver 不反向选租户 | Resolver 接口已有；candidate-scoped API、KMS/Secret Manager 为平台新增 |
 | Channel Adapter | 解析供应商回调、校验协议、验签/解密、转换统一消息和出站回复 | IM ↔ Adapter ↔ Gateway | 包占位；真实 WeCom/Telegram Adapter 为平台新增 |
-| Agent Gateway | 限流、候选绑定路由、可信租户建立、幂等记录、快照装配和队列投递 | Adapter → Gateway → Worker/Queue | 平台新增 |
-| Agent Worker | 消费固定执行计划，调用 Runner、Model、Tool 和 Storage，生成回复事件 | Gateway/Queue → Worker → 上游能力 | 最小 Runner spine 已有；服务化 Worker 为平台新增 |
+| Agent Gateway | 限流、候选绑定路由、可信租户建立、幂等记录、快照装配和队列投递 | Adapter → Gateway → Worker/Queue | Issue #28 文档契约；实现阶段交付 HTTP/API 与 Channel principal 入口，真实队列仍为后续工作 |
+| Agent Worker | 消费固定执行计划，调用 Runner、Model、Tool 和 Storage，生成回复事件 | Gateway/Queue → Worker → 上游能力 | 最小 Runner spine 已有；Issue #28 交付进程内 Dispatch/HTTP，独立 Worker 为后续工作 |
 | Runner/Agent/Model | Agent 编排、模型调用、Tool/MCP、Event 和 context 取消 | Worker → tRPC-Agent-Go | 直接复用；当前已有最小 LLMAgent/Runner 装配 |
 | Plugin/Guardrail/Callback | 输入、工具、输出治理和生命周期回调 | Worker → 策略链 → Runner/Tool/Storage | 上游能力可复用；租户策略编排为平台新增 |
 | Storage Adapter | Session、Event、State、Summary、Memory、Knowledge、Artifact、Audit 的租户分区 | Worker → Storage Adapter → provider | Profile/Catalog 输入边界已有；真实 Adapter 为平台新增 |
@@ -569,7 +571,7 @@ deadline 或 supervisor，不能把 `context.Context` 存成无限生命周期�
 | 能力 | 当前仓库/上游可复用 | Issue #24 后仍需实现 |
 | --- | --- | --- |
 | Tenant/App/Revision/Profile 生命周期、版本和摘要 | 当前 Go 领域模型、InMemory Repository、快照测试 | SQL migration、Admin HTTP API、分布式失效 |
-| Model/Secret/ExecutionPlan/Runner spine | `model`、`runtime` 包和 tRPC-Agent-Go Runner | 真实 Secret Manager、Agent Registry、Worker 服务 |
+| Model/Secret/ExecutionPlan/Runner spine | `model`、`runtime` 包和 tRPC-Agent-Go Runner；Issue #28 复用 Resolver/Runner spine | 真实 Secret Manager、分布式 Registry、独立 Worker 服务 |
 | Session 用户命名空间 | tRPC-Agent-Go Session + TenantSessionService | Redis/SQL adapter、CAS/序号、跨节点 conformance test |
 | IM 消息抽象 | OpenClaw Channel 模型可作为参考 | Channel Binding、WeCom/Telegram 验签、身份映射和回复队列 |
 | Tool/Memory/Knowledge/Artifact/Telemetry | tRPC-Agent-Go 对应接口和 OTel | 租户路由、统一 Storage Adapter、审计/成本和策略链 |
@@ -578,11 +580,12 @@ deadline 或 supervisor，不能把 `context.Context` 存成无限生命周期�
 
 ```text
 Production architecture design (本页)
-  └── Channel Binding + trusted inbound routing
-        └── HTTP Gateway / streaming API
+  └── Channel Binding + trusted inbound routing (Issue #26)
+        └── HTTP Gateway / streaming API (Issue #28)
               └── WeCom adapter + idempotency/reply retry
                     └── persistent repositories and production adapters
 ```
 
-Issue #24 的文档交付完成后，README 只勾选设计交付物；Channel Binding、Gateway、真实 IM/Storage
-Adapter、KMS、迁移工具、Dashboard 和告警规则仍保持未实现状态，避免文档进度掩盖工程边界。
+PR #25 的文档交付已完成，Issue #26 的 Channel Binding 领域与可信路由已实现；在 Issue #28
+代码验收完成前，README 不勾选 Gateway 的持续服务、Registry 或 HTTP/SSE 能力，避免文档
+进度掩盖工程边界。
