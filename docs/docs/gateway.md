@@ -143,18 +143,36 @@ SSE 每个事件使用稳定的 `event:` 类型和 JSON `data:`，以明确 `don
 - 按可信 principal + external message ID 定义 InMemory 幂等接口；重复请求返回已有
   结果或稳定冲突，不再次启动 Runner。该实现不承诺跨节点或重启后的持久化保证。
 
-## 8. 与 PR #25 验收的对齐表
+## 8. PR #25 / Issue #24 验收对齐
 
-| PR #25 架构验收 | Issue #28 交付证明 |
-| --- | --- |
-| Control/Data Plane 分离、固定快照 | Resolver 只从可信 principal 装配 `ExecutionPlan`；Dispatch 不重新读取配置 |
-| Worker 无状态、共享 Session | Runner 借用 Tenant-scoped Session；Registry 不保存会话真相 |
-| Channel Adapter 不绕过 Gateway | Channel principal 只能来自 Issue #26 `RoutingTarget` |
-| request/trace/message/idempotency 关联 | HTTP response、SSE、Dispatch 和幂等接口分别保留三类 ID |
-| 有界取消、Event 排空、资源所有权 | Dispatch、Registry、Server shutdown 的取消/lease/close 测试 |
-| Secret 不进入快照、日志、错误和 cache key | 复用现有 secret-free Factory input；HTTP 错误统一脱敏 |
+PR #25 已在合并 head `75d857bc5ad07ebc162c26817064532afd15a46e` 完成 Issue #24
+的架构设计验收。下表把该已验收基线映射到 Issue #28 的实现边界；它不把 PR #25
+的设计交付重新声称为运行时代码，也不把 Issue #28 的 InMemory 证明扩大为生产能力。
 
-## 9. 离线验收矩阵
+| PR #25 验收组 | 已验收的基线证据 | Issue #28 的对齐边界 |
+| --- | --- | --- |
+| 架构职责、控制面/数据面和部署拓扑 | `architecture.md`、架构图和部署章节 | Gateway 只编排可信主体、固定 Plan 与执行；真实部署仍不在本 Issue |
+| WeCom 核心时序与 IM 协议 | `architecture.md`、`channel-binding.md` 和 WeCom/Telegram 对比 | #26 提供可信 Channel 来源；#28 不实现真实 webhook 或 IM Adapter |
+| 数据模型、同步、顺序与幂等 | `data-model.md`、`ops.md` 的状态机和迁移约束 | #28 只证明单进程 InMemory 幂等/限流；不宣称持久化或跨节点语义 |
+| 多后端矩阵与迁移回滚 | `backend-profile.md`、架构文档中的一致性/迁移矩阵 | ExecutionPlan 固定 Backend 版本与 digest；Redis/SQL/向量迁移仍是后续能力 |
+| 治理、观测、故障恢复 | `ops.md` 的策略链、审计、trace、重试和恢复 runbook | #28 先落实错误脱敏、Context 取消、Event 排空和资源关闭；不声称生产 telemetry |
+| 生产风险清单 | `ops.md` 的 11 项风险及缓解措施 | 每个代码阶段只勾选有测试证明的局部风险控制，不回填设计之外的生产承诺 |
+| 核心安全与版本约束 | PR #25 checklist、#26 trusted routing、secret-free snapshot 设计 | #28 保持 principal provenance、租户隔离、完整 CacheKey 与 Secret 不出边界 |
+| README、导航、渲染和 CI 验收 | 已合并 PR #25 的 README/MkDocs/CI 验证记录 | README 只跟随 #28 实际代码阶段更新，不把设计项提前标为完成 |
+
+## 9. 下一代码阶段 ledger：Runner Registry 与 Dispatch
+
+文档先行的 Stage 2 只覆盖进程内 Runner Registry 和协议无关 Dispatch；完成后才将
+下面项目从 `[ ]` 改为 `[x]`，并把测试命令与 exact head 写入 PR ledger：
+
+- [ ] 使用完整 `ExecutionPlan.CacheKey()` 做 Runner 查找，不能按 Tenant/App 的部分字段共享。
+- [ ] 合并同 key 的并发构造，构造失败不缓存半成品，并区分借用依赖与 Registry 自有 Runner。
+- [ ] 提供引用计数 lease、Invalidate、空闲/容量淘汰和有界 Close；在途请求释放前不得关闭 Runner。
+- [ ] Dispatch 只接收已验证 Principal 与规范化 `InboundMessage`，生成 Binding/API-aware identity，传递 request ID 和取消 Context。
+- [ ] 以脱敏的文本、状态、错误、done 事件消费 Runner Event；取消或关闭时有界排空并释放 lease。
+- [ ] 用并发、跨租户、版本失效、构造失败、取消、淘汰和关闭回归测试证明上述边界。
+
+## 10. 离线验收矩阵
 
 使用 InMemory Tenant/Agent/Model/Backend Repository、fake Authenticator、Issue #26
 fake verified binding、fake Secret Resolver、fake Model Factory、InMemory Session 和
