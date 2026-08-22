@@ -113,12 +113,14 @@ goroutine；排空超时只产生脱敏的取消/关闭结果。
 
 ## 6. HTTP API
 
-本阶段提供两个最小 endpoint：
+本阶段提供两个最小对话 endpoint，以及一组独立的存活/就绪 endpoint：
 
 | Endpoint | 成功响应 | 失败/取消 |
 | --- | --- | --- |
 | `POST /v1/chat` | `application/json`，返回 `request_id`、最终文本和受控执行状态 | 在发送响应前写一次 HTTP status；脱敏 JSON error |
 | `POST /v1/chat/stream` | `text/event-stream`，输出规范化 `message`、`status`、`error`、`done` 事件 | partial stream 后只写 SSE error/terminal，不再写第二个 HTTP status |
+| `GET /healthz` | `200` 表示进程存活 | 进程无法提供存活检查时返回失败 |
+| `GET /readyz` | `200` 表示 Resolver、Registry 和 Runner 构造依赖已就绪 | 依赖未加载或服务正在摘流时返回失败 |
 
 请求使用严格 JSON decoder：未知字段、空/过大 body、非 text 内容、超长文本和缺失
 可信主体/消息身份都失败关闭。服务端生成或校验 `request_id`，只接受有效 tracing
