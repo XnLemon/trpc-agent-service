@@ -259,8 +259,11 @@ CREATE TABLE backend_profile (
     profile_key    TEXT NOT NULL
                    CHECK (profile_key ~ '^[a-z][a-z0-9-]{1,63}$'),
     display_name   TEXT NOT NULL
-                   CHECK (length(btrim(display_name)) BETWEEN 1 AND 200),
-    description    TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 2000),
+                   CHECK (display_name = btrim(display_name)
+                          AND length(display_name) BETWEEN 1 AND 200),
+    description    TEXT NOT NULL DEFAULT ''
+                   CHECK (description = btrim(description)
+                          AND length(description) <= 2000),
     status         TEXT NOT NULL DEFAULT 'active'
                    CHECK (status IN ('active', 'suspended', 'disabled')),
     schema_version INT NOT NULL DEFAULT 1 CHECK (schema_version = 1),
@@ -495,7 +498,16 @@ DECLARE
     v_digest TEXT;
     v_next_version BIGINT;
     v_occurred_at TIMESTAMPTZ;
+    v_actor_type TEXT;
+    v_actor_id TEXT;
+    v_reason TEXT;
+    v_correlation_id TEXT;
 BEGIN
+    v_actor_type := btrim(p_actor_type);
+    v_actor_id := btrim(p_actor_id);
+    v_reason := btrim(p_reason);
+    v_correlation_id := btrim(p_correlation_id);
+
     -- All operations that change Tenant defaults or Profile status use the
     -- same Tenant -> Profile lock order.
     SELECT default_backend_profile_id INTO v_default_profile_id
@@ -523,10 +535,10 @@ BEGIN
         RAISE EXCEPTION 'backend profile version conflict';
     END IF;
 
-    IF p_actor_type IS NULL OR length(btrim(p_actor_type)) = 0
-       OR p_actor_id IS NULL OR length(btrim(p_actor_id)) = 0
-       OR p_correlation_id IS NULL OR length(btrim(p_correlation_id)) = 0
-       OR p_reason IS NULL OR length(btrim(p_reason)) NOT BETWEEN 1 AND 1000 THEN
+    IF v_actor_type IS NULL OR length(v_actor_type) = 0
+       OR v_actor_id IS NULL OR length(v_actor_id) = 0
+       OR v_correlation_id IS NULL OR length(v_correlation_id) = 0
+       OR v_reason IS NULL OR length(v_reason) NOT BETWEEN 1 AND 1000 THEN
         RAISE EXCEPTION 'backend profile transition requires valid audit metadata';
     END IF;
 
@@ -584,7 +596,7 @@ BEGIN
         p_tenant_id, p_profile_id,
         v_previous_status, p_next_status,
         v_digest, v_digest,
-        p_actor_type, p_actor_id, p_reason, p_correlation_id,
+        v_actor_type, v_actor_id, v_reason, v_correlation_id,
         v_previous_version, v_next_version, v_occurred_at
     );
     RETURN v_next_version;

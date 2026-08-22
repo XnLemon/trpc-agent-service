@@ -191,6 +191,23 @@ func TestPrepareStatusChangeMapsTerminalEventsAndResumeRequiresSession(t *testin
 	}
 }
 
+func TestDisabledProfileWithoutBindingsRemainsTerminal(t *testing.T) {
+	catalog := newTestCatalog(t)
+	disabled := newTestProfile(t, catalog)
+	disabled.Status = StatusDisabled
+	disabled.Bindings = nil
+	disabled.ContentDigest = contentDigest(disabled.SchemaVersion, disabled.Bindings)
+
+	update := repositoryUpdateInput(disabled)
+	if _, _, err := PrepareConfigurationChange(*disabled, update, catalog, disabled.UpdatedAt.Add(time.Second)); !errors.Is(err, ErrDisabled) {
+		t.Fatalf("configuration mutation error = %v, want ErrDisabled", err)
+	}
+	transition := repositoryTransitionInput(disabled, StatusActive)
+	if _, _, err := PrepareStatusChange(*disabled, transition, catalog, disabled.UpdatedAt.Add(time.Second)); !errors.Is(err, ErrDisabled) {
+		t.Fatalf("status mutation error = %v, want ErrDisabled", err)
+	}
+}
+
 func TestChangeMetadataReasonLimit(t *testing.T) {
 	metadata := repositoryMetadata()
 	metadata.Reason = strings.Repeat("界", 1001)

@@ -242,13 +242,13 @@ func normalizeConfiguration(schemaVersion int, bindings []CapabilityBinding, cat
 	if err != nil {
 		return nil, "", err
 	}
-	if len(normalized) == 0 {
-		return nil, "", fmt.Errorf("%w: at least one capability binding is required", ErrInvalid)
-	}
 	return normalized, contentDigest(schemaVersion, normalized), nil
 }
 
 func validateLifecycleConfiguration(status Status, bindings []CapabilityBinding) error {
+	if status != StatusDisabled && len(bindings) == 0 {
+		return fmt.Errorf("%w: non-disabled profile requires at least one capability binding", ErrInvalid)
+	}
 	if status == StatusActive && !hasCapability(bindings, CapabilitySession) {
 		return fmt.Errorf("%w: active profile requires a session binding", ErrInvalid)
 	}

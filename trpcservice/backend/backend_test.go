@@ -104,6 +104,15 @@ func TestProfileLifecycleAndSessionInvariant(t *testing.T) {
 	if err := active.Validate(catalog); err != nil {
 		t.Fatalf("disabled retained Profile should validate: %v", err)
 	}
+	disabledWithoutBindings := active.Clone()
+	disabledWithoutBindings.Bindings = nil
+	disabledWithoutBindings.ContentDigest = contentDigest(disabledWithoutBindings.SchemaVersion, disabledWithoutBindings.Bindings)
+	if err := disabledWithoutBindings.Validate(catalog); err != nil {
+		t.Fatalf("disabled Profile without bindings should validate: %v", err)
+	}
+	if disabledWithoutBindings.CanAcceptExecution() || disabledWithoutBindings.CanTransitionTo(StatusActive) || disabledWithoutBindings.CanTransitionTo(StatusSuspended) {
+		t.Fatalf("disabled Profile without bindings is not terminal")
+	}
 	if _, err := NewProfile(CreateInput{
 		TenantID: testTenantID, ProfileKey: "disabled", DisplayName: "Disabled",
 		Status: StatusDisabled, Bindings: sessionBinding(),
