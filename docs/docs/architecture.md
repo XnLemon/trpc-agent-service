@@ -213,6 +213,10 @@ Factory 或已授权的连接能力；Secret rotation 不能只依赖 TTL，应�
 
 ## 4. Channel Binding 与可信入站路由
 
+Issue #26 的可执行领域契约、状态转移、PostgreSQL 复合键和离线验证矩阵见
+[Channel Binding 与可信入站路由](channel-binding.md)。本节保留生产架构中的组件职责和
+Gateway 映射，代码阶段只实现文档所列的控制面与可信边界，不实现真实供应商 Adapter。
+
 Channel Binding 是外部账号到同一租户 Agent App 的稳定控制面对象，建议包含：
 
 | 字段 | 语义与约束 |

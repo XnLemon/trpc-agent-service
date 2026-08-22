@@ -165,10 +165,14 @@ type SecretScope struct {
 }
 
 type CandidateBindingContext struct {
-    Provider             string
-    BindingID            string
+    Channel              string
     PublicRouteKeyDigest string
-    CandidateToken       string // opaque, short-lived, contains no trusted tenant_id
+    BindingVersion       int64
+    ConfigDigest         string
+    Purpose              string
+    CandidateToken       string // opaque, short-lived, single-use capability
+    IssuedAt             time.Time
+    ExpiresAt            time.Time
 }
 
 type CandidateSecretRequest struct {
@@ -194,12 +198,14 @@ type ModelFactory interface {
 - `SecretScope` 必须同时包含可信 `tenant_id` 和 `secret_ref`；没有全局 `Resolve(ref)` 入口。
 - `tenant_id` 必须来自已认证的 Tenant snapshot/Execution Plan，而非请求体、header 或模型输出。
 - 公开 route 的验签发生在建立可信 `tenant_id` 之前，不能调用上面的租户级 `Resolve`。Channel
-  Adapter 先用公开 route/provider 查候选 Binding，得到只含 `provider`、`binding_id`、route
-  digest 和短时 opaque `candidate_token` 的 `CandidateBindingContext`；其中不带 `tenant_id`，
-  也不接受请求体自带的 `secret_ref`。`ResolveCandidate` 在全局候选索引内校验 Binding 状态和
-  Secret 引用，返回只供一次验签/解密使用的 `ScopedVerifierHandle`。
-- `CandidateToken` 由 Registry/Resolver 绑定候选 Binding、用途和过期时间后签发；不得由 URL、
-  header、消息正文或候选 `tenant_id` 自行拼接。验签失败不创建租户事件，也不进入租户级存储。
+  Adapter 先用公开 route/channel 查候选 Binding，得到只含 Channel、route digest、固定版本/摘要
+  和短时 opaque `candidate_token` 的 `CandidateBindingContext`；其中不带 `tenant_id`、`app_id`、
+  `secret_ref` 或 Secret 值，也不接受请求体自带的 `secret_ref`。`ResolveCandidate` 在全局候选
+  索引内校验 token 对应的唯一候选、Binding 状态、用途和过期时间，返回只供一次验签/解密使用的
+  `ScopedVerifierHandle`。
+- `CandidateToken` 由 Registry/Resolver 绑定**一个**候选 Binding、用途、签发/过期时间和单次
+  消费边界后签发；不得由 URL、header、消息正文或候选 `tenant_id` 自行拼接。验签失败不创建
+  租户事件，也不进入租户级存储；token 消费后不能重放。
 - 验签成功并加载可信 Tenant snapshot 后，才允许按现有 `SecretScope{TenantID, SecretRef}`
   调用租户级 `Resolve`；候选 handle 和其中的 Secret 值都不得传给 Runner 或领域对象。
 - Resolver 失败返回固定、可分类但不带底层凭据的错误；原始 KMS 错误不能直接进入日志、trace 或响应。
