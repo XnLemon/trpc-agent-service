@@ -142,16 +142,6 @@ func NewScopedVerifierHandle(token string, purpose VerificationPurpose, expiresA
 // must not log, persist, or expose it to a request payload.
 func (h ScopedVerifierHandle) Token() string { return h.token }
 
-func (h ScopedVerifierHandle) validate(now time.Time) error {
-	if h.token == "" || len([]rune(h.token)) > 256 || hasControl(h.token) || h.Purpose.validate() != nil || h.ExpiresAt.IsZero() || h.ExpiresAt.Location() != time.UTC {
-		return ErrVerificationFailed
-	}
-	if !now.IsZero() && now.After(h.ExpiresAt) {
-		return ErrVerificationFailed
-	}
-	return nil
-}
-
 // VerificationRequest is the provider-neutral fake verification input. The
 // route hints are explicitly untrusted and are never copied into VerifiedBinding.
 type VerificationRequest struct {
@@ -284,11 +274,7 @@ func NewRoutingTarget(tenantSnapshot tenant.ConfigurationSnapshot, binding *Bind
 
 // Validate checks the non-secret target identity.
 func (target RoutingTarget) Validate() error {
-	verified := VerifiedBinding{
-		TenantID: target.TenantID, BindingID: target.BindingID, BindingVersion: target.BindingVersion,
-		AppID: target.AppID, Channel: target.Channel, ProviderAccountID: target.ProviderAccountID,
-		ConfigDigest: target.ConfigDigest,
-	}
+	verified := VerifiedBinding(target)
 	return verified.Validate()
 }
 
