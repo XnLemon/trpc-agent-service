@@ -202,7 +202,7 @@ func TestRepositoryContextAndMissingIdentityBoundaries(t *testing.T) {
 	if fetched, err := repository.Get(nilContext, created.TenantID, created.ProfileID); err != nil || fetched == nil {
 		t.Fatalf("nil-context Get = %+v, %v", fetched, err)
 	}
-	updated, _, err := repository.UpdateConfiguration(nil, modelprofile.UpdateConfigurationInput{
+	updated, _, err := repository.UpdateConfiguration(nilContext, modelprofile.UpdateConfigurationInput{
 		TenantID: created.TenantID, ProfileID: created.ProfileID, ExpectedVersion: created.Version,
 		DisplayName: "Nil Context Updated", SchemaVersion: modelprofile.SchemaVersionV1,
 		Configuration: modelprofile.Configuration{Provider: "fake", Model: "deterministic"}, Metadata: inmemoryMetadata(),
@@ -210,7 +210,7 @@ func TestRepositoryContextAndMissingIdentityBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := repository.TransitionStatus(nil, modelprofile.TransitionStatusInput{
+	if _, _, err := repository.TransitionStatus(nilContext, modelprofile.TransitionStatusInput{
 		TenantID: updated.TenantID, ProfileID: updated.ProfileID, ExpectedVersion: updated.Version,
 		NextStatus: modelprofile.StatusActive, Metadata: inmemoryMetadata(),
 	}); !errors.Is(err, modelprofile.ErrInvalidTransition) {
@@ -233,7 +233,7 @@ func TestRepositoryContextAndMissingIdentityBoundaries(t *testing.T) {
 	if cloneProfile(nil) != nil {
 		t.Fatal("cloneProfile(nil) returned a value")
 	}
-	if checkContext(nil) != nil {
+	if checkContext(nilContext) != nil {
 		t.Fatal("nil context was rejected")
 	}
 	cancelled, cancel := context.WithCancel(context.Background())
