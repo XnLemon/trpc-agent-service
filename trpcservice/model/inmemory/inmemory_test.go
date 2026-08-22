@@ -192,6 +192,96 @@ func TestRepositoryOperationsCancelWhileWaitingForLock(t *testing.T) {
 	}
 }
 
+func TestRepositoryContextAndMissingIdentityBoundaries(t *testing.T) {
+	repository := NewRepository(inmemoryTestCatalog(t))
+	created, _, err := repository.Create(nil, inmemoryCreateInput("tenant-one", "nil-context"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fetched, err := repository.Get(nil, created.TenantID, created.ProfileID); err != nil || fetched == nil {
+		t.Fatalf("nil-context Get = %+v, %v", fetched, err)
+	}
+	updated, _, err := repository.UpdateConfiguration(nil, modelprofile.UpdateConfigurationInput{
+		TenantID: created.TenantID, ProfileID: created.ProfileID, ExpectedVersion: created.Version,
+		DisplayName: "Nil Context Updated", SchemaVersion: modelprofile.SchemaVersionV1,
+		Configuration: modelprofile.Configuration{Provider: "fake", Model: "deterministic"}, Metadata: inmemoryMetadata(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := repository.TransitionStatus(nil, modelprofile.TransitionStatusInput{
+		TenantID: updated.TenantID, ProfileID: updated.ProfileID, ExpectedVersion: updated.Version,
+		NextStatus: modelprofile.StatusActive, Metadata: inmemoryMetadata(),
+	}); !errors.Is(err, modelprofile.ErrInvalidTransition) {
+		t.Fatalf("same-status transition error = %v", err)
+	}
+	missingID := "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	if _, _, err := repository.UpdateConfiguration(context.Background(), modelprofile.UpdateConfigurationInput{
+		TenantID: created.TenantID, ProfileID: missingID, ExpectedVersion: 1,
+		DisplayName: "Missing", SchemaVersion: modelprofile.SchemaVersionV1,
+		Configuration: modelprofile.Configuration{Provider: "fake", Model: "deterministic"}, Metadata: inmemoryMetadata(),
+	}); !errors.Is(err, modelprofile.ErrNotFound) {
+		t.Fatalf("missing update error = %v", err)
+	}
+	if _, _, err := repository.TransitionStatus(context.Background(), modelprofile.TransitionStatusInput{
+		TenantID: created.TenantID, ProfileID: missingID, ExpectedVersion: 1,
+		NextStatus: modelprofile.StatusSuspended, Metadata: inmemoryMetadata(),
+	}); !errors.Is(err, modelprofile.ErrNotFound) {
+		t.Fatalf("missing transition error = %v", err)
+	}
+	if cloneProfile(nil) != nil {
+		t.Fatal("cloneProfile(nil) returned a value")
+	}
+	if checkContext(nil) != nil {
+		t.Fatal("nil context was rejected")
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !errors.Is(checkContext(cancelled), context.Canceled) {
+		t.Fatalf("cancelled context error = %v", checkContext(cancelled))
+	}
+}
+
+func TestContextRWMutexDirectCancellationAndMisusePaths(t *testing.T) {
+	mutex := contextRWMutex{}
+	if err := mutex.lock(nil); err != nil {
+		t.Fatal(err)
+	}
+	mutex.unlock()
+	if err := mutex.rlock(nil); err != nil {
+		t.Fatal(err)
+	}
+	mutex.runlock()
+	closed := make(chan struct{})
+	close(closed)
+	if err := waitContext(nil, closed); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if !errors.Is(waitContext(cancelled, make(chan struct{})), context.Canceled) {
+		t.Fatalf("waitContext cancellation error = %v", waitContext(cancelled, make(chan struct{})))
+	}
+	if !errors.Is(mutex.lock(cancelled), context.Canceled) {
+		t.Fatalf("cancelled writer lock error = %v", mutex.lock(cancelled))
+	}
+	if !errors.Is(mutex.rlock(cancelled), context.Canceled) {
+		t.Fatalf("cancelled reader lock error = %v", mutex.rlock(cancelled))
+	}
+	assertPanics(t, mutex.unlock)
+	assertPanics(t, mutex.runlock)
+}
+
+func assertPanics(t *testing.T, function func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic")
+		}
+	}()
+	function()
+}
+
 func inmemoryTestCatalog(t *testing.T) *modelprofile.ProviderCatalog {
 	t.Helper()
 	defaultMode := "safe"

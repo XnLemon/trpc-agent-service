@@ -149,6 +149,137 @@ func TestSecretScopeRejectsMissingOrInvalidTenant(t *testing.T) {
 	if err := (SecretScope{TenantID: "other-tenant", SecretRef: "secret://model"}).Validate(); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("invalid tenant error = %v", err)
 	}
+	if err := (SecretScope{TenantID: modelTestTenantOne}).Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing secret reference error = %v", err)
+	}
+}
+
+func TestModelExecutionSnapshotRejectsInvalidStatesAndInputs(t *testing.T) {
+	root, tenantSnapshot, profile, catalog := modelExecutionFixture(t, "")
+	snapshot, err := NewModelExecutionSnapshot(tenantSnapshot, profile, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if zero := (ModelExecutionSnapshot{}).Tenant(); zero.TenantID != "" {
+		t.Fatalf("zero snapshot tenant = %+v", zero)
+	}
+	if zero := (ModelExecutionSnapshot{}).Profile(); zero.ProfileID != "" {
+		t.Fatalf("zero snapshot profile = %+v", zero)
+	}
+	if _, err := (ModelExecutionSnapshot{}).CacheKey(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("zero snapshot cache key error = %v", err)
+	}
+	if _, err := (ModelExecutionSnapshot{}).FactoryInput(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("zero snapshot factory input error = %v", err)
+	}
+	if _, ok := ModelExecutionSnapshotFromContext(context.Background()); ok {
+		t.Fatal("empty context returned a model snapshot")
+	}
+	if _, err := NewModelExecutionSnapshot(tenant.ConfigurationSnapshot{}, profile, catalog); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid tenant snapshot error = %v", err)
+	}
+
+	invalidTenant := root.Clone()
+	invalidTenant.TenantID = "tenant"
+	if err := validateExecutionState(invalidTenant, profile, catalog); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid tenant state error = %v", err)
+	}
+	inactiveTenant := root.Clone()
+	inactiveTenant.Status = tenant.StatusSuspended
+	if err := validateExecutionState(inactiveTenant, profile, catalog); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("inactive tenant state error = %v", err)
+	}
+	if err := validateExecutionState(*root, nil, catalog); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil profile state error = %v", err)
+	}
+	if err := validateExecutionState(*root, profile, nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil catalog state error = %v", err)
+	}
+	invalidProfile := profile.Clone()
+	invalidProfile.ContentDigest = "wrong"
+	if err := validateExecutionState(*root, &invalidProfile, catalog); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid profile state error = %v", err)
+	}
+	differentTenantProfile := profile.Clone()
+	differentTenantProfile.TenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	if err := validateExecutionState(*root, &differentTenantProfile, catalog); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("cross-tenant profile state error = %v", err)
+	}
+	inactiveProfile := profile.Clone()
+	inactiveProfile.Status = StatusSuspended
+	if err := validateExecutionState(*root, &inactiveProfile, catalog); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("inactive profile state error = %v", err)
+	}
+	if contextWithZero := WithModelExecutionSnapshot(context.Background(), ModelExecutionSnapshot{}); func() bool {
+		_, ok := ModelExecutionSnapshotFromContext(contextWithZero)
+		return ok
+	}() {
+		t.Fatal("zero model snapshot entered context")
+	}
+
+	if _, err := NewSecretValue(""); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty secret error = %v", err)
+	}
+	if got := (SecretValue{}).String(); got != "<empty-secret>" {
+		t.Fatalf("empty secret String() = %q", got)
+	}
+	input, err := snapshot.FactoryInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveAndBuild(nil, input, nil, &recordingFactory{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil context error = %v", err)
+	}
+	if _, err := ResolveAndBuild(context.Background(), input, nil, nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil factory error = %v", err)
+	}
+	if _, err := ResolveAndBuild(context.Background(), ModelFactoryInput{}, nil, &recordingFactory{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("incomplete factory input error = %v", err)
+	}
+	secretProfile, err := NewProfile(CreateInput{
+		TenantID: root.TenantID, ProfileKey: "secret-input", DisplayName: "Secret Input",
+		Configuration: Configuration{Provider: "public", Model: "chat", SecretRef: "secret://tenant/model"},
+	}, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretSnapshot, err := NewModelExecutionSnapshot(tenantSnapshot, secretProfile, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretInput, err := secretSnapshot.FactoryInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveAndBuild(context.Background(), secretInput, nil, &recordingFactory{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing resolver error = %v", err)
+	}
+	resolver := &recordingResolver{err: errors.New("resolver secret")}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := ResolveAndBuild(cancelled, secretInput, resolver, &recordingFactory{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled resolver error = %v", err)
+	}
+	factory := &recordingFactory{returnNil: true}
+	if _, err := ResolveAndBuild(context.Background(), input, nil, factory); !errors.Is(err, ErrModelFactory) {
+		t.Fatalf("nil model error = %v", err)
+	}
+	cancelled, cancel = context.WithCancel(context.Background())
+	cancel()
+	if _, err := ResolveAndBuild(cancelled, input, nil, &recordingFactory{err: errors.New("factory failure")}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled factory error = %v", err)
+	}
+
+	incompleteInputs := []ModelFactoryInput{
+		{TenantID: root.TenantID},
+		{TenantID: root.TenantID, ProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", TenantVersion: 1, ProfileVersion: 1, SchemaVersion: 99, ContentDigest: "digest", Provider: "fake", Model: "deterministic"},
+		{TenantID: root.TenantID, ProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", TenantVersion: 1, ProfileVersion: 1, SchemaVersion: SchemaVersionV1, ContentDigest: "digest", Provider: "fake", Model: "deterministic", SecretRef: "bad ref"},
+	}
+	for _, incomplete := range incompleteInputs {
+		if err := validateFactoryInput(incomplete); !errors.Is(err, ErrInvalid) {
+			t.Errorf("factory input %+v error = %v", incomplete, err)
+		}
+	}
 }
 
 type recordingResolver struct {
@@ -168,10 +299,11 @@ func (resolver *recordingResolver) Resolve(_ context.Context, scope SecretScope)
 }
 
 type recordingFactory struct {
-	calls  int
-	input  ModelFactoryInput
-	secret SecretValue
-	err    error
+	calls     int
+	input     ModelFactoryInput
+	secret    SecretValue
+	err       error
+	returnNil bool
 }
 
 func (factory *recordingFactory) New(_ context.Context, input ModelFactoryInput, secret SecretValue) (trpcmodel.Model, error) {
@@ -180,6 +312,9 @@ func (factory *recordingFactory) New(_ context.Context, input ModelFactoryInput,
 	factory.secret = secret
 	if factory.err != nil {
 		return nil, factory.err
+	}
+	if factory.returnNil {
+		return nil, nil
 	}
 	return fakeModel{}, nil
 }

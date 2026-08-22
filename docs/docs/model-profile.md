@@ -249,7 +249,9 @@ Runner 装配逻辑为：
 1. 从 Execution Plan 读取 `AgentFactoryInput`、`ModelFactoryInput` 和 `StorageFactoryInput`。
 2. 通过显式 Tenant scope 解析 Secret，并把结果直接交给 Model Factory 得到 `model.Model`。
 3. 将 Agent 输入的受控 generation 参数映射到上游 `model.GenerationConfig`，构造
-   `llmagent.New`；不把 Revision 的未知字段或平台配置 map 直接传给上游。
+   `llmagent.New`；`RuntimePolicy` 同步映射为上游的 LLM/tool call limits、
+   `WithEnableParallelTools`、`ToolConcurrencyConfig.MaxConcurrency`，并在 Runner 边界
+   固定 `WithMaxRunDuration`；不把 Revision 的未知字段或平台配置 map 直接传给上游。
 4. 将 Backend 的 Session binding 映射到已选择的 Session service；本阶段的集成测试使用
    上游 `session/inmemory.NewSessionService()`，并在其外层包裹固定 Tenant 的
    `TenantSessionService`，不实现真实持久化后端 adapter。
