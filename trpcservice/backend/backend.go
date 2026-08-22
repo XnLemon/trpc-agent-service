@@ -204,8 +204,9 @@ func (p Profile) Validate(catalog *ProviderCatalog) error {
 	if p.ContentDigest != digest {
 		return fmt.Errorf("%w: content digest does not match configuration", ErrInvalid)
 	}
-	if p.Version < 1 || p.CreatedAt.IsZero() || p.UpdatedAt.IsZero() || p.UpdatedAt.Before(p.CreatedAt) {
-		return fmt.Errorf("%w: version and timestamps must be initialized and ordered", ErrInvalid)
+	if p.Version < 1 || p.CreatedAt.IsZero() || p.UpdatedAt.IsZero() || p.UpdatedAt.Before(p.CreatedAt) ||
+		p.CreatedAt.Location() != time.UTC || p.UpdatedAt.Location() != time.UTC {
+		return fmt.Errorf("%w: version and timestamps must be initialized, UTC, and ordered", ErrInvalid)
 	}
 	return nil
 }
@@ -643,14 +644,26 @@ func normalizeEndpointAuthority(parsed *url.URL) error {
 		if ip == nil || !strings.Contains(address, ":") || (zoneIndex >= 0 && !validZone(zone)) {
 			return fmt.Errorf("%w: endpoint IPv6 host is invalid", ErrInvalid)
 		}
-		canonicalHostname := ip.String()
-		if zoneIndex >= 0 {
-			canonicalHostname += "%" + zone
-		}
-		if port != "" {
-			parsed.Host = net.JoinHostPort(canonicalHostname, port)
+		if mappedIPv4 := ip.To4(); mappedIPv4 != nil {
+			if zoneIndex >= 0 {
+				return fmt.Errorf("%w: IPv4-mapped endpoint cannot have a zone", ErrInvalid)
+			}
+			canonicalHostname := mappedIPv4.String()
+			if port != "" {
+				parsed.Host = net.JoinHostPort(canonicalHostname, port)
+			} else {
+				parsed.Host = canonicalHostname
+			}
 		} else {
-			parsed.Host = "[" + canonicalHostname + "]"
+			canonicalHostname := ip.String()
+			if zoneIndex >= 0 {
+				canonicalHostname += "%" + zone
+			}
+			if port != "" {
+				parsed.Host = net.JoinHostPort(canonicalHostname, port)
+			} else {
+				parsed.Host = "[" + canonicalHostname + "]"
+			}
 		}
 	} else {
 		if strings.Count(authority, ":") > 1 || (strings.Contains(authority, ":") && port == "") {

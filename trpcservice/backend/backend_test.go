@@ -221,6 +221,8 @@ func TestProfileValidateRejectsCorruptRoot(t *testing.T) {
 		{name: "version", mutate: func(profile *Profile) { profile.Version = 0 }},
 		{name: "created time", mutate: func(profile *Profile) { profile.CreatedAt = time.Time{} }},
 		{name: "time order", mutate: func(profile *Profile) { profile.UpdatedAt = profile.CreatedAt.Add(-time.Second) }},
+		{name: "created time zone", mutate: func(profile *Profile) { profile.CreatedAt = profile.CreatedAt.In(time.FixedZone("UTC+8", 8*60*60)) }},
+		{name: "updated time zone", mutate: func(profile *Profile) { profile.UpdatedAt = profile.UpdatedAt.In(time.FixedZone("UTC-5", -5*60*60)) }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -434,6 +436,35 @@ func TestEndpointCanonicalLengthRemainsValid(t *testing.T) {
 	}
 }
 
+func TestIPv4MappedIPv6NormalizesIdempotently(t *testing.T) {
+	catalog := newTestCatalog(t)
+	endpoints := []string{"https://[::ffff:192.0.2.1]", "https://192.0.2.1"}
+	var profiles []*Profile
+	for i, endpoint := range endpoints {
+		profile, err := NewProfile(CreateInput{
+			TenantID: testTenantID, ProfileKey: []string{"mapped-ipv6", "plain-ipv4"}[i], DisplayName: "Mapped IPv6",
+			Status: StatusSuspended,
+			Bindings: []CapabilityBinding{{
+				Capability: CapabilityKnowledge, Provider: "qdrant", Endpoint: endpoint,
+				Options: map[string]string{"collection": "documents"},
+			}},
+		}, catalog)
+		if err != nil {
+			t.Fatalf("NewProfile(%q) error = %v", endpoint, err)
+		}
+		if got := profile.Bindings[0].Endpoint; got != "https://192.0.2.1" {
+			t.Fatalf("normalized mapped endpoint = %q", got)
+		}
+		if err := profile.Validate(catalog); err != nil {
+			t.Fatalf("Profile.Validate(%q) error = %v", endpoint, err)
+		}
+		profiles = append(profiles, profile)
+	}
+	if profiles[0].ContentDigest != profiles[1].ContentDigest {
+		t.Fatalf("mapped and plain IPv4 endpoints have different digests: %s != %s", profiles[0].ContentDigest, profiles[1].ContentDigest)
+	}
+}
+
 func TestEndpointAuthorityValidation(t *testing.T) {
 	catalog := newTestCatalog(t)
 	valid := map[string]string{
@@ -466,6 +497,7 @@ func TestEndpointAuthorityValidation(t *testing.T) {
 		"https://[127.0.0.1]:6333",
 		"https://[fe80::1%25]:6333",
 		"https://[fe80::1%25bad%21zone]:6333",
+		"https://[::ffff:192.0.2.1%25ETH0]:6333",
 	}
 	for _, endpoint := range invalid {
 		t.Run(endpoint, func(t *testing.T) {
