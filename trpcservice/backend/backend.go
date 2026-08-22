@@ -840,7 +840,7 @@ var sensitiveOptionKeys = map[string]struct{}{
 
 var sensitiveOptionSequences = []string{
 	"apikey", "accesskey", "secretkey", "privatekey", "connectionstring",
-	"password", "passwd", "token", "secret", "credential", "credentials", "dsn",
+	"password", "passwd", "passphrase", "token", "secret", "credential", "credentials", "dsn",
 }
 
 func validScheme(scheme string) bool {

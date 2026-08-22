@@ -105,7 +105,7 @@ Catalog 允许后续适配器逐步注册 tRPC-Agent-Go 已支持的 provider，
 - provider schema 决定 endpoint 是否必需以及允许的 scheme。
 
 `options` 使用 `map[string]string`，避免任意 JSON 类型穿过运行时边界。Catalog 只接受显式
-allowlist；`password`、`passwd`、`token`、`api_key`、`secret`、`credential`、`dsn`、
+allowlist；`password`、`passwd`、`passphrase`、`token`、`api_key`、`secret`、`credential`、`dsn`、
 `connection_string` 等敏感 key 即使被 schema 错误声明也必须由公共校验拒绝。错误消息不能
 回显 endpoint、option value 或 Secret 值。
 
