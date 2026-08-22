@@ -105,7 +105,7 @@ Catalog 允许后续适配器逐步注册 tRPC-Agent-Go 已支持的 provider，
 - provider schema 决定 endpoint 是否必需以及允许的 scheme。
 
 `options` 使用 `map[string]string`，避免任意 JSON 类型穿过运行时边界。Catalog 只接受显式
-allowlist；`password`、`passwd`、`passphrase`、`token`、`api_key`、`secret`、`credential`、`dsn`、
+allowlist；`password`、`passwd`、`pwd`、`passphrase`、`token`、`api_key`、`secret`、`credential`、`dsn`、
 `connection_string` 等敏感 key 即使被 schema 错误声明也必须由公共校验拒绝。错误消息不能
 回显 endpoint、option value 或 Secret 值。
 
@@ -335,6 +335,7 @@ CREATE TABLE backend_profile_change_outbox (
     CHECK (
         (event_type = 'created'
          AND previous_status IS NULL
+         AND current_status IN ('active', 'suspended')
          AND previous_digest IS NULL
          AND previous_version = 0
          AND next_version = 1)
@@ -353,6 +354,22 @@ deferred，使受控事务可以先替换 bindings 再提交根状态，但事�
 Session binding。
 
 ```sql
+CREATE OR REPLACE FUNCTION backend_profile_reject_disabled_insert()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.status = 'disabled' THEN
+        RAISE EXCEPTION 'backend profile cannot be created disabled';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER backend_profile_no_disabled_insert
+BEFORE INSERT ON backend_profile
+FOR EACH ROW EXECUTE FUNCTION backend_profile_reject_disabled_insert();
+
 CREATE OR REPLACE FUNCTION backend_profile_reject_identity_change()
 RETURNS TRIGGER
 LANGUAGE plpgsql

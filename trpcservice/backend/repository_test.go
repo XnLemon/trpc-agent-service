@@ -31,6 +31,11 @@ func TestPrepareCreatedChange(t *testing.T) {
 	if _, err := PrepareCreatedChange(mutated, catalog, repositoryMetadata()); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("already-mutated creation error = %v", err)
 	}
+	disabled := profile.Clone()
+	disabled.Status = StatusDisabled
+	if _, err := PrepareCreatedChange(disabled, catalog, repositoryMetadata()); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("created disabled Profile error = %v", err)
+	}
 	metadata := repositoryMetadata()
 	metadata.ActorID = " "
 	if _, err := PrepareCreatedChange(*profile, catalog, metadata); !errors.Is(err, ErrInvalid) {

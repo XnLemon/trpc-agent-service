@@ -289,6 +289,7 @@ func TestProviderCatalogRejectsInvalidSchemas(t *testing.T) {
 		{name: "compact password", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"dbpassword": {Kind: OptionString}}}}},
 		{name: "passphrase", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"passphrase": {Kind: OptionString}}}}},
 		{name: "prefixed passphrase", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"ssh_passphrase": {Kind: OptionString}}}}},
+		{name: "password abbreviation", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"pwd": {Kind: OptionString}}}}},
 		{name: "compact secret", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"clientsecret": {Kind: OptionString}}}}},
 		{name: "compact token", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"bearertoken": {Kind: OptionString}}}}},
 		{name: "compact DSN", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"jdbcdsn": {Kind: OptionString}}}}},
@@ -346,6 +347,7 @@ func TestProviderCatalogRejectsInvalidBindingsWithoutLeakingValues(t *testing.T)
 		{name: "sensitive option suffix", mutate: func(binding *CapabilityBinding) { binding.Options["private_key_pem"] = secretValue }},
 		{name: "sensitive compact option", mutate: func(binding *CapabilityBinding) { binding.Options["dbpassword"] = secretValue }},
 		{name: "sensitive passphrase option", mutate: func(binding *CapabilityBinding) { binding.Options["ssh_passphrase"] = secretValue }},
+		{name: "sensitive password abbreviation", mutate: func(binding *CapabilityBinding) { binding.Options["pwd"] = secretValue }},
 		{name: "required option", mutate: func(binding *CapabilityBinding) { delete(binding.Options, "database") }},
 		{name: "integer", mutate: func(binding *CapabilityBinding) { binding.Options["pool_size"] = "many" }},
 		{name: "integer maximum", mutate: func(binding *CapabilityBinding) { binding.Options["pool_size"] = "101" }},
@@ -465,6 +467,35 @@ func TestIPv4MappedIPv6NormalizesIdempotently(t *testing.T) {
 	}
 	if profiles[0].ContentDigest != profiles[1].ContentDigest {
 		t.Fatalf("mapped and plain IPv4 endpoints have different digests: %s != %s", profiles[0].ContentDigest, profiles[1].ContentDigest)
+	}
+}
+
+func TestEndpointPortNormalizationIsSemantic(t *testing.T) {
+	catalog := newTestCatalog(t)
+	endpoints := []string{"https://qdrant.example.com:06333", "https://qdrant.example.com:6333"}
+	var profiles []*Profile
+	for i, endpoint := range endpoints {
+		profile, err := NewProfile(CreateInput{
+			TenantID: testTenantID, ProfileKey: []string{"leading-zero-port", "canonical-port"}[i], DisplayName: "Port",
+			Status: StatusSuspended,
+			Bindings: []CapabilityBinding{{
+				Capability: CapabilityKnowledge, Provider: "qdrant", Endpoint: endpoint,
+				Options: map[string]string{"collection": "documents"},
+			}},
+		}, catalog)
+		if err != nil {
+			t.Fatalf("NewProfile(%q) error = %v", endpoint, err)
+		}
+		if got := profile.Bindings[0].Endpoint; got != endpoints[1] {
+			t.Fatalf("normalized endpoint = %q, want %q", got, endpoints[1])
+		}
+		if err := profile.Validate(catalog); err != nil {
+			t.Fatalf("Profile.Validate(%q) error = %v", endpoint, err)
+		}
+		profiles = append(profiles, profile)
+	}
+	if profiles[0].ContentDigest != profiles[1].ContentDigest {
+		t.Fatalf("equivalent ports have different digests: %s != %s", profiles[0].ContentDigest, profiles[1].ContentDigest)
 	}
 }
 

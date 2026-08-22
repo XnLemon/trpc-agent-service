@@ -79,6 +79,9 @@ func PrepareCreatedChange(profile Profile, catalog *ProviderCatalog, metadata Ch
 	if err := profile.Validate(catalog); err != nil {
 		return ChangeEvent{}, err
 	}
+	if profile.Status != StatusActive && profile.Status != StatusSuspended {
+		return ChangeEvent{}, fmt.Errorf("%w: created profile cannot be disabled", ErrInvalid)
+	}
 	metadata, err := normalizeChangeMetadata(metadata)
 	if err != nil {
 		return ChangeEvent{}, err

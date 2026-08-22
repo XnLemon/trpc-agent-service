@@ -627,6 +627,13 @@ func normalizeEndpointAuthority(parsed *url.URL) error {
 	authority := parsed.Host
 	hostname := parsed.Hostname()
 	port := parsed.Port()
+	if port != "" {
+		portNumber, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || portNumber == 0 {
+			return fmt.Errorf("%w: endpoint port is invalid", ErrInvalid)
+		}
+		port = strconv.FormatUint(portNumber, 10)
+	}
 	if strings.HasPrefix(authority, "[") {
 		closingBracket := strings.LastIndex(authority, "]")
 		if closingBracket < 0 {
@@ -678,12 +685,6 @@ func normalizeEndpointAuthority(parsed *url.URL) error {
 			parsed.Host = net.JoinHostPort(hostname, port)
 		} else {
 			parsed.Host = hostname
-		}
-	}
-	if port != "" {
-		portNumber, err := strconv.ParseUint(port, 10, 16)
-		if err != nil || portNumber == 0 {
-			return fmt.Errorf("%w: endpoint port is invalid", ErrInvalid)
 		}
 	}
 	return nil
@@ -820,7 +821,7 @@ func sensitiveOptionKey(key string) bool {
 	}
 	for _, part := range strings.Split(key, "_") {
 		switch part {
-		case "password", "passwd", "token", "secret", "credential", "credentials", "dsn":
+		case "password", "passwd", "pwd", "token", "secret", "credential", "credentials", "dsn":
 			return true
 		}
 	}
@@ -840,7 +841,7 @@ var sensitiveOptionKeys = map[string]struct{}{
 
 var sensitiveOptionSequences = []string{
 	"apikey", "accesskey", "secretkey", "privatekey", "connectionstring",
-	"password", "passwd", "passphrase", "token", "secret", "credential", "credentials", "dsn",
+	"password", "passwd", "pwd", "passphrase", "token", "secret", "credential", "credentials", "dsn",
 }
 
 func validScheme(scheme string) bool {
