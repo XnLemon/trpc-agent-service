@@ -96,7 +96,9 @@ Catalog 允许后续适配器逐步注册 tRPC-Agent-Go 已支持的 provider，
 
 `endpoint` 只表达网络位置，不是 DSN：
 
-- trim 后最长 2048 字符，不允许控制字符。
+- trim 后的原始 UTF-8 序列最长 2048 字节；URI 解析、主机规范化和百分号转义后的最终序列化结果也最长
+  2048 字节。百分号转义可能扩展非 ASCII path，因此两个边界都会独立校验。原始文本和解析后的 path
+  都不允许控制字符。
 - URI 不允许 userinfo、query 或 fragment，因而不能携带用户名、密码或签名参数。
 - 第一版只接受单一 hostname authority；多节点/故障转移列表必须由后续 provider schema 以
   结构化字段建模，不能塞入逗号分隔的 endpoint 字符串。

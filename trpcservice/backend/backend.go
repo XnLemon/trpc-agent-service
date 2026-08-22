@@ -639,8 +639,18 @@ func normalizeEndpointAuthority(parsed *url.URL) error {
 		if zoneIndex >= 0 {
 			address, zone = hostname[:zoneIndex], hostname[zoneIndex+1:]
 		}
-		if net.ParseIP(address) == nil || !strings.Contains(address, ":") || (zoneIndex >= 0 && !validZone(zone)) {
+		ip := net.ParseIP(address)
+		if ip == nil || !strings.Contains(address, ":") || (zoneIndex >= 0 && !validZone(zone)) {
 			return fmt.Errorf("%w: endpoint IPv6 host is invalid", ErrInvalid)
+		}
+		canonicalHostname := ip.String()
+		if zoneIndex >= 0 {
+			canonicalHostname += "%" + zone
+		}
+		if port != "" {
+			parsed.Host = net.JoinHostPort(canonicalHostname, port)
+		} else {
+			parsed.Host = "[" + canonicalHostname + "]"
 		}
 	} else {
 		if strings.Count(authority, ":") > 1 || (strings.Contains(authority, ":") && port == "") {
@@ -816,6 +826,7 @@ var sensitiveOptionKeys = map[string]struct{}{
 
 var sensitiveOptionSequences = []string{
 	"apikey", "accesskey", "secretkey", "privatekey", "connectionstring",
+	"password", "passwd", "token", "secret", "credential", "credentials", "dsn",
 }
 
 func validScheme(scheme string) bool {
