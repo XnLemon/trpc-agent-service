@@ -287,6 +287,7 @@ func TestProviderCatalogRejectsInvalidSchemas(t *testing.T) {
 		{name: "required default", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"pool": {Kind: OptionInteger, Required: true, DefaultValue: &defaultValue}}}}},
 		{name: "enum values", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"mode": {Kind: OptionEnum}}}}},
 		{name: "invalid enum value", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"mode": {Kind: OptionEnum, AllowedValues: []string{"\n"}}}}}},
+		{name: "oversized enum value", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"mode": {Kind: OptionEnum, Required: true, AllowedValues: []string{strings.Repeat("x", maxOptionValueLength+1)}}}}}},
 		{name: "duplicate enum value", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"mode": {Kind: OptionEnum, AllowedValues: []string{"safe", "SAFE"}}}}}},
 		{name: "values on string", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"mode": {Kind: OptionString, AllowedValues: []string{"safe"}}}}}},
 		{name: "invalid default", specs: []ProviderSpec{{Provider: "postgres", Capabilities: []Capability{CapabilitySession}, EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden, Options: map[string]OptionSpec{"pool": {Kind: OptionInteger, DefaultValue: stringPointer("many")}}}}},
@@ -319,6 +320,11 @@ func TestProviderCatalogRejectsInvalidBindingsWithoutLeakingValues(t *testing.T)
 		{name: "endpoint query", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com?token=" + secretValue }},
 		{name: "endpoint fragment", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com#secret" }},
 		{name: "endpoint control", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com/bad\npath" }},
+		{name: "endpoint encoded null", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com/%00" }},
+		{name: "endpoint encoded newline", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com/%0A" }},
+		{name: "endpoint canonical length", mutate: func(binding *CapabilityBinding) {
+			binding.Endpoint = "postgres://db.example.com/" + strings.Repeat("é", 1000)
+		}},
 		{name: "endpoint absolute", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "://not-a-uri" }},
 		{name: "endpoint hostname", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://:5432" }},
 		{name: "endpoint multi host", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://HOST1:5432,HOST2:5432" }},
@@ -385,6 +391,29 @@ func TestEndpointNormalizationPreservesIPv6ZoneCase(t *testing.T) {
 	}
 	if err := profile.Validate(catalog); err != nil {
 		t.Fatalf("Profile.Validate() after normalization error = %v", err)
+	}
+}
+
+func TestEndpointCanonicalLengthRemainsValid(t *testing.T) {
+	catalog := newTestCatalog(t)
+	base := "https://qdrant.example.com/"
+	profile, err := NewProfile(CreateInput{
+		TenantID: testTenantID, ProfileKey: "max-endpoint", DisplayName: "Maximum Endpoint",
+		Status: StatusSuspended,
+		Bindings: []CapabilityBinding{{
+			Capability: CapabilityKnowledge, Provider: "qdrant",
+			Endpoint: base + strings.Repeat("a", maxEndpointLength-len(base)),
+			Options:  map[string]string{"collection": "documents"},
+		}},
+	}, catalog)
+	if err != nil {
+		t.Fatalf("NewProfile() error = %v", err)
+	}
+	if got := len(profile.Bindings[0].Endpoint); got != maxEndpointLength {
+		t.Fatalf("normalized endpoint length = %d, want %d", got, maxEndpointLength)
+	}
+	if err := profile.Validate(catalog); err != nil {
+		t.Fatalf("Profile.Validate() at endpoint limit error = %v", err)
 	}
 }
 

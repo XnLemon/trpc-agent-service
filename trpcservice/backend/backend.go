@@ -517,7 +517,7 @@ func compileOptionSpec(spec OptionSpec) (OptionSpec, error) {
 		seen := make(map[string]struct{}, len(spec.AllowedValues))
 		for i, value := range spec.AllowedValues {
 			value = strings.ToLower(strings.TrimSpace(value))
-			if value == "" || hasControl(value) {
+			if value == "" || len(value) > maxOptionValueLength || hasControl(value) {
 				return OptionSpec{}, fmt.Errorf("%w: enum value is invalid", ErrInvalid)
 			}
 			if _, exists := seen[value]; exists {
@@ -604,6 +604,9 @@ func normalizeEndpoint(endpoint string, policy FieldPolicy, schemes map[string]s
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return "", fmt.Errorf("%w: endpoint cannot contain credentials, query, or fragment", ErrInvalid)
 	}
+	if hasControl(parsed.Path) {
+		return "", fmt.Errorf("%w: endpoint path is invalid", ErrInvalid)
+	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	if err := normalizeEndpointAuthority(parsed); err != nil {
 		return "", err
@@ -611,7 +614,11 @@ func normalizeEndpoint(endpoint string, policy FieldPolicy, schemes map[string]s
 	if _, exists := schemes[parsed.Scheme]; !exists {
 		return "", fmt.Errorf("%w: endpoint scheme is not allowed", ErrInvalid)
 	}
-	return parsed.String(), nil
+	canonical := parsed.String()
+	if len(canonical) > maxEndpointLength {
+		return "", fmt.Errorf("%w: normalized endpoint is too long", ErrInvalid)
+	}
+	return canonical, nil
 }
 
 func normalizeEndpointAuthority(parsed *url.URL) error {
