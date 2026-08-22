@@ -482,7 +482,7 @@ Channel Binding 仍必须在持久化列中保留 binding、channel 和外部身
 `message_event.status` 与入站幂等记录共同表达以下状态机：
 
 ```text
-received → running → completed → reply_pending → replied
+received → running → completed ──materialize outbox/CAS──> reply_pending → replied
      │          │          │              │
      └──────────┴──────────┴──────────────┴→ failed / DLQ
 ```
@@ -499,6 +499,12 @@ received → running → completed → reply_pending → replied
 Memory，重排 Summary 任务。SQL Adapter 可以把 event/state/outbox 放在同一事务；Redis
 Adapter 必须使用经过验证的 Lua/Stream/事务边界；无法原子提交时必须声明最终一致并提供
 补偿和 repair cursor。向量索引延迟不能影响 Tenant 权限、Session 顺序或 Audit。
+
+`completed` 只表示执行结果和 reply cache 已持久化；只有完整的 `reply_outbox` 分段已经幂等
+写入并通过 CAS/事务后，消息才可进入 `reply_pending`。同一 provider 把分段写入和状态转换
+放在一个事务；跨 provider 使用 durable repair marker。若 Worker 在物化分段前崩溃，修复器
+从 reply cache ref 补齐缺失分段；若 `reply_pending` 缺段，也只能进入 repair，不能直接进入
+`replied`。因此每个 `reply_pending` 都有可恢复的 segment_count，且不会重新运行 Runner。
 
 ## 多后端职责矩阵
 

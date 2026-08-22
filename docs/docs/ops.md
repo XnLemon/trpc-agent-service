@@ -115,6 +115,10 @@ error_type、cost、request_id、trace_id、actor、reason、occurred_at 和前�
 失败时不放行可发送的 outbox，进入 repair；Memory 已成功而 Summary 失败时保留事件和 Memory，
 只重排 Summary，不回滚或重新执行 Runner。
 
+`completed` 只在执行结果和 reply cache 持久化后成立；必须先幂等物化完整 reply outbox，再 CAS
+为 `reply_pending`。发现 `completed` 缺段或 `reply_pending` 缺段时，按 cache ref 和 repair
+cursor 补齐，不重新运行 Runner，也不能跳过分段直接标记 `replied`。
+
 ### Model、Tool 或数据库故障
 
 - Model：使用 request deadline、有限重试和 token 预算；超时写失败/取消 event，返回固定

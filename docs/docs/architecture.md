@@ -327,8 +327,9 @@ sequenceDiagram
         R->>ST: Memory durable write；异步投递向量索引
         R->>ST: Audit(tool/model/decision/cost/trace)
         R-->>W: Runner Event（文本/工具/错误/结束）
-        W->>ID: CAS running → completed/reply_pending，保存 reply cache ref
-        W->>O: 为每个 segment 写 pending（稳定 segment_id/顺序/幂等键）
+        W->>ID: CAS running → completed，保存 reply cache ref
+        W->>O: 幂等写入每个 segment pending（稳定 segment_id/顺序/幂等键）
+        W->>ID: CAS completed → reply_pending（仅在 segment_count 完整可见后）
         W->>ST: summary 按 event_seq 异步 CAS（只读取已 durable 的 Memory）
         loop 按 segment_index 处理分段
           O->>O: CAS claim pending/retryable 或过期 sending（owner/lease/fence）
@@ -365,14 +366,18 @@ sequenceDiagram
       alt received 或 running
         G-->>CA: 2xx；CAS 失败者不加载 plan、不启动第二个 Runner
       else completed、reply_pending 或 replied
-        G->>O: 按 reply_id 读取缓存或 claim 可发送分段
+        G->>O: 校验 reply_id/segment_count；缺段时从缓存修复，再 claim 可发送分段
         G-->>CA: 2xx；只重放回复，不重新执行 Runner
       end
     end
   end
 ```
 
-时序中 `message_event` 的唯一性和 Session 顺序由共享 Storage Adapter 保证；队列至少一次
+`completed` 表示执行结果和 reply cache 已持久化，但还不是可发送状态。Worker 必须先以幂等键
+物化完整 `reply_outbox` 分段，再把 `completed` CAS 为 `reply_pending`；同一 provider 使用事务，
+跨 provider 则使用 durable repair marker。若 Worker 在两步之间崩溃，行保持 `completed`，修复器
+根据 reply cache ref 补齐分段并再次 CAS；任何 `reply_pending` 行都必须能找到完整 segment_count，
+否则进入 repair 而不能直接标记 `replied`。时序中 `message_event` 的唯一性和 Session 顺序由共享 Storage Adapter 保证；队列至少一次
 投递不是重复执行的借口。`completed` 但回复失败时重放缓存回复，不重新调用模型或具有副作用
 的 Tool；只有明确标记为安全、幂等的步骤才允许重试。回复 Outbox 还必须以
 `reply_id + segment_index` 建立稳定的分段幂等记录，保存顺序、状态、attempts 和供应商回执。
@@ -423,7 +428,7 @@ received ──claim/CAS──> running ──execution commit──> completed
     │                                                         │
     └─ invalid/duplicate                              retryable? ──> running
 
-completed ──enqueue reply──> reply_pending ──send success──> replied
+completed ──materialize outbox/CAS──> reply_pending ──send success──> replied
                                    │
                                    └─ retry budget exhausted ──> failed + DLQ
 ```
