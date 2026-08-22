@@ -286,6 +286,28 @@ AS $$
 DECLARE
     v_next_version BIGINT;
 BEGIN
+    -- Keep the global lock order Tenant -> referenced Profile. Status
+    -- transitions use the same order, avoiding a default-assignment race.
+    PERFORM 1
+    FROM public.tenant
+    WHERE tenant_id = p_tenant_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'tenant does not exist';
+    END IF;
+
+    IF p_default_backend_profile_id IS NOT NULL THEN
+        PERFORM 1
+        FROM public.backend_profile
+        WHERE tenant_id = p_tenant_id
+          AND profile_id = p_default_backend_profile_id
+          AND status = 'active'
+        FOR UPDATE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'default backend profile must exist in the tenant and be active';
+        END IF;
+    END IF;
+
     -- A full, validated configuration snapshot avoids ambiguous patch/null semantics.
     UPDATE public.tenant
     SET display_name = p_display_name,

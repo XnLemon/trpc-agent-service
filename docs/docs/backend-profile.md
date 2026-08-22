@@ -150,8 +150,10 @@ Profile version，但只有后端语义改变才改变 digest。状态转换不�
 - 暂停或停用只影响后续快照，不篡改已经创建的执行快照。
 
 Tenant 是第一道运行门禁，Backend Profile 是第二道门禁；只有二者都 active 才能创建新快照。
-`tenant.default_backend_profile_id` 为 `NULL` 或指向非 active Profile 时不得回退到平台默认、
-其他 Profile 或其他租户。
+本阶段唯一合法的 Profile 选择源是 `tenant.default_backend_profile_id`。它为 `NULL`、指向非
+active Profile 或与传入 Profile 不一致时，快照构造都必须失败，不得回退到平台默认、其他
+Profile 或其他租户。未来若 Agent Revision 或 Channel Binding 支持显式覆盖，必须先定义新的
+可信选择来源、同租户校验和优先级，再扩展快照构造器；不能把任意 Profile 参数当作授权。
 
 ## Repository 与审计事件
 
@@ -222,8 +224,9 @@ InMemory 只用于单进程开发和测试，不提供持久化、跨进程一�
 
 1. Tenant snapshot 有效且 Tenant active。
 2. Profile 自身全部不变量和 digest 有效。
-3. Profile 与 Tenant ID 相同且 Profile active。
-4. Profile 包含有效 Session binding。
+3. Tenant 的 `default_backend_profile_id` 非空且等于 Profile ID。
+4. Profile 与 Tenant ID 相同且 Profile active。
+5. Profile 包含有效 Session binding。
 
 快照访问器每次返回副本；零值、手工拼装或 Context 中损坏的快照不能通过校验。Context 注入
 与读取都再次克隆，避免调用方在一次执行中观察到控制面热更新。
@@ -452,6 +455,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
 DECLARE
+    v_default_profile_id TEXT;
     v_previous_status TEXT;
     v_digest TEXT;
     v_next_version BIGINT;
@@ -461,6 +465,16 @@ BEGIN
        OR p_correlation_id IS NULL OR length(btrim(p_correlation_id)) = 0
        OR p_reason IS NULL OR length(btrim(p_reason)) NOT BETWEEN 1 AND 1000 THEN
         RAISE EXCEPTION 'backend profile transition requires valid audit metadata';
+    END IF;
+
+    -- All operations that change Tenant defaults or Profile status use the
+    -- same Tenant -> Profile lock order.
+    SELECT default_backend_profile_id INTO v_default_profile_id
+    FROM public.tenant
+    WHERE tenant_id = p_tenant_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'tenant does not exist';
     END IF;
 
     SELECT status, content_digest INTO v_previous_status, v_digest
@@ -489,11 +503,8 @@ BEGIN
         RAISE EXCEPTION 'active backend profile requires a session binding';
     END IF;
 
-    IF p_next_status = 'disabled' AND EXISTS (
-        SELECT 1 FROM public.tenant
-        WHERE tenant_id = p_tenant_id
-          AND default_backend_profile_id = p_profile_id
-    ) THEN
+    IF p_next_status = 'disabled'
+       AND v_default_profile_id = p_profile_id THEN
         RAISE EXCEPTION 'tenant default backend profile must be switched first';
     END IF;
 
@@ -540,9 +551,11 @@ GRANT EXECUTE ON FUNCTION transition_backend_profile_status(
 ```
 
 停用 Tenant 默认 Profile 时，Admin 编排事务必须先切换或清空
-`tenant.default_backend_profile_id`，否则拒绝停用。Backend Repository 本身不能凭过期的调用方
-布尔值推断 Tenant 默认引用；SQL 实现应在同一数据库事务校验，InMemory 阶段由上层 Tenant
-编排负责。无论哪种实现，都不得自动选择另一个 Profile。
+`tenant.default_backend_profile_id`，否则拒绝停用。所有相关 SQL 路径统一使用“先锁 Tenant，
+再锁目标 Profile”的顺序；设置默认引用时也必须在持有 Tenant 行锁后锁定并验证目标 Profile
+属于同一 Tenant 且 active。复合外键只证明对象存在，不能代替状态校验。Backend Repository
+本身不能凭过期的调用方布尔值推断 Tenant 默认引用；SQL 实现在同一事务校验，InMemory 阶段
+由上层 Tenant 编排负责。无论哪种实现，都不得自动选择另一个 Profile。
 
 运行时角色不能直接修改 Profile、binding 或 Outbox 表。受控 SQL 函数使用固定
 `search_path`、显式撤销 `PUBLIC EXECUTE`，并由不属于运行时连接池的 migration owner 持有。
@@ -554,17 +567,29 @@ Worker 只接收快照，不枚举控制面表。
 [`0e352fd`](https://github.com/trpc-group/trpc-agent-go/commit/0e352fdd1428d30a8d978d39877f5a7b2591ccc1)
 为依据；未来 adapter 应固定兼容版本并用编译/集成测试检测上游变化。
 
+tRPC-Agent-Go 的 Session、Memory、Knowledge VectorStore 和 Artifact 接口没有独立
+`tenant_id` 参数。平台 adapter 必须在构造时捕获 `StorageFactoryInput.TenantID`，并在每次
+底层表查询、keyspace、collection、bucket prefix 或等价 provider 分区中强制使用该可信
+Tenant 边界；框架的 AppName/UserID/SessionID 命名空间只是第二层防碰撞，不是授权条件。
+无法提供可验证租户分区的 provider 不得共享给多个租户。每个真实 adapter 落地时必须增加
+双租户 conformance test，证明相同框架 ID 不会跨租户读写。
+
 | Capability | tRPC-Agent-Go 边界 | 平台 adapter 责任 |
 | --- | --- | --- |
-| Session | [`session.Service`](https://github.com/trpc-group/trpc-agent-go/blob/0e352fdd1428d30a8d978d39877f5a7b2591ccc1/session/session.go)；通过 [`runner.WithSessionService`](https://github.com/trpc-group/trpc-agent-go/blob/0e352fdd1428d30a8d978d39877f5a7b2591ccc1/runner/runner.go) 注入 | 解析绑定，构造受支持实现；Runner identity 继续使用 Tenant 命名空间 |
-| Memory | [`memory.Service`](https://github.com/trpc-group/trpc-agent-go/blob/0e352fdd1428d30a8d978d39877f5a7b2591ccc1/memory/memory.go)；通过 `runner.WithMemoryService` 注入 | 构造 provider，并保证 AppName/UserID 仍处于租户作用域 |
-| Knowledge | [`knowledge.Knowledge`](https://github.com/trpc-group/trpc-agent-go/blob/0e352fdd1428d30a8d978d39877f5a7b2591ccc1/knowledge/knowledge.go) 和 [`vectorstore.VectorStore`](https://github.com/trpc-group/trpc-agent-go/blob/0e352fdd1428d30a8d978d39877f5a7b2591ccc1/knowledge/vectorstore/vectorstore.go) | 由 Agent Factory 以 `knowledge.WithVectorStore` 装配；embedder/model 引用不属于 Backend Profile |
-| Artifact | [`artifact.Service`](https://github.com/trpc-group/trpc-agent-go/blob/0e352fdd1428d30a8d978d39877f5a7b2591ccc1/artifact/service.go)；通过 `runner.WithArtifactService` 注入 | 构造对象存储 adapter，并保留 App/User/Session 作用域 |
+| Session | [`session.Service`](https://github.com/trpc-group/trpc-agent-go/blob/0e352fdd1428d30a8d978d39877f5a7b2591ccc1/session/session.go)；通过 [`runner.WithSessionService`](https://github.com/trpc-group/trpc-agent-go/blob/0e352fdd1428d30a8d978d39877f5a7b2591ccc1/runner/runner.go) 注入 | adapter 固定 Tenant 分区并构造受支持实现；Runner identity 继续使用 Tenant 命名空间作为第二层隔离 |
+| Memory | [`memory.Service`](https://github.com/trpc-group/trpc-agent-go/blob/0e352fdd1428d30a8d978d39877f5a7b2591ccc1/memory/memory.go)；通过 `runner.WithMemoryService` 注入 | adapter 固定 Tenant 分区，再映射 AppName/UserID |
+| Knowledge | [`knowledge.Knowledge`](https://github.com/trpc-group/trpc-agent-go/blob/0e352fdd1428d30a8d978d39877f5a7b2591ccc1/knowledge/knowledge.go) 和 [`vectorstore.VectorStore`](https://github.com/trpc-group/trpc-agent-go/blob/0e352fdd1428d30a8d978d39877f5a7b2591ccc1/knowledge/vectorstore/vectorstore.go) | adapter 先固定 Tenant 分区并构造 VectorStore；Agent Factory 再以 [`knowledge.New`](https://github.com/trpc-group/trpc-agent-go/blob/0e352fdd1428d30a8d978d39877f5a7b2591ccc1/knowledge/default.go) 和 `knowledge.WithVectorStore` 构造 Knowledge，最后通过 [`llmagent.WithKnowledge`](https://github.com/trpc-group/trpc-agent-go/blob/0e352fdd1428d30a8d978d39877f5a7b2591ccc1/agent/llmagent/option.go) 注入 LLMAgent |
+| Artifact | [`artifact.Service`](https://github.com/trpc-group/trpc-agent-go/blob/0e352fdd1428d30a8d978d39877f5a7b2591ccc1/artifact/service.go)；通过 `runner.WithArtifactService` 注入 | adapter 固定 Tenant/bucket prefix，再映射 App/User/Session 作用域 |
 | Audit | tRPC-Agent-Go 复用 OpenTelemetry，没有与上述 Service 同构的强制审计存储接口 | 平台 Audit adapter 独立持久化强制事件；OTel exporter 只负责 telemetry，采样不能代替审计 |
 
 tRPC-Agent-Go 仓库当前包含多种 Session、Memory、VectorStore 和 Artifact 实现，但“上游存在
 package”不等于平台已经允许该 provider。只有对应 adapter、Catalog schema 和测试一起落地后，
 provider 才能在租户配置中启用。
+
+Knowledge 的 embedder/model 引用不属于 Backend Profile。它必须来自后续发布且不可变的
+Agent/Knowledge 配置与同租户 Model Profile，并与 Backend snapshot 一起固定后再调用
+`knowledge.New`。在该可信依赖来源落地前，配置了 Knowledge binding 的运行时 Factory 必须
+fail closed，不能借用聊天模型、进程环境变量或全局默认 embedder。
 
 Storage Factory 的构造顺序是：校验快照 → 读取已注册 adapter → 按 Tenant 授权解析
 `secret_ref` → 构造客户端/Service → 注入 Agent/Runner。Secret Resolver 失败必须令本次构造
@@ -582,7 +607,9 @@ Storage Factory 的构造顺序是：校验快照 → 读取已注册 adapter �
 - expected version 并发单一获胜，以及等待锁时 Context 取消。
 - 所有写入事件的 actor、reason、correlation、状态、digest 和前后版本。
 - Tenant/Profile 非 active、作用域不一致、损坏摘要和 Context 零值快照拒绝。
+- Tenant 默认 Profile 为空、不匹配或非 active 时拒绝快照，且不回退到其他 Profile。
 - 快照固定 Tenant/Profile version/digest 且不可能携带 Secret 值或 live client。
+- 每个真实 adapter 以相同框架 ID 做双租户 conformance test，证明底层查询/分区显式隔离。
 
 交付顺序固定为：
 
