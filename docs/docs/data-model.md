@@ -406,6 +406,8 @@ message_event(
   tenant_id, event_id, session_id, binding_id,
   external_message_id, idempotency_key, event_seq, kind,
   payload_ref, payload_digest, status, request_id, trace_id,
+  execution_owner, execution_claim_token, execution_lease_expires_at,
+  execution_fencing_token, execution_heartbeat_at, execution_attempts,
   created_at, committed_at
 )
 
@@ -446,7 +448,9 @@ audit_log(
   元组)` 建唯一约束。外部身份元组由 Adapter 按通道定义，不使用昵称或可变展示名。
 - `message_event` 同时有 `(tenant_id, session_id, event_seq)` 唯一约束和
   `(tenant_id, binding_id, external_message_id)` 唯一约束；`idempotency_key` 由验签后的
-  `tenant_id + binding_id + channel + external_message_id` 计算。
+  `tenant_id + binding_id + channel + external_message_id` 计算。`running` 还必须持有
+  execution owner、claim token、lease deadline、heartbeat、attempts 和 fencing token；只有
+  当前 fence 才能提交 Runner event、state、tool receipt 或 reply outbox。
 - `reply_outbox` 以 `(tenant_id, reply_id, segment_index)` 唯一约束分段顺序，以
   `(tenant_id, segment_id)` 和出站幂等键防止同一分段重复发送；状态至少区分 `pending`、
   `sending`、`reconciling`、`sent`、`retryable`、`unknown` 和 `failed`，并保存 attempts、
@@ -487,10 +491,18 @@ received → running → completed ──materialize outbox/CAS──> reply_pen
      └──────────┴──────────┴──────────────┴→ failed / DLQ
 ```
 
-在 `running` 收到重复请求时只返回确认，不再创建 Runner；`completed` 或 `reply_pending`
-时使用缓存回复引用重试出站；`replied` 直接返回已完成；`failed` 只有在错误可重试且没有
-不可逆副作用时才能重新排队。模型输出不是天然幂等，扣费、发送、工单和外部写操作必须有
-单独的幂等键或人工确认。
+`running` 的执行租约过期时进入 `execution-reconciling`，而不是由 HTTP 回调重复路径直接启动
+第二个 Runner；修复成功才以新 fencing token 回到 `running`/`retryable`，副作用无法对账则进入
+`failed/DLQ`。旧 Worker 的 heartbeat、event/state、Tool receipt 和 outbox 写入都因 fence 不
+匹配而被拒绝，保证队列重投递不会覆盖新执行。
+
+回调层在 `running` 收到重复请求时只返回确认，不再创建 Runner；这与队列任务重投递是两种
+路径。只有 Worker/Queue 发现 execution lease 过期后，才能 CAS 抢占新的 owner 和 fencing
+token，并先进入执行修复：检查最后提交的 event、每个 Tool 的外部幂等键和 provider receipt。
+已确认的 Tool 不得重跑；没有不可逆副作用且可以从最后 event 安全恢复时才重新排队，副作用
+结果不明则进入 failed/DLQ/人工处理。`completed` 或 `reply_pending` 时使用缓存回复引用重试
+出站；`replied` 直接返回已完成；模型输出不是天然幂等，扣费、发送、工单和外部写操作必须
+有单独的幂等键或人工确认。
 
 推荐顺序是：唯一写入入站事实 → 以 Session version/CAS 或事务分配 `event_seq` → 提交 event
 和 state → 写 durable Memory（以 `source_event_id` 关联）→ 写 reply outbox → 异步生成 Summary

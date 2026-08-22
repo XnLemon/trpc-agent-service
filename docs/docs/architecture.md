@@ -312,7 +312,7 @@ sequenceDiagram
     CA->>G: 规范化消息 + tenant_id + binding_id + external_message_id
     G->>ID: 唯一写入 tenant+channel+message_id，状态 received
     alt 唯一写入成功（首次投递）
-      G->>ID: CAS received → running；保存 request/trace/idempotency key
+      G->>ID: CAS received → running；写入 owner/claim token/lease/heartbeat/fence
       alt claim 成功
         G->>CP: 加载 Tenant/App Revision/Model/Backend
         CP-->>G: 固定版本、摘要和无密钥 ExecutionPlan 输入
@@ -320,6 +320,7 @@ sequenceDiagram
         G-->>WX: 5 秒内返回确认
         G->>Q: 投递执行任务（幂等键 + plan key + message ref）
         Q->>W: 消费任务，校验 plan 未被伪造
+        W->>ID: heartbeat；event/state/Tool receipt 携带 execution fencing token
         W->>R: context + userID + sessionID + model.Message
         R->>TL: 输入/工具白名单、权限、预算、危险操作确认
         TL-->>R: allow / deny / approval required
@@ -372,6 +373,13 @@ sequenceDiagram
     end
   end
 ```
+
+回调重复与队列任务重投递必须分开处理：Gateway 对 `running` 的重复回调只返回 2xx，不启动
+第二个 Runner；只有 execution lease 过期后，Queue/Worker 才能用新的 owner、claim token 和
+fencing token 进入 `execution-reconciling`。修复器检查最后 event、Tool 外部幂等键和 provider
+receipt；已经提交的 Tool 不重跑，结果不明的外部副作用进入 failed/DLQ/人工处理，只有安全可
+恢复的任务才重新排队。旧 Worker 的 heartbeat、event/state、Tool receipt 和 outbox 写入必须
+因 fence 不匹配而被拒绝。
 
 `completed` 表示执行结果和 reply cache 已持久化，但还不是可发送状态。Worker 必须先以幂等键
 物化完整 `reply_outbox` 分段，再把 `completed` CAS 为 `reply_pending`；同一 provider 使用事务，
@@ -433,11 +441,18 @@ completed ──materialize outbox/CAS──> reply_pending ──send success�
                                    └─ retry budget exhausted ──> failed + DLQ
 ```
 
-同一幂等键在 `running` 时只返回已接收，不启动第二个 Runner；在 `completed` 时读取缓存的
-回复引用；在 `reply_pending` 时只重试发送；在 `replied` 时返回已完成；在 `failed` 时依据
-错误是否可重试和 Tool/模型副作用标记决定重排或人工处理。模型生成通常可以重新计算但不
-保证字节相同，发送、扣费、写外部系统、创建工单等副作用默认不可安全重试，必须用外部
-幂等键、确认步骤或人工恢复隔离。对于一个有多个分段的回复，消息级状态之外还要记录
+`running` 的执行租约过期时进入 `execution-reconciling`，而不是由 HTTP 回调重复路径直接
+启动第二个 Runner；修复成功才以新 fencing token 回到 `running`/`retryable`，副作用无法对账
+则进入 `failed/DLQ`。旧 Worker 的 heartbeat、event/state、Tool receipt 和 outbox 写入都因
+fence 不匹配而被拒绝，保证队列重投递不会覆盖新执行。
+
+回调层在 `running` 收到重复请求时只返回确认，不再创建 Runner；这与队列任务重投递是两种
+路径。只有 Worker/Queue 发现 execution lease 过期后，才能 CAS 抢占新的 owner 和 fencing
+token，并先对账已提交 event、每个 Tool 的外部幂等键和 provider receipt。已确认的 Tool 不得
+重跑；没有不可逆副作用且可以从最后 event 安全恢复时才重新排队，副作用结果不明则进入
+failed/DLQ/人工处理。`completed` 或 `reply_pending` 时使用缓存回复引用重试出站；`replied`
+直接返回已完成；模型输出不是天然幂等，扣费、发送、工单和外部写操作必须有单独的幂等键或
+人工确认。对于一个有多个分段的回复，消息级状态之外还要记录
 `segment_id`、`segment_index`、`segment_count`、`pending/sending/sent/retryable/unknown/failed`、
 尝试次数、`provider_message_id` 和最后错误；只有所有 segment 都已确认发送，消息级状态才
 能从 `reply_pending` 变为 `replied`。

@@ -98,6 +98,9 @@ error_type、cost、request_id、trace_id、actor、reason、occurred_at 和前�
   失败 payload 直接当可信 Tenant，也不为了“止重试”而跳过验签。
 - `running`/`completed`/`reply_pending`/`replied` 的重复请求只返回确认或重放缓存回复；
   不重新执行模型和副作用 Tool。
+- 回调重复不负责回收执行；对 `running` 的队列任务检查 execution owner、heartbeat、lease
+  deadline 和 fencing token。过期任务先对账已提交 event、Tool 幂等键和 provider receipt，
+  安全可恢复才用新 fence 重排；副作用结果不明则进入 failed/DLQ/人工处理，不能盲目重跑。
 - 多段回复按 `reply_id + segment_index` 查看 outbox；发送前检查 owner、lease deadline 和
   fencing token，过期 `sending`/`unknown` 先用原幂等键向供应商对账，确认未接受后再换新 fence
   进入 retryable；全部 segment 确认成功后才把聚合状态置为 `replied`，仍不明的分段保留
