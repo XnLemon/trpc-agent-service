@@ -320,6 +320,7 @@ func TestProviderCatalogRejectsInvalidBindingsWithoutLeakingValues(t *testing.T)
 		{name: "endpoint fragment", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com#secret" }},
 		{name: "endpoint control", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://db.example.com/bad\npath" }},
 		{name: "endpoint absolute", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "://not-a-uri" }},
+		{name: "endpoint hostname", mutate: func(binding *CapabilityBinding) { binding.Endpoint = "postgres://:5432" }},
 		{name: "secret required", mutate: func(binding *CapabilityBinding) { binding.SecretRef = "" }},
 		{name: "secret grammar", mutate: func(binding *CapabilityBinding) { binding.SecretRef = "secret ref with spaces" }},
 		{name: "unknown option", mutate: func(binding *CapabilityBinding) { binding.Options["unknown"] = secretValue }},
