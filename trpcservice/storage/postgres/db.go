@@ -141,6 +141,9 @@ func mapDBError(ctx context.Context, err error, notFound, duplicate, conflict, i
 }
 
 func commit(ctx context.Context, tx *sql.Tx) error {
+	if tx == nil {
+		return ErrStorage
+	}
 	if err := ctx.Err(); err != nil {
 		rollback(tx)
 		return err

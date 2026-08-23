@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 )
 
@@ -86,6 +87,12 @@ func TestRunMainHelpAndSupervisorShutdown(t *testing.T) {
 }
 
 func TestRunMainStartsAndStopsConfiguredHTTPServer(t *testing.T) {
+	previousBootstrapRuntime := newBootstrapRuntime
+	newBootstrapRuntime = func(context.Context) (*bootstrap.Runtime, error) {
+		return bootstrap.NewUnavailable()
+	}
+	defer func() { newBootstrapRuntime = previousBootstrapRuntime }()
+
 	oldArgs := os.Args
 	os.Args = []string{"trpc-service", "--help"}
 	main()
@@ -109,6 +116,18 @@ func TestRunMainStartsAndStopsConfiguredHTTPServer(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "listening on 127.0.0.1:0") {
 		t.Fatalf("server output = %q", output.String())
+	}
+}
+
+func TestRunMainFailsFastWithoutProductionConfiguration(t *testing.T) {
+	t.Setenv("TRPC_POSTGRES_DSN", "")
+	var output strings.Builder
+	err := runMain(context.Background(), []string{"-addr", "127.0.0.1:0"}, &output, io.Discard, nil)
+	if !errors.Is(err, bootstrap.ErrInvalidConfig) {
+		t.Fatalf("missing production configuration error = %v", err)
+	}
+	if strings.Contains(err.Error(), "postgres://") {
+		t.Fatalf("configuration error disclosed a DSN: %v", err)
 	}
 }
 

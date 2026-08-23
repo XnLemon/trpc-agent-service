@@ -170,6 +170,19 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 		WHERE tenant_id = 't_01ARZ3NDEKTSV4RRFFQ69G5FAV'
 		  AND app_id = 'app_01ARZ3NDEKTSV4RRFFQ69G5FAV'
 	`)
+
+	setRole(t, ctx, conn, "migration_owner")
+	expectExecError(t, ctx, conn, `
+		SELECT public.control_plane_publish_agent_app(
+			't_01ARZ3NDEKTSV4RRFFQ69G5FAV',
+			'app_01ARZ3NDEKTSV4RRFFQ69G5FAV',
+			1, 1, 1, repeat('0', 64), clock_timestamp(), clock_timestamp(),
+			'active', 2, 2, clock_timestamp(), 'draft', 'active', NULL, 2,
+			'admin', 'smoke', 'mismatch', 'migration-smoke'
+		)
+	`)
+	resetRole(t, ctx, conn)
+
 	execSQL(t, ctx, conn, `
 		UPDATE public.agent_app_revision
 		SET state = 'published', content_digest = repeat('0', 64), published_at = clock_timestamp()

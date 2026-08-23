@@ -31,6 +31,8 @@ type serviceOptions struct {
 	shutdownTimeout time.Duration
 }
 
+var newBootstrapRuntime = bootstrap.NewFromEnvironment
+
 func main() {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
@@ -50,7 +52,7 @@ func runMain(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 		_, _ = fmt.Fprintf(stdout, "trpc-agent-service %s\nusage: trpc-service [-addr address] [-shutdown-timeout duration]\n", trpcservice.Version)
 		return nil
 	}
-	bootstrapRuntime, err := bootstrap.NewUnavailable()
+	bootstrapRuntime, err := newBootstrapRuntime(ctx)
 	if err != nil {
 		return err
 	}

@@ -149,7 +149,7 @@
 - [x] 实现普通及流式对话 API，并贯穿 `request_id` / `trace_id`
 - [ ] 实现无状态 Worker 和基于共享 Session/Memory 后端的水平扩展
 - [x] 实现 `context.Context` 取消、Runner Event 通道排空和 goroutine 生命周期管理
-- [x] 实现健康检查、readiness、优雅摘流和服务关闭（bootstrap 依赖未配置时保持 503）
+- [x] 实现健康检查、readiness、优雅摘流和服务关闭（生产入口缺少 bootstrap 配置时快速失败）
 
 ### 数据模型、多后端与同步
 

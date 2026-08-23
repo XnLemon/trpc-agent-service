@@ -571,6 +571,10 @@ BEGIN
     IF NOT FOUND THEN RAISE EXCEPTION 'agent app revision does not exist'; END IF;
     IF v_revision_state <> 'draft' THEN RAISE EXCEPTION 'published agent app revision is immutable'; END IF;
     IF v_draft_version <> p_expected_draft_version THEN RAISE EXCEPTION 'agent app draft version conflict'; END IF;
+    IF p_current_revision IS NULL OR p_current_revision <> p_revision
+       OR p_event_current_revision IS NULL OR p_event_current_revision <> p_revision THEN
+        RAISE EXCEPTION 'published agent app current revision must match published revision';
+    END IF;
     UPDATE public.agent_app_revision
     SET state = 'published', content_digest = p_content_digest,
         published_at = p_published_at, updated_at = p_revision_updated_at

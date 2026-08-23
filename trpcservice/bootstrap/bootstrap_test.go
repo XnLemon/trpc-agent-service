@@ -82,6 +82,89 @@ func TestNewUnavailableUsesRealGraphButReturns503(t *testing.T) {
 	}
 }
 
+func TestEnvironmentBootstrapRequiresExplicitConfigurationAndBuildsDependencies(t *testing.T) {
+	t.Setenv(envPostgresDSN, "postgres://postgres:postgres@127.0.0.1:5432/control_plane")
+	t.Setenv(envAPIToken, "api-token")
+	t.Setenv(envTenantID, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	t.Setenv(envAppID, "app_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	t.Setenv(envSubjectID, "service")
+	t.Setenv(envModelAPIKey, "test-secret")
+	t.Setenv(envModelProvider, "openai")
+	t.Setenv(envModelNames, "gpt-4o-mini,custom.model")
+	t.Setenv(envModelEndpointHost, "api.openai.com,proxy.example")
+	t.Setenv(envModelSecretRef, "env/test-key")
+
+	config, err := loadEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.modelProvider != "openai" || len(config.modelNames) != 2 || config.secretRef != "env/test-key" {
+		t.Fatalf("environment config = %+v", config)
+	}
+	modelCatalog, backendCatalog, err := environmentCatalogs(config)
+	if err != nil || modelCatalog == nil || backendCatalog == nil {
+		t.Fatalf("environment catalogs = %v, %v, %v", modelCatalog, backendCatalog, err)
+	}
+
+	authenticator, err := gateway.NewStaticAPIAuthenticator(map[string]gateway.APIIdentity{
+		config.apiToken: {TenantID: config.tenantID, AppID: config.appID, SubjectID: config.subjectID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	request.Header.Set("Authorization", "Bearer "+config.apiToken)
+	authenticated, err := authenticator.Authenticate(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := authenticated.Identity()
+	if err != nil || identity.TenantID != config.tenantID || identity.AppID != config.appID {
+		t.Fatalf("environment identity = %+v, err=%v", identity, err)
+	}
+
+	resolver := environmentSecretResolver{reference: config.secretRef, value: config.modelAPIKey}
+	secret, err := resolver.Resolve(context.Background(), modelprofile.SecretScope{TenantID: config.tenantID, SecretRef: config.secretRef})
+	if err != nil || secret.Value() != config.modelAPIKey || secret.String() != "<redacted-secret>" {
+		t.Fatalf("environment secret = %s, err=%v", secret, err)
+	}
+	model, err := (environmentModelFactory{}).New(context.Background(), modelprofile.ModelFactoryInput{Model: "gpt-4o-mini"}, secret)
+	if err != nil || model == nil {
+		t.Fatalf("environment model = %v, err=%v", model, err)
+	}
+
+	for _, name := range []string{envPostgresDSN, envAPIToken, envTenantID, envAppID, envModelAPIKey} {
+		t.Setenv(name, "")
+		if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("missing %s error = %v", name, err)
+		}
+		t.Setenv(name, "configured")
+	}
+	if _, err := NewFromEnvironment(nilContextForTest()); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("nil environment bootstrap context error = %v", err)
+	}
+}
+
+func nilContextForTest() context.Context { return nil }
+
+func TestEnvironmentBootstrapPreservesCancellationAndRejectsBadLists(t *testing.T) {
+	t.Setenv(envPostgresDSN, "postgres://postgres:postgres@127.0.0.1:5432/control_plane")
+	t.Setenv(envAPIToken, "api-token")
+	t.Setenv(envTenantID, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	t.Setenv(envAppID, "app_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	t.Setenv(envModelAPIKey, "test-secret")
+	t.Setenv(envModelNames, "gpt-4o-mini,,custom.model")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("empty model list item error = %v", err)
+	}
+	t.Setenv(envModelNames, "gpt-4o-mini")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := NewFromEnvironment(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled environment bootstrap error = %v", err)
+	}
+}
+
 func testConfig(t *testing.T) (Config, func()) {
 	t.Helper()
 	modelCatalog, err := modelprofile.NewProviderCatalog(modelprofile.ProviderSpec{
