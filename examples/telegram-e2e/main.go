@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -36,7 +38,10 @@ var (
 	errConfiguration         = errors.New("invalid Telegram E2E configuration")
 	errPreflight             = errors.New("telegram E2E preflight failed")
 	errPreflightClient       = errors.New("telegram E2E bot client preflight failed")
-	errPreflightGetMe        = errors.New("telegram E2E getMe preflight failed")
+	errPreflightGetMeNetwork = errors.New("telegram E2E getMe network failure")
+	errPreflightGetMeTimeout = errors.New("telegram E2E getMe timeout")
+	errPreflightGetMeAPI     = errors.New("telegram E2E getMe Telegram API rejected the request")
+	errPreflightGetMeReply   = errors.New("telegram E2E getMe response was invalid")
 	errPreflightWebhook      = errors.New("telegram E2E webhook preflight failed")
 	errWebhookConfigured     = errors.New("telegram webhook is configured; remove it or enable TELEGRAM_DELETE_WEBHOOK")
 	errAdapterConfiguration  = errors.New("telegram E2E adapter configuration failed")
@@ -90,7 +95,7 @@ func run(ctx context.Context, lookup func(string) string, stdout, stderr io.Writ
 		return err
 	}
 
-	receiver, err := prepareBot(ctx, configuration.botToken, configuration.deleteWebhook, configuration.dropPendingUpdate)
+	receiver, err := prepareBot(ctx, configuration.botToken, configuration.pollTimeout, configuration.deleteWebhook, configuration.dropPendingUpdate)
 	if err != nil {
 		return err
 	}
@@ -115,7 +120,7 @@ func run(ctx context.Context, lookup func(string) string, stdout, stderr io.Writ
 
 	var result error
 	if configuration.senderBotToken != "" {
-		result = runAutomatedSender(runContext, configuration.senderBotToken, receiver, configuration.testMessage, configuration.deleteWebhook, configuration.dropPendingUpdate)
+		result = runAutomatedSender(runContext, configuration.senderBotToken, configuration.pollTimeout, receiver, configuration.testMessage, configuration.deleteWebhook, configuration.dropPendingUpdate)
 		cancel()
 		if stopErr := waitForAdapter(runDone); stopErr != nil && result == nil {
 			result = stopErr
@@ -201,19 +206,63 @@ func readBool(lookup func(string) string, name string, fallback bool) (bool, err
 	return strconv.ParseBool(value)
 }
 
-func prepareBot(ctx context.Context, token string, deleteWebhook, dropPending bool) (*models.User, error) {
-	client, err := bot.New(token, bot.WithSkipGetMe())
+func prepareBot(ctx context.Context, token string, pollTimeout time.Duration, deleteWebhook, dropPending bool) (*models.User, error) {
+	client, err := bot.New(token, bot.WithSkipGetMe(), bot.WithHTTPClient(pollTimeout, preflightHTTPClient(pollTimeout)))
 	if err != nil {
 		return nil, errPreflightClient
 	}
 	me, err := client.GetMe(ctx)
-	if err != nil || me == nil || !me.IsBot || me.ID <= 0 {
-		return nil, errPreflightGetMe
+	if err != nil {
+		return nil, classifyGetMeError(err)
+	}
+	if me == nil || !me.IsBot || me.ID <= 0 {
+		return nil, errPreflightGetMeReply
 	}
 	if err := prepareLongPolling(ctx, client, deleteWebhook, dropPending); err != nil {
 		return nil, err
 	}
 	return me, nil
+}
+
+func classifyGetMeError(err error) error {
+	if err == nil {
+		return errPreflightGetMeReply
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errPreflightGetMeTimeout
+	}
+	if errors.Is(err, bot.ErrorForbidden) || errors.Is(err, bot.ErrorBadRequest) || errors.Is(err, bot.ErrorUnauthorized) || errors.Is(err, bot.ErrorNotFound) || errors.Is(err, bot.ErrorConflict) || errors.Is(err, bot.ErrorTooManyRequests) {
+		return errPreflightGetMeAPI
+	}
+	var tooManyRequestsError *bot.TooManyRequestsError
+	if errors.As(err, &tooManyRequestsError) {
+		return errPreflightGetMeAPI
+	}
+	var requestError *url.Error
+	if errors.As(err, &requestError) {
+		if requestError.Timeout() {
+			return errPreflightGetMeTimeout
+		}
+		return errPreflightGetMeNetwork
+	}
+	return errPreflightGetMeReply
+}
+
+func classifyAdapterError(err error) error {
+	switch {
+	case errors.Is(err, telegram.ErrInvalid):
+		return errAdapterConfiguration
+	case errors.Is(err, telegram.ErrBotIdentityMismatch):
+		return errAdapterIdentity
+	case errors.Is(err, telegram.ErrInitialization):
+		return errAdapterInitialization
+	default:
+		return errPreflight
+	}
+}
+
+func preflightHTTPClient(pollTimeout time.Duration) *http.Client {
+	return &http.Client{Timeout: pollTimeout + 5*time.Second}
 }
 
 func prepareLongPolling(ctx context.Context, client webhookClient, deleteWebhook, dropPending bool) error {
@@ -326,16 +375,7 @@ func telegramAdapter(ctx context.Context, configuration runConfig, target channe
 		},
 	})
 	if err != nil {
-		switch {
-		case errors.Is(err, telegram.ErrInvalid):
-			return nil, errAdapterConfiguration
-		case errors.Is(err, telegram.ErrBotIdentityMismatch):
-			return nil, errAdapterIdentity
-		case errors.Is(err, telegram.ErrInitialization):
-			return nil, errAdapterInitialization
-		default:
-			return nil, errPreflight
-		}
+		return nil, classifyAdapterError(err)
 	}
 	return adapter, nil
 }
@@ -366,7 +406,7 @@ func (dispatcher *deterministicDispatcher) Dispatch(ctx context.Context, request
 	return events, nil
 }
 
-func runAutomatedSender(ctx context.Context, token string, receiver *models.User, marker string, deleteWebhook, dropPending bool) error {
+func runAutomatedSender(ctx context.Context, token string, pollTimeout time.Duration, receiver *models.User, marker string, deleteWebhook, dropPending bool) error {
 	if receiver == nil || receiver.ID <= 0 || receiver.Username == "" {
 		return errSender
 	}
@@ -392,6 +432,7 @@ func runAutomatedSender(ctx context.Context, token string, receiver *models.User
 			default:
 			}
 		}),
+		bot.WithHTTPClient(pollTimeout, preflightHTTPClient(pollTimeout)),
 	)
 	if err != nil {
 		return errSender

@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/telegram"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -96,6 +99,58 @@ func TestPrepareLongPollingHandlesWebhookSafely(t *testing.T) {
 	}
 	if !configured.deleted || !configured.dropPending {
 		t.Fatalf("DeleteWebhook options were not preserved: %+v", configured)
+	}
+}
+
+func TestClassifyGetMeErrorRedactsProviderDetails(t *testing.T) {
+	secret := "bot-secret"
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "nil error", want: errPreflightGetMeReply},
+		{name: "context timeout", err: context.DeadlineExceeded, want: errPreflightGetMeTimeout},
+		{name: "api rejection", err: fmt.Errorf("provider response: %w", bot.ErrorUnauthorized), want: errPreflightGetMeAPI},
+		{name: "rate limit", err: &bot.TooManyRequestsError{Message: "provider response", RetryAfter: 1}, want: errPreflightGetMeAPI},
+		{name: "network error", err: &url.Error{Op: "POST", URL: "https://api.telegram.org/bot" + secret + "/getMe", Err: errors.New("dial failed")}, want: errPreflightGetMeNetwork},
+		{name: "invalid response", err: errors.New("provider response could not be decoded"), want: errPreflightGetMeReply},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := classifyGetMeError(test.err)
+			if !errors.Is(got, test.want) {
+				t.Fatalf("classifyGetMeError(%v) = %v, want %v", test.err, got, test.want)
+			}
+			if strings.Contains(got.Error(), secret) {
+				t.Fatalf("classification error %q leaked provider secret", got)
+			}
+		})
+	}
+}
+
+func TestClassifyAdapterErrorRedactsProviderDetails(t *testing.T) {
+	secret := "bot-secret"
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "invalid configuration", err: fmt.Errorf("provider token %s: %w", secret, telegram.ErrInvalid), want: errAdapterConfiguration},
+		{name: "identity mismatch", err: telegram.ErrBotIdentityMismatch, want: errAdapterIdentity},
+		{name: "initialization", err: fmt.Errorf("provider detail: %w", telegram.ErrInitialization), want: errAdapterInitialization},
+		{name: "fallback", err: errors.New("unexpected provider error"), want: errPreflight},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := classifyAdapterError(test.err)
+			if !errors.Is(got, test.want) {
+				t.Fatalf("classifyAdapterError(%v) = %v, want %v", test.err, got, test.want)
+			}
+			if strings.Contains(got.Error(), secret) {
+				t.Fatalf("classification error %q leaked provider secret", got)
+			}
+		})
 	}
 }
 
