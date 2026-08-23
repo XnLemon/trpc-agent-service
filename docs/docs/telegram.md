@@ -1,7 +1,7 @@
 # Telegram 长轮询 Channel Adapter
 
-> Issue #31 的文档先行契约。本文固定 Telegram 适配器的边界、生命周期和安全约束；在代码与
-> 测试完成前，不把设计项标记为已实现。
+> Issue #31 的实现契约与状态记录。Telegram long polling 普通文本路径已实现并由单元、race
+> 与全仓验证覆盖；Webhook、媒体/rich update、持久化和跨节点能力仍明确不在本 Issue 范围内。
 
 ## 1. 交付边界
 
@@ -136,13 +136,13 @@ trace 或 Telegram 回复中。
 
 ## 6. 文档与代码验收清单
 
-代码阶段完成后，README 和 MkDocs 状态应明确区分已交付与后续能力：
+README 和 MkDocs 状态应明确区分已交付与后续能力：
 
-- [ ] SDK 版本固定，Bot factory/client 可注入，`Run(ctx)` 和单 update handler 可测试；
-- [ ] `getMe` 身份校验、tenant/Binding/Runner 隔离、普通文本映射和 binding-aware 幂等通过测试；
-- [ ] Dispatch 完整消费、单逻辑回复、4096 code point 分段、forum thread 路由和失败脱敏通过测试；
-- [ ] cancellation、polling error、send failure、duplicate delivery 和资源生命周期通过测试；
-- [ ] Telegram long polling 标记为已实现；Webhook、持久化幂等/outbox、媒体、跨节点 ownership
+- [x] SDK 版本固定，Bot factory/client 可注入，`Run(ctx)` 和单 update handler 可测试；
+- [x] `getMe` 身份校验、tenant/Binding/Runner 隔离、普通文本映射和 binding-aware 幂等通过测试；
+- [x] Dispatch 完整消费、单逻辑回复、4096 code point 分段、forum thread 路由和失败脱敏通过测试；
+- [x] cancellation、polling error、send failure、duplicate delivery 和资源生命周期通过测试；
+- [x] Telegram long polling 已实现；Webhook、持久化幂等/outbox、媒体、跨节点 ownership
       和其他 rich update 明确保持未勾选。
 
 参考：[Telegram Bot API](https://core.telegram.org/bots/api)、

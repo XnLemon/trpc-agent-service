@@ -173,11 +173,13 @@
 - [ ] 实现外部消息到 `model.Message` / `runner.Runner.Run` 的转换
 - [ ] 实现 Runner Event 到文本、流式消息和卡片消息的转换
 - [ ] 接入企业微信或微信相关通道
-- [ ] 再接入至少一种不同 IM 通道，例如 Telegram
+- [x] 接入 Telegram long polling 文本通道（Issue #31；单 Binding、Gateway Dispatch、进程内幂等）
+- [ ] 接入 Telegram webhook、媒体/rich update 或其他 IM 通道
 - [ ] 实现 webhook 验签、账号与租户绑定、用户身份映射
 - [ ] 使用 `tenant + channel + message_id` 实现幂等去重和缓存回复
 - [x] 实现单聊/群聊 Session ID 规则及跨群、跨租户隔离
-- [ ] 处理消息分段、频率限制、异步回复、图片/文件、撤回和失败重试
+- [x] Telegram 文本回复分段、重复投递和论坛线程路由
+- [ ] 处理频率限制、异步回复、图片/文件、撤回和失败重试
 - [ ] 增加重复投递、乱序、验签失败和跨租户访问测试
 
 ### 治理、安全与可观测性
@@ -214,21 +216,24 @@
 - [x] 列出至少 8 个生产风险及对应缓解措施
 - [x] 持续标注可直接复用的 tRPC-Agent-Go 能力与平台新增模块边界
 
-> Issue #24 只完成架构、数据模型和运维文档；当前 PR 只确认下方部分 Gateway/API、进程内
-> 保护和 Binding-aware identity 条目。完整 Channel/Gateway 生产能力、真实 IM/Storage
-> Adapter、迁移工具和生产告警仍未实现。
+> Issue #24 只完成架构、数据模型和运维文档；当前仓库另外交付了 Issue #28 的 Gateway/API
+> 阶段能力和 Issue #31 的 Telegram long polling 文本 Adapter。完整 WeCom/Telegram webhook、
+> rich update、持久化消息能力、迁移工具和生产告警仍未实现。
 
 ## 当前 PR 实现记录（不改变原验收要求）
 
-> 以下内容仅索引 PR #29 当前 head 的实现和测试范围，不替代、收窄或修改上方原验收要求；
+> 以下内容仅索引当前实现 PR 的 head 和测试范围，不替代、收窄或修改上方原验收要求；
 > 上方勾选仅表示该原条目已有完整证据。PR 尚未合并，当前阶段实现也不等同于全部原验收项已完成。
 
 - `trpcservice/gateway/auth.go` 的 proof-bearing API 身份校验对应
   `trpcservice/gateway/auth_test.go`；`resolver.go` 对应 `resolver_test.go`。
 - 当前 PR 包含 Gateway、HTTP/SSE、进程内限流/幂等和 Channel trusted-principal 的阶段性代码，
   具体边界以 `docs/docs/gateway.md` 为准。
+- Issue #31 的 `trpcservice/channels/telegram` 提供单 Binding、`getMe` 身份校验、普通文本
+  long polling、Gateway Dispatch、进程内幂等和脱敏分段回复；具体边界以
+  `docs/docs/telegram.md` 为准。
 - Issue #26 的 fake candidate resolver/verifier 与 proof-bearing routing 边界有独立测试，
-  但这不代表真实 IM Adapter、生产 webhook 或持久化能力已满足 README 原验收要求。
+  但这不代表 WeCom/Telegram webhook、媒体能力或持久化消息能力已满足 README 原验收要求。
 
 ## 代码目录
 
