@@ -165,12 +165,12 @@ PR #25 已在合并 head `75d857bc5ad07ebc162c26817064532afd15a46e` 完成 Issue
 文档先行的 Stage 2 只覆盖进程内 Runner Registry 和协议无关 Dispatch；完成后才将
 下面项目从 `[ ]` 改为 `[x]`，并把测试命令与 exact head 写入 PR ledger：
 
-- [ ] 使用完整 `ExecutionPlan.CacheKey()` 做 Runner 查找，不能按 Tenant/App 的部分字段共享。
-- [ ] 合并同 key 的并发构造，构造失败不缓存半成品，并区分借用依赖与 Registry 自有 Runner。
-- [ ] 提供引用计数 lease、Invalidate、空闲/容量淘汰和有界 Close；在途请求释放前不得关闭 Runner。
-- [ ] Dispatch 只接收已验证 Principal 与规范化 `InboundMessage`，生成 Binding/API-aware identity，传递 request ID 和取消 Context。
-- [ ] 以脱敏的文本、状态、错误、done 事件消费 Runner Event；取消或关闭时有界排空并释放 lease。
-- [ ] 用并发、跨租户、版本失效、构造失败、取消、淘汰和关闭回归测试证明上述边界。
+- [x] 使用完整 `ExecutionPlan.CacheKey()` 做 Runner 查找，不能按 Tenant/App 的部分字段共享。
+- [x] 合并同 key 的并发构造，构造失败不缓存半成品，并区分借用依赖与 Registry 自有 Runner。
+- [x] 提供引用计数 lease、Invalidate、空闲/容量淘汰和有界 Close；在途请求释放前不得关闭 Runner。
+- [x] Dispatch 只接收已验证 Principal 与规范化 `InboundMessage`，生成 Binding/API-aware identity，传递 request ID 和取消 Context。
+- [x] 以脱敏的文本、状态、错误、done 事件消费 Runner Event；取消或关闭时有界排空并释放 lease。
+- [x] 用并发、跨租户、版本失效、构造失败、取消、淘汰和关闭回归测试证明上述边界。
 
 ## 10. 离线验收矩阵
 
