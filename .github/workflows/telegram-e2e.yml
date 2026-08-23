@@ -1,6 +1,10 @@
 name: Telegram Live E2E
 
 on:
+  push:
+    branches:
+      - main
+  pull_request:
   workflow_dispatch:
     inputs:
       delete_webhook:
@@ -24,6 +28,7 @@ permissions:
 jobs:
   telegram-e2e:
     name: Telegram live long-polling E2E
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     environment: telegram-e2e
     timeout-minutes: 5
