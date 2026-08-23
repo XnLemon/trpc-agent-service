@@ -184,6 +184,14 @@ type VerifiedBinding struct {
 	Channel           Channel
 	ProviderAccountID string
 	ConfigDigest      string
+	proof             *verifiedBindingProof
+}
+
+// verifiedBindingProof is only created inside this package after a resolver
+// has completed provider verification. It also retains the verified fields so
+// a copied public value cannot be edited and then re-used as trusted input.
+type verifiedBindingProof struct {
+	fields VerifiedBinding
 }
 
 // Clone returns a defensive copy of the verified result.
@@ -191,6 +199,12 @@ func (v VerifiedBinding) Clone() VerifiedBinding { return v }
 
 // Validate checks the fixed identity shape carried by a verifier result.
 func (v VerifiedBinding) Validate() error {
+	if v.proof == nil {
+		return fmt.Errorf("%w: verified binding has no verifier proof", ErrVerificationFailed)
+	}
+	if v.proof.fields.TenantID != v.TenantID || v.proof.fields.BindingID != v.BindingID || v.proof.fields.BindingVersion != v.BindingVersion || v.proof.fields.AppID != v.AppID || v.proof.fields.Channel != v.Channel || v.proof.fields.ProviderAccountID != v.ProviderAccountID || v.proof.fields.ConfigDigest != v.ConfigDigest {
+		return fmt.Errorf("%w: verified binding was modified after verification", ErrInvalid)
+	}
 	if err := validateTenantID(v.TenantID); err != nil {
 		return err
 	}
@@ -213,21 +227,24 @@ func (v VerifiedBinding) Validate() error {
 	return nil
 }
 
-// NewVerifiedBinding seals the public routing fields from a validated active
-// Binding. It is intended for trusted resolver implementations; inbound
-// payload fields are not accepted by this constructor.
-func NewVerifiedBinding(binding Binding) (VerifiedBinding, error) {
+// newVerifiedBinding seals the public routing fields from a validated active
+// Binding after a resolver in this package has completed verification. It is
+// intentionally unexported: callers must obtain the result from a
+// CandidateVerifier rather than minting one from request-shaped fields.
+func newVerifiedBinding(binding Binding) (VerifiedBinding, error) {
 	if err := binding.Validate(); err != nil {
 		return VerifiedBinding{}, err
 	}
 	if !binding.CanAcceptInbound() {
 		return VerifiedBinding{}, ErrVerificationFailed
 	}
-	return VerifiedBinding{
+	verified := VerifiedBinding{
 		TenantID: binding.TenantID, BindingID: binding.BindingID, BindingVersion: binding.Version,
 		AppID: binding.AppID, Channel: binding.Channel, ProviderAccountID: binding.ProviderAccountID,
 		ConfigDigest: binding.ConfigDigest,
-	}, nil
+	}
+	verified.proof = &verifiedBindingProof{fields: verified}
+	return verified, nil
 }
 
 // RoutingTarget is the fixed, non-secret route selected after candidate
@@ -240,6 +257,15 @@ type RoutingTarget struct {
 	Channel           Channel
 	ProviderAccountID string
 	ConfigDigest      string
+	capability        *routingTargetCapability
+}
+
+// routingTargetCapability retains the verifier-owned snapshot that created a
+// RoutingTarget. Keeping the expected fields private makes the public route
+// value tamper-evident: callers cannot mint the capability or change a copied
+// target without failing validation.
+type routingTargetCapability struct {
+	verified VerifiedBinding
 }
 
 // NewRoutingTarget validates the trusted Tenant snapshot, current Binding,
@@ -265,17 +291,37 @@ func NewRoutingTarget(tenantSnapshot tenant.ConfigurationSnapshot, binding *Bind
 	if tenantValue.TenantID != binding.TenantID || tenantValue.TenantID != app.TenantID || verified.TenantID != binding.TenantID || verified.AppID != binding.AppID || verified.BindingID != binding.BindingID || verified.BindingVersion != binding.Version || verified.AppID != app.AppID || verified.Channel != binding.Channel || verified.ProviderAccountID != binding.ProviderAccountID || verified.ConfigDigest != binding.ConfigDigest {
 		return RoutingTarget{}, fmt.Errorf("%w: trusted tenant, binding, app, and verifier scopes do not match", ErrVerificationFailed)
 	}
-	return RoutingTarget{
+	routingTarget := RoutingTarget{
 		TenantID: tenantValue.TenantID, BindingID: binding.BindingID, BindingVersion: binding.Version,
 		AppID: app.AppID, Channel: binding.Channel, ProviderAccountID: binding.ProviderAccountID,
 		ConfigDigest: binding.ConfigDigest,
-	}, nil
+	}
+	routingTarget.capability = &routingTargetCapability{verified: verified}
+	return routingTarget, nil
 }
 
 // Validate checks the non-secret target identity.
 func (target RoutingTarget) Validate() error {
-	verified := VerifiedBinding(target)
-	return verified.Validate()
+	if target.capability == nil {
+		return fmt.Errorf("%w: routing target was not created by the trusted boundary", ErrVerificationFailed)
+	}
+	current := VerifiedBinding{
+		TenantID:          target.TenantID,
+		BindingID:         target.BindingID,
+		BindingVersion:    target.BindingVersion,
+		AppID:             target.AppID,
+		Channel:           target.Channel,
+		ProviderAccountID: target.ProviderAccountID,
+		ConfigDigest:      target.ConfigDigest,
+	}
+	if !sameVerifiedBindingFields(current, target.capability.verified) {
+		return fmt.Errorf("%w: routing target was modified after trusted creation", ErrVerificationFailed)
+	}
+	return target.capability.verified.Validate()
+}
+
+func sameVerifiedBindingFields(left, right VerifiedBinding) bool {
+	return left.TenantID == right.TenantID && left.BindingID == right.BindingID && left.BindingVersion == right.BindingVersion && left.AppID == right.AppID && left.Channel == right.Channel && left.ProviderAccountID == right.ProviderAccountID && left.ConfigDigest == right.ConfigDigest
 }
 
 // ConversationKind controls the external identity tuple used for a session.

@@ -144,8 +144,8 @@
 - [x] 将 Tenant、Agent Revision、Model Profile 和 Backend Profile 组合成 Execution Plan
 - [ ] 实现 Agent Registry，按 `tenant_id + agent_app_id + version` 加载 Agent
 - [x] 实现 Tenant + App + Revision 不可变执行快照、Factory Cache Key 和无密钥 Factory 输入契约
-- [ ] 实现 Gateway 的鉴权、租户解析、Agent 路由、限流和请求去重
-- [ ] 实现普通及流式对话 API，并贯穿 `request_id` / `trace_id`
+- [x] 实现 Gateway 的鉴权、租户解析、Agent 路由、限流和请求去重
+- [x] 实现普通及流式对话 API，并贯穿 `request_id` / `trace_id`
 - [ ] 实现无状态 Worker 和基于共享 Session/Memory 后端的水平扩展
 - [x] 实现 `context.Context` 取消、Runner Event 通道排空和 goroutine 生命周期管理
 - [ ] 实现健康检查、readiness、优雅摘流和服务关闭
@@ -176,7 +176,7 @@
 - [ ] 再接入至少一种不同 IM 通道，例如 Telegram
 - [ ] 实现 webhook 验签、账号与租户绑定、用户身份映射
 - [ ] 使用 `tenant + channel + message_id` 实现幂等去重和缓存回复
-- [ ] 实现单聊/群聊 Session ID 规则及跨群、跨租户隔离
+- [x] 实现单聊/群聊 Session ID 规则及跨群、跨租户隔离
 - [ ] 处理消息分段、频率限制、异步回复、图片/文件、撤回和失败重试
 - [ ] 增加重复投递、乱序、验签失败和跨租户访问测试
 
@@ -214,8 +214,21 @@
 - [x] 列出至少 8 个生产风险及对应缓解措施
 - [x] 持续标注可直接复用的 tRPC-Agent-Go 能力与平台新增模块边界
 
-> Issue #24 只完成架构、数据模型和运维文档；Channel Binding、Gateway、真实 IM/Storage
+> Issue #24 只完成架构、数据模型和运维文档；当前 PR 只确认下方部分 Gateway/API、进程内
+> 保护和 Binding-aware identity 条目。完整 Channel/Gateway 生产能力、真实 IM/Storage
 > Adapter、迁移工具和生产告警仍未实现。
+
+## 当前 PR 实现记录（不改变原验收要求）
+
+> 以下内容仅索引 PR #29 当前 head 的实现和测试范围，不替代、收窄或修改上方原验收要求；
+> 上方勾选仅表示该原条目已有完整证据。PR 尚未合并，当前阶段实现也不等同于全部原验收项已完成。
+
+- `trpcservice/gateway/auth.go` 的 proof-bearing API 身份校验对应
+  `trpcservice/gateway/auth_test.go`；`resolver.go` 对应 `resolver_test.go`。
+- 当前 PR 包含 Gateway、HTTP/SSE、进程内限流/幂等和 Channel trusted-principal 的阶段性代码，
+  具体边界以 `docs/docs/gateway.md` 为准。
+- Issue #26 的 fake candidate resolver/verifier 与 proof-bearing routing 边界有独立测试，
+  但这不代表真实 IM Adapter、生产 webhook 或持久化能力已满足 README 原验收要求。
 
 ## 代码目录
 

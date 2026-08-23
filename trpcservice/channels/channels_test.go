@@ -214,7 +214,7 @@ func TestNewBindingAndBindingValidationRejectMalformedState(t *testing.T) {
 func TestRoutingAndScopeValidationBoundaries(t *testing.T) {
 	binding := newPreparedTestBinding(t)
 	binding.Status = StatusActive
-	verified, err := NewVerifiedBinding(*binding)
+	verified, err := newVerifiedBinding(*binding)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,12 +242,12 @@ func TestRoutingAndScopeValidationBoundaries(t *testing.T) {
 			}
 		})
 	}
-	if _, err := NewVerifiedBinding(Binding{}); !errors.Is(err, ErrInvalid) {
+	if _, err := newVerifiedBinding(Binding{}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("invalid Binding was sealed as verified: %v", err)
 	}
 	suspended := binding.Clone()
 	suspended.Status = StatusSuspended
-	if _, err := NewVerifiedBinding(suspended); !errors.Is(err, ErrVerificationFailed) {
+	if _, err := newVerifiedBinding(suspended); !errors.Is(err, ErrVerificationFailed) {
 		t.Fatalf("suspended Binding was sealed as verified: %v", err)
 	}
 

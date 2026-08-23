@@ -171,7 +171,7 @@ func TestFakeResolverIsCoveredInsideItsOwningPackage(t *testing.T) {
 		t.Fatal("zero fake options unexpectedly changed")
 	}
 	zeroClock := NewFakeCandidateResolver(repo, map[channels.SecretScope]string{}, FakeResolverOptions{Clock: func() time.Time { return time.Time{} }})
-	if zeroClock.nowUTC().IsZero() {
+	if zeroClock.NowUTC().IsZero() {
 		t.Fatal("zero fake clock was not replaced by wall clock")
 	}
 }
@@ -193,20 +193,20 @@ func TestFakeResolverPrunesAndBoundsUnverifiedHandles(t *testing.T) {
 	if _, err := resolveHandleForTest(t, repo, resolver, routeDigest); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(resolver.handles); got != 2 {
+	if got := resolver.HandleCount(); got != 2 {
 		t.Fatalf("expected two outstanding handles, got %d", got)
 	}
 	clock.now = base.Add(3 * time.Second)
 	if _, err := resolveHandleForTest(t, repo, resolver, routeDigest); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(resolver.handles); got != 1 {
+	if got := resolver.HandleCount(); got != 1 {
 		t.Fatalf("expired handles were not pruned before minting: got %d", got)
 	}
 	if _, err := resolveHandleForTest(t, repo, resolver, routeDigest); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(resolver.handles); got != 2 {
+	if got := resolver.HandleCount(); got != 2 {
 		t.Fatalf("expected configured handle capacity, got %d", got)
 	}
 	candidate, err := firstCandidate(t, repo, channels.ChannelWeCom, routeDigest)
@@ -216,7 +216,7 @@ func TestFakeResolverPrunesAndBoundsUnverifiedHandles(t *testing.T) {
 	if _, err := resolver.ResolveCandidate(context.Background(), channels.CandidateSecretRequest{Candidate: candidate, Purpose: channels.PurposeWebhookVerification}); !errors.Is(err, channels.ErrVerificationFailed) {
 		t.Fatalf("handle capacity was not enforced: %v", err)
 	}
-	if got := len(resolver.handles); got != 2 {
+	if got := resolver.HandleCount(); got != 2 {
 		t.Fatalf("handle store exceeded configured capacity: got %d", got)
 	}
 }
