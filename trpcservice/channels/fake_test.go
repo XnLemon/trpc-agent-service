@@ -337,7 +337,8 @@ func TestFakeCandidateResolverRejectsForgeryReplayAndLifecycleEdges(t *testing.T
 	if validFakeVerificationRequest(VerificationRequest{Purpose: PurposeWebhookVerification, Timestamp: now, Nonce: "n", MessageDigest: strings.Repeat("a", 64), Signature: "s"}, now, 0) {
 		t.Fatal("zero clock skew accepted a verification request")
 	}
-	if checkFakeContext(nil) != nil {
+	var nilContext context.Context
+	if checkFakeContext(nilContext) != nil {
 		t.Fatal("nil context should be accepted by the offline fake")
 	}
 	canceledContext, cancelContext := context.WithCancel(context.Background())

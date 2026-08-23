@@ -441,10 +441,11 @@ func TestGatewayAuthenticationAndPrincipalValidationEdges(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest("GET", "/", nil)
+	var nilContext context.Context
 	if _, err := authenticator.Authenticate(context.Background(), nil); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("nil request error = %v", err)
 	}
-	if _, err := authenticator.Authenticate(nil, request); !errors.Is(err, ErrUnauthenticated) {
+	if _, err := authenticator.Authenticate(nilContext, request); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("nil context error = %v", err)
 	}
 	canceled, cancel := context.WithCancel(context.Background())
@@ -534,7 +535,8 @@ func TestInboundMessageAndResolverBoundaryEdges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolver.Resolve(nil, mustAPIPrincipal(t, fixture.tenant.TenantID, fixture.app.AppID)); !errors.Is(err, ErrInvalid) {
+	var nilContext context.Context
+	if _, err := resolver.Resolve(nilContext, mustAPIPrincipal(t, fixture.tenant.TenantID, fixture.app.AppID)); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("nil resolver context error = %v", err)
 	}
 	if !IsContextCancellation(context.Canceled) || !IsContextCancellation(context.DeadlineExceeded) || IsContextCancellation(errors.New("other")) {
