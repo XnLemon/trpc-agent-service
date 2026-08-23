@@ -207,6 +207,8 @@ disconnect 验收仍必须保持未勾选，不能用 fake 就绪状态替代。
 
 | 代码边界 | 实现文件 | 对应测试文件 |
 | --- | --- | --- |
+| API Authenticator、proof-bearing API identity 与 credential 校验 | `trpcservice/gateway/auth.go` | `trpcservice/gateway/auth_test.go` |
+| Trusted Principal → 固定 ExecutionPlan 的 Repository Resolver | `trpcservice/gateway/resolver.go` | `trpcservice/gateway/resolver_test.go` |
 | JSON/SSE Handler、严格请求 schema、health/readiness、response 脱敏 | `trpcservice/gateway/http.go` | `trpcservice/gateway/http_test.go` |
 | Tenant 并发/窗口限流和稳定拒绝错误 | `trpcservice/gateway/limits.go` | `trpcservice/gateway/limits_test.go` |
 | principal + external message ID 的进程内幂等接口 | `trpcservice/gateway/idempotency.go` | `trpcservice/gateway/idempotency_test.go` |
