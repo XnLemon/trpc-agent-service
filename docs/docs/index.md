@@ -24,6 +24,8 @@
   身份校验、普通文本映射、Dispatch 聚合回复和生命周期边界。
 - [Telegram live E2E 示例](https://github.com/XnLemon/trpc-agent-service/tree/main/examples/telegram-e2e)：
   Issue #33 的真实 Bot API 传输冒烟测试和手动 CI 运行说明。
+- [PostgreSQL 控制面与启动装配](postgresql-control-plane.md)：Issue #37 的文档先行契约，
+  复用既有表设计并统一 migration、Repository 事务边界、bootstrap、readiness 和 shutdown。
 
 ## 快速开始
 
@@ -49,6 +51,8 @@ cd trpc-agent-service
 - [Telegram 长轮询 Adapter](telegram.md) — 单 Binding Telegram long polling、文本映射与安全边界
 - [Gateway、Execution Plan 与 HTTP/SSE](gateway.md) — 可信主体、固定执行计划、Runner Registry、
   Dispatch、健康检查、优雅停机和普通/流式 API
+- [PostgreSQL 控制面与启动装配](postgresql-control-plane.md) — 六类控制面表的 migration 顺序、
+  SQL Repository 事务和真实运行时启动装配
 - [运维方案](ops.md) — 发布灰度、监控审计、故障恢复、容量模型和生产风险清单
 
 ## CI

@@ -155,6 +155,7 @@
 - [x] 完成 Tenant 根模型的 PostgreSQL DDL、约束、生命周期和框架映射设计
 - [x] 完成 Agent App/Revision 的 PostgreSQL DDL、发布事务、回滚和框架映射设计
 - [x] 完成 Backend Profile 的 PostgreSQL DDL、生命周期、运行时快照和框架映射设计
+- [x] 完成 Model Profile 的无密钥 PostgreSQL 目标形状、Repository 事务和启动装配设计（Issue #37）
 - [ ] 将 Tenant、Agent App/Revision DDL 落地为数据库 migration
 - [ ] 补齐 channel binding、session、event、memory、summary、artifact 和 audit log 的可执行 DDL
 - [ ] 定义 Session、Memory、Summary、Knowledge、Artifact 和 Audit 的统一访问接口
@@ -216,6 +217,7 @@
 - [x] 对比至少两种 IM 通道的协议、限制和回复机制
 - [x] 列出至少 8 个生产风险及对应缓解措施
 - [x] 持续标注可直接复用的 tRPC-Agent-Go 能力与平台新增模块边界
+- [x] 完成 Issue #37 PostgreSQL 控制面 migration、Repository、bootstrap 和 readiness 的文档契约
 
 > Issue #24 只完成架构、数据模型和运维文档；当前仓库另外交付了 Issue #28 的 Gateway/API
 > 阶段能力和 Issue #31 的 Telegram long polling 文本 Adapter。完整 WeCom/Telegram webhook、
