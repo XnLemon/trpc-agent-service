@@ -35,6 +35,8 @@ const (
 	defaultSubjectID      = "service"
 )
 
+var openEnvironmentDatabase = postgres.Open
+
 // environmentConfig is intentionally private: it contains the one secret
 // handed to the ModelFactory and must not become a serializable application
 // configuration object.
@@ -72,7 +74,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: API authenticator configuration is invalid", ErrInvalidConfig)
 	}
-	db, err := postgres.Open(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+	db, err := openEnvironmentDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

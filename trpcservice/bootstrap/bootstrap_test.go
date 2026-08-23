@@ -20,6 +20,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -220,6 +221,46 @@ func TestEnvironmentDependencyErrorBoundaries(t *testing.T) {
 	}
 	if _, err := factory.New(context.Background(), modelprofile.ModelFactoryInput{Model: "chat", Endpoint: "https://api.openai.com/v1"}, secret); err != nil {
 		t.Fatalf("endpoint model factory error = %v", err)
+	}
+}
+
+func TestNewFromEnvironmentBuildsRealGraphWhenDatabaseOpens(t *testing.T) {
+	t.Setenv(envPostgresDSN, "postgres://configured")
+	t.Setenv(envAPIToken, "api-token")
+	t.Setenv(envTenantID, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	t.Setenv(envAppID, "app_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	t.Setenv(envModelAPIKey, "test-secret")
+
+	registerBootstrapPingDriver.Do(func() {
+		sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{})
+	})
+	db, err := sql.Open("trpc-service-bootstrap-ping", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousOpen := openEnvironmentDatabase
+	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) {
+		return db, nil
+	}
+	defer func() { openEnvironmentDatabase = previousOpen }()
+
+	graph, err := NewFromEnvironment(context.Background())
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if !graph.Ready() {
+		t.Fatal("environment bootstrap graph is not ready")
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) {
+		return nil, errors.New("database open failure")
+	}
+	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("database open failure = %v", err)
 	}
 }
 
