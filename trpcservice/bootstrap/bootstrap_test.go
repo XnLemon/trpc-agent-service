@@ -2,9 +2,12 @@ package bootstrap
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -164,6 +167,103 @@ func TestEnvironmentBootstrapPreservesCancellationAndRejectsBadLists(t *testing.
 		t.Fatalf("canceled environment bootstrap error = %v", err)
 	}
 }
+
+func TestEnvironmentDependencyErrorBoundaries(t *testing.T) {
+	if _, _, err := environmentCatalogs(environmentConfig{
+		modelProvider: "invalid provider", modelNames: []string{"chat"}, endpointHosts: []string{"example.test"},
+	}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("invalid model catalog error = %v", err)
+	}
+	values, err := environmentList("TEST_LIST", "A, B", false)
+	if err != nil || len(values) != 2 || values[0] != "A" || values[1] != "B" {
+		t.Fatalf("case-preserving environment list = %#v, err=%v", values, err)
+	}
+	if _, err := environmentList("TEST_LIST", ",", true); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("empty environment list error = %v", err)
+	}
+
+	resolver := environmentSecretResolver{reference: "env/test-key", value: "secret"}
+	validScope := modelprofile.SecretScope{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", SecretRef: "env/test-key"}
+	if _, err := resolver.Resolve(nilContextForTest(), validScope); err == nil {
+		t.Fatal("nil resolver context unexpectedly succeeded")
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := resolver.Resolve(canceled, validScope); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled resolver error = %v", err)
+	}
+	if _, err := resolver.Resolve(context.Background(), modelprofile.SecretScope{TenantID: "invalid", SecretRef: validScope.SecretRef}); err == nil {
+		t.Fatal("invalid secret scope unexpectedly succeeded")
+	}
+	if _, err := resolver.Resolve(context.Background(), modelprofile.SecretScope{TenantID: validScope.TenantID, SecretRef: "env/other"}); err == nil {
+		t.Fatal("mismatched secret reference unexpectedly succeeded")
+	}
+	if _, err := (environmentSecretResolver{reference: validScope.SecretRef}).Resolve(context.Background(), validScope); err == nil {
+		t.Fatal("empty environment secret unexpectedly succeeded")
+	}
+
+	factory := environmentModelFactory{}
+	secret, err := modelprofile.NewSecretValue("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := factory.New(nilContextForTest(), modelprofile.ModelFactoryInput{Model: "chat"}, secret); err == nil {
+		t.Fatal("nil model factory context unexpectedly succeeded")
+	}
+	canceled, cancel = context.WithCancel(context.Background())
+	cancel()
+	if _, err := factory.New(canceled, modelprofile.ModelFactoryInput{Model: "chat"}, secret); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled model factory error = %v", err)
+	}
+	if _, err := factory.New(context.Background(), modelprofile.ModelFactoryInput{Model: "chat"}, modelprofile.SecretValue{}); err == nil {
+		t.Fatal("empty model factory secret unexpectedly succeeded")
+	}
+	if _, err := factory.New(context.Background(), modelprofile.ModelFactoryInput{Model: "chat", Endpoint: "https://api.openai.com/v1"}, secret); err != nil {
+		t.Fatalf("endpoint model factory error = %v", err)
+	}
+}
+
+var registerBootstrapPingDriver sync.Once
+
+func TestNewUsesDatabasePingAndBuildsPostgreSQLRepositories(t *testing.T) {
+	registerBootstrapPingDriver.Do(func() {
+		sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{})
+	})
+	db, err := sql.Open("trpc-service-bootstrap-ping", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, closeDependencies := testConfig(t)
+	config.DB, config.OwnDB = db, true
+	config.CloseDependencies = func() error {
+		closeDependencies()
+		return nil
+	}
+	config.Tenants, config.Apps, config.Models, config.Backends, config.Channels = nil, nil, nil, nil, nil
+	graph, err := New(context.Background(), config)
+	if err != nil {
+		_ = db.Close()
+		closeDependencies()
+		t.Fatal(err)
+	}
+	if !graph.Ready() {
+		t.Fatal("database-backed bootstrap graph is not ready")
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type bootstrapPingDriver struct{}
+
+func (bootstrapPingDriver) Open(string) (driver.Conn, error) { return bootstrapPingConn{}, nil }
+
+type bootstrapPingConn struct{}
+
+func (bootstrapPingConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+func (bootstrapPingConn) Close() error                        { return nil }
+func (bootstrapPingConn) Begin() (driver.Tx, error)           { return nil, driver.ErrSkip }
+func (bootstrapPingConn) Ping(context.Context) error          { return nil }
 
 func testConfig(t *testing.T) (Config, func()) {
 	t.Helper()
