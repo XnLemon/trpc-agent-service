@@ -26,6 +26,12 @@ type httpDispatchStub struct {
 	blockCall bool
 }
 
+type nilDispatchService struct{}
+
+func (nilDispatchService) Dispatch(context.Context, DispatchRequest) (<-chan DispatchEvent, error) {
+	return nil, nil
+}
+
 func (stub *httpDispatchStub) Dispatch(ctx context.Context, request DispatchRequest) (<-chan DispatchEvent, error) {
 	stub.mu.Lock()
 	stub.calls++
@@ -388,11 +394,88 @@ func TestHTTPStreamWriterAndErrorMappingEdges(t *testing.T) {
 	}
 }
 
+func TestHTTPAdditionalBoundaryBranches(t *testing.T) {
+	stub := &httpDispatchStub{events: []DispatchEvent{{Type: DispatchEventDone, Status: "complete", Done: true}}}
+	notReady := newHTTPTestHandler(t, stub, func() bool { return false })
+	nilRequestRecorder := httptest.NewRecorder()
+	notReady.ServeHTTP(nilRequestRecorder, nil)
+	notReadyRecorder := httptest.NewRecorder()
+	notReady.ServeHTTP(notReadyRecorder, newHTTPChatRequest(http.MethodPost, "/v1/chat", validHTTPChatBody("not-ready")))
+	if notReadyRecorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("not-ready chat status = %d", notReadyRecorder.Code)
+	}
+	badAuth := APIAuthenticatorFunc(func(context.Context, *http.Request) (AuthenticatedAPI, error) { return AuthenticatedAPI{}, nil })
+	badAuthHandler, err := NewHTTPHandler(HTTPConfig{Dispatcher: stub, Authenticator: badAuth, Ready: func() bool { return true }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	badAuthRecorder := httptest.NewRecorder()
+	badAuthHandler.ServeHTTP(badAuthRecorder, newHTTPChatRequest(http.MethodPost, "/v1/chat", validHTTPChatBody("bad-proof")))
+	if badAuthRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("bad authenticator status = %d", badAuthRecorder.Code)
+	}
+
+	nilStreamHandler, err := NewHTTPHandler(HTTPConfig{Dispatcher: nilDispatchService{}, Authenticator: notReady.authenticator, Ready: func() bool { return true }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nilStreamRecorder := httptest.NewRecorder()
+	nilStreamHandler.ServeHTTP(nilStreamRecorder, newHTTPChatRequest(http.MethodPost, "/v1/chat", validHTTPChatBody("nil-stream")))
+	if nilStreamRecorder.Code != http.StatusBadGateway {
+		t.Fatalf("nil dispatch stream status = %d", nilStreamRecorder.Code)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := collectHTTPEvents(canceled, make(chan DispatchEvent)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled event collection error = %v", err)
+	}
+	for _, test := range []struct {
+		err    error
+		status int
+	}{
+		{err: context.Canceled, status: http.StatusRequestTimeout},
+		{err: context.DeadlineExceeded, status: http.StatusGatewayTimeout},
+		{err: ErrIdempotencyCapacity, status: http.StatusServiceUnavailable},
+		{err: ErrPlanUnavailable, status: http.StatusBadGateway},
+		{err: ErrRunnerUnavailable, status: http.StatusBadGateway},
+		{err: ErrClosed, status: http.StatusServiceUnavailable},
+		{err: nil, status: http.StatusInternalServerError},
+	} {
+		status, _ := mapHTTPError(test.err)
+		if status != test.status {
+			t.Fatalf("mapped status for %v = %d", test.err, status)
+		}
+	}
+	response := finalChatResponse("request", "trace", []DispatchEvent{
+		{Type: DispatchEventStatus, Status: "partial"},
+		{Type: DispatchEventError, Error: "execution failed"},
+		{Type: DispatchEventDone, Status: "error", Done: true},
+	})
+	if response.Status != "error" || response.Error == "" || !response.Done {
+		t.Fatalf("final error response = %+v", response)
+	}
+	failingWriter := &errorWriter{}
+	if err := writeSSEEvent(failingWriter, DispatchEvent{Type: DispatchEventMessage, Text: "x"}); err == nil {
+		t.Fatal("SSE write failure was not returned")
+	}
+	noFlush := &noFlushResponseWriter{header: make(http.Header)}
+	stubHandler := newHTTPTestHandler(t, stub, func() bool { return true })
+	stubHandler.writeReplayStream(noFlush, nil)
+	if noFlush.status != http.StatusInternalServerError {
+		t.Fatalf("non-flusher replay status = %d", noFlush.status)
+	}
+}
+
 type noFlushResponseWriter struct {
 	header http.Header
 	body   string
 	status int
 }
+
+type errorWriter struct{}
+
+func (*errorWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
 
 func (writer *noFlushResponseWriter) Header() http.Header { return writer.header }
 

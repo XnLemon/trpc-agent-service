@@ -85,6 +85,33 @@ func TestRunMainHelpAndSupervisorShutdown(t *testing.T) {
 	}
 }
 
+func TestRunMainStartsAndStopsConfiguredHTTPServer(t *testing.T) {
+	oldArgs := os.Args
+	os.Args = []string{"trpc-service", "--help"}
+	main()
+	os.Args = oldArgs
+
+	signals := make(chan os.Signal, 1)
+	var output strings.Builder
+	result := make(chan error, 1)
+	go func() {
+		result <- runMain(context.Background(), []string{"-addr", "127.0.0.1:0", "-shutdown-timeout", "500ms"}, &output, io.Discard, signals)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	signals <- syscall.SIGTERM
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("configured HTTP server did not stop")
+	}
+	if !strings.Contains(output.String(), "listening on 127.0.0.1:0") {
+		t.Fatalf("server output = %q", output.String())
+	}
+}
+
 func TestRunServiceContextAndServeErrors(t *testing.T) {
 	handler, err := gateway.NewHTTPHandler(gateway.HTTPConfig{})
 	if err != nil {
