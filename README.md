@@ -114,7 +114,7 @@
 - [x] 建立 Go module、命令行入口和基础目录结构
 - [x] 提供构建、启动、停止、格式化、静态检查和覆盖率脚本
 - [x] 配置 Go CI、Codecov 和 MkDocs 文档 CI
-- [ ] 将命令行入口改造成持续运行的服务，并支持优雅停机
+- [x] 将命令行入口改造成持续运行的服务，并支持优雅停机
 - [ ] 增加 Dockerfile、Docker Compose 最小部署和 Kubernetes 生产部署清单
 - [ ] 增加配置示例、环境变量说明和可验证的端到端快速开始
 
@@ -129,7 +129,7 @@
 - [x] 实现租户级 Agent App 根模型和生命周期
 - [x] 实现 LLMAgent Revision 版本模型、草稿、不可变发布和内容摘要
 - [x] 定义 Agent Repository 并提供租户隔离、并发安全的 InMemory 实现
-- [x] 实现租户级 Channel Binding 领域模型、候选索引与可信入站路由边界
+- [x] 实现租户级 Channel Binding 领域模型、候选索引、fake 验签与可信入站路由边界
 - [x] 实现 Backend Profile 领域模型
 - [x] 完成 Model Profile、Secret Resolver 与最小 Runner 链路设计
 - [x] 实现 Model Profile 控制面、Secret Resolver 契约和最小 Runner 链路
@@ -142,13 +142,13 @@
 
 - [x] 引入并初始化 tRPC-Agent-Go，建立可执行的 `runner.Runner`
 - [x] 将 Tenant、Agent Revision、Model Profile 和 Backend Profile 组合成 Execution Plan
-- [ ] 实现 Agent Registry，按 `tenant_id + agent_app_id + version` 加载 Agent
+- [x] 实现 Agent Registry，按完整 `ExecutionPlan.CacheKey()` 加载并复用 Agent
 - [x] 实现 Tenant + App + Revision 不可变执行快照、Factory Cache Key 和无密钥 Factory 输入契约
-- [ ] 实现 Gateway 的鉴权、租户解析、Agent 路由、限流和请求去重
-- [ ] 实现普通及流式对话 API，并贯穿 `request_id` / `trace_id`
+- [x] 实现 Gateway 的 API/Channel 主体认证、租户解析、固定 Agent 路由、限流和请求去重
+- [x] 实现普通及流式对话 API，并贯穿 `request_id` / `trace_id`
 - [ ] 实现无状态 Worker 和基于共享 Session/Memory 后端的水平扩展
 - [x] 实现 `context.Context` 取消、Runner Event 通道排空和 goroutine 生命周期管理
-- [ ] 实现健康检查、readiness、优雅摘流和服务关闭
+- [x] 实现健康检查、readiness、优雅摘流和服务关闭
 
 ### 数据模型、多后端与同步
 
@@ -174,9 +174,9 @@
 - [ ] 实现 Runner Event 到文本、流式消息和卡片消息的转换
 - [ ] 接入企业微信或微信相关通道
 - [ ] 再接入至少一种不同 IM 通道，例如 Telegram
-- [ ] 实现 webhook 验签、账号与租户绑定、用户身份映射
+- [x] 提供 fake candidate resolver/verifier 的离线 webhook 验签、账号与租户绑定、用户身份映射
 - [ ] 使用 `tenant + channel + message_id` 实现幂等去重和缓存回复
-- [ ] 实现单聊/群聊 Session ID 规则及跨群、跨租户隔离
+- [x] 定义并测试单聊/群聊 Session ID 规则及跨群、跨租户隔离
 - [ ] 处理消息分段、频率限制、异步回复、图片/文件、撤回和失败重试
 - [ ] 增加重复投递、乱序、验签失败和跨租户访问测试
 
@@ -214,8 +214,9 @@
 - [x] 列出至少 8 个生产风险及对应缓解措施
 - [x] 持续标注可直接复用的 tRPC-Agent-Go 能力与平台新增模块边界
 
-> Issue #24 只完成架构、数据模型和运维文档；Channel Binding、Gateway、真实 IM/Storage
-> Adapter、迁移工具和生产告警仍未实现。
+> Issue #24 只完成架构、数据模型和运维文档；Issue #26 的 Channel Binding/可信入站路由与
+> Issue #28 的 Gateway、HTTP/SSE 及进程内保护能力已在对应实现阶段交付。真实 IM/Storage
+> Adapter、持久化迁移工具和生产告警仍未实现。
 
 ## 代码目录
 
