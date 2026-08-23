@@ -214,52 +214,67 @@ disconnect 验收仍必须保持未勾选，不能用 fake 就绪状态替代。
 
 ### 11.2 HTTP 与关联 ID 验收项
 
-- [ ] `POST /v1/chat` 只接受严格 JSON text 请求；未知字段、空/过大 body、超长文本、
+- [x] `POST /v1/chat` 只接受严格 JSON text 请求；未知字段、空/过大 body、超长文本、
   缺失 API Authenticator 结果和缺失 conversation identity 返回脱敏错误。
-- [ ] `POST /v1/chat/stream` 输出稳定的 `message`、`status`、`error`、`done` SSE
+- [x] `POST /v1/chat/stream` 输出稳定的 `message`、`status`、`error`、`done` SSE
   事件；写失败、客户端断开或 Dispatch 取消后不再写第二个 HTTP status。
 - [ ] `GET /healthz` 只表示进程存活；`GET /readyz` 反映 Resolver、Registry、Runner
   Factory 和 shutdown 状态，摘流后失败且不会继续接受新执行。
-- [ ] API principal 只能来自 `APIAuthenticator.Authenticate` 的 proof-bearing result；
+- [x] API principal 只能来自 `APIAuthenticator.Authenticate` 的 proof-bearing result；
   body/header 中的 Tenant/App/Profile/Binding 字段不能改变 Resolver 路由。
-- [ ] 服务端生成唯一 `request_id`，只接受受限 tracing header 作为 `trace_id`；两者都
+- [x] 服务端生成唯一 `request_id`，只接受受限 tracing header 作为 `trace_id`；两者都
   贯穿 Dispatcher、响应和脱敏错误，业务字段不能伪造关联 ID。
 - [ ] Handler 在正常完成、JSON error、SSE partial error、超时、客户端断开和 shutdown
   时都释放 Dispatch/Registry 资源，不遗留 event consumer 或 goroutine。
 
+当前 `[ ]` 项是有意保留的边界：HTTPHandler 已覆盖 handler-level Context cancel、摘流
+和自有状态关闭，但真实 Resolver/Registry/Runner Factory 的命令行装配与真实 socket
+disconnect 的 transport-level 验收仍不在本阶段交付中。
+
 ### 11.3 进程内保护验收项
 
-- [ ] Tenant limiter 使用明确的并发/窗口配额；零值、并发竞争、窗口边界、取消释放和
+- [x] Tenant limiter 使用明确的并发/窗口配额；零值、并发竞争、窗口边界、取消释放和
   稳定 `ErrRateLimited` 都有 `limits_test.go` 覆盖，不把 limiter 状态写入全局单例。
-- [ ] Idempotency 接口以可信 principal scope + external message ID 为 key；相同 key
+- [x] Idempotency 接口以可信 principal scope + external message ID 为 key；相同 key
   的并发请求最多启动一次 Runner，重复请求返回稳定 duplicate/已有结果，并区分不同
   Tenant、principal、conversation 和 message ID。
-- [ ] 幂等 entry 的 pending/completed/failed 生命周期、取消和容量/TTL 行为有明确测试；
+- [x] 幂等 entry 的 pending/completed/failed 生命周期、取消和容量/TTL 行为有明确测试；
   文档同时声明该实现只保证单进程，不保证重启、跨节点或持久化恢复。
 - [ ] `cmd/trpc-service` 使用安全默认监听、请求/关闭超时和 signal handler；shutdown
   顺序固定为 readiness 摘流 → 停止新请求 → 有界等待 → 取消剩余 Context → Dispatch
   排空 → Registry Close，并对重复 signal/重复 shutdown 保持安全。
-- [ ] `BeginShutdown` 只负责 readiness 摘流并阻止新执行；必须等 `http.Server.Shutdown`
+- [x] `BeginShutdown` 只负责 readiness 摘流并阻止新执行；必须等 `http.Server.Shutdown`
   返回后再关闭自有 limiter/idempotency 状态，保证在途请求能完成或按超时取消。
 
 ### 11.4 离线验收与勾选规则
 
-- [ ] `http_test.go` 覆盖 API Authenticator → Resolver → Registry → Dispatcher → JSON
-  final response 的离线链路，并覆盖 Channel principal 的协议无关 Dispatch/SSE 事件。
-- [ ] `http_test.go` 覆盖未知 JSON、空 body、body limit、内容类型、trace/request ID、
+- [x] `http_test.go` 与 `dispatch_test.go` 覆盖 API Authenticator → Resolver → Registry
+  → Dispatcher → JSON final response 的离线链路，以及 Channel principal 的协议无关
+  Dispatch/SSE 事件。
+- [x] `http_test.go` 覆盖未知 JSON、空 body、body limit、内容类型、trace/request ID、
   认证失败、跨租户字段伪造、SSE terminal 和脱敏错误。
-- [ ] `limits_test.go` 与 `idempotency_test.go` 覆盖双租户隔离、并发、取消、重复 key、
+- [x] `limits_test.go` 与 `idempotency_test.go` 覆盖双租户隔离、并发、取消、重复 key、
   TTL/容量边界和 shutdown 清理。
-- [ ] `main_test.go` 覆盖 server 启停、health/readiness、摘流、signal cancel、有界
-  shutdown 和无依赖时 readiness 失败；不得通过启动真实外部服务完成测试。
-- [ ] 只有对应实现文件、对应测试文件、全仓测试/race、format/lint/build、MkDocs
-  strict 和 `git diff --check` 全部通过后，才能把本节条目从 `[ ]` 改成 `[x]`。
-- [ ] 在本阶段完成前，README 不勾选持续服务、health/readiness、普通/流式 API、限流或
-  InMemory 幂等；PR description 必须列出实际测试文件和远端 CI exact head。
+- [x] `main_test.go` 与 `http_test.go` 覆盖当前 server 启停、health/readiness、摘流、
+  signal cancel、有界 shutdown 和无依赖时 readiness 失败；不得通过启动真实外部服务
+  完成测试。
+- [x] 对应实现文件、对应测试文件、全仓测试/race、format/lint/build、MkDocs strict
+  和 `git diff --check` 全部通过。
+- [x] README 仍未勾选未完成的生产持续服务/health/readiness 能力；PR description 列出
+  实际测试文件和远端 CI exact head。
 
-### 11.5 当前修复顺序
+### 11.5 当前未完成边界与验证证据
 
-代码审计发现 `BeginShutdown` 若在 `Server.Shutdown` 等待前关闭自有幂等状态，会让已
-进入的请求无法完成 `Complete`。因此下一提交必须先按上面的契约修复生命周期，再以
-`http_test.go` 与 `main_test.go` 的回归测试、全仓 race 和远端 CI 验证；修复完成前不
-把完整 graceful-shutdown 条目标记为 `[x]`。
+代码审计发现的 `BeginShutdown` 提前关闭自有幂等状态问题已在代码 head `3f966cc`
+修复：`http_test.go` 验证在途 claim 可在摘流后完成，`main.go` 在
+`http.Server.Shutdown` 返回后才调用 `HTTPHandler.Close()`。
+
+当前代码阶段的验证证据：
+
+- `go test ./... -count=1`、`go test -race ./... -count=1`、`go vet ./...` 通过。
+- `bash ./scripts/build.sh`、`python -m mkdocs build --strict -f docs/mkdocs.yml`、
+  `git diff --check` 通过。
+- PR #29 exact head `3f966cc` 的远端 Format & Lint、Build/Test/Coverage、MkDocs 和
+  Codecov patch 全部通过。
+- 真实控制面依赖装配、Registry/Runner 由命令行统一拥有并关闭、真实 socket disconnect
+  的 transport-level 验收仍未完成，不把这些边界写成已交付。
