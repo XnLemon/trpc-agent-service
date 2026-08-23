@@ -136,7 +136,8 @@ func TestBotFactoryContractsAndSDKOptions(t *testing.T) {
 func TestNewRedactsConstructionFailuresAndRejectsPreconditions(t *testing.T) {
 	target := newTrustedTarget(t, channels.ChannelTelegram, "construction-failures", "12345")
 	dispatcher := &dispatchStub{}
-	if _, err := New(nil, Config{BotToken: "token", Target: target, Dispatcher: dispatcher}); !errors.Is(err, ErrInvalid) {
+	var nilContext context.Context
+	if _, err := New(nilContext, Config{BotToken: "token", Target: target, Dispatcher: dispatcher}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("nil construction context returned unexpected error: %v", err)
 	}
 	canceled, cancel := context.WithCancel(context.Background())
@@ -437,7 +438,8 @@ func TestRunAndHandleUpdatePreconditions(t *testing.T) {
 	}
 
 	bare := &Adapter{}
-	if err := bare.Run(nil); !errors.Is(err, ErrInvalid) {
+	var nilContext context.Context
+	if err := bare.Run(nilContext); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("nil Run context returned unexpected error: %v", err)
 	}
 	if err := bare.Run(context.Background()); !errors.Is(err, ErrNotReady) {
@@ -449,7 +451,7 @@ func TestRunAndHandleUpdatePreconditions(t *testing.T) {
 
 	target := newTrustedTarget(t, channels.ChannelTelegram, "preconditions", "12345")
 	adapter := newTestAdapter(t, target, &dispatchStub{events: []gateway.DispatchEvent{{Type: gateway.DispatchEventDone, Done: true}}}, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
-	if err := adapter.HandleUpdate(nil, textUpdate(19, models.ChatTypePrivate, 100, 42, "text", 0)); !errors.Is(err, ErrInvalid) {
+	if err := adapter.HandleUpdate(nilContext, textUpdate(19, models.ChatTypePrivate, 100, 42, "text", 0)); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("nil HandleUpdate context returned unexpected error: %v", err)
 	}
 	canceled, cancel := context.WithCancel(context.Background())
