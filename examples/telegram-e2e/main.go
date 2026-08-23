@@ -33,14 +33,20 @@ const (
 )
 
 var (
-	errConfiguration     = errors.New("invalid Telegram E2E configuration")
-	errPreflight         = errors.New("telegram E2E preflight failed")
-	errWebhookConfigured = errors.New("telegram webhook is configured; remove it or enable TELEGRAM_DELETE_WEBHOOK")
-	errAdapterRun        = errors.New("telegram E2E adapter stopped unexpectedly")
-	errAdapterClose      = errors.New("telegram E2E adapter close failed")
-	errRunTimeout        = errors.New("telegram E2E timed out waiting for the test message")
-	errSender            = errors.New("telegram E2E sender failed")
-	errSenderStopped     = errors.New("telegram E2E sender stopped unexpectedly")
+	errConfiguration         = errors.New("invalid Telegram E2E configuration")
+	errPreflight             = errors.New("telegram E2E preflight failed")
+	errPreflightClient       = errors.New("telegram E2E bot client preflight failed")
+	errPreflightGetMe        = errors.New("telegram E2E getMe preflight failed")
+	errPreflightWebhook      = errors.New("telegram E2E webhook preflight failed")
+	errWebhookConfigured     = errors.New("telegram webhook is configured; remove it or enable TELEGRAM_DELETE_WEBHOOK")
+	errAdapterConfiguration  = errors.New("telegram E2E adapter configuration failed")
+	errAdapterInitialization = errors.New("telegram E2E adapter initialization failed")
+	errAdapterIdentity       = errors.New("telegram E2E adapter identity check failed")
+	errAdapterRun            = errors.New("telegram E2E adapter stopped unexpectedly")
+	errAdapterClose          = errors.New("telegram E2E adapter close failed")
+	errRunTimeout            = errors.New("telegram E2E timed out waiting for the test message")
+	errSender                = errors.New("telegram E2E sender failed")
+	errSenderStopped         = errors.New("telegram E2E sender stopped unexpectedly")
 )
 
 type runConfig struct {
@@ -198,11 +204,11 @@ func readBool(lookup func(string) string, name string, fallback bool) (bool, err
 func prepareBot(ctx context.Context, token string, deleteWebhook, dropPending bool) (*models.User, error) {
 	client, err := bot.New(token, bot.WithSkipGetMe())
 	if err != nil {
-		return nil, errPreflight
+		return nil, errPreflightClient
 	}
 	me, err := client.GetMe(ctx)
 	if err != nil || me == nil || !me.IsBot || me.ID <= 0 {
-		return nil, errPreflight
+		return nil, errPreflightGetMe
 	}
 	if err := prepareLongPolling(ctx, client, deleteWebhook, dropPending); err != nil {
 		return nil, err
@@ -212,11 +218,11 @@ func prepareBot(ctx context.Context, token string, deleteWebhook, dropPending bo
 
 func prepareLongPolling(ctx context.Context, client webhookClient, deleteWebhook, dropPending bool) error {
 	if client == nil {
-		return errPreflight
+		return errPreflightWebhook
 	}
 	info, err := client.GetWebhookInfo(ctx)
 	if err != nil {
-		return errPreflight
+		return errPreflightWebhook
 	}
 	if info == nil || info.URL == "" {
 		return nil
@@ -225,7 +231,7 @@ func prepareLongPolling(ctx context.Context, client webhookClient, deleteWebhook
 		return errWebhookConfigured
 	}
 	if _, err := client.DeleteWebhook(ctx, &bot.DeleteWebhookParams{DropPendingUpdates: dropPending}); err != nil {
-		return errPreflight
+		return errPreflightWebhook
 	}
 	return nil
 }
@@ -320,7 +326,16 @@ func telegramAdapter(ctx context.Context, configuration runConfig, target channe
 		},
 	})
 	if err != nil {
-		return nil, errPreflight
+		switch {
+		case errors.Is(err, telegram.ErrInvalid):
+			return nil, errAdapterConfiguration
+		case errors.Is(err, telegram.ErrBotIdentityMismatch):
+			return nil, errAdapterIdentity
+		case errors.Is(err, telegram.ErrInitialization):
+			return nil, errAdapterInitialization
+		default:
+			return nil, errPreflight
+		}
 	}
 	return adapter, nil
 }
