@@ -140,11 +140,11 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 		INSERT INTO public.agent_app (tenant_id, app_id, app_key, display_name)
 		VALUES ('t_01ARZ3NDEKTSV4RRFFQ69G5FAW', 'app_01ARZ3NDEKTSV4RRFFQ69G5FAW', 'primary', 'Other');
 		INSERT INTO public.agent_app_revision (
-			tenant_id, app_id, revision, instruction, model_profile_id,
+			tenant_id, app_id, revision, agent_kind, instruction, model_profile_id,
 			generation_config, runtime_policy
 		) VALUES (
 			't_01ARZ3NDEKTSV4RRFFQ69G5FAV', 'app_01ARZ3NDEKTSV4RRFFQ69G5FAV', 1,
-			'run', 'mp_01ARZ3NDEKTSV4RRFFQ69G5FAV', '{}'::JSONB, '{}'::JSONB
+			'llm', 'run', 'mp_01ARZ3NDEKTSV4RRFFQ69G5FAV', '{}'::JSONB, '{}'::JSONB
 		);
 	`)
 	resetRole(t, ctx, conn)
@@ -152,11 +152,11 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 	setRole(t, ctx, conn, "migration_owner")
 	expectExecError(t, ctx, conn, `
 		INSERT INTO public.agent_app_revision (
-			tenant_id, app_id, revision, instruction, model_profile_id,
+			tenant_id, app_id, revision, agent_kind, instruction, model_profile_id,
 			generation_config, runtime_policy
 		) VALUES (
 			't_01ARZ3NDEKTSV4RRFFQ69G5FAW', 'app_01ARZ3NDEKTSV4RRFFQ69G5FAW', 1,
-			'cross tenant', 'mp_01ARZ3NDEKTSV4RRFFQ69G5FAV', '{}'::JSONB, '{}'::JSONB
+			'llm', 'cross tenant', 'mp_01ARZ3NDEKTSV4RRFFQ69G5FAV', '{}'::JSONB, '{}'::JSONB
 		)
 	`)
 	resetRole(t, ctx, conn)
