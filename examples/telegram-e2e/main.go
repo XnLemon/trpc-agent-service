@@ -137,7 +137,8 @@ func runWithPreflight(ctx context.Context, lookup func(string) string, stdout, s
 
 	var result error
 	if configuration.senderBotToken != "" {
-		result = runAutomatedSender(runContext, configuration.senderBotToken, configuration.pollTimeout, receiver, configuration.testMessage, reply, configuration.deleteWebhook, configuration.dropPendingUpdate)
+		senderResult := runAutomatedSender(runContext, configuration.senderBotToken, configuration.pollTimeout, receiver, configuration.testMessage, reply, configuration.deleteWebhook, configuration.dropPendingUpdate)
+		result = classifyAutomatedSenderResult(ctx.Err(), runContext.Err(), senderResult)
 		cancel()
 		if stopErr := waitForAdapter(runDone); stopErr != nil && result == nil {
 			result = stopErr
@@ -182,6 +183,19 @@ func classifyManualRunResult(parentErr, runContextErr, adapterErr error) error {
 		return nil
 	}
 	return errAdapterRun
+}
+
+func classifyAutomatedSenderResult(parentErr, runContextErr, senderErr error) error {
+	if parentErr != nil {
+		return nil
+	}
+	if errors.Is(runContextErr, context.DeadlineExceeded) {
+		return errRunTimeout
+	}
+	if errors.Is(runContextErr, context.Canceled) {
+		return nil
+	}
+	return senderErr
 }
 
 func loadConfig(lookup func(string) string) (runConfig, error) {

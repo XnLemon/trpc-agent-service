@@ -137,6 +137,28 @@ func TestClassifyManualRunResultTreatsCancellationAsClean(t *testing.T) {
 	}
 }
 
+func TestClassifyAutomatedSenderResultTreatsCancellationAndTimeoutAsClean(t *testing.T) {
+	tests := []struct {
+		name          string
+		parentErr     error
+		runContextErr error
+		senderErr     error
+		want          error
+	}{
+		{name: "parent cancellation", parentErr: context.Canceled, runContextErr: context.Canceled, senderErr: errSender, want: nil},
+		{name: "run timeout", runContextErr: context.DeadlineExceeded, senderErr: errSender, want: errRunTimeout},
+		{name: "run cancellation", runContextErr: context.Canceled, senderErr: errSender, want: nil},
+		{name: "sender failure", senderErr: errSender, want: errSender},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := classifyAutomatedSenderResult(test.parentErr, test.runContextErr, test.senderErr); !errors.Is(got, test.want) {
+				t.Fatalf("classifyAutomatedSenderResult() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestPrepareLongPollingHandlesWebhookSafely(t *testing.T) {
 	noWebhook := &fakeWebhookClient{}
 	if err := prepareLongPolling(context.Background(), noWebhook, false, false); err != nil {
