@@ -32,7 +32,11 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect PostgreSQL: %v", err)
 	}
-	defer conn.Close(context.Background())
+	defer func() {
+		if err := conn.Close(context.Background()); err != nil {
+			t.Logf("close PostgreSQL connection: %v", err)
+		}
+	}()
 
 	var alreadyMigrated bool
 	if err := conn.QueryRow(ctx, `

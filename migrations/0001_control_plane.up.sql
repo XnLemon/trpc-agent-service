@@ -45,7 +45,7 @@ AS $$
        )
 $$;
 
-CREATE OR REPLACE FUNCTION public.jsonb_has_safe_keys(value JSONB)
+CREATE OR REPLACE FUNCTION public.jsonb_has_safe_keys(document JSONB)
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 IMMUTABLE
@@ -56,11 +56,13 @@ DECLARE
     item RECORD;
     child JSONB;
 BEGIN
-    IF value IS NULL THEN
+    IF document IS NULL THEN
         RETURN FALSE;
     END IF;
-    IF pg_catalog.jsonb_typeof(value) = 'object' THEN
-        FOR item IN SELECT key, value AS item_value FROM pg_catalog.jsonb_each(value)
+    IF pg_catalog.jsonb_typeof(document) = 'object' THEN
+        FOR item IN
+            SELECT object_item.key, object_item.item_value
+            FROM pg_catalog.jsonb_each(document) AS object_item(key, item_value)
         LOOP
             IF pg_catalog.lower(item.key) IN (
                 'access_key', 'access_token', 'api_key', 'apikey', 'api_secret',
@@ -78,8 +80,10 @@ BEGIN
                 RETURN FALSE;
             END IF;
         END LOOP;
-    ELSIF pg_catalog.jsonb_typeof(value) = 'array' THEN
-        FOR child IN SELECT value FROM pg_catalog.jsonb_array_elements(value)
+    ELSIF pg_catalog.jsonb_typeof(document) = 'array' THEN
+        FOR child IN
+            SELECT array_item.child
+            FROM pg_catalog.jsonb_array_elements(document) AS array_item(child)
         LOOP
             IF NOT public.jsonb_has_safe_keys(child) THEN
                 RETURN FALSE;
