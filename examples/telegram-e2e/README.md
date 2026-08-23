@@ -26,7 +26,7 @@ go run ./examples/telegram-e2e
 ```
 
 The command prints a unique ordinary-text marker. Open the receiver Bot in
-Telegram, send that marker, and confirm the `telegram-e2e-ok` reply. Commands,
+Telegram, send that marker, and confirm the `telegram-e2e-ok:<run-correlation>` reply. Commands,
 media, and rich updates are intentionally outside this first E2E. Press
 `Ctrl+C` to stop the local polling process cleanly.
 

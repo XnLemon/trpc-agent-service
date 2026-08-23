@@ -115,7 +115,7 @@ func runWithPreflight(ctx context.Context, lookup func(string) string, stdout, s
 
 	receiver, err := prepare(runContext, configuration.botToken, configuration.pollTimeout, configuration.deleteWebhook, configuration.dropPendingUpdate)
 	if err != nil {
-		return err
+		return classifyPreflightResult(ctx.Err(), runContext.Err(), err)
 	}
 	target, err := newTrustedTarget(strconv.FormatInt(receiver.ID, 10))
 	if err != nil {
@@ -124,7 +124,7 @@ func runWithPreflight(ctx context.Context, lookup func(string) string, stdout, s
 	dispatcher := newDeterministicDispatcher(configuration.testMessage, reply)
 	adapter, err := telegramAdapter(runContext, configuration, target, dispatcher, stderr)
 	if err != nil {
-		return err
+		return classifyPreflightResult(ctx.Err(), runContext.Err(), err)
 	}
 
 	runDone := make(chan error, 1)
@@ -159,6 +159,16 @@ func runWithPreflight(ctx context.Context, lookup func(string) string, stdout, s
 		result = errAdapterClose
 	}
 	return result
+}
+
+func classifyPreflightResult(parentErr, runContextErr, preflightErr error) error {
+	if parentErr != nil {
+		return nil
+	}
+	if errors.Is(runContextErr, context.DeadlineExceeded) {
+		return errRunTimeout
+	}
+	return preflightErr
 }
 
 func classifyManualRunResult(parentErr, runContextErr, adapterErr error) error {
@@ -438,7 +448,9 @@ func (dispatcher *deterministicDispatcher) Dispatch(ctx context.Context, request
 		})
 	}
 	events := make(chan gateway.DispatchEvent, 2)
-	events <- gateway.DispatchEvent{Type: gateway.DispatchEventMessage, RequestID: request.RequestID, Text: dispatcher.reply}
+	if request.Message.Content == dispatcher.marker {
+		events <- gateway.DispatchEvent{Type: gateway.DispatchEventMessage, RequestID: request.RequestID, Text: dispatcher.reply}
+	}
 	events <- gateway.DispatchEvent{Type: gateway.DispatchEventDone, RequestID: request.RequestID, Status: "complete", Done: true}
 	close(events)
 	return events, nil

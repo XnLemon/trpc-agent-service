@@ -91,11 +91,27 @@ func TestRunTimeoutCoversBlockingPreflight(t *testing.T) {
 	}
 
 	err := runWithPreflight(context.Background(), func(name string) string { return values[name] }, io.Discard, io.Discard, prepare)
-	if !errors.Is(err, errPreflightGetMeTimeout) {
-		t.Fatalf("runWithPreflight() error = %v, want preflight timeout", err)
+	if !errors.Is(err, errRunTimeout) {
+		t.Fatalf("runWithPreflight() error = %v, want run timeout", err)
 	}
 	if !errors.Is(observedContextErr, context.DeadlineExceeded) {
 		t.Fatalf("preflight context error = %v, want deadline exceeded", observedContextErr)
+	}
+}
+
+func TestRunWithPreflightTreatsParentCancellationAsClean(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	prepare := func(ctx context.Context, _ string, _ time.Duration, _, _ bool) (*models.User, error) {
+		return nil, ctx.Err()
+	}
+	if err := runWithPreflight(ctx, func(name string) string {
+		if name == "TELEGRAM_BOT_TOKEN" {
+			return "receiver-token"
+		}
+		return ""
+	}, io.Discard, io.Discard, prepare); err != nil {
+		t.Fatalf("runWithPreflight() error = %v, want clean cancellation", err)
 	}
 }
 
@@ -243,6 +259,28 @@ func TestDeterministicDispatcherEmitsCompleteReplyAndMarksInput(t *testing.T) {
 		}
 	default:
 		t.Fatal("dispatcher did not mark the expected message")
+	}
+}
+
+func TestDeterministicDispatcherDoesNotReplyToNonMarker(t *testing.T) {
+	dispatcher := newDeterministicDispatcher("marker", e2eReplyFor("correlation"))
+	stream, err := dispatcher.Dispatch(context.Background(), gateway.DispatchRequest{
+		Message: gateway.InboundMessage{Content: "old-message"}, RequestID: "request-id",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []gateway.DispatchEvent
+	for event := range stream {
+		events = append(events, event)
+	}
+	if len(events) != 1 || !events[0].Done || events[0].Type != gateway.DispatchEventDone {
+		t.Fatalf("unexpected non-marker events: %+v", events)
+	}
+	select {
+	case message := <-dispatcher.seen:
+		t.Fatalf("non-marker was recorded as seen: %+v", message)
+	default:
 	}
 }
 
