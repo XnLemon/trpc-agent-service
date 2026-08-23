@@ -125,7 +125,8 @@
 - [x] 定义租户 Repository 接口并提供并发安全的 InMemory 实现
 - [x] 实现不可变运行时配置快照和带租户命名空间的 Runner 用户/会话身份
 - [x] 覆盖租户隔离、并发更新、Context 取消和运行时边界测试
-- [ ] 实现 PostgreSQL/MySQL 租户 Repository（Issue #37 已落地 PostgreSQL migration）
+- [x] 实现 PostgreSQL Tenant、Agent、Model、Backend、Channel Binding Repository（Issue #37）
+- [ ] 实现 MySQL 租户及控制面 Repository
 - [x] 实现租户级 Agent App 根模型和生命周期
 - [x] 实现 LLMAgent Revision 版本模型、草稿、不可变发布和内容摘要
 - [x] 定义 Agent Repository 并提供租户隔离、并发安全的 InMemory 实现
@@ -148,7 +149,7 @@
 - [x] 实现普通及流式对话 API，并贯穿 `request_id` / `trace_id`
 - [ ] 实现无状态 Worker 和基于共享 Session/Memory 后端的水平扩展
 - [x] 实现 `context.Context` 取消、Runner Event 通道排空和 goroutine 生命周期管理
-- [ ] 实现健康检查、readiness、优雅摘流和服务关闭
+- [x] 实现健康检查、readiness、优雅摘流和服务关闭（bootstrap 依赖未配置时保持 503）
 
 ### 数据模型、多后端与同步
 
@@ -156,7 +157,7 @@
 - [x] 完成 Agent App/Revision 的 PostgreSQL DDL、发布事务、回滚和框架映射设计
 - [x] 完成 Backend Profile 的 PostgreSQL DDL、生命周期、运行时快照和框架映射设计
 - [x] 完成 Model Profile 的无密钥 PostgreSQL 目标形状、Repository 事务和启动装配设计（Issue #37）
-- [x] 将 Tenant、Agent App/Revision DDL 落地为 PostgreSQL migration（Issue #37）
+- [x] 将 Tenant、Agent App/Revision、Model、Backend、Channel Binding DDL 和受控写入口落地为 PostgreSQL migration（Issue #37）
 - [ ] 补齐 channel binding、session、event、memory、summary、artifact 和 audit log 的可执行 DDL
 - [ ] 定义 Session、Memory、Summary、Knowledge、Artifact 和 Audit 的统一访问接口
 - [ ] 实现租户级 Backend Registry/Factory 和后端路由

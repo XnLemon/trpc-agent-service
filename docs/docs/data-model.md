@@ -213,7 +213,7 @@ CREATE OR REPLACE FUNCTION transition_tenant_status(
     p_actor_id TEXT,
     p_reason TEXT,
     p_correlation_id TEXT
-) RETURNS VOID
+) RETURNS BIGINT
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp
@@ -221,6 +221,7 @@ AS $$
 DECLARE
     v_previous_status TEXT;
     v_next_version BIGINT;
+    v_event_id BIGINT;
 BEGIN
     IF p_actor_type IS NULL OR length(btrim(p_actor_type)) = 0
        OR p_actor_id IS NULL OR length(btrim(p_actor_id)) = 0 THEN
@@ -265,7 +266,8 @@ BEGIN
     ) VALUES (
         p_tenant_id, v_previous_status, p_next_status, p_actor_type, p_actor_id,
         p_reason, p_expected_version, v_next_version, p_correlation_id
-    );
+    ) RETURNING event_id INTO v_event_id;
+    RETURN v_event_id;
 END;
 $$;
 

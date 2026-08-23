@@ -3,7 +3,8 @@
 > 本页是 Issue #37 的实现契约。它复用已经合入的 Tenant、Agent App/Revision、Backend
 > Profile 和 Channel Binding 设计，并补齐 Model Profile 的持久化形状、统一 migration 顺序、
 > Repository 事务边界和进程启动装配。控制面 DDL 与受控 Repository 写入口分别落在
-> `0001`、`0002` 两个有序 migration；Repository/bootstrap 会在代码阶段继续接入。
+> `0001`、`0002` 两个有序 migration；Go Repository 和 bootstrap 实现在
+> `trpcservice/storage/postgres`、`trpcservice/bootstrap`。
 
 ## 目标与边界
 
@@ -55,8 +56,8 @@ Profile 或 Binding 被另一个租户引用。key 的唯一性也都限定在�
 
 ## Migration 组织与执行前提
 
-代码阶段将提供不依赖迁移工具的 SQL 文件，调用方负责按文件名顺序执行；迁移工具不是本
-Issue 的范围。第一版使用两个有序 migration，目标目录为：
+迁移文件不依赖具体迁移工具，调用方负责按文件名顺序执行；迁移工具不是本 Issue 的范围。
+第一版使用两个有序 migration，目标目录为：
 
 ```text
 migrations/
@@ -208,17 +209,17 @@ SecretResolver、fake ModelFactory 和 InMemory Session，不需要真实模型�
 
 ## 验证矩阵与非目标
 
-文档对应的代码阶段必须增加：
+本页契约对应的验证入口如下；它们是 Issue #37 的纵向实现证据：
 
-- 干净 PostgreSQL migration 的执行/权限/跨租户 FK、published current pointer 和延迟 binding
-  检查；
-- 五类 SQL Repository 与 InMemory 等价的租户隔离、生命周期、乐观锁、发布/回滚、深拷贝和
-  Context 取消测试；
-- 发布事务不会产生跨租户引用或半发布状态的集成测试；
-- 数据库重启后的 Resolver 读取测试；
-- Bootstrap 真实 Resolver/Registry/HTTPHandler 组装、readiness 503→200 和 bounded shutdown
-  测试；
-- Secret 不进入 SQL 明文列以外的任何运行时结构、错误、日志或 trace 的扫描/断言。
+- `migrations/migration_test.go`：干净 PostgreSQL migration、权限、跨租户 FK、published
+  current pointer、延迟 binding 和嵌套凭据键检查；
+- `trpcservice/storage/postgres/integration_test.go`：五类 SQL Repository 的租户作用域、
+  生命周期、发布、候选消费、Outbox、Context 取消和深拷贝路径；CI 使用独立 PostgreSQL
+  服务执行；
+- `trpcservice/bootstrap/bootstrap_test.go`：真实 Resolver/Registry/HTTPHandler 组装、
+  readiness 503→200 和 shutdown gate；
+- 生产代码中的 `codec.go`、受控 SQL 函数和稳定错误映射保证 Secret 不进入运行时对象或底层
+  数据库错误。
 
 本 Issue 不实现 Session/Event/Memory 等完整持久化后端、迁移工具、真实 KMS/Vault、完整
 Admin API、分布式幂等/Outbox 消费或无状态 Worker 水平扩展。它只建立后续这些能力可以安全

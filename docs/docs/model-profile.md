@@ -39,9 +39,10 @@ trusted Tenant snapshot
 
 本阶段明确不包含 Channel Binding、HTTP Gateway/Admin API、真实模型请求、生产 KMS/Vault、
 Redis/SQL/向量库/S3 adapter、OTel exporter、计费和跨节点配置缓存。Issue #37 的
-`migrations/0001_control_plane.up.sql` 已落地本页领域契约对应的无密钥表形状。
-Issue #37 复用本页领域契约，并在 [PostgreSQL 控制面与启动装配](postgresql-control-plane.md)
-中补齐 `model_profile` 的持久化形状和 SQL Repository 边界。
+`migrations/0001_control_plane.up.sql` 与 `0002_control_plane_repository_functions.up.sql`
+已落地本页领域契约对应的无密钥表形状和受控写入口；Go 实现在
+`trpcservice/storage/postgres/model.go`，总体验证见
+[PostgreSQL 控制面与启动装配](postgresql-control-plane.md)。
 
 ## 设计阶段 ledger
 
