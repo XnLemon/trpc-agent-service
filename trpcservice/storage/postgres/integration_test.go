@@ -239,7 +239,7 @@ func TestPostgreSQLRepositories(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("suspend backend profile: %v", err)
 	}
-	backendProfile, _, err = backends.TransitionStatus(ctx, backend.TransitionStatusInput{
+	_, _, err = backends.TransitionStatus(ctx, backend.TransitionStatusInput{
 		TenantID: root.TenantID, ProfileID: backendProfile.ProfileID, ExpectedVersion: backendProfile.Version + 1,
 		NextStatus: backend.StatusActive,
 		Metadata:   backend.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "integration", CorrelationID: "backend-resume"},
