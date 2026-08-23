@@ -30,6 +30,13 @@ Telegram, send that marker, and confirm the `telegram-e2e-ok` reply. Commands,
 media, and rich updates are intentionally outside this first E2E. Press
 `Ctrl+C` to stop the local polling process cleanly.
 
+If PowerShell can reach `api.telegram.org` but this command reports
+`telegram E2E getMe network failure`, Go is using a different HTTPS path. Go
+uses the standard `HTTPS_PROXY`/`HTTP_PROXY` environment variables; it does not
+automatically import every Windows system-proxy setting. Configure the proxy
+for the same PowerShell process, without printing credentials, and rerun the
+command.
+
 If the Bot has a webhook, either remove it before starting long polling or set
 `TELEGRAM_DELETE_WEBHOOK=true`. Pending updates are preserved by default; set
 `TELEGRAM_DROP_PENDING_UPDATES=true` only when discarding them is intentional.

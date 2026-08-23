@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -71,6 +72,7 @@ type webhookClient interface {
 
 type deterministicDispatcher struct {
 	marker string
+	reply  string
 	seen   chan gateway.InboundMessage
 	once   sync.Once
 }
@@ -94,8 +96,15 @@ func run(ctx context.Context, lookup func(string) string, stdout, stderr io.Writ
 	if err != nil {
 		return err
 	}
+	runContext, cancel := context.WithTimeout(ctx, configuration.runTimeout)
+	defer cancel()
+	correlationID, err := newCorrelationID()
+	if err != nil {
+		return errConfiguration
+	}
+	reply := e2eReplyFor(correlationID)
 
-	receiver, err := prepareBot(ctx, configuration.botToken, configuration.pollTimeout, configuration.deleteWebhook, configuration.dropPendingUpdate)
+	receiver, err := prepareBot(runContext, configuration.botToken, configuration.pollTimeout, configuration.deleteWebhook, configuration.dropPendingUpdate)
 	if err != nil {
 		return err
 	}
@@ -103,13 +112,12 @@ func run(ctx context.Context, lookup func(string) string, stdout, stderr io.Writ
 	if err != nil {
 		return errConfiguration
 	}
-	dispatcher := newDeterministicDispatcher(configuration.testMessage)
-	adapter, err := telegramAdapter(ctx, configuration, target, dispatcher, stderr)
+	dispatcher := newDeterministicDispatcher(configuration.testMessage, reply)
+	adapter, err := telegramAdapter(runContext, configuration, target, dispatcher, stderr)
 	if err != nil {
 		return err
 	}
 
-	runContext, cancel := context.WithTimeout(ctx, configuration.runTimeout)
 	runDone := make(chan error, 1)
 	go func() {
 		runDone <- adapter.Run(runContext)
@@ -120,7 +128,7 @@ func run(ctx context.Context, lookup func(string) string, stdout, stderr io.Writ
 
 	var result error
 	if configuration.senderBotToken != "" {
-		result = runAutomatedSender(runContext, configuration.senderBotToken, configuration.pollTimeout, receiver, configuration.testMessage, configuration.deleteWebhook, configuration.dropPendingUpdate)
+		result = runAutomatedSender(runContext, configuration.senderBotToken, configuration.pollTimeout, receiver, configuration.testMessage, reply, configuration.deleteWebhook, configuration.dropPendingUpdate)
 		cancel()
 		if stopErr := waitForAdapter(runDone); stopErr != nil && result == nil {
 			result = stopErr
@@ -265,6 +273,18 @@ func preflightHTTPClient(pollTimeout time.Duration) *http.Client {
 	return &http.Client{Timeout: pollTimeout + 5*time.Second}
 }
 
+func newCorrelationID() (string, error) {
+	var nonce [8]byte
+	if _, err := cryptorand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(nonce[:]), nil
+}
+
+func e2eReplyFor(correlationID string) string {
+	return e2eReply + ":" + correlationID
+}
+
 func prepareLongPolling(ctx context.Context, client webhookClient, deleteWebhook, dropPending bool) error {
 	if client == nil {
 		return errPreflightWebhook
@@ -380,8 +400,8 @@ func telegramAdapter(ctx context.Context, configuration runConfig, target channe
 	return adapter, nil
 }
 
-func newDeterministicDispatcher(marker string) *deterministicDispatcher {
-	return &deterministicDispatcher{marker: marker, seen: make(chan gateway.InboundMessage, 1)}
+func newDeterministicDispatcher(marker, reply string) *deterministicDispatcher {
+	return &deterministicDispatcher{marker: marker, reply: reply, seen: make(chan gateway.InboundMessage, 1)}
 }
 
 func (dispatcher *deterministicDispatcher) Dispatch(ctx context.Context, request gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
@@ -400,13 +420,13 @@ func (dispatcher *deterministicDispatcher) Dispatch(ctx context.Context, request
 		})
 	}
 	events := make(chan gateway.DispatchEvent, 2)
-	events <- gateway.DispatchEvent{Type: gateway.DispatchEventMessage, RequestID: request.RequestID, Text: e2eReply}
+	events <- gateway.DispatchEvent{Type: gateway.DispatchEventMessage, RequestID: request.RequestID, Text: dispatcher.reply}
 	events <- gateway.DispatchEvent{Type: gateway.DispatchEventDone, RequestID: request.RequestID, Status: "complete", Done: true}
 	close(events)
 	return events, nil
 }
 
-func runAutomatedSender(ctx context.Context, token string, pollTimeout time.Duration, receiver *models.User, marker string, deleteWebhook, dropPending bool) error {
+func runAutomatedSender(ctx context.Context, token string, pollTimeout time.Duration, receiver *models.User, marker, reply string, deleteWebhook, dropPending bool) error {
 	if receiver == nil || receiver.ID <= 0 || receiver.Username == "" {
 		return errSender
 	}
@@ -418,7 +438,7 @@ func runAutomatedSender(ctx context.Context, token string, pollTimeout time.Dura
 			if update == nil || update.Message == nil || update.Message.From == nil {
 				return
 			}
-			if update.Message.From.ID == receiver.ID && update.Message.Text == e2eReply {
+			if isExpectedAutomatedReply(update, receiver.ID, reply) {
 				select {
 				case replyReceived <- struct{}{}:
 				default:
@@ -475,6 +495,11 @@ func runAutomatedSender(ctx context.Context, token string, pollTimeout time.Dura
 		waitForSender(senderDone)
 		return errSender
 	}
+}
+
+func isExpectedAutomatedReply(update *models.Update, receiverID int64, reply string) bool {
+	return update != nil && update.Message != nil && update.Message.From != nil &&
+		update.Message.From.ID == receiverID && update.Message.Chat.ID == receiverID && update.Message.Text == reply
 }
 
 func waitForSender(done <-chan struct{}) bool {

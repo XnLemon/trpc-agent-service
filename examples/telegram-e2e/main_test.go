@@ -176,7 +176,8 @@ func TestNewTrustedTargetRejectsNonCanonicalAccountID(t *testing.T) {
 }
 
 func TestDeterministicDispatcherEmitsCompleteReplyAndMarksInput(t *testing.T) {
-	dispatcher := newDeterministicDispatcher("marker")
+	reply := e2eReplyFor("correlation")
+	dispatcher := newDeterministicDispatcher("marker", reply)
 	stream, err := dispatcher.Dispatch(context.Background(), gateway.DispatchRequest{
 		Message: gateway.InboundMessage{Content: "marker"}, RequestID: "request-id",
 	})
@@ -187,7 +188,7 @@ func TestDeterministicDispatcherEmitsCompleteReplyAndMarksInput(t *testing.T) {
 	for event := range stream {
 		events = append(events, event)
 	}
-	if len(events) != 2 || events[0].Type != gateway.DispatchEventMessage || events[0].Text != e2eReply || !events[1].Done {
+	if len(events) != 2 || events[0].Type != gateway.DispatchEventMessage || events[0].Text != reply || !events[1].Done {
 		t.Fatalf("unexpected dispatch events: %+v", events)
 	}
 	select {
@@ -197,6 +198,36 @@ func TestDeterministicDispatcherEmitsCompleteReplyAndMarksInput(t *testing.T) {
 		}
 	default:
 		t.Fatal("dispatcher did not mark the expected message")
+	}
+}
+
+func TestExpectedAutomatedReplyRequiresCorrelationAndPrivatePeer(t *testing.T) {
+	receiverID := int64(42)
+	reply := e2eReplyFor("correlation")
+	tests := []struct {
+		name   string
+		update *models.Update
+		want   bool
+	}{
+		{name: "valid reply", update: &models.Update{Message: &models.Message{From: &models.User{ID: receiverID}, Chat: models.Chat{ID: receiverID}, Text: reply}}, want: true},
+		{name: "stale correlation", update: &models.Update{Message: &models.Message{From: &models.User{ID: receiverID}, Chat: models.Chat{ID: receiverID}, Text: e2eReplyFor("stale")}}},
+		{name: "unexpected chat", update: &models.Update{Message: &models.Message{From: &models.User{ID: receiverID}, Chat: models.Chat{ID: 99}, Text: reply}}},
+		{name: "unexpected sender", update: &models.Update{Message: &models.Message{From: &models.User{ID: 99}, Chat: models.Chat{ID: receiverID}, Text: reply}}},
+		{name: "missing message", update: &models.Update{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isExpectedAutomatedReply(test.update, receiverID, reply); got != test.want {
+				t.Fatalf("isExpectedAutomatedReply() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestPreflightHTTPClientUsesPollTimeoutBudget(t *testing.T) {
+	client := preflightHTTPClient(3 * time.Second)
+	if client.Timeout != 8*time.Second {
+		t.Fatalf("preflight HTTP timeout = %s, want 8s", client.Timeout)
 	}
 }
 

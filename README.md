@@ -257,7 +257,7 @@
 |   |-- start.sh           # 启动服务
 |   `-- stop.sh            # 停止服务
 |-- data                   # 服务运行时数据
-|-- example                # 可运行的外部集成示例
+|-- examples               # 可运行的外部集成示例
 |   `-- telegram-e2e        # Telegram live long-polling E2E
 |-- docs                   # 各模块说明与架构设计文档
 |-- cmd
