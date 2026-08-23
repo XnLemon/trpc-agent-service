@@ -36,12 +36,6 @@ func decodeJSON(data []byte, destination any) error {
 	return nil
 }
 
-// modelJSON is the secret-free shape stored in model_profile JSONB columns.
-type modelJSON struct {
-	Options    map[string]string      `json:"options,omitempty"`
-	Generation model.GenerationConfig `json:"generation,omitempty"`
-}
-
 func encodeModelJSON(configuration model.Configuration) ([]byte, []byte, error) {
 	options, err := encodeJSON(configuration.Options)
 	if err != nil {
@@ -81,21 +75,6 @@ func encodeBackendBindings(bindings []backend.CapabilityBinding) ([]byte, error)
 		})
 	}
 	return encodeJSON(values)
-}
-
-func decodeBackendBindings(data []byte) ([]backend.CapabilityBinding, error) {
-	var values []backendBindingJSON
-	if err := decodeJSON(data, &values); err != nil {
-		return nil, err
-	}
-	bindings := make([]backend.CapabilityBinding, 0, len(values))
-	for _, value := range values {
-		bindings = append(bindings, backend.CapabilityBinding{
-			Capability: backend.Capability(value.Capability), Provider: value.Provider,
-			Endpoint: value.Endpoint, Options: value.Options, SecretRef: value.SecretRef,
-		})
-	}
-	return bindings, nil
 }
 
 func encodeAgentRevisionParts(revision agent.Revision) ([]byte, []byte, []byte, error) {

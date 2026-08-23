@@ -562,7 +562,7 @@ func loadAgentRevision(ctx context.Context, q queryer, tenantID, appID string, r
 	if err != nil {
 		return nil, err
 	}
-	defer toolsRows.Close()
+	defer func() { _ = toolsRows.Close() }()
 	for toolsRows.Next() {
 		var tool agent.ToolAuthorization
 		if err := toolsRows.Scan(&tool.ToolID, &tool.Required); err != nil {

@@ -240,7 +240,7 @@ func (r *ChannelRepository) LookupCandidates(ctx context.Context, channel channe
 	if err != nil {
 		return nil, mapDBError(ctx, err, channels.ErrCandidateUnavailable, channels.ErrCandidateUnavailable, channels.ErrCandidateUnavailable, channels.ErrCandidateUnavailable)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	type rowValue struct {
 		tenantID, bindingID string
 		version             int64

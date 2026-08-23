@@ -206,7 +206,7 @@ func loadBackendProfile(ctx context.Context, q queryer, catalog *backend.Provide
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var bindings []backend.CapabilityBinding
 	for rows.Next() {
 		var binding backend.CapabilityBinding

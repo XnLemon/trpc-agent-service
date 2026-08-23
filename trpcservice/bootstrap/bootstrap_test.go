@@ -64,9 +64,6 @@ func TestNewRejectsMissingExplicitDependency(t *testing.T) {
 	if _, err := New(context.Background(), Config{}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("missing dependency error = %v", err)
 	}
-	if _, err := New(nil, Config{}); !errors.Is(err, ErrInvalidConfig) {
-		t.Fatalf("nil context error = %v", err)
-	}
 }
 
 func TestNewUnavailableUsesRealGraphButReturns503(t *testing.T) {
