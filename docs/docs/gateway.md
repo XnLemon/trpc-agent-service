@@ -191,12 +191,14 @@ fake Runner/Model 覆盖：
 Gateway、普通/流式 API、限流和 InMemory 幂等能力；真实 IM、持久化幂等、生产 Secret
 Manager 与多节点语义继续保持未勾选。
 
-## 11. 下一代码阶段 ledger：HTTP Gateway、服务生命周期与进程内保护
+## 11. 当前代码阶段 ledger：HTTP Gateway、服务生命周期与进程内保护
 
 本阶段在已完成的 Resolver、Registry 和 Dispatch 之上，补齐 Issue #28 的第一层网络
 适配与单进程服务生命周期。所有依赖继续通过构造参数注入；`cmd/trpc-service` 不得
 为了让 readiness 变绿而伪造 Tenant、Runner、Secret 或 Model 依赖。本阶段不实现真实
-WeCom/Telegram Adapter、生产 Secret Manager、持久化幂等或跨节点限流。
+WeCom/Telegram Adapter、生产 Secret Manager、持久化幂等或跨节点限流。当前代码已落地
+HTTP、限流、幂等和命令行 Server 的可测试边界；控制面依赖的生产装配与完整 transport
+disconnect 验收仍必须保持未勾选，不能用 fake 就绪状态替代。
 
 ### 11.1 文件边界与对应测试
 
@@ -237,6 +239,8 @@ WeCom/Telegram Adapter、生产 Secret Manager、持久化幂等或跨节点限�
 - [ ] `cmd/trpc-service` 使用安全默认监听、请求/关闭超时和 signal handler；shutdown
   顺序固定为 readiness 摘流 → 停止新请求 → 有界等待 → 取消剩余 Context → Dispatch
   排空 → Registry Close，并对重复 signal/重复 shutdown 保持安全。
+- [ ] `BeginShutdown` 只负责 readiness 摘流并阻止新执行；必须等 `http.Server.Shutdown`
+  返回后再关闭自有 limiter/idempotency 状态，保证在途请求能完成或按超时取消。
 
 ### 11.4 离线验收与勾选规则
 
@@ -252,3 +256,10 @@ WeCom/Telegram Adapter、生产 Secret Manager、持久化幂等或跨节点限�
   strict 和 `git diff --check` 全部通过后，才能把本节条目从 `[ ]` 改成 `[x]`。
 - [ ] 在本阶段完成前，README 不勾选持续服务、health/readiness、普通/流式 API、限流或
   InMemory 幂等；PR description 必须列出实际测试文件和远端 CI exact head。
+
+### 11.5 当前修复顺序
+
+代码审计发现 `BeginShutdown` 若在 `Server.Shutdown` 等待前关闭自有幂等状态，会让已
+进入的请求无法完成 `Complete`。因此下一提交必须先按上面的契约修复生命周期，再以
+`http_test.go` 与 `main_test.go` 的回归测试、全仓 race 和远端 CI 验证；修复完成前不
+把完整 graceful-shutdown 条目标记为 `[x]`。
