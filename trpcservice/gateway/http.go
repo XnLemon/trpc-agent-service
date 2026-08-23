@@ -236,7 +236,7 @@ func (handler *HTTPHandler) chat(writer http.ResponseWriter, request *http.Reque
 		handler.writeMappedError(writer, request, requestID, traceID, err)
 		return
 	}
-	defer limitLease.Release()
+	defer func() { _ = limitLease.Release() }()
 	claim, replay, err := handler.idempotency.Begin(ctx, principal, message)
 	if err != nil {
 		handler.writeMappedError(writer, request, requestID, traceID, err)
@@ -292,7 +292,7 @@ func (handler *HTTPHandler) decodeMessage(writer http.ResponseWriter, request *h
 		return InboundMessage{}, fmt.Errorf("%w: content type must be application/json", ErrInvalid)
 	}
 	body := http.MaxBytesReader(writer, request.Body, handler.maxBodyBytes)
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	decoder := json.NewDecoder(body)
 	decoder.DisallowUnknownFields()
 	var input chatRequest
@@ -303,11 +303,7 @@ func (handler *HTTPHandler) decodeMessage(writer http.ResponseWriter, request *h
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return InboundMessage{}, fmt.Errorf("%w: request JSON has trailing data", ErrInvalid)
 	}
-	message := InboundMessage{
-		Content: input.Content, ContentType: input.ContentType, ExternalMessageID: input.ExternalMessageID,
-		ExternalUserID: input.ExternalUserID, ConversationKind: input.ConversationKind,
-		ExternalPeerID: input.ExternalPeerID, ExternalChatID: input.ExternalChatID, ExternalThreadID: input.ExternalThreadID,
-	}
+	message := InboundMessage(input)
 	return message.Normalize()
 }
 

@@ -132,7 +132,9 @@ func TestIdempotencyStoreScopesCapacityAndConfigurationEdges(t *testing.T) {
 	if _, _, err := store.Begin(context.Background(), principal, secondMessage); !errors.Is(err, ErrIdempotencyCapacity) {
 		t.Fatalf("capacity error = %v", err)
 	}
-	claim.Fail()
+	if err := claim.Fail(); err != nil {
+		t.Fatal(err)
+	}
 
 	secondFixture := newGatewayFixture(t)
 	secondPrincipal := mustAPIPrincipal(t, secondFixture.tenant.TenantID, secondFixture.app.AppID)

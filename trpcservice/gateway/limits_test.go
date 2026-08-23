@@ -34,7 +34,9 @@ func TestTenantLimiterAdmissionWindowAndRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second.Release()
+	if err := second.Release(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := limiter.Acquire(context.Background(), tenantID); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("window request limit error = %v", err)
 	}
@@ -43,7 +45,9 @@ func TestTenantLimiterAdmissionWindowAndRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	third.Release()
+	if err := third.Release(); err != nil {
+		t.Fatal(err)
+	}
 
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -102,7 +106,7 @@ func TestTenantLimiterConcurrentAdmissionAndConfigurationEdges(t *testing.T) {
 			<-start
 			lease, err := limiter.Acquire(context.Background(), fixture.tenant.TenantID)
 			if err == nil {
-				defer lease.Release()
+				defer func() { _ = lease.Release() }()
 			}
 			results <- err
 		}()
