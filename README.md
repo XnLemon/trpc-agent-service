@@ -174,6 +174,7 @@
 - [ ] 实现 Runner Event 到文本、流式消息和卡片消息的转换
 - [ ] 接入企业微信或微信相关通道
 - [x] 接入 Telegram long polling 文本通道（Issue #31；单 Binding、Gateway Dispatch、进程内幂等）
+- [x] 增加真实 Telegram live E2E 示例与手动 CI workflow（Issue #33；根目录 `example/telegram-e2e`）
 - [ ] 接入 Telegram webhook、媒体/rich update 或其他 IM 通道
 - [ ] 实现 webhook 验签、账号与租户绑定、用户身份映射
 - [ ] 使用 `tenant + channel + message_id` 实现幂等去重和缓存回复
@@ -232,6 +233,9 @@
 - Issue #31 的 `trpcservice/channels/telegram` 提供单 Binding、`getMe` 身份校验、普通文本
   long polling、Gateway Dispatch、进程内幂等和脱敏分段回复；具体边界以
   `docs/docs/telegram.md` 为准。
+- Issue #33 的 `example/telegram-e2e` 使用真实 Telegram Bot API 和确定性 Dispatcher 验证
+  `getMe -> getUpdates -> sendMessage`；live workflow 只手动触发并使用受保护 Environment，
+  不替代完整模型供应商或生产控制面 E2E。
 - Issue #26 的 fake candidate resolver/verifier 与 proof-bearing routing 边界有独立测试，
   但这不代表 WeCom/Telegram webhook、媒体能力或持久化消息能力已满足 README 原验收要求。
 
@@ -253,6 +257,8 @@
 |   |-- start.sh           # 启动服务
 |   `-- stop.sh            # 停止服务
 |-- data                   # 服务运行时数据
+|-- example                # 可运行的外部集成示例
+|   `-- telegram-e2e        # Telegram live long-polling E2E
 |-- docs                   # 各模块说明与架构设计文档
 |-- cmd
 |   `-- trpc-service       # 命令行入口，可直接启动服务

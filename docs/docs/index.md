@@ -22,6 +22,8 @@
   限流、幂等和服务生命周期契约。
 - [Telegram 长轮询 Adapter](telegram.md)：Issue #31 的文档先行契约，固定单 Binding、Bot
   身份校验、普通文本映射、Dispatch 聚合回复和生命周期边界。
+- [Telegram live E2E 示例](https://github.com/XnLemon/trpc-agent-service/tree/main/example/telegram-e2e)：
+  Issue #33 的真实 Bot API 传输冒烟测试和手动 CI 运行说明。
 
 ## 快速开始
 
