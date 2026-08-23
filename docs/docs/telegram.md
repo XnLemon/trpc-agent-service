@@ -159,7 +159,7 @@ Issue #33 提供根目录 `example/telegram-e2e/` 示例和手动触发的 CI �
 trace 或错误。CI 使用受保护的 `telegram-e2e` Environment，至少配置接收 Bot 的
 `TELEGRAM_BOT_TOKEN`，并在需要完全自动化入站消息时配置第二个受控测试 Bot 的
 `TELEGRAM_SENDER_BOT_TOKEN`。一个 Bot Token 不能模拟普通用户向自己发送入站消息，
-所以 CI 必须显式配置发送者或采用人工/外部触发方案。
+所以当前 workflow 必须显式配置第二个受控测试 Bot；本地人工运行可以不配置发送者。
 
 示例和 CI 都只验证普通文本；命令、媒体、rich update、Webhook、持久化 outbox 和
 生产模型供应商仍不属于该 E2E 范围。详见

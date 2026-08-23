@@ -49,9 +49,10 @@ Optional local settings:
 The live workflow is intentionally manual and references a protected GitHub
 Environment named `telegram-e2e`:
 
-- `TELEGRAM_BOT_TOKEN`: secret for the receiving test Bot.
-- `TELEGRAM_SENDER_BOT_TOKEN`: optional secret for a second controlled test Bot
-  that sends the unique marker and receives the expected reply.
+- `TELEGRAM_BOT_TOKEN`: required secret for the receiving test Bot.
+- `TELEGRAM_SENDER_BOT_TOKEN`: required secret for a second controlled test Bot
+  in CI; it sends the unique marker and receives the expected reply. This
+  sender secret is optional only for local human-driven runs.
 
 For a fully automatic message round trip, enable Telegram Bot-to-Bot
 Communication Mode for both dedicated test Bots. A single Bot API token cannot

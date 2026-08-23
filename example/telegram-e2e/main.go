@@ -34,13 +34,13 @@ const (
 
 var (
 	errConfiguration     = errors.New("invalid Telegram E2E configuration")
-	errPreflight         = errors.New("Telegram E2E preflight failed")
-	errWebhookConfigured = errors.New("Telegram webhook is configured; remove it or enable TELEGRAM_DELETE_WEBHOOK")
-	errAdapterRun        = errors.New("Telegram E2E adapter stopped unexpectedly")
-	errAdapterClose      = errors.New("Telegram E2E adapter close failed")
-	errRunTimeout        = errors.New("Telegram E2E timed out waiting for the test message")
-	errSender            = errors.New("Telegram E2E sender failed")
-	errSenderStopped     = errors.New("Telegram E2E sender stopped unexpectedly")
+	errPreflight         = errors.New("telegram E2E preflight failed")
+	errWebhookConfigured = errors.New("telegram webhook is configured; remove it or enable TELEGRAM_DELETE_WEBHOOK")
+	errAdapterRun        = errors.New("telegram E2E adapter stopped unexpectedly")
+	errAdapterClose      = errors.New("telegram E2E adapter close failed")
+	errRunTimeout        = errors.New("telegram E2E timed out waiting for the test message")
+	errSender            = errors.New("telegram E2E sender failed")
+	errSenderStopped     = errors.New("telegram E2E sender stopped unexpectedly")
 )
 
 type runConfig struct {
