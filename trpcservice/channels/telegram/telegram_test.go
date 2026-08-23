@@ -99,7 +99,7 @@ func TestPollingErrorsUseStableRedactedHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer adapter.Close()
+	defer func() { _ = adapter.Close() }()
 	factory.config.OnPollingError()
 	events := recorder.snapshot()
 	if len(events) != 1 || events[0].Operation != ErrorOperationPolling || !errors.Is(events[0].Err, ErrPolling) {
