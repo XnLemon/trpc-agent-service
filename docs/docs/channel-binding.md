@@ -1,8 +1,9 @@
 # Channel Binding 与可信入站路由
 
 > 本页是 Issue #26 的实现契约。它先固定控制面模型、候选路由和可信边界，随后由
-> `trpcservice/channels` 的领域模型、InMemory Repository 和 fake verifier 实现。文中没有
-> 把真实企业微信/Telegram 适配器或 HTTP Gateway 误写成当前交付物。
+> `trpcservice/channels` 的领域模型、InMemory Repository 和 fake verifier 实现。Telegram
+> long polling 的适配器契约见 [Telegram 长轮询 Adapter](telegram.md)；本页仍只定义控制面和
+> trusted routing，不把协议运行时细节混入 Binding 领域模型。
 
 ## 目标与边界
 
