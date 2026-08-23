@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"testing"
@@ -73,6 +74,50 @@ func TestLoadConfigParsesExplicitSettings(t *testing.T) {
 	}
 	if configuration.testMessage != values["TELEGRAM_TEST_MESSAGE"] || configuration.runTimeout != 45*time.Second || configuration.pollTimeout != 3*time.Second || !configuration.deleteWebhook || !configuration.dropPendingUpdate {
 		t.Fatalf("explicit settings were not parsed: %+v", configuration)
+	}
+}
+
+func TestRunTimeoutCoversBlockingPreflight(t *testing.T) {
+	values := map[string]string{
+		"TELEGRAM_BOT_TOKEN":    "receiver-token",
+		"TELEGRAM_TIMEOUT":      "20ms",
+		"TELEGRAM_POLL_TIMEOUT": "2s",
+	}
+	var observedContextErr error
+	prepare := func(ctx context.Context, _ string, _ time.Duration, _, _ bool) (*models.User, error) {
+		<-ctx.Done()
+		observedContextErr = ctx.Err()
+		return nil, errPreflightGetMeTimeout
+	}
+
+	err := runWithPreflight(context.Background(), func(name string) string { return values[name] }, io.Discard, io.Discard, prepare)
+	if !errors.Is(err, errPreflightGetMeTimeout) {
+		t.Fatalf("runWithPreflight() error = %v, want preflight timeout", err)
+	}
+	if !errors.Is(observedContextErr, context.DeadlineExceeded) {
+		t.Fatalf("preflight context error = %v, want deadline exceeded", observedContextErr)
+	}
+}
+
+func TestClassifyManualRunResultTreatsCancellationAsClean(t *testing.T) {
+	tests := []struct {
+		name          string
+		parentErr     error
+		runContextErr error
+		adapterErr    error
+		want          error
+	}{
+		{name: "parent cancellation", parentErr: context.Canceled, runContextErr: context.Canceled, want: nil},
+		{name: "run timeout", runContextErr: context.DeadlineExceeded, want: errRunTimeout},
+		{name: "adapter cancellation", adapterErr: context.Canceled, want: nil},
+		{name: "unexpected stop", want: errAdapterRun},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := classifyManualRunResult(test.parentErr, test.runContextErr, test.adapterErr); !errors.Is(got, test.want) {
+				t.Fatalf("classifyManualRunResult() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 

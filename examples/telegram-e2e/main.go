@@ -70,6 +70,8 @@ type webhookClient interface {
 	DeleteWebhook(context.Context, *bot.DeleteWebhookParams) (bool, error)
 }
 
+type prepareBotFunc func(context.Context, string, time.Duration, bool, bool) (*models.User, error)
+
 type deterministicDispatcher struct {
 	marker string
 	reply  string
@@ -89,7 +91,14 @@ func main() {
 }
 
 func run(ctx context.Context, lookup func(string) string, stdout, stderr io.Writer) error {
+	return runWithPreflight(ctx, lookup, stdout, stderr, prepareBot)
+}
+
+func runWithPreflight(ctx context.Context, lookup func(string) string, stdout, stderr io.Writer, prepare prepareBotFunc) error {
 	if ctx == nil || lookup == nil || stdout == nil || stderr == nil {
+		return errConfiguration
+	}
+	if prepare == nil {
 		return errConfiguration
 	}
 	configuration, err := loadConfig(lookup)
@@ -104,7 +113,7 @@ func run(ctx context.Context, lookup func(string) string, stdout, stderr io.Writ
 	}
 	reply := e2eReplyFor(correlationID)
 
-	receiver, err := prepareBot(runContext, configuration.botToken, configuration.pollTimeout, configuration.deleteWebhook, configuration.dropPendingUpdate)
+	receiver, err := prepare(runContext, configuration.botToken, configuration.pollTimeout, configuration.deleteWebhook, configuration.dropPendingUpdate)
 	if err != nil {
 		return err
 	}
@@ -136,16 +145,12 @@ func run(ctx context.Context, lookup func(string) string, stdout, stderr io.Writ
 	} else {
 		select {
 		case err := <-runDone:
-			if err != nil {
-				result = errAdapterRun
-			} else {
-				result = errAdapterRun
-			}
+			result = classifyManualRunResult(ctx.Err(), runContext.Err(), err)
 		case <-runContext.Done():
 			if stopErr := waitForAdapter(runDone); stopErr != nil {
 				result = stopErr
-			} else if ctx.Err() == nil {
-				result = errRunTimeout
+			} else {
+				result = classifyManualRunResult(ctx.Err(), runContext.Err(), nil)
 			}
 		}
 	}
@@ -154,6 +159,19 @@ func run(ctx context.Context, lookup func(string) string, stdout, stderr io.Writ
 		result = errAdapterClose
 	}
 	return result
+}
+
+func classifyManualRunResult(parentErr, runContextErr, adapterErr error) error {
+	if parentErr != nil {
+		return nil
+	}
+	if errors.Is(runContextErr, context.DeadlineExceeded) {
+		return errRunTimeout
+	}
+	if errors.Is(runContextErr, context.Canceled) || errors.Is(adapterErr, context.Canceled) || errors.Is(adapterErr, context.DeadlineExceeded) {
+		return nil
+	}
+	return errAdapterRun
 }
 
 func loadConfig(lookup func(string) string) (runConfig, error) {
