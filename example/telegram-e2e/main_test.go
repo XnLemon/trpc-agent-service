@@ -100,20 +100,20 @@ func TestPrepareLongPollingHandlesWebhookSafely(t *testing.T) {
 }
 
 func TestNewTrustedTargetUsesTheTrustedBoundary(t *testing.T) {
-	target, err := newTrustedTarget("8954722550")
+	target, err := newTrustedTarget("123456789")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := target.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if target.Channel != channels.ChannelTelegram || target.ProviderAccountID != "8954722550" {
+	if target.Channel != channels.ChannelTelegram || target.ProviderAccountID != "123456789" {
 		t.Fatalf("unexpected target: %+v", target)
 	}
 }
 
 func TestNewTrustedTargetRejectsNonCanonicalAccountID(t *testing.T) {
-	for _, value := range []string{"", "0", "+8954722550", "08954722550", "bot"} {
+	for _, value := range []string{"", "0", "+123456789", "0123456789", "bot"} {
 		if _, err := newTrustedTarget(value); !errors.Is(err, errConfiguration) {
 			t.Fatalf("provider account %q error = %v", value, err)
 		}
