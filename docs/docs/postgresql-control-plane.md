@@ -2,8 +2,8 @@
 
 > 本页是 Issue #37 的实现契约。它复用已经合入的 Tenant、Agent App/Revision、Backend
 > Profile 和 Channel Binding 设计，并补齐 Model Profile 的持久化形状、统一 migration 顺序、
-> Repository 事务边界和进程启动装配。SQL migration 已落地；Repository/bootstrap 会在后续
-> 代码阶段继续接入。
+> Repository 事务边界和进程启动装配。控制面 DDL 与受控 Repository 写入口分别落在
+> `0001`、`0002` 两个有序 migration；Repository/bootstrap 会在代码阶段继续接入。
 
 ## 目标与边界
 
@@ -56,23 +56,26 @@ Profile 或 Binding 被另一个租户引用。key 的唯一性也都限定在�
 ## Migration 组织与执行前提
 
 代码阶段将提供不依赖迁移工具的 SQL 文件，调用方负责按文件名顺序执行；迁移工具不是本
-Issue 的范围。第一版使用单个有序 migration，目标目录为：
+Issue 的范围。第一版使用两个有序 migration，目标目录为：
 
 ```text
 migrations/
-└── 0001_control_plane.up.sql
+├── 0001_control_plane.up.sql
+└── 0002_control_plane_repository_functions.up.sql
 ```
 
 执行约定如下：
 
 1. 在干净 PostgreSQL 实例上使用一个事务执行完整文件；失败时整个 schema 和权限变更回滚。
-2. 迁移开始固定 `search_path` 为 `pg_catalog, public`，所有函数体对业务表使用 `public.`
+2. 迁移开始固定 `search_path` 为 `pg_catalog, public, pg_temp`，所有函数体对业务表使用 `public.`
    限定名；不依赖连接池或客户端会话的隐式 search path。
 3. 在干净实例中 migration 会创建缺失的 `NOLOGIN` 受控角色；生产部署也可以在执行前预置
    数据库 owner、migration owner、`tenant_admin_writer` 和 `tenant_app_writer`。这些角色不
    属于普通请求连接池，migration 不把 owner 权限继承给运行时角色。
-4. 受控 `SECURITY DEFINER` 函数创建后先撤销 `PUBLIC` 的默认 `EXECUTE`，再只授予管理角色。
-   Worker 只能消费控制平面下发的固定快照，不能枚举根表或草稿。
+4. `0002` 为 Tenant、Model、Backend、Agent App/Revision、Channel Binding 以及 Outbox
+   写入提供完整的 `SECURITY DEFINER` entry point；函数先撤销 `PUBLIC` 的默认 `EXECUTE`，
+   再只授予 `tenant_admin_writer`。Worker 只能消费控制平面下发的固定快照，不能枚举根表
+   或草稿。
 5. SQL 文件不包含 token、API key、DSN、密码、运行时客户端或测试 Secret。`secret_ref` 是
    唯一允许进入控制面配置的凭据引用，且只按租户作用域解释。
 
@@ -207,7 +210,8 @@ SecretResolver、fake ModelFactory 和 InMemory Session，不需要真实模型�
 
 文档对应的代码阶段必须增加：
 
-- 干净 PostgreSQL migration 的重复执行/权限/跨租户 FK 检查；
+- 干净 PostgreSQL migration 的执行/权限/跨租户 FK、published current pointer 和延迟 binding
+  检查；
 - 五类 SQL Repository 与 InMemory 等价的租户隔离、生命周期、乐观锁、发布/回滚、深拷贝和
   Context 取消测试；
 - 发布事务不会产生跨租户引用或半发布状态的集成测试；

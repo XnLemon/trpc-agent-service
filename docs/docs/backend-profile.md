@@ -512,7 +512,7 @@ CREATE OR REPLACE FUNCTION transition_backend_profile_status(
 ) RETURNS BIGINT
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
     v_default_profile_id TEXT;

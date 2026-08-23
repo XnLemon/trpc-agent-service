@@ -1,0 +1,265 @@
+package migrations
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+)
+
+// TestPostgreSQLControlPlaneMigration runs only when CI (or a developer) points
+// it at a disposable, empty PostgreSQL database. Keeping the DSN separate from
+// the application's POSTGRES_DSN avoids accidentally mutating a development
+// database during the normal test suite.
+func TestPostgreSQLControlPlaneMigration(t *testing.T) {
+	dsn := os.Getenv("POSTGRES_MIGRATION_TEST_DSN")
+	if dsn == "" {
+		t.Skip("POSTGRES_MIGRATION_TEST_DSN is not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	config, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse PostgreSQL DSN: %v", err)
+	}
+	config.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	conn, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("connect PostgreSQL: %v", err)
+	}
+	defer conn.Close(context.Background())
+
+	var alreadyMigrated bool
+	if err := conn.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_catalog.pg_tables
+			WHERE schemaname = 'public' AND tablename = 'tenant'
+		)`,
+	).Scan(&alreadyMigrated); err != nil {
+		t.Fatalf("check clean PostgreSQL database: %v", err)
+	}
+	if alreadyMigrated {
+		t.Fatal("migration smoke test requires an empty PostgreSQL database")
+	}
+
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate migration test source")
+	}
+	migrationDir := filepath.Dir(sourceFile)
+	for _, name := range []string{
+		"0001_control_plane.up.sql",
+		"0002_control_plane_repository_functions.up.sql",
+	} {
+		path := filepath.Join(migrationDir, name)
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if _, err := conn.Exec(ctx, string(contents)); err != nil {
+			t.Fatalf("execute %s: %v", name, err)
+		}
+	}
+
+	assertBoolean(t, ctx, conn,
+		`SELECT public.jsonb_has_safe_keys('{"nested":{"bot_token":"not-a-secret"}}'::jsonb)`, false,
+	)
+	assertBoolean(t, ctx, conn,
+		`SELECT public.jsonb_has_safe_keys('{"nested":{"public_value":"ok"}}'::jsonb)`, true,
+	)
+	assertBoolean(t, ctx, conn,
+		`SELECT public.control_plane_endpoint_is_safe('postgres://user:password@db.example.com')`, false,
+	)
+	assertBoolean(t, ctx, conn,
+		`SELECT public.control_plane_endpoint_is_safe('postgres://db.example.com:5432')`, true,
+	)
+	assertBoolean(t, ctx, conn,
+		`SELECT public.control_plane_secret_ref_is_safe('secret ref')`, false,
+	)
+
+	// The admin role can execute the complete controlled writer surface, but it
+	// cannot bypass it with direct table DML.
+	setRole(t, ctx, conn, "tenant_admin_writer")
+	if _, err := conn.Exec(ctx, `
+		SELECT public.control_plane_create_tenant(
+			't_01ARZ3NDEKTSV4RRFFQ69G5FAV', 'smoke', 'Smoke Tenant', 'active',
+			NULL::BIGINT, NULL::BIGINT, NULL::BIGINT, NULL::BIGINT, '', 90, 'basic',
+			1.0::REAL, NULL::TEXT, NULL::TEXT, 1::BIGINT, clock_timestamp(), clock_timestamp()
+		)`); err != nil {
+		t.Fatalf("admin controlled tenant create: %v", err)
+	}
+	expectExecError(t, ctx, conn, `
+		INSERT INTO public.tenant (tenant_id, tenant_key, display_name)
+		VALUES ('t_01ARZ3NDEKTSV4RRFFQ69G5FAW', 'bypass', 'Bypass')
+	`)
+	var tenantCount int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM public.tenant WHERE tenant_key = 'smoke'`).Scan(&tenantCount); err != nil {
+		t.Fatalf("admin tenant snapshot read: %v", err)
+	}
+	if tenantCount != 1 {
+		t.Fatalf("controlled tenant create count = %d, want 1", tenantCount)
+	}
+	resetRole(t, ctx, conn)
+
+	setRole(t, ctx, conn, "tenant_app_writer")
+	expectExecError(t, ctx, conn, `SELECT count(*) FROM public.tenant`)
+	expectExecError(t, ctx, conn, `
+		SELECT public.control_plane_create_tenant(
+			't_01ARZ3NDEKTSV4RRFFQ69G5FAW', 'worker', 'Worker', 'active',
+			NULL::BIGINT, NULL::BIGINT, NULL::BIGINT, NULL::BIGINT, '', 90, 'basic',
+			1.0::REAL, NULL::TEXT, NULL::TEXT, 1::BIGINT, clock_timestamp(), clock_timestamp()
+		)
+	`)
+	resetRole(t, ctx, conn)
+
+	// Prepare a second tenant and two draft apps as the controlled migration
+	// identity. The later assertions deliberately exercise cross-tenant and
+	// deferred constraints through transactions.
+	setRole(t, ctx, conn, "migration_owner")
+	execSQL(t, ctx, conn, `
+		INSERT INTO public.tenant (tenant_id, tenant_key, display_name)
+		VALUES ('t_01ARZ3NDEKTSV4RRFFQ69G5FAW', 'other', 'Other Tenant');
+		INSERT INTO public.model_profile (
+			tenant_id, profile_id, profile_key, display_name, status, provider, model,
+			content_digest
+		) VALUES (
+			't_01ARZ3NDEKTSV4RRFFQ69G5FAV', 'mp_01ARZ3NDEKTSV4RRFFQ69G5FAV',
+			'primary', 'Primary', 'active', 'public', 'chat', repeat('0', 64)
+		);
+		INSERT INTO public.agent_app (tenant_id, app_id, app_key, display_name)
+		VALUES ('t_01ARZ3NDEKTSV4RRFFQ69G5FAV', 'app_01ARZ3NDEKTSV4RRFFQ69G5FAV', 'primary', 'Primary');
+		INSERT INTO public.agent_app (tenant_id, app_id, app_key, display_name)
+		VALUES ('t_01ARZ3NDEKTSV4RRFFQ69G5FAW', 'app_01ARZ3NDEKTSV4RRFFQ69G5FAW', 'primary', 'Other');
+		INSERT INTO public.agent_app_revision (
+			tenant_id, app_id, revision, instruction, model_profile_id,
+			generation_config, runtime_policy
+		) VALUES (
+			't_01ARZ3NDEKTSV4RRFFQ69G5FAV', 'app_01ARZ3NDEKTSV4RRFFQ69G5FAV', 1,
+			'run', 'mp_01ARZ3NDEKTSV4RRFFQ69G5FAV', '{}'::JSONB, '{}'::JSONB
+		);
+	`)
+	resetRole(t, ctx, conn)
+
+	setRole(t, ctx, conn, "migration_owner")
+	expectExecError(t, ctx, conn, `
+		INSERT INTO public.agent_app_revision (
+			tenant_id, app_id, revision, instruction, model_profile_id,
+			generation_config, runtime_policy
+		) VALUES (
+			't_01ARZ3NDEKTSV4RRFFQ69G5FAW', 'app_01ARZ3NDEKTSV4RRFFQ69G5FAW', 1,
+			'cross tenant', 'mp_01ARZ3NDEKTSV4RRFFQ69G5FAV', '{}'::JSONB, '{}'::JSONB
+		)
+	`)
+	resetRole(t, ctx, conn)
+
+	// A current pointer to a draft must fail at transaction commit, not merely
+	// because the row-level FK happens to exist.
+	setRole(t, ctx, conn, "migration_owner")
+	expectCommitError(t, ctx, conn, `
+		UPDATE public.agent_app
+		SET status = 'active', current_revision = 1
+		WHERE tenant_id = 't_01ARZ3NDEKTSV4RRFFQ69G5FAV'
+		  AND app_id = 'app_01ARZ3NDEKTSV4RRFFQ69G5FAV'
+	`)
+	execSQL(t, ctx, conn, `
+		UPDATE public.agent_app_revision
+		SET state = 'published', content_digest = repeat('0', 64), published_at = clock_timestamp()
+		WHERE tenant_id = 't_01ARZ3NDEKTSV4RRFFQ69G5FAV'
+		  AND app_id = 'app_01ARZ3NDEKTSV4RRFFQ69G5FAV' AND revision = 1;
+		UPDATE public.agent_app
+		SET status = 'active', current_revision = 1
+		WHERE tenant_id = 't_01ARZ3NDEKTSV4RRFFQ69G5FAV'
+		  AND app_id = 'app_01ARZ3NDEKTSV4RRFFQ69G5FAV';
+	`)
+	resetRole(t, ctx, conn)
+
+	// The deferred backend binding guard rejects an incomplete profile but
+	// accepts a root and its binding inserted in one transaction.
+	setRole(t, ctx, conn, "migration_owner")
+	expectCommitError(t, ctx, conn, `
+		INSERT INTO public.backend_profile (
+			tenant_id, profile_id, profile_key, display_name, status, content_digest
+		) VALUES (
+			't_01ARZ3NDEKTSV4RRFFQ69G5FAV', 'bp_01ARZ3NDEKTSV4RRFFQ69G5FAV',
+			'incomplete', 'Incomplete', 'active', repeat('1', 64)
+		)
+	`)
+	execSQL(t, ctx, conn, `
+		INSERT INTO public.backend_profile (
+			tenant_id, profile_id, profile_key, display_name, status, content_digest
+		) VALUES (
+			't_01ARZ3NDEKTSV4RRFFQ69G5FAV', 'bp_01ARZ3NDEKTSV4RRFFQ69G5FAW',
+			'complete', 'Complete', 'active', repeat('2', 64)
+		);
+		INSERT INTO public.backend_profile_binding (
+			tenant_id, profile_id, capability, provider
+		) VALUES (
+			't_01ARZ3NDEKTSV4RRFFQ69G5FAV', 'bp_01ARZ3NDEKTSV4RRFFQ69G5FAW',
+			'session', 'inmemory'
+		);
+	`)
+	resetRole(t, ctx, conn)
+}
+
+func assertBoolean(t *testing.T, ctx context.Context, conn *pgx.Conn, query string, want bool) {
+	t.Helper()
+	var got bool
+	if err := conn.QueryRow(ctx, query).Scan(&got); err != nil {
+		t.Fatalf("query boolean %q: %v", query, err)
+	}
+	if got != want {
+		t.Fatalf("query boolean %q = %v, want %v", query, got, want)
+	}
+}
+
+func setRole(t *testing.T, ctx context.Context, conn *pgx.Conn, role string) {
+	t.Helper()
+	if _, err := conn.Exec(ctx, "SET ROLE "+role); err != nil {
+		t.Fatalf("set role %s: %v", role, err)
+	}
+}
+
+func resetRole(t *testing.T, ctx context.Context, conn *pgx.Conn) {
+	t.Helper()
+	if _, err := conn.Exec(ctx, "RESET ROLE"); err != nil {
+		t.Fatalf("reset role: %v", err)
+	}
+}
+
+func execSQL(t *testing.T, ctx context.Context, conn *pgx.Conn, statement string) {
+	t.Helper()
+	if _, err := conn.Exec(ctx, statement); err != nil {
+		t.Fatalf("execute SQL: %v", err)
+	}
+}
+
+func expectExecError(t *testing.T, ctx context.Context, conn *pgx.Conn, statement string) {
+	t.Helper()
+	if _, err := conn.Exec(ctx, statement); err == nil {
+		t.Fatalf("expected SQL error for %s", statement)
+	}
+}
+
+func expectCommitError(t *testing.T, ctx context.Context, conn *pgx.Conn, statement string) {
+	t.Helper()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL ROLE migration_owner"); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("set local migration role: %v", err)
+	}
+	if _, err := tx.Exec(ctx, statement); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("expected deferred statement to reach commit: %v", err)
+	}
+	if err := tx.Commit(ctx); err == nil {
+		t.Fatalf("expected deferred constraint error for %s", statement)
+	}
+}

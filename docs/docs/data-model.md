@@ -22,7 +22,8 @@
 
 ### PostgreSQL DDL
 
-下面的 DDL 是根表最小实现。默认引用的复合外键需要在后续关联表创建后追加，见下方完整性约束。
+下面的 DDL 是根表逻辑契约；可执行的完整定义、复合外键、延迟约束和角色权限以
+Issue #37 的 `migrations/0001_control_plane.up.sql` 为唯一权威。
 
 ```sql
 CREATE TABLE tenant (
@@ -215,7 +216,7 @@ CREATE OR REPLACE FUNCTION transition_tenant_status(
 ) RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
     v_previous_status TEXT;
@@ -285,7 +286,7 @@ CREATE OR REPLACE FUNCTION update_tenant_configuration(
 ) RETURNS BIGINT
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
     v_next_version BIGINT;
@@ -369,7 +370,14 @@ GRANT EXECUTE ON FUNCTION update_tenant_configuration(
 COMMIT;
 ```
 
-`SECURITY DEFINER` 函数由不属于运行时连接池的专用 owner 持有；其 `search_path` 固定，且函数 owner 不得是可登录的应用账号。Admin API 只能以 `tenant_admin_writer` 调用状态迁移和配置更新函数；该角色也是唯一拥有跨租户根表读取权限的运行时控制平面角色。普通 Worker 使用 `tenant_app_writer`，没有 `tenant` 的 `SELECT` 或 `UPDATE` 权限。Gateway 验证 IM 回调并解析可信 `tenant_id` 后，由控制平面生成只包含该租户、固定 `version` 的配置快照并随任务下发；Worker 只能消费快照，不能通过用户输入指定租户或查询根表。配置更新函数接收完整配置快照与 `expected_version`，只会将版本递增一次并维护 `updated_at`，且拒绝 `disabled` 租户；停用后的归档或清理若需要写入，必须由后续 issue 定义独立的受控流程。数据库 owner 和 migration role 是受控管理身份，不属于生产流量路径。
+`SECURITY DEFINER` 函数由不属于运行时连接池的专用 owner 持有；其 `search_path` 固定为
+`pg_catalog, public, pg_temp`，且函数 owner 不得是可登录的应用账号。Admin API 以
+`tenant_admin_writer` 调用 `0001` 的 Tenant 状态/配置函数和 `0002` 的 Model、Backend、
+Agent App/Revision、Channel Binding 受控写入口；该角色也是唯一拥有跨租户根表读取权限的
+运行时控制平面角色。普通 Worker 使用 `tenant_app_writer`，没有控制面表的读取或写入权限。
+Gateway 验证 IM 回调并解析可信 `tenant_id` 后，由控制平面生成只包含该租户、固定 `version`
+的配置快照并随任务下发；Worker 只能消费快照，不能通过用户输入指定租户或查询根表。数据库
+owner 和 migration role 是受控管理身份，不属于生产流量路径。
 
 ### 与 tRPC-Agent-Go 的映射
 
@@ -578,5 +586,6 @@ Adapter 必须使用经过验证的 Lua/Stream/事务边界；无法原子提交
 | Audit | OpenTelemetry 可复用为 trace | 独立 append-only audit adapter；sampling 不能代替审计 |
 | Agent 执行 | Runner、LLMAgent、Tool/MCP、Plugin/Guardrail | Gateway、Binding、幂等、策略和回复 Outbox |
 
-当前 Go 代码没有实现上述 Channel/Session/Memory/Audit 生产表、客户端或 migration；文档的
-逻辑模型用于约束后续 issue，不能作为已完成的数据库交付物。
+Issue #37 已将 Tenant、Agent App/Revision、Model Profile、Backend Profile 和 Channel Binding
+的控制面表与跨租户复合约束落入 migration；当前 Go 代码仍没有实现 Session/Memory/Audit
+生产表或客户端。本文剩余逻辑模型用于约束后续 issue，不能替代后续平台表的数据库交付物。

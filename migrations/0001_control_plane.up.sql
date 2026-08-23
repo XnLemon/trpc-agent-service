@@ -3,17 +3,17 @@ BEGIN;
 -- This migration is executed by a controlled database/migration owner. The
 -- runtime roles below are deliberately NOLOGIN and receive only the grants at
 -- the end of the migration.
-SET LOCAL search_path = pg_catalog, public;
+SET LOCAL search_path = pg_catalog, public, pg_temp;
 
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'migration_owner') THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'migration_owner') THEN
         EXECUTE 'CREATE ROLE migration_owner NOLOGIN NOINHERIT';
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tenant_admin_writer') THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'tenant_admin_writer') THEN
         EXECUTE 'CREATE ROLE tenant_admin_writer NOLOGIN NOINHERIT';
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tenant_app_writer') THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'tenant_app_writer') THEN
         EXECUTE 'CREATE ROLE tenant_app_writer NOLOGIN NOINHERIT';
     END IF;
 END;
@@ -47,20 +47,80 @@ $$;
 
 CREATE OR REPLACE FUNCTION public.jsonb_has_safe_keys(value JSONB)
 RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    item RECORD;
+    child JSONB;
+BEGIN
+    IF value IS NULL THEN
+        RETURN FALSE;
+    END IF;
+    IF pg_catalog.jsonb_typeof(value) = 'object' THEN
+        FOR item IN SELECT key, value AS item_value FROM pg_catalog.jsonb_each(value)
+        LOOP
+            IF pg_catalog.lower(item.key) IN (
+                'access_key', 'access_token', 'api_key', 'apikey', 'api_secret',
+                'app_secret', 'authorization', 'bearer', 'bot_token',
+                'client_secret', 'connection_string', 'credential', 'credentials',
+                'dsn', 'encryption_key', 'password', 'passwd', 'passphrase',
+                'private_key', 'privatekey', 'pwd', 'refresh_token', 'secret',
+                'secret_key', 'secret_ref', 'secretref', 'signing_key', 'token',
+                'username', 'webhook_secret'
+            ) THEN
+                RETURN FALSE;
+            END IF;
+            child := item.item_value;
+            IF NOT public.jsonb_has_safe_keys(child) THEN
+                RETURN FALSE;
+            END IF;
+        END LOOP;
+    ELSIF pg_catalog.jsonb_typeof(value) = 'array' THEN
+        FOR child IN SELECT value FROM pg_catalog.jsonb_array_elements(value)
+        LOOP
+            IF NOT public.jsonb_has_safe_keys(child) THEN
+                RETURN FALSE;
+            END IF;
+        END LOOP;
+    END IF;
+    RETURN TRUE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.control_plane_endpoint_is_safe(value TEXT)
+RETURNS BOOLEAN
 LANGUAGE sql
 IMMUTABLE
 PARALLEL SAFE
+SET search_path = pg_catalog, public, pg_temp
 AS $$
-    SELECT pg_catalog.jsonb_typeof(value) = 'object'
-       AND NOT EXISTS (
-           SELECT 1
-           FROM pg_catalog.jsonb_object_keys(value) AS item(key)
-           WHERE pg_catalog.lower(item.key) IN (
-               'api_key', 'apikey', 'authorization', 'connection_string',
-               'credential', 'credentials', 'dsn', 'password', 'passwd',
-               'passphrase', 'pwd', 'secret', 'token', 'access_token'
-           )
+    SELECT value IS NOT NULL
+       AND value = public.trim_control_plane_text(value)
+       AND pg_catalog.length(value) <= 2048
+       AND value !~ '[[:cntrl:]]'
+       AND value !~ '[[:space:]]'
+       AND value !~ '[?#@]'
+       AND (
+           value = ''
+           OR value ~ '^[A-Za-z][A-Za-z0-9+.-]*://[^/[:space:]@?#]+(/[^[:space:]?#]*)?$'
        )
+$$;
+
+CREATE OR REPLACE FUNCTION public.control_plane_secret_ref_is_safe(value TEXT)
+RETURNS BOOLEAN
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+    SELECT value IS NOT NULL
+       AND value = public.trim_control_plane_text(value)
+       AND pg_catalog.length(value) <= 256
+       AND value !~ '[[:cntrl:]]'
+       AND value !~ '[[:space:]]'
 $$;
 
 CREATE TABLE public.tenant (
@@ -133,13 +193,12 @@ CREATE TABLE public.model_profile (
     schema_version  INT NOT NULL DEFAULT 1 CHECK (schema_version = 1),
     provider        TEXT NOT NULL CHECK (provider ~ '^[a-z][a-z0-9_-]{0,63}$'),
     model           TEXT NOT NULL CHECK (model ~ '^[a-z][a-z0-9._:-]{0,127}$'),
-    endpoint        TEXT NOT NULL DEFAULT '' CHECK (pg_catalog.length(endpoint) <= 2048),
+    endpoint        TEXT NOT NULL DEFAULT '' CHECK (public.control_plane_endpoint_is_safe(endpoint)),
     options         JSONB NOT NULL DEFAULT '{}'::jsonb
                     CHECK (public.jsonb_object_string_values(options)
                            AND public.jsonb_has_safe_keys(options)),
     secret_ref      TEXT NOT NULL DEFAULT ''
-                    CHECK (pg_catalog.length(secret_ref) BETWEEN 0 AND 256
-                           AND secret_ref = public.trim_control_plane_text(secret_ref)),
+                    CHECK (public.control_plane_secret_ref_is_safe(secret_ref)),
     generation      JSONB NOT NULL DEFAULT '{}'::jsonb
                     CHECK (pg_catalog.jsonb_typeof(generation) = 'object'
                            AND public.jsonb_has_safe_keys(generation)),
@@ -224,7 +283,7 @@ CREATE TABLE public.agent_app_revision (
                        CHECK (state IN ('draft', 'published')),
     draft_version      BIGINT NOT NULL DEFAULT 1 CHECK (draft_version >= 1),
     agent_kind         TEXT NOT NULL CHECK (agent_kind = 'llm'),
-    schema_version     INT NOT NULL DEFAULT 1 CHECK (schema_version >= 1),
+    schema_version     INT NOT NULL DEFAULT 1 CHECK (schema_version = 1),
     description        TEXT NOT NULL DEFAULT ''
                        CHECK (description = public.trim_control_plane_text(description)
                               AND pg_catalog.length(description) <= 2000),
@@ -263,16 +322,56 @@ ALTER TABLE public.agent_app
     FOREIGN KEY (tenant_id, app_id, current_revision)
     REFERENCES public.agent_app_revision(tenant_id, app_id, revision);
 
+CREATE OR REPLACE FUNCTION public.agent_app_current_revision_guard()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+    v_revision_state TEXT;
+BEGIN
+    IF NEW.current_revision IS NULL THEN
+        IF NEW.status IN ('active', 'suspended') THEN
+            RAISE EXCEPTION 'active or suspended agent app requires a current revision';
+        END IF;
+        RETURN NEW;
+    END IF;
+    SELECT state INTO v_revision_state
+    FROM public.agent_app_revision
+    WHERE tenant_id = NEW.tenant_id
+      AND app_id = NEW.app_id
+      AND revision = NEW.current_revision;
+    IF NOT FOUND OR v_revision_state <> 'published' THEN
+        RAISE EXCEPTION 'agent app current revision must be published';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER agent_app_current_revision_published_guard
+AFTER INSERT OR UPDATE OF status, current_revision ON public.agent_app
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.agent_app_current_revision_guard();
+
 CREATE OR REPLACE FUNCTION public.agent_app_revision_reject_published_change()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF OLD.state = 'published' THEN
+            RAISE EXCEPTION 'published agent app revision is immutable';
+        END IF;
+        -- Draft deletion is intentionally allowed; published history is not.
+        RETURN OLD;
+    END IF;
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.app_id IS DISTINCT FROM OLD.app_id
+       OR NEW.revision IS DISTINCT FROM OLD.revision THEN
+        RAISE EXCEPTION 'agent app revision identity is immutable';
+    END IF;
     IF OLD.state = 'published' THEN
         RAISE EXCEPTION 'published agent app revision is immutable';
-    END IF;
-    IF TG_OP = 'DELETE' THEN
-        RETURN OLD;
     END IF;
     RETURN NEW;
 END;
@@ -360,13 +459,12 @@ CREATE TABLE public.backend_profile_binding (
     capability TEXT NOT NULL
                CHECK (capability IN ('session', 'memory', 'knowledge', 'artifact', 'audit')),
     provider   TEXT NOT NULL CHECK (provider ~ '^[a-z][a-z0-9_-]{0,63}$'),
-    endpoint   TEXT NOT NULL DEFAULT '' CHECK (pg_catalog.length(endpoint) <= 2048),
+    endpoint   TEXT NOT NULL DEFAULT '' CHECK (public.control_plane_endpoint_is_safe(endpoint)),
     options    JSONB NOT NULL DEFAULT '{}'::jsonb
                CHECK (public.jsonb_object_string_values(options)
                       AND public.jsonb_has_safe_keys(options)),
     secret_ref TEXT NOT NULL DEFAULT ''
-               CHECK (pg_catalog.length(secret_ref) BETWEEN 0 AND 256
-                      AND secret_ref = public.trim_control_plane_text(secret_ref)),
+               CHECK (public.control_plane_secret_ref_is_safe(secret_ref)),
     PRIMARY KEY (tenant_id, profile_id, capability),
     FOREIGN KEY (tenant_id, profile_id)
         REFERENCES public.backend_profile(tenant_id, profile_id)
@@ -488,7 +586,7 @@ CREATE TABLE public.channel_binding (
     app_id                  TEXT NOT NULL
                             CHECK (app_id ~ '^app_[0-7][0-9A-HJKMNP-TV-Z]{25}$'),
     secret_ref              TEXT NOT NULL
-                            CHECK (secret_ref = public.trim_control_plane_text(secret_ref)
+                            CHECK (public.control_plane_secret_ref_is_safe(secret_ref)
                                    AND pg_catalog.length(secret_ref) BETWEEN 1 AND 256),
     protocol_config         JSONB NOT NULL DEFAULT '{}'::jsonb
                             CHECK (pg_catalog.jsonb_typeof(protocol_config) = 'object'
@@ -716,15 +814,16 @@ CREATE OR REPLACE FUNCTION public.transition_tenant_status(
     p_actor_id TEXT,
     p_reason TEXT,
     p_correlation_id TEXT
-) RETURNS VOID
+) RETURNS BIGINT
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
     v_previous_status TEXT;
     v_previous_version BIGINT;
     v_next_version BIGINT;
+    v_event_id BIGINT;
     v_now TIMESTAMPTZ;
 BEGIN
     SELECT status, version INTO v_previous_status, v_previous_version
@@ -755,7 +854,8 @@ BEGIN
         public.trim_control_plane_text(p_actor_type), public.trim_control_plane_text(p_actor_id),
         public.trim_control_plane_text(p_reason), p_expected_version, v_next_version,
         public.trim_control_plane_text(p_correlation_id), v_now
-    );
+    ) RETURNING event_id INTO v_event_id;
+    RETURN v_event_id;
 END;
 $$;
 
@@ -776,7 +876,7 @@ CREATE OR REPLACE FUNCTION public.update_tenant_configuration(
 ) RETURNS BIGINT
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
     v_next_version BIGINT;
@@ -834,7 +934,7 @@ CREATE OR REPLACE FUNCTION public.transition_backend_profile_status(
 ) RETURNS BIGINT
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
     v_previous_status TEXT;
@@ -895,6 +995,7 @@ $$;
 -- admin role only reads snapshots/outbox events and executes those entry
 -- points. The worker role intentionally has no control-plane table access.
 REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO migration_owner, tenant_admin_writer, tenant_app_writer;
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC;
 REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
