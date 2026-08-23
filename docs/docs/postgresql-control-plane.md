@@ -25,10 +25,14 @@ explicit BootstrapConfig
              └── HTTP Gateway + readiness
 ```
 
-本 Issue 只持久化 PlanResolver 当前需要的六类控制面对象：`tenant`、`agent_app`、
-`agent_app_revision`、`model_profile`、`backend_profile` 和 `channel_binding`。Session、
-Event、Memory、Summary、Knowledge、Artifact、Redis、向量库、对象存储、真实 KMS/Vault、
-Admin API 和分布式 Outbox 消费仍由后续 Issue 负责。
+本 Issue 只持久化当前控制面纵向链路需要的六类对象：`tenant`、`agent_app`、
+`agent_app_revision`、`model_profile`、`backend_profile` 和 `channel_binding`。当前
+`gateway.PlanResolver` 的直接 Repository 输入仍只有 Tenant、Agent App、Model Profile 和
+Backend Profile 四类，外加两个 Provider Catalog；它不读取 Channel Binding。Channel Binding
+由 Channel Adapter/Candidate Index 完成候选发现和可信路由，bootstrap 必须把它作为独立的
+Repository/候选索引依赖装配，只有形成可信 Principal 后才进入 Dispatcher → PlanResolver。
+Session、Event、Memory、Summary、Knowledge、Artifact、Redis、向量库、对象存储、真实
+KMS/Vault、Admin API 和分布式 Outbox 消费仍由后续 Issue 负责。
 
 ## 既有表设计的复用关系
 
