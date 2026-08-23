@@ -174,7 +174,7 @@
 - [ ] 实现 Runner Event 到文本、流式消息和卡片消息的转换
 - [ ] 接入企业微信或微信相关通道
 - [x] 接入 Telegram long polling 文本通道（Issue #31；单 Binding、Gateway Dispatch、进程内幂等）
-- [x] 增加真实 Telegram live E2E 示例与手动 CI workflow（Issue #33；根目录 `examples/telegram-e2e`）
+- [x] 增加真实 Telegram live E2E 示例与 CI workflow（Issue #33；根目录 `examples/telegram-e2e`）
 - [ ] 接入 Telegram webhook、媒体/rich update 或其他 IM 通道
 - [ ] 实现 webhook 验签、账号与租户绑定、用户身份映射
 - [ ] 使用 `tenant + channel + message_id` 实现幂等去重和缓存回复
