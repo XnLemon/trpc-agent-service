@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -403,4 +404,152 @@ func newGatewayFixture(t *testing.T) gatewayFixture {
 		tenant: updatedRoot, app: publishedApp, revision: published, model: modelProfile, backend: backendProfile,
 		modelCatalog: modelCatalog, backendCatalog: backendCatalog, tenants: tenants, apps: apps, models: models, backends: backends,
 	}
+}
+
+func TestGatewayAuthenticationAndPrincipalValidationEdges(t *testing.T) {
+	identity := APIIdentity{TenantID: "t_01J1K9ZQTVE4PAWF1TSB2WMHNP", AppID: "app_01J1K9ZQTVE4PAWF1TSB2WMHNP", SubjectID: "subject"}
+	authenticated, err := newAuthenticatedAPI(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := authenticated.Identity(); err != nil || got != identity {
+		t.Fatalf("authenticated identity = %+v, err=%v", got, err)
+	}
+	var nilAuthenticator APIAuthenticatorFunc
+	if _, err := nilAuthenticator.Authenticate(context.Background(), httptest.NewRequest("GET", "/", nil)); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("nil authenticator error = %v", err)
+	}
+	called := false
+	functionAuthenticator := APIAuthenticatorFunc(func(context.Context, *http.Request) (AuthenticatedAPI, error) {
+		called = true
+		return authenticated, nil
+	})
+	if _, err := functionAuthenticator.Authenticate(context.Background(), httptest.NewRequest("GET", "/", nil)); err != nil || !called {
+		t.Fatalf("function authenticator result err=%v called=%v", err, called)
+	}
+	if _, err := (AuthenticatedAPI{}).Identity(); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("zero authenticated identity error = %v", err)
+	}
+
+	for _, credential := range []string{"", " ", "bad\ncredential", strings.Repeat("x", maxPrincipalIDRunes+1)} {
+		if _, err := NewStaticAPIAuthenticator(map[string]APIIdentity{credential: identity}); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid credential %q was accepted: %v", credential, err)
+		}
+	}
+	authenticator, err := NewStaticAPIAuthenticator(map[string]APIIdentity{"credential": identity})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest("GET", "/", nil)
+	if _, err := authenticator.Authenticate(context.Background(), nil); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("nil request error = %v", err)
+	}
+	if _, err := authenticator.Authenticate(nil, request); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("nil context error = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := authenticator.Authenticate(canceled, request); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled authentication error = %v", err)
+	}
+	for _, header := range []string{"", "Basic credential", "Bearer ", "Bearer unknown"} {
+		request.Header.Set("Authorization", header)
+		if _, err := authenticator.Authenticate(context.Background(), request); !errors.Is(err, ErrUnauthenticated) {
+			t.Fatalf("invalid authorization %q error = %v", header, err)
+		}
+	}
+
+	principal := mustAPIPrincipal(t, identity.TenantID, identity.AppID)
+	mutated := principal
+	mutated.apiProof = nil
+	if !errors.Is(mutated.Validate(), ErrInvalid) {
+		t.Fatal("principal without proof was accepted")
+	}
+	mutated = principal
+	mutated.tenantID = "t_01J1K9ZQTVE4PAWF1TSB2WMHNQ"
+	if !errors.Is(mutated.Validate(), ErrInvalid) {
+		t.Fatal("principal with mismatched proof was accepted")
+	}
+	mutated = principal
+	mutated.kind = PrincipalKind("unknown")
+	if !errors.Is(mutated.Validate(), ErrInvalid) {
+		t.Fatal("unknown principal kind was accepted")
+	}
+	fixture := newGatewayFixture(t)
+	channelPrincipal, err := NewChannelPrincipal(newTrustedRoutingTarget(t, fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutatedChannel := channelPrincipal
+	mutatedChannel.tenantID = "t_01J1K9ZQTVE4PAWF1TSB2WMHNQ"
+	if !errors.Is(mutatedChannel.Validate(), ErrInvalid) {
+		t.Fatal("channel principal with mismatched scope was accepted")
+	}
+}
+
+func TestInboundMessageAndResolverBoundaryEdges(t *testing.T) {
+	base := InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}
+	validGroup := base
+	validGroup.ConversationKind = channels.ConversationGroup
+	validGroup.ExternalPeerID = ""
+	validGroup.ExternalChatID = "chat"
+	validGroup.ExternalMessageID = "message"
+	validGroup.ExternalThreadID = "thread"
+	if _, err := validGroup.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]InboundMessage{
+		"empty content":        {Content: " ", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"},
+		"long content":         {Content: strings.Repeat("x", maxMessageRunes+1), ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"},
+		"message id":           withMessageField(base, "ExternalMessageID", "bad\nid"),
+		"long user":            withMessageField(base, "ExternalUserID", strings.Repeat("x", maxExternalIDRunes+1)),
+		"missing direct peer":  {Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect},
+		"missing group chat":   {Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationGroup},
+		"unknown conversation": {Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationKind("other")},
+		"bad thread":           withMessageField(base, "ExternalThreadID", "bad\nthread"),
+	}
+	for name, message := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := message.Normalize(); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("Normalize() error = %v", err)
+			}
+		})
+	}
+
+	if _, err := NewPlanResolver(PlanResolverConfig{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing resolver dependencies error = %v", err)
+	}
+	var nilResolver *PlanResolver
+	if nilResolver.Ready() {
+		t.Fatal("nil resolver is ready")
+	}
+	if _, err := nilResolver.Resolve(context.Background(), Principal{}); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("nil resolver error = %v", err)
+	}
+	fixture := newGatewayFixture(t)
+	resolver, err := NewPlanResolver(PlanResolverConfig{
+		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
+		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Resolve(nil, mustAPIPrincipal(t, fixture.tenant.TenantID, fixture.app.AppID)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil resolver context error = %v", err)
+	}
+	if !IsContextCancellation(context.Canceled) || !IsContextCancellation(context.DeadlineExceeded) || IsContextCancellation(errors.New("other")) {
+		t.Fatal("context cancellation classification is incorrect")
+	}
+}
+
+func withMessageField(message InboundMessage, field, value string) InboundMessage {
+	switch field {
+	case "ExternalMessageID":
+		message.ExternalMessageID = value
+	case "ExternalUserID":
+		message.ExternalUserID = value
+	case "ExternalThreadID":
+		message.ExternalThreadID = value
+	}
+	return message
 }
