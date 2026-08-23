@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -156,6 +157,39 @@ func TestHTTPHandlerHealthReadinessAndConfigurationEdges(t *testing.T) {
 	handler.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if ready.Code != http.StatusServiceUnavailable {
 		t.Fatalf("shutdown readiness response = %d", ready.Code)
+	}
+}
+
+func TestHTTPHandlerShutdownDefersOwnedStateClose(t *testing.T) {
+	handler, err := NewHTTPHandler(HTTPConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := newGatewayFixture(t)
+	principal := mustAPIPrincipal(t, fixture.tenant.TenantID, fixture.app.AppID)
+	message := InboundMessage{
+		Content: "in-flight", ExternalUserID: "user", ConversationKind: channels.ConversationDirect,
+		ExternalPeerID: "peer", ExternalMessageID: "message",
+	}
+	claim, _, err := handler.idempotency.Begin(context.Background(), principal, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.BeginShutdown()
+	if _, _, err := handler.idempotency.Begin(context.Background(), principal, message); !errors.Is(err, ErrDuplicateMessage) {
+		t.Fatalf("BeginShutdown closed in-flight idempotency state: %v", err)
+	}
+	if err := claim.Complete([]DispatchEvent{{Type: DispatchEventDone, Done: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := handler.idempotency.Begin(context.Background(), principal, message); !errors.Is(err, ErrClosed) {
+		t.Fatalf("closed idempotency state accepted a new claim: %v", err)
 	}
 }
 

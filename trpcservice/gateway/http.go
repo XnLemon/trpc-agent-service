@@ -131,21 +131,31 @@ func (handler *HTTPHandler) Ready() bool {
 	return handler.ready == nil || handler.ready()
 }
 
-// BeginShutdown makes readiness fail and drops owned process-local admission
-// state. The caller still owns net/http.Server.Shutdown ordering.
+// BeginShutdown makes readiness fail and stops new execution requests. The
+// caller must wait for net/http.Server.Shutdown before calling Close.
 func (handler *HTTPHandler) BeginShutdown() {
 	if handler == nil {
 		return
 	}
-	if handler.draining.Swap(true) {
-		return
+	handler.draining.Store(true)
+}
+
+// Close releases process-local admission state owned by the handler. It is
+// intentionally separate from BeginShutdown so in-flight requests can finish
+// while the HTTP server drains.
+func (handler *HTTPHandler) Close() error {
+	if handler == nil {
+		return nil
 	}
-	if handler.ownLimiter {
-		_ = handler.limiter.Close()
+	handler.BeginShutdown()
+	var closeErr error
+	if handler.ownLimiter && handler.limiter != nil {
+		closeErr = errors.Join(closeErr, handler.limiter.Close())
 	}
-	if handler.ownIdempotency {
-		_ = handler.idempotency.Close()
+	if handler.ownIdempotency && handler.idempotency != nil {
+		closeErr = errors.Join(closeErr, handler.idempotency.Close())
 	}
+	return closeErr
 }
 
 func (handler *HTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
