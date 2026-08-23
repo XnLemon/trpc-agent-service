@@ -233,6 +233,11 @@ func TestHTTPChatStrictInputAuthenticationAndCorrelation(t *testing.T) {
 			if body["error"] == "" {
 				t.Fatalf("missing stable error body: %+v", body)
 			}
+			if test.name == "invalid trace" {
+				if requestID, ok := body["request_id"].(string); !ok || requestID == "" {
+					t.Fatalf("invalid trace response lost request ID: %+v", body)
+				}
+			}
 		})
 	}
 

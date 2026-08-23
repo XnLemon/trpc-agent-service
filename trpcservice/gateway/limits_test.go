@@ -71,6 +71,34 @@ func TestTenantLimiterAdmissionWindowAndRelease(t *testing.T) {
 	}
 }
 
+func TestTenantLimiterWindowRolloverPreservesActiveLeases(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	clock := now
+	limiter, err := NewTenantLimiter(TenantLimiterConfig{MaxConcurrent: 1, MaxRequests: 1, Window: time.Minute, Now: func() time.Time { return clock }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := newGatewayFixture(t)
+	first, err := limiter.Acquire(context.Background(), fixture.tenant.TenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(time.Minute)
+	if _, err := limiter.Acquire(context.Background(), fixture.tenant.TenantID); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("active lease was lost at window rollover: %v", err)
+	}
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := limiter.Acquire(context.Background(), fixture.tenant.TenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTenantLimiterConcurrentAdmissionAndConfigurationEdges(t *testing.T) {
 	if _, err := NewTenantLimiter(TenantLimiterConfig{MaxConcurrent: -1}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("negative concurrent limit error = %v", err)

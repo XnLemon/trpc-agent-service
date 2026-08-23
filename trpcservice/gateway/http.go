@@ -200,7 +200,7 @@ func (handler *HTTPHandler) chat(writer http.ResponseWriter, request *http.Reque
 	}
 	requestID, traceID, err := requestCorrelation(request)
 	if err != nil {
-		handler.writeError(writer, request, http.StatusBadRequest, "invalid request correlation", "", "")
+		handler.writeError(writer, request, http.StatusBadRequest, "invalid request correlation", requestID, traceID)
 		return
 	}
 	if !handler.Ready() {
