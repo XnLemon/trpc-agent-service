@@ -86,6 +86,37 @@ func TestNewUnavailableUsesRealGraphButReturns503(t *testing.T) {
 	}
 }
 
+func TestUnavailableBootstrapBoundariesAndHTTPServer(t *testing.T) {
+	graph, err := NewUnavailable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = graph.Close() }()
+	if _, err := NewHTTPServer(nil, ":8080", 0, 0, 0, 0); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("nil graph server error = %v", err)
+	}
+	if _, err := NewHTTPServer(&Runtime{}, ":8080", 0, 0, 0, 0); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("handlerless graph server error = %v", err)
+	}
+	if _, err := NewHTTPServer(graph, "", 0, 0, 0, 0); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("empty address server error = %v", err)
+	}
+	server, err := NewHTTPServer(graph, ":8080", 0, 0, 0, 0)
+	if err != nil || server.Handler != graph.HandlerValue().Handler() {
+		t.Fatalf("HTTP server = %+v, err=%v", server, err)
+	}
+	if _, err := (unavailableSecretResolver{}).Resolve(context.Background(), modelprofile.SecretScope{}); !errors.Is(err, ErrBootstrapNotReady) {
+		t.Fatalf("unavailable secret resolver error = %v", err)
+	}
+	if _, err := (unavailableModelFactory{}).New(context.Background(), modelprofile.ModelFactoryInput{}, modelprofile.SecretValue{}); !errors.Is(err, ErrBootstrapNotReady) {
+		t.Fatalf("unavailable model factory error = %v", err)
+	}
+	var nilGraph *Runtime
+	if nilGraph.HandlerValue() != nil || nilGraph.Ready() {
+		t.Fatal("nil runtime reported a handler or readiness")
+	}
+}
+
 func TestEnvironmentBootstrapRequiresExplicitConfigurationAndBuildsDependencies(t *testing.T) {
 	t.Setenv(envPostgresDSN, "postgres://postgres:postgres@127.0.0.1:5432/control_plane")
 	t.Setenv(envAPIToken, "api-token")
