@@ -232,3 +232,162 @@ func collectDispatchEvents(stream <-chan DispatchEvent) []DispatchEvent {
 	}
 	return events
 }
+
+func TestDispatcherConfigurationAndEventMappingEdges(t *testing.T) {
+	if _, err := NewDispatcher(DispatchConfig{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing dispatcher dependency error = %v", err)
+	}
+	dispatcher, principal := newTestDispatcher(t, &testRunner{})
+	if _, err := NewDispatcher(DispatchConfig{Resolver: dispatcher.resolver, Registry: dispatcher.registry, DrainTimeout: -time.Second}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("negative drain timeout error = %v", err)
+	}
+	readyDispatcher, err := NewDispatcher(DispatchConfig{Resolver: dispatcher.resolver, Registry: dispatcher.registry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !readyDispatcher.Ready() {
+		t.Fatal("configured dispatcher is not ready")
+	}
+	var nilDispatcher *Dispatcher
+	if nilDispatcher.Ready() {
+		t.Fatal("nil dispatcher is ready")
+	}
+	if _, err := nilDispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal}); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("nil dispatcher error = %v", err)
+	}
+	if _, err := dispatcher.Dispatch(nil, DispatchRequest{Principal: principal}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil dispatch context error = %v", err)
+	}
+
+	for name, event := range map[string]*trpcevent.Event{
+		"nil event":        nil,
+		"partial status":   {Response: &trpcmodel.Response{IsPartial: true}},
+		"message fallback": {Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Message: trpcmodel.Message{Content: "fallback"}}}}},
+		"done with text":   {Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "final"}}}, Done: true}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mapped, done := mapRunnerEvent(event, "request", "trace")
+			if name == "done with text" && !done {
+				t.Fatal("done event was not terminal")
+			}
+			if len(mapped) == 0 || mapped[0].RequestID != "request" {
+				t.Fatalf("mapped event = %+v", mapped)
+			}
+		})
+	}
+	if got := cancellationStatus(contextWithDeadline(t)); got != "deadline_exceeded" {
+		t.Fatalf("deadline cancellation status = %q", got)
+	}
+	if got := cancellationStatus(canceledContext()); got != "canceled" {
+		t.Fatalf("canceled status = %q", got)
+	}
+	if responseText(nil) != "" || responseText(&trpcmodel.Response{Choices: []trpcmodel.Choice{{Message: trpcmodel.Message{Content: "message"}}, {Delta: trpcmodel.Message{Content: "delta"}}}}) != "messagedelta" {
+		t.Fatal("response text mapping was incorrect")
+	}
+	if _, done := mapRunnerEvent(&trpcevent.Event{Response: &trpcmodel.Response{Error: &trpcmodel.ResponseError{Message: "secret"}}}, "request", "trace"); !done {
+		t.Fatal("error event was not terminal")
+	}
+	if _, err := dispatchRunnerIdentity(Principal{}, InboundMessage{}); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("unknown principal identity error = %v", err)
+	}
+	if got := encodeDispatchIdentity("a", "bc"); got != "1:a2:bc" {
+		t.Fatalf("encoded identity = %q", got)
+	}
+	groupMessage := InboundMessage{
+		Content: "group", ExternalUserID: "user", ConversationKind: channels.ConversationGroup, ExternalChatID: "chat",
+	}
+	if _, err := dispatchRunnerIdentity(principal, groupMessage); err != nil {
+		t.Fatalf("API group identity error = %v", err)
+	}
+}
+
+func TestDispatcherRunAndChannelTerminalEdges(t *testing.T) {
+	request := func(principal Principal) DispatchRequest {
+		return DispatchRequest{Principal: principal, Message: InboundMessage{
+			Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer",
+		}}
+	}
+	for name, runFn := range map[string]func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error){
+		"runner error": func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+			return nil, errors.New("provider detail")
+		},
+		"runner canceled": func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+			return nil, context.Canceled
+		},
+		"nil event stream": func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+			return nil, nil
+		},
+		"closed event stream": func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+			events := make(chan *trpcevent.Event)
+			close(events)
+			return events, nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			runner := &testRunner{runFn: runFn}
+			dispatcher, principal := newTestDispatcher(t, runner)
+			stream, err := dispatcher.Dispatch(context.Background(), request(principal))
+			switch name {
+			case "runner error":
+				if !errors.Is(err, ErrExecution) {
+					t.Fatalf("runner error = %v", err)
+				}
+			case "runner canceled":
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("runner cancellation = %v", err)
+				}
+			case "nil event stream":
+				if !errors.Is(err, ErrExecution) {
+					t.Fatalf("nil event stream error = %v", err)
+				}
+			case "closed event stream":
+				if err != nil {
+					t.Fatal(err)
+				}
+				events := collectDispatchEvents(stream)
+				if len(events) != 1 || !events[0].Done {
+					t.Fatalf("closed stream events = %+v", events)
+				}
+			}
+		})
+	}
+
+	dispatcher, principal := newTestDispatcher(t, &testRunner{})
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := dispatcher.Dispatch(canceled, request(principal)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled dispatch error = %v", err)
+	}
+
+	ctx, stop := context.WithCancel(context.Background())
+	stop()
+	if sendDispatchEvent(ctx, make(chan DispatchEvent), DispatchEvent{}) {
+		t.Fatal("sendDispatchEvent succeeded after cancellation")
+	}
+	drainRunnerEvents(nil, time.Millisecond)
+	drainRunnerEvents(make(chan *trpcevent.Event), time.Millisecond)
+
+	var nilLease *RunnerLease
+	if nilLease.Runner() != nil || nilLease.Release() != nil {
+		t.Fatal("nil lease was not safe")
+	}
+	if (&RunnerLease{}).Runner() != nil || (&RunnerLease{}).Release() != nil {
+		t.Fatal("empty lease was not safe")
+	}
+	if (&runnerEntry{}).close() != nil {
+		t.Fatal("empty Runner entry close failed")
+	}
+}
+
+func contextWithDeadline(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	t.Cleanup(cancel)
+	return ctx
+}
+
+func canceledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
