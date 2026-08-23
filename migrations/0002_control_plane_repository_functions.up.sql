@@ -269,7 +269,7 @@ BEGIN
     INSERT INTO public.backend_profile_binding (
         tenant_id, profile_id, capability, provider, endpoint, options, secret_ref
     )
-    SELECT p_tenant_id, p_profile_id, item.capability, item.provider, item.endpoint,
+    SELECT p_tenant_id, p_profile_id, item.capability, item.provider, COALESCE(item.endpoint, ''),
            COALESCE(item.options, '{}'::JSONB), COALESCE(item.secret_ref, '')
     FROM pg_catalog.jsonb_to_recordset(COALESCE(p_bindings, '[]'::JSONB)) AS item(
         capability TEXT, provider TEXT, endpoint TEXT, options JSONB, secret_ref TEXT
@@ -341,7 +341,7 @@ BEGIN
     INSERT INTO public.backend_profile_binding (
         tenant_id, profile_id, capability, provider, endpoint, options, secret_ref
     )
-    SELECT p_tenant_id, p_profile_id, item.capability, item.provider, item.endpoint,
+    SELECT p_tenant_id, p_profile_id, item.capability, item.provider, COALESCE(item.endpoint, ''),
            COALESCE(item.options, '{}'::JSONB), COALESCE(item.secret_ref, '')
     FROM pg_catalog.jsonb_to_recordset(COALESCE(p_bindings, '[]'::JSONB)) AS item(
         capability TEXT, provider TEXT, endpoint TEXT, options JSONB, secret_ref TEXT
