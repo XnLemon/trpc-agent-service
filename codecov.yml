@@ -1,6 +1,11 @@
 # Codecov status checks (shown on PRs).
 # The hard CI gate lives in scripts/coverage.sh --min (see .github/workflows/ci.yml);
 # this file makes the same 85% target visible in Codecov reports and PR comments.
+# The live example entrypoint is exercised only by the opt-in Telegram workflow;
+# its credential-free unit tests cover the pure helpers and boundary setup.
+ignore:
+  - "examples/telegram-e2e/main.go"
+
 coverage:
   status:
     project:
