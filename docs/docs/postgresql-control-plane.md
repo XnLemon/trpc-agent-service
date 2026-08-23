@@ -1,8 +1,9 @@
 # PostgreSQL 控制面持久化与启动装配
 
-> 本页是 Issue #37 的文档先行契约。它复用已经合入的 Tenant、Agent App/Revision、
-> Backend Profile 和 Channel Binding 设计，并补齐 Model Profile 的持久化形状、统一
-> migration 顺序、Repository 事务边界和进程启动装配。文档完成不等于对应 SQL/Go 已经落地。
+> 本页是 Issue #37 的实现契约。它复用已经合入的 Tenant、Agent App/Revision、Backend
+> Profile 和 Channel Binding 设计，并补齐 Model Profile 的持久化形状、统一 migration 顺序、
+> Repository 事务边界和进程启动装配。SQL migration 已落地；Repository/bootstrap 会在后续
+> 代码阶段继续接入。
 
 ## 目标与边界
 
@@ -67,9 +68,9 @@ migrations/
 1. 在干净 PostgreSQL 实例上使用一个事务执行完整文件；失败时整个 schema 和权限变更回滚。
 2. 迁移开始固定 `search_path` 为 `pg_catalog, public`，所有函数体对业务表使用 `public.`
    限定名；不依赖连接池或客户端会话的隐式 search path。
-3. 数据库 owner、migration owner、`tenant_admin_writer` 和 `tenant_app_writer` 是部署前
-   创建的受控角色，不属于普通请求连接池。migration 只授予最小必要权限，不把 owner 权限
-   继承给运行时角色。
+3. 在干净实例中 migration 会创建缺失的 `NOLOGIN` 受控角色；生产部署也可以在执行前预置
+   数据库 owner、migration owner、`tenant_admin_writer` 和 `tenant_app_writer`。这些角色不
+   属于普通请求连接池，migration 不把 owner 权限继承给运行时角色。
 4. 受控 `SECURITY DEFINER` 函数创建后先撤销 `PUBLIC` 的默认 `EXECUTE`，再只授予管理角色。
    Worker 只能消费控制平面下发的固定快照，不能枚举根表或草稿。
 5. SQL 文件不包含 token、API key、DSN、密码、运行时客户端或测试 Secret。`secret_ref` 是

@@ -384,9 +384,9 @@ COMMIT;
 
 ## Channel Binding 与消息数据模型
 
-本节是 Issue #24 的逻辑模型设计，不是已经执行的 PostgreSQL migration。**现有实现**包含
-Tenant、Agent App/Revision、Model Profile、Backend Profile 和无密钥执行快照；下面的
-Channel/Session/Event/Memory/Summary/Audit 表属于**平台新增**。所有生产 Repository 都必须
+本节是 Issue #24 的逻辑模型设计。Issue #37 已将 `channel_binding` 与 Tenant、Agent
+App/Revision、Model Profile、Backend Profile 一起落入控制面 migration；下面的
+Session/Event/Memory/Summary/Audit 表仍属于**平台新增**。所有生产 Repository 都必须
 把 `tenant_id` 作为显式参数和列，字符串 namespace 只能防碰撞，不能替代授权或复合约束。
 
 ### 稳定身份与约束

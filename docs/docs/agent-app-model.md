@@ -16,7 +16,8 @@ Agent App 是租户创建、发布和路由 Agent 的控制面对象。它必须
 `agent_app_revision` 保存草稿或已发布的执行定义。
 
 本阶段覆盖领域模型、发布/回滚、InMemory Repository 和执行快照契约；不实现 Gateway、
-Worker、Admin HTTP API、具体模型客户端、Secret Manager、SQL migration 或跨节点缓存。
+Worker、Admin HTTP API、具体模型客户端、Secret Manager 或跨节点缓存。Issue #37 的
+`migrations/0001_control_plane.up.sql` 复用本页 DDL；SQL Repository 和运行时装配另行实现。
 
 ## 核心决策
 

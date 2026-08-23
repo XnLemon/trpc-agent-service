@@ -24,7 +24,9 @@ Channel Binding 把一个外部 IM 账号绑定到同一租户的 Agent App。�
 - 使用 fake resolver/verifier 的离线集成测试。
 
 明确不在范围内：真实供应商 SDK、企业微信 AES 解密、Telegram webhook、HTTP Gateway、KMS/
-Vault、PostgreSQL migration、消息去重/回复 Outbox、队列和生产审计持久化。Telegram long
+Vault、消息去重/回复 Outbox、队列和生产审计持久化。Issue #37 的控制面 migration 已落地
+本页的 `channel_binding` 表；SQL Repository 与运行时 bootstrap 由该 Issue 的代码阶段实现。
+Telegram long
 polling 运行时契约见 [Telegram 长轮询 Adapter](telegram.md)，不属于本 Binding 领域模型。
 
 ## 控制面模型

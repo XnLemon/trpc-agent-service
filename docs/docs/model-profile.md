@@ -38,7 +38,8 @@ trusted Tenant snapshot
 - 离线 deterministic fake model + InMemory Session 的集成测试，以及取消和 Event channel 收尾测试。
 
 本阶段明确不包含 Channel Binding、HTTP Gateway/Admin API、真实模型请求、生产 KMS/Vault、
-PostgreSQL migration、Redis/SQL/向量库/S3 adapter、OTel exporter、计费和跨节点配置缓存。
+Redis/SQL/向量库/S3 adapter、OTel exporter、计费和跨节点配置缓存。Issue #37 的
+`migrations/0001_control_plane.up.sql` 已落地本页领域契约对应的无密钥表形状。
 Issue #37 复用本页领域契约，并在 [PostgreSQL 控制面与启动装配](postgresql-control-plane.md)
 中补齐 `model_profile` 的持久化形状和 SQL Repository 边界。
 

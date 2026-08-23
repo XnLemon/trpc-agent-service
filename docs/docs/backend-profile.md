@@ -21,7 +21,8 @@ provider 配置，使 Gateway/Worker 可以固定 Session、Memory、Knowledge�
 - PostgreSQL 目标 DDL、同租户默认引用和 tRPC-Agent-Go 装配映射。
 
 本阶段不创建 Redis、SQL、向量库、对象存储或审计后端客户端，不引入 tRPC-Agent-Go 依赖，
-不实现数据库 migration、Secret Manager、数据迁移、Gateway、Worker 或跨节点配置缓存。
+不实现 Secret Manager、数据迁移、Gateway、Worker 或跨节点配置缓存。Issue #37 的
+`migrations/0001_control_plane.up.sql` 复用本页 DDL；SQL Repository 和运行时装配另行实现。
 
 ## 核心模型
 
@@ -249,7 +250,8 @@ Factory 函数或任意 `any` 字段。其 `SecretRef` 仍只是引用；后续 
 
 ## PostgreSQL 目标模型
 
-以下 DDL 描述完整性和事务边界，本 Issue 不将其落成 migration。
+以下 DDL 描述完整性和事务边界，已由 Issue #37 的
+`migrations/0001_control_plane.up.sql` 落地；本页继续作为领域约束的详细说明。
 
 ```sql
 -- Match Go strings.TrimSpace/unicode.IsSpace for every boundary field that
@@ -717,5 +719,5 @@ Backend Profile
               └── Gateway / Worker 最小执行链路
 ```
 
-真实 provider adapter、Secret 解析、数据库 migration 和数据迁移分别由后续 Issue 落地；
-本控制面契约只为它们提供可审计、可冻结且不会泄露凭据的配置输入。
+真实 provider adapter、Secret 解析和数据迁移分别由后续 Issue 落地；本控制面契约只为它们
+提供可审计、可冻结且不会泄露凭据的配置输入。
