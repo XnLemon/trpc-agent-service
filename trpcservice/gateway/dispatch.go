@@ -164,8 +164,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 
 func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, output chan<- DispatchEvent) {
 	defer close(output)
-	defer lease.Release()
-	terminal := false
+	defer func() { _ = lease.Release() }()
 	for {
 		if ctx.Err() != nil {
 			dispatcher.finishCanceled(ctx, requestID, traceID, runnerEvents, output)
@@ -174,9 +173,7 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		select {
 		case event, ok := <-runnerEvents:
 			if !ok {
-				if !terminal {
-					trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "complete", Done: true})
-				}
+				trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "complete", Done: true})
 				return
 			}
 			mapped, done := mapRunnerEvent(event, requestID, traceID)
@@ -187,7 +184,6 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 				}
 			}
 			if done {
-				terminal = true
 				drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
 				return
 			}

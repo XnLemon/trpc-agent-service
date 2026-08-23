@@ -74,7 +74,7 @@ func TestRunnerRegistryMergesConcurrentConstructionAndReusesCompleteKey(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer registry.Close()
+	defer func() { _ = registry.Close() }()
 
 	const workers = 12
 	leases := make(chan *RunnerLease, workers)
@@ -139,7 +139,7 @@ func TestRunnerRegistryInvalidationDefersCloseUntilRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer registry.Close()
+	defer func() { _ = registry.Close() }()
 	key, err := plan.CacheKey()
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +193,7 @@ func TestRunnerRegistryCapacityEvictsIdleButNotBorrowedEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer registry.Close()
+	defer func() { _ = registry.Close() }()
 	leaseOne, err := registry.Acquire(context.Background(), planOne)
 	if err != nil {
 		t.Fatal(err)
@@ -233,7 +233,7 @@ func TestRunnerRegistryDoesNotCacheFactoryFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer registry.Close()
+	defer func() { _ = registry.Close() }()
 	if _, err := registry.Acquire(context.Background(), plan); !errors.Is(err, ErrRunnerUnavailable) {
 		t.Fatalf("first factory error = %v", err)
 	}

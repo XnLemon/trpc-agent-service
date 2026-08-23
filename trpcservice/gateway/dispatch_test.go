@@ -120,7 +120,7 @@ func TestDispatcherUsesVerifiedChannelIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer registry.Close()
+	defer func() { _ = registry.Close() }()
 	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, DrainTimeout: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)

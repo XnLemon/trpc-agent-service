@@ -318,7 +318,10 @@ func (registry *RunnerRegistry) Close() error {
 	timeout := registry.closeTimeout
 	registry.mu.Unlock()
 
-	closeEntries(closeImmediately)
+	var runnerCloseErr error
+	for _, entry := range closeImmediately {
+		runnerCloseErr = joinRunnerCloseError(runnerCloseErr, entry.close())
+	}
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	timedOut := false
@@ -336,7 +339,7 @@ func (registry *RunnerRegistry) Close() error {
 		for _, entry := range waitEntries {
 			select {
 			case <-entry.zero:
-				_ = entry.close()
+				runnerCloseErr = joinRunnerCloseError(runnerCloseErr, entry.close())
 			case <-deadline.C:
 				timedOut = true
 			}
@@ -348,9 +351,9 @@ func (registry *RunnerRegistry) Close() error {
 
 	registry.mu.Lock()
 	if timedOut {
-		registry.closeErr = ErrRegistryCloseTimeout
+		registry.closeErr = errors.Join(ErrRegistryCloseTimeout, runnerCloseErr)
 	} else {
-		registry.closeErr = nil
+		registry.closeErr = runnerCloseErr
 	}
 	close(registry.closeDone)
 	err := registry.closeErr
@@ -420,6 +423,13 @@ func closeEntries(entries []*runnerEntry) {
 			_ = entry.close()
 		}
 	}
+}
+
+func joinRunnerCloseError(current, next error) error {
+	if next == nil {
+		return current
+	}
+	return errors.Join(current, next)
 }
 
 func (entry *runnerEntry) close() error {
