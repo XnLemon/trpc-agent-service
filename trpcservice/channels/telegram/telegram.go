@@ -246,6 +246,10 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 	adapter.client = client
 	me, err := client.GetMe(ctx)
 	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			_ = adapter.closeOwnedIdempotency()
+			return nil, contextErr
+		}
 		adapter.report(ErrorOperationInitialization, ErrInitialization)
 		_ = adapter.closeOwnedIdempotency()
 		return nil, ErrInitialization
@@ -524,7 +528,15 @@ func normalizeUpdate(target channels.RoutingTarget, update *models.Update) (gate
 }
 
 func hasUnsupportedMessage(message *models.Message) bool {
-	return message == nil || message.DirectMessagesTopic != nil || message.SenderChat != nil ||
+	if message == nil {
+		return true
+	}
+	for _, entity := range message.Entities {
+		if entity.Type == models.MessageEntityTypeBotCommand {
+			return true
+		}
+	}
+	return message.DirectMessagesTopic != nil || message.SenderChat != nil ||
 		message.SenderBusinessBot != nil || message.ReceiverUser != nil || message.BusinessConnectionID != "" ||
 		message.RichMessage != nil || message.Animation != nil || message.Audio != nil || message.Document != nil ||
 		message.PaidMedia != nil || len(message.Photo) > 0 || message.Sticker != nil || message.Story != nil ||

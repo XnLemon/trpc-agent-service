@@ -188,6 +188,40 @@ func TestNewRedactsConstructionFailuresAndRejectsPreconditions(t *testing.T) {
 	}
 }
 
+func TestNewPreservesCancellationDuringGetMe(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "getme-cancel", "12345")
+	started := make(chan struct{})
+	client := &fakeBot{getMeFn: func(ctx context.Context) (*models.User, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	factory := &fakeFactory{client: client}
+	recorder := &errorRecorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := New(ctx, Config{
+			BotToken: "runtime-token", Target: target, Dispatcher: &dispatchStub{}, Factory: factory,
+			ErrorHook: recorder.hook,
+		})
+		result <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("getMe did not start")
+	}
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("getMe cancellation was remapped: %v", err)
+	}
+	if events := recorder.snapshot(); len(events) != 0 {
+		t.Fatalf("getMe cancellation emitted an initialization failure hook: %+v", events)
+	}
+}
+
 func TestPollingErrorsUseStableRedactedHook(t *testing.T) {
 	target := newTrustedTarget(t, channels.ChannelTelegram, "polling-hook", "12345")
 	recorder := &errorRecorder{}
@@ -335,6 +369,10 @@ func TestUnsupportedAndMalformedUpdatesNeverDispatch(t *testing.T) {
 	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
 	adapter := newTestAdapter(t, target, dispatcher, client)
 	valid := textUpdate(10, models.ChatTypePrivate, 100, 42, "valid", 0)
+	privateCommand := textUpdate(101, models.ChatTypePrivate, 100, 42, "/start", 0)
+	privateCommand.Message.Entities = []models.MessageEntity{{Type: models.MessageEntityTypeBotCommand, Offset: 0, Length: 6}}
+	groupCommand := textUpdate(102, models.ChatTypeGroup, -100, 42, "/help@bot", 0)
+	groupCommand.Message.Entities = []models.MessageEntity{{Type: models.MessageEntityTypeBotCommand, Offset: 0, Length: 10}}
 	cases := []struct {
 		name   string
 		update *models.Update
@@ -346,6 +384,8 @@ func TestUnsupportedAndMalformedUpdatesNeverDispatch(t *testing.T) {
 		{name: "callback", update: &models.Update{ID: 13, CallbackQuery: &models.CallbackQuery{}}, want: ErrUnsupportedUpdate},
 		{name: "media only", update: &models.Update{ID: 14, Message: &models.Message{Chat: models.Chat{ID: 100, Type: models.ChatTypePrivate}, From: &models.User{ID: 42}, Photo: []models.PhotoSize{{}}}}, want: ErrUnsupportedUpdate},
 		{name: "service with text", update: &models.Update{ID: 141, Message: &models.Message{Text: "system", Chat: models.Chat{ID: 100, Type: models.ChatTypePrivate}, From: &models.User{ID: 42}, NewChatTitle: "renamed"}}, want: ErrUnsupportedUpdate},
+		{name: "private command", update: privateCommand, want: ErrUnsupportedUpdate},
+		{name: "group command", update: groupCommand, want: ErrUnsupportedUpdate},
 		{name: "missing sender", update: &models.Update{ID: 15, Message: &models.Message{Text: "x", Chat: models.Chat{ID: 100, Type: models.ChatTypePrivate}}}, want: ErrInvalidUpdate},
 		{name: "channel", update: textUpdate(16, models.ChatTypeChannel, 100, 42, "x", 0), want: ErrUnsupportedUpdate},
 	}
@@ -648,6 +688,7 @@ type fakeBot struct {
 	mu      sync.Mutex
 	me      *models.User
 	meErr   error
+	getMeFn func(context.Context) (*models.User, error)
 	sendErr error
 	sends   []sentMessage
 	startFn func(context.Context)
@@ -670,6 +711,9 @@ func (client *fakeBot) Start(ctx context.Context) {
 func (client *fakeBot) GetMe(ctx context.Context) (*models.User, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if client.getMeFn != nil {
+		return client.getMeFn(ctx)
 	}
 	return client.me, client.meErr
 }
