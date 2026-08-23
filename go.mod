@@ -4,6 +4,8 @@ go 1.21
 
 require trpc.group/trpc-go/trpc-agent-go v1.11.2
 
+require github.com/go-telegram/bot v1.23.0
+
 require (
 	github.com/bmatcuk/doublestar/v4 v4.9.1 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect

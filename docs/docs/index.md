@@ -20,6 +20,8 @@
 - [Gateway、Execution Plan 与 HTTP/SSE](gateway.md)：对齐 PR #25 架构验收与 Issue #26
   可信主体，定义 Issue #28 的 Resolver、Runner Registry、Dispatch、普通/SSE API、
   限流、幂等和服务生命周期契约。
+- [Telegram 长轮询 Adapter](telegram.md)：Issue #31 的文档先行契约，固定单 Binding、Bot
+  身份校验、普通文本映射、Dispatch 聚合回复和生命周期边界。
 
 ## 快速开始
 
@@ -42,6 +44,7 @@ cd trpc-agent-service
 - [架构设计](architecture.md) — 组件拓扑、可信路由、消息链路、数据同步和多后端迁移
 - [数据模型](data-model.md) — 核心表结构、Session/Event/Memory/Summary/Audit 和租户约束
 - [Channel Binding](channel-binding.md) — 租户级通道绑定、候选发现与可信入站路由
+- [Telegram 长轮询 Adapter](telegram.md) — 单 Binding Telegram long polling、文本映射与安全边界
 - [Gateway、Execution Plan 与 HTTP/SSE](gateway.md) — 可信主体、固定执行计划、Runner Registry、
   Dispatch、健康检查、优雅停机和普通/流式 API
 - [运维方案](ops.md) — 发布灰度、监控审计、故障恢复、容量模型和生产风险清单

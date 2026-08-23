@@ -41,7 +41,7 @@ Model Profile 和 Backend Profile，构造一个带版本、摘要和租户边�
 | Admin API | 租户、App、Profile、Binding 的管理、发布、回滚、审计入口 | Admin API → 控制面 Repository | 控制面模型已实现；HTTP API 为平台新增 |
 | Config/Registry | 版本校验、同租户引用、Factory/Storage 注册和缓存失效 | 控制面 → Gateway/Worker 快照 | Execution Plan/快照边界已有；Issue #28 交付进程内 Runner Registry，分布式失效仍为后续工作 |
 | Secret Resolver | 公开入站用不含 `tenant_id` 的 `CandidateBindingContext` 返回一次性验签 handle；验签后按固定 Tenant/Profile 作用域解析执行 Secret | Adapter/Gateway → Resolver；Resolver 不反向选租户 | Resolver 接口已有；candidate-scoped API、KMS/Secret Manager 为平台新增 |
-| Channel Adapter | 解析供应商回调、校验协议、验签/解密、转换统一消息和出站回复 | IM ↔ Adapter ↔ Gateway | 包占位；真实 WeCom/Telegram Adapter 为平台新增 |
+| Channel Adapter | 解析供应商回调、校验协议、验签/解密、转换统一消息和出站回复 | IM ↔ Adapter ↔ Gateway | Issue #31 已交付 Telegram long polling 普通文本；WeCom、Telegram webhook 和其他生产 Adapter 仍为平台新增 |
 | Agent Gateway | 限流、候选绑定路由、可信租户建立、幂等记录、快照装配和队列投递 | Adapter → Gateway → Worker/Queue | Issue #28 文档契约；实现阶段交付 HTTP/API 与 Channel principal 入口，真实队列仍为后续工作 |
 | Agent Worker | 消费固定执行计划，调用 Runner、Model、Tool 和 Storage，生成回复事件 | Gateway/Queue → Worker → 上游能力 | 最小 Runner spine 已有；Issue #28 交付进程内 Dispatch/HTTP，独立 Worker 为后续工作 |
 | Runner/Agent/Model | Agent 编排、模型调用、Tool/MCP、Event 和 context 取消 | Worker → tRPC-Agent-Go | 直接复用；当前已有最小 LLMAgent/Runner 装配 |
@@ -586,6 +586,7 @@ Production architecture design (本页)
                     └── persistent repositories and production adapters
 ```
 
-PR #25 的文档交付已完成，Issue #26 的 Channel Binding 领域与可信路由已实现；在 Issue #28
-代码验收完成前，README 不勾选 Gateway 的持续服务、Registry 或 HTTP/SSE 能力，避免文档
-进度掩盖工程边界。
+PR #25 的文档交付已完成，Issue #26 的 Channel Binding 领域与可信路由已实现，Issue #28
+交付了 Gateway 的进程内执行链，Issue #31 交付了 Telegram long polling 普通文本 Adapter；
+WeCom/Telegram webhook、rich update、持久化和分布式能力仍按后续 Issue 交付，避免文档进度
+掩盖工程边界。

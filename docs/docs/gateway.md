@@ -23,7 +23,7 @@ PR #25 的架构验收继续约束组件职责：Channel Adapter 负责协议适
 #26 的 `VerifiedBinding` / `RoutingTarget` 是 Channel principal 的唯一可信来源；本
 Issue 不重新解释请求 body/header，也不从其中拼出租户。
 
-本 Issue 明确不实现真实 WeCom/Telegram webhook、OAuth/OIDC、KMS/Vault、Redis/SQL
+本 Issue 明确不实现真实 WeCom/Telegram webhook（Telegram long polling 由 Issue #31 单独交付）、OAuth/OIDC、KMS/Vault、Redis/SQL
 持久化、生产队列、Admin API、Graph/Chain/Parallel/Cycle 全量运行时或多节点一致性。
 InMemory 限流、幂等、Registry 和 Session 只证明单进程契约，不能宣称跨节点生产语义。
 
