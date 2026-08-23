@@ -217,15 +217,17 @@ disconnect 验收仍必须保持未勾选，不能用 fake 就绪状态替代。
 - [x] `POST /v1/chat` 只接受严格 JSON text 请求；未知字段、空/过大 body、超长文本、
   缺失 API Authenticator 结果和缺失 conversation identity 返回脱敏错误。
 - [x] `POST /v1/chat/stream` 输出稳定的 `message`、`status`、`error`、`done` SSE
-  事件；写失败、客户端断开或 Dispatch 取消后不再写第二个 HTTP status。
+  事件；写失败、handler Context cancel 或 Dispatch 取消后不再写第二个 HTTP status。
 - [ ] `GET /healthz` 只表示进程存活；`GET /readyz` 反映 Resolver、Registry、Runner
   Factory 和 shutdown 状态，摘流后失败且不会继续接受新执行。
 - [x] API principal 只能来自 `APIAuthenticator.Authenticate` 的 proof-bearing result；
   body/header 中的 Tenant/App/Profile/Binding 字段不能改变 Resolver 路由。
 - [x] 服务端生成唯一 `request_id`，只接受受限 tracing header 作为 `trace_id`；两者都
   贯穿 Dispatcher、响应和脱敏错误，业务字段不能伪造关联 ID。
-- [ ] Handler 在正常完成、JSON error、SSE partial error、超时、客户端断开和 shutdown
-  时都释放 Dispatch/Registry 资源，不遗留 event consumer 或 goroutine。
+- [x] Handler 在正常完成、JSON error、SSE partial error、超时、handler cancel 和
+  shutdown 时释放已接入的 Dispatch/Registry 资源，不遗留已覆盖路径的 event consumer
+  或 goroutine。
+- [ ] 真实 HTTP socket client disconnect 的 transport-level 资源释放与 goroutine 验收。
 
 当前 `[ ]` 项是有意保留的边界：HTTPHandler 已覆盖 handler-level Context cancel、摘流
 和自有状态关闭，但真实 Resolver/Registry/Runner Factory 的命令行装配与真实 socket
