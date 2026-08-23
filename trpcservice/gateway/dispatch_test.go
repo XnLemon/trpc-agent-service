@@ -255,7 +255,8 @@ func TestDispatcherConfigurationAndEventMappingEdges(t *testing.T) {
 	if _, err := nilDispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal}); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("nil dispatcher error = %v", err)
 	}
-	if _, err := dispatcher.Dispatch(nil, DispatchRequest{Principal: principal}); !errors.Is(err, ErrInvalid) {
+	var nilContext context.Context
+	if _, err := dispatcher.Dispatch(nilContext, DispatchRequest{Principal: principal}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("nil dispatch context error = %v", err)
 	}
 

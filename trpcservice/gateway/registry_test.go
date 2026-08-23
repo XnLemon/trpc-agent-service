@@ -305,7 +305,8 @@ func TestRunnerRegistryConfigurationAndBoundaryErrors(t *testing.T) {
 	if !registry.Ready() {
 		t.Fatal("new registry is not ready")
 	}
-	if _, err := registry.Acquire(nil, plan); !errors.Is(err, ErrInvalid) {
+	var nilContext context.Context
+	if _, err := registry.Acquire(nilContext, plan); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("nil context error = %v", err)
 	}
 	canceled, cancel := context.WithCancel(context.Background())
