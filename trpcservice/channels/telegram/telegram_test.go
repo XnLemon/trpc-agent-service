@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -83,6 +84,104 @@ func TestNewRejectsNonTelegramTargetAndInvalidRuntimeOptions(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalid) {
 				t.Fatalf("invalid option was accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestBotFactoryContractsAndSDKOptions(t *testing.T) {
+	var nilFactory BotFactoryFunc
+	if _, err := nilFactory.New("token", BotFactoryConfig{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil BotFactoryFunc returned unexpected error: %v", err)
+	}
+	called := false
+	expected := &fakeBot{}
+	factory := BotFactoryFunc(func(token string, config BotFactoryConfig) (BotClient, error) {
+		called = token == "runtime-token" && config.Workers == 2
+		return expected, nil
+	})
+	client, err := factory.New("runtime-token", BotFactoryConfig{Workers: 2})
+	if err != nil || client != expected || !called {
+		t.Fatalf("BotFactoryFunc did not delegate: client=%v err=%v called=%v", client, err, called)
+	}
+
+	handler := func(context.Context, *bot.Bot, *models.Update) {}
+	transport := &http.Client{}
+	if configuredHTTPClient(transport, time.Second) != transport || configuredHTTPClient(nil, time.Second) == nil {
+		t.Fatal("configured HTTP client did not preserve or create a client")
+	}
+	sdkClient, err := (sdkBotFactory{}).New("runtime-token", BotFactoryConfig{
+		Handler: handler, APIBaseURL: "https://api.example.test", HTTPClient: transport,
+		PollTimeout: minimumPollTimeout, Workers: 1, OnPollingError: func() {},
+	})
+	if err != nil {
+		t.Fatalf("SDK factory rejected valid options: %v", err)
+	}
+	if _, ok := sdkClient.(*bot.Bot); !ok {
+		t.Fatalf("SDK factory returned unexpected client type %T", sdkClient)
+	}
+	for name, config := range map[string]BotFactoryConfig{
+		"missing handler": {PollTimeout: minimumPollTimeout, Workers: 1},
+		"invalid worker":  {Handler: handler, PollTimeout: minimumPollTimeout, Workers: 0},
+		"short timeout":   {Handler: handler, PollTimeout: minimumPollTimeout - time.Nanosecond, Workers: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := (sdkBotFactory{}).New("runtime-token", config); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("invalid SDK factory options were accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestNewRedactsConstructionFailuresAndRejectsPreconditions(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "construction-failures", "12345")
+	dispatcher := &dispatchStub{}
+	if _, err := New(nil, Config{BotToken: "token", Target: target, Dispatcher: dispatcher}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil construction context returned unexpected error: %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := New(canceled, Config{BotToken: "token", Target: target, Dispatcher: dispatcher}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled construction context returned unexpected error: %v", err)
+	}
+	for name, config := range map[string]Config{
+		"invalid token":        {BotToken: " token", Target: target, Dispatcher: dispatcher},
+		"missing dispatcher":   {BotToken: "token", Target: target},
+		"untrusted target":     {BotToken: "token", Dispatcher: dispatcher},
+		"noncanonical account": {BotToken: "token", Target: newTrustedTarget(t, channels.ChannelTelegram, "noncanonical", "012345"), Dispatcher: dispatcher},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("invalid construction input was accepted: %v", err)
+			}
+		})
+	}
+	for name, factory := range map[string]BotFactory{
+		"factory error": BotFactoryFunc(func(string, BotFactoryConfig) (BotClient, error) {
+			return nil, errors.New("provider token=secret")
+		}),
+		"nil client": BotFactoryFunc(func(string, BotFactoryConfig) (BotClient, error) {
+			return nil, nil
+		}),
+		"getMe error":          &fakeFactory{client: &fakeBot{meErr: errors.New("provider token=secret")}},
+		"missing bot identity": &fakeFactory{client: &fakeBot{}},
+		"not a bot":            &fakeFactory{client: &fakeBot{me: &models.User{ID: 12345}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			recorder := &errorRecorder{}
+			_, err := New(context.Background(), Config{
+				BotToken: "runtime-token", Target: target, Dispatcher: dispatcher, Factory: factory,
+				ErrorHook: recorder.hook,
+			})
+			want := ErrInitialization
+			if name == "missing bot identity" || name == "not a bot" {
+				want = ErrBotIdentityMismatch
+			}
+			if !errors.Is(err, want) || strings.Contains(err.Error(), "secret") {
+				t.Fatalf("construction failure was not stable/redacted: err=%v want=%v", err, want)
+			}
+			if len(recorder.snapshot()) != 1 {
+				t.Fatalf("construction failure did not report exactly one hook event: %+v", recorder.snapshot())
 			}
 		})
 	}
@@ -322,6 +421,141 @@ func TestRunCancellationAndCloseStopPolling(t *testing.T) {
 	}
 	if err := adapter.HandleUpdate(context.Background(), textUpdate(18, models.ChatTypePrivate, 100, 42, "closed", 0)); !errors.Is(err, ErrClosed) {
 		t.Fatalf("closed adapter accepted an update: %v", err)
+	}
+}
+
+func TestRunAndHandleUpdatePreconditions(t *testing.T) {
+	var nilAdapter *Adapter
+	if err := nilAdapter.Run(context.Background()); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("nil adapter Run returned unexpected error: %v", err)
+	}
+	if err := nilAdapter.HandleUpdate(context.Background(), nil); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("nil adapter HandleUpdate returned unexpected error: %v", err)
+	}
+	if err := nilAdapter.Close(); err != nil {
+		t.Fatalf("nil adapter Close returned unexpected error: %v", err)
+	}
+
+	bare := &Adapter{}
+	if err := bare.Run(nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil Run context returned unexpected error: %v", err)
+	}
+	if err := bare.Run(context.Background()); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("bare adapter Run returned unexpected error: %v", err)
+	}
+	if err := bare.HandleUpdate(context.Background(), nil); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("bare adapter HandleUpdate returned unexpected error: %v", err)
+	}
+
+	target := newTrustedTarget(t, channels.ChannelTelegram, "preconditions", "12345")
+	adapter := newTestAdapter(t, target, &dispatchStub{events: []gateway.DispatchEvent{{Type: gateway.DispatchEventDone, Done: true}}}, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
+	if err := adapter.HandleUpdate(nil, textUpdate(19, models.ChatTypePrivate, 100, 42, "text", 0)); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil HandleUpdate context returned unexpected error: %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := adapter.HandleUpdate(canceled, textUpdate(20, models.ChatTypePrivate, 100, 42, "text", 0)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled HandleUpdate context returned unexpected error: %v", err)
+	}
+	if err := adapter.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunRejectsConcurrentStart(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "concurrent-run", "12345")
+	started := make(chan struct{})
+	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}, startFn: func(ctx context.Context) {
+		close(started)
+		<-ctx.Done()
+	}}
+	adapter := newTestAdapter(t, target, &dispatchStub{}, client)
+	runDone := make(chan error, 1)
+	go func() { runDone <- adapter.Run(context.Background()) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not start")
+	}
+	if err := adapter.Run(context.Background()); !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("concurrent Run returned unexpected error: %v", err)
+	}
+	if err := adapter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-runDone; err != nil {
+		t.Fatalf("first Run returned unexpected error: %v", err)
+	}
+}
+
+func TestDispatchTerminalAndReplyHelpers(t *testing.T) {
+	message := gateway.InboundMessage{Content: "text", ContentType: gateway.ContentTypeText, ExternalMessageID: "message-1", ExternalUserID: "42", ConversationKind: channels.ConversationDirect, ExternalPeerID: "100"}
+	for name, stub := range map[string]*dispatchStub{
+		"nil stream":     {stream: func(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) { return nil, nil }},
+		"incomplete":     {events: []gateway.DispatchEvent{{Type: gateway.DispatchEventMessage, Text: "partial"}}},
+		"event error":    {events: []gateway.DispatchEvent{{Type: gateway.DispatchEventError, Error: "redacted"}, {Type: gateway.DispatchEventDone, Done: true}}},
+		"provider error": {err: errors.New("provider token=secret")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			adapter := &Adapter{dispatcher: stub}
+			if _, err := adapter.dispatch(context.Background(), message); !errors.Is(err, ErrDispatch) {
+				t.Fatalf("dispatch returned unexpected error: %v", err)
+			}
+		})
+	}
+	contextError := &Adapter{dispatcher: &dispatchStub{err: context.Canceled}}
+	if _, err := contextError.dispatch(context.Background(), message); !errors.Is(err, context.Canceled) {
+		t.Fatalf("context dispatch error was not preserved: %v", err)
+	}
+	waiting := make(chan gateway.DispatchEvent)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	cancelAdapter := &Adapter{dispatcher: &dispatchStub{stream: func(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+		return waiting, nil
+	}}}
+	if _, err := cancelAdapter.dispatch(canceled, message); !errors.Is(err, context.Canceled) {
+		t.Fatalf("dispatch cancellation was not preserved: %v", err)
+	}
+
+	target := newTrustedTarget(t, channels.ChannelTelegram, "reply-helpers", "12345")
+	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
+	adapter := newTestAdapter(t, target, &dispatchStub{}, client)
+	tgMessage := &models.Message{Chat: models.Chat{ID: 100, Type: models.ChatTypePrivate}}
+	if err := adapter.sendEvents(context.Background(), tgMessage, []gateway.DispatchEvent{{Type: gateway.DispatchEventError}}); err != nil {
+		t.Fatalf("error event did not send fixed reply: %v", err)
+	}
+	if err := adapter.sendEvents(context.Background(), tgMessage, []gateway.DispatchEvent{{Type: gateway.DispatchEventStatus, Status: "empty"}}); err != nil {
+		t.Fatalf("empty event stream produced unexpected reply error: %v", err)
+	}
+	if err := adapter.sendText(context.Background(), nil, "text"); !errors.Is(err, ErrInvalidUpdate) {
+		t.Fatalf("nil outbound message returned unexpected error: %v", err)
+	}
+	if err := (*Adapter)(nil).sendText(context.Background(), tgMessage, "text"); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("nil outbound adapter returned unexpected error: %v", err)
+	}
+	canceledSend, cancelSend := context.WithCancel(context.Background())
+	cancelSend()
+	if err := adapter.sendText(canceledSend, tgMessage, "text"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled outbound context returned unexpected error: %v", err)
+	}
+	if got := splitText("", maximumReplyRunes); got != nil {
+		t.Fatalf("empty reply produced chunks: %#v", got)
+	}
+}
+
+func TestSDKHandlerUsesSingleUpdatePath(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "sdk-handler", "12345")
+	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
+	dispatcher := &dispatchStub{events: []gateway.DispatchEvent{{Type: gateway.DispatchEventMessage, Text: "reply"}, {Type: gateway.DispatchEventDone, Done: true}}}
+	factory := &fakeFactory{client: client}
+	adapter, err := New(context.Background(), Config{BotToken: "runtime-token", Target: target, Dispatcher: dispatcher, Factory: factory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = adapter.Close() }()
+	factory.config.Handler(context.Background(), nil, textUpdate(21, models.ChatTypePrivate, 100, 42, "input", 0))
+	if len(dispatcher.requests()) != 1 || len(client.sent()) != 1 || client.sent()[0].Text != "reply" {
+		t.Fatalf("SDK handler did not route one update: dispatch=%d sends=%v", len(dispatcher.requests()), client.sent())
 	}
 }
 
