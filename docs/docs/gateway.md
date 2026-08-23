@@ -190,3 +190,65 @@ fake Runner/Model 覆盖：
 代码阶段完成后，README 只能勾选实际实现并有测试支撑的持续服务、健康检查、Registry、
 Gateway、普通/流式 API、限流和 InMemory 幂等能力；真实 IM、持久化幂等、生产 Secret
 Manager 与多节点语义继续保持未勾选。
+
+## 11. 下一代码阶段 ledger：HTTP Gateway、服务生命周期与进程内保护
+
+本阶段在已完成的 Resolver、Registry 和 Dispatch 之上，补齐 Issue #28 的第一层网络
+适配与单进程服务生命周期。所有依赖继续通过构造参数注入；`cmd/trpc-service` 不得
+为了让 readiness 变绿而伪造 Tenant、Runner、Secret 或 Model 依赖。本阶段不实现真实
+WeCom/Telegram Adapter、生产 Secret Manager、持久化幂等或跨节点限流。
+
+### 11.1 文件边界与对应测试
+
+每个代码边界必须有同名语义的对应测试文件，测试不得再集中到无意义的
+`stage3_edges_test.go`：
+
+| 代码边界 | 实现文件 | 对应测试文件 |
+| --- | --- | --- |
+| JSON/SSE Handler、严格请求 schema、health/readiness、response 脱敏 | `trpcservice/gateway/http.go` | `trpcservice/gateway/http_test.go` |
+| Tenant 并发/窗口限流和稳定拒绝错误 | `trpcservice/gateway/limits.go` | `trpcservice/gateway/limits_test.go` |
+| principal + external message ID 的进程内幂等接口 | `trpcservice/gateway/idempotency.go` | `trpcservice/gateway/idempotency_test.go` |
+| 持续 HTTP Server、signal shutdown、readiness 摘流与有界退出 | `cmd/trpc-service/main.go` | `cmd/trpc-service/main_test.go` |
+
+### 11.2 HTTP 与关联 ID 验收项
+
+- [ ] `POST /v1/chat` 只接受严格 JSON text 请求；未知字段、空/过大 body、超长文本、
+  缺失 API Authenticator 结果和缺失 conversation identity 返回脱敏错误。
+- [ ] `POST /v1/chat/stream` 输出稳定的 `message`、`status`、`error`、`done` SSE
+  事件；写失败、客户端断开或 Dispatch 取消后不再写第二个 HTTP status。
+- [ ] `GET /healthz` 只表示进程存活；`GET /readyz` 反映 Resolver、Registry、Runner
+  Factory 和 shutdown 状态，摘流后失败且不会继续接受新执行。
+- [ ] API principal 只能来自 `APIAuthenticator.Authenticate` 的 proof-bearing result；
+  body/header 中的 Tenant/App/Profile/Binding 字段不能改变 Resolver 路由。
+- [ ] 服务端生成唯一 `request_id`，只接受受限 tracing header 作为 `trace_id`；两者都
+  贯穿 Dispatcher、响应和脱敏错误，业务字段不能伪造关联 ID。
+- [ ] Handler 在正常完成、JSON error、SSE partial error、超时、客户端断开和 shutdown
+  时都释放 Dispatch/Registry 资源，不遗留 event consumer 或 goroutine。
+
+### 11.3 进程内保护验收项
+
+- [ ] Tenant limiter 使用明确的并发/窗口配额；零值、并发竞争、窗口边界、取消释放和
+  稳定 `ErrRateLimited` 都有 `limits_test.go` 覆盖，不把 limiter 状态写入全局单例。
+- [ ] Idempotency 接口以可信 principal scope + external message ID 为 key；相同 key
+  的并发请求最多启动一次 Runner，重复请求返回稳定 duplicate/已有结果，并区分不同
+  Tenant、principal、conversation 和 message ID。
+- [ ] 幂等 entry 的 pending/completed/failed 生命周期、取消和容量/TTL 行为有明确测试；
+  文档同时声明该实现只保证单进程，不保证重启、跨节点或持久化恢复。
+- [ ] `cmd/trpc-service` 使用安全默认监听、请求/关闭超时和 signal handler；shutdown
+  顺序固定为 readiness 摘流 → 停止新请求 → 有界等待 → 取消剩余 Context → Dispatch
+  排空 → Registry Close，并对重复 signal/重复 shutdown 保持安全。
+
+### 11.4 离线验收与勾选规则
+
+- [ ] `http_test.go` 覆盖 API Authenticator → Resolver → Registry → Dispatcher → JSON
+  final response 的离线链路，并覆盖 Channel principal 的协议无关 Dispatch/SSE 事件。
+- [ ] `http_test.go` 覆盖未知 JSON、空 body、body limit、内容类型、trace/request ID、
+  认证失败、跨租户字段伪造、SSE terminal 和脱敏错误。
+- [ ] `limits_test.go` 与 `idempotency_test.go` 覆盖双租户隔离、并发、取消、重复 key、
+  TTL/容量边界和 shutdown 清理。
+- [ ] `main_test.go` 覆盖 server 启停、health/readiness、摘流、signal cancel、有界
+  shutdown 和无依赖时 readiness 失败；不得通过启动真实外部服务完成测试。
+- [ ] 只有对应实现文件、对应测试文件、全仓测试/race、format/lint/build、MkDocs
+  strict 和 `git diff --check` 全部通过后，才能把本节条目从 `[ ]` 改成 `[x]`。
+- [ ] 在本阶段完成前，README 不勾选持续服务、health/readiness、普通/流式 API、限流或
+  InMemory 幂等；PR description 必须列出实际测试文件和远端 CI exact head。
