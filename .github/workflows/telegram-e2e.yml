@@ -46,7 +46,7 @@ jobs:
           test -n "$TELEGRAM_SENDER_BOT_TOKEN" || { echo "::error::telegram-e2e Environment is missing TELEGRAM_SENDER_BOT_TOKEN"; exit 1; }
 
       - name: Run live Telegram E2E
-        run: go run ./example/telegram-e2e
+        run: go run ./examples/telegram-e2e
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_SENDER_BOT_TOKEN: ${{ secrets.TELEGRAM_SENDER_BOT_TOKEN }}

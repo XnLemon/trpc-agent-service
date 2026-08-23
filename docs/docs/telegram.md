@@ -151,7 +151,7 @@ README 和 MkDocs 状态应明确区分已交付与后续能力：
 
 ## 7. 真实 Telegram E2E
 
-Issue #33 提供根目录 `example/telegram-e2e/` 示例和手动触发的 CI 工作流，
+Issue #33 提供根目录 `examples/telegram-e2e/` 示例和手动触发的 CI 工作流，
 用于验证真实的 `getMe -> getUpdates -> sendMessage` 边界。示例内部使用确定性
 `DispatchService`，因此不会把模型供应商凭据和 Telegram 传输冒烟测试混在一起。
 
@@ -163,5 +163,5 @@ trace 或错误。CI 使用受保护的 `telegram-e2e` Environment，至少配�
 
 示例和 CI 都只验证普通文本；命令、媒体、rich update、Webhook、持久化 outbox 和
 生产模型供应商仍不属于该 E2E 范围。详见
-[Telegram live E2E example](https://github.com/XnLemon/trpc-agent-service/tree/main/example/telegram-e2e)
+[Telegram live E2E example](https://github.com/XnLemon/trpc-agent-service/tree/main/examples/telegram-e2e)
 和 Issue #33。

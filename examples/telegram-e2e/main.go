@@ -269,7 +269,7 @@ func newTrustedTarget(providerAccountID string) (channels.RoutingTarget, error) 
 	binding, _, err := repository.Create(context.Background(), channels.CreateInput{
 		TenantID: root.TenantID, BindingKey: "telegram-e2e", Channel: channels.ChannelTelegram,
 		ProviderAccountID: providerAccountID, PublicRouteKeyDigest: routeDigest, AppID: app.AppID,
-		SecretRef: "example/telegram-e2e", Status: channels.StatusActive,
+		SecretRef: "examples/telegram-e2e", Status: channels.StatusActive,
 		Protocol: channels.ProtocolConfiguration{Telegram: &channels.TelegramProtocolConfiguration{}},
 		Metadata: exampleMetadata(),
 	})

@@ -22,7 +22,7 @@ PowerShell:
 
 ```powershell
 $env:TELEGRAM_BOT_TOKEN = '<receiver bot token>'
-go run ./example/telegram-e2e
+go run ./examples/telegram-e2e
 ```
 
 The command prints a unique ordinary-text marker. Open the receiver Bot in
