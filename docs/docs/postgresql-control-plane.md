@@ -187,7 +187,7 @@ provider 细节。每个方法都必须把 `context.Context` 传给 `QueryContex
 当前 `cmd/trpc-service` 的生产入口由 `bootstrap.NewFromEnvironment` 装配真实图，而不是
 启动一个永久不可用的空图。它要求 `TRPC_POSTGRES_DSN`、`TRPC_API_TOKEN`、
 `TRPC_TENANT_ID`、`TRPC_APP_ID` 和 `TRPC_MODEL_API_KEY`；可选的
-`TRPC_MODEL_PROVIDER`、`TRPC_MODEL_NAMES`、`TRPC_MODEL_ENDPOINT_HOSTS`、
+`TRPC_MODEL_PROVIDER`（当前仅支持 `openai`）、`TRPC_MODEL_NAMES`、`TRPC_MODEL_ENDPOINT_HOSTS`、
 `TRPC_MODEL_SECRET_REF` 用于建立受信 Model Catalog 和 SecretRef 映射。缺少必需配置时
 进程在绑定 HTTP 端口前失败；`NewUnavailable` 只保留给无外部依赖的测试装配。当前 Session
 capability 仍使用进程内实现，持久化 Session 属于后续 Issue。

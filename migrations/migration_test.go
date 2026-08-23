@@ -192,6 +192,31 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 		SET status = 'active', current_revision = 1
 		WHERE tenant_id = 't_01ARZ3NDEKTSV4RRFFQ69G5FAV'
 		  AND app_id = 'app_01ARZ3NDEKTSV4RRFFQ69G5FAV';
+		INSERT INTO public.agent_app_revision (
+			tenant_id, app_id, revision, state, agent_kind, instruction, model_profile_id,
+			generation_config, runtime_policy, content_digest, published_at
+		) VALUES (
+			't_01ARZ3NDEKTSV4RRFFQ69G5FAV', 'app_01ARZ3NDEKTSV4RRFFQ69G5FAV', 2,
+			'published', 'llm', 'run again', 'mp_01ARZ3NDEKTSV4RRFFQ69G5FAV',
+			'{}'::JSONB, '{}'::JSONB, repeat('1', 64), clock_timestamp()
+		);
+		UPDATE public.agent_app
+		SET current_revision = 2
+		WHERE tenant_id = 't_01ARZ3NDEKTSV4RRFFQ69G5FAV'
+		  AND app_id = 'app_01ARZ3NDEKTSV4RRFFQ69G5FAV';
+	`)
+	resetRole(t, ctx, conn)
+
+	// The SECURITY DEFINER rollback writer must bind the stored pointer and
+	// both event pointers to the requested published target.
+	setRole(t, ctx, conn, "tenant_admin_writer")
+	expectExecError(t, ctx, conn, `
+		SELECT public.control_plane_rollback_agent_app(
+			't_01ARZ3NDEKTSV4RRFFQ69G5FAV',
+			'app_01ARZ3NDEKTSV4RRFFQ69G5FAV',
+			1, 1, 2, 2, clock_timestamp(), repeat('0', 64), 2, 2,
+			'active', 'active', 'admin', 'smoke', 'mismatch', 'rollback-smoke'
+		)
 	`)
 	resetRole(t, ctx, conn)
 

@@ -206,6 +206,11 @@ func TestEnvironmentDependencyErrorBoundaries(t *testing.T) {
 	}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("invalid model catalog error = %v", err)
 	}
+	if _, _, err := environmentCatalogs(environmentConfig{
+		modelProvider: "anthropic", modelNames: []string{"chat"}, endpointHosts: []string{"example.test"},
+	}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("unsupported model provider error = %v", err)
+	}
 	values, err := environmentList("TEST_LIST", "A, B", false)
 	if err != nil || len(values) != 2 || values[0] != "A" || values[1] != "B" {
 		t.Fatalf("case-preserving environment list = %#v, err=%v", values, err)
@@ -252,6 +257,9 @@ func TestEnvironmentDependencyErrorBoundaries(t *testing.T) {
 	}
 	if _, err := factory.New(context.Background(), modelprofile.ModelFactoryInput{Model: "chat", Endpoint: "https://api.openai.com/v1"}, secret); err != nil {
 		t.Fatalf("endpoint model factory error = %v", err)
+	}
+	if _, err := factory.New(context.Background(), modelprofile.ModelFactoryInput{Provider: "anthropic", Model: "chat"}, secret); err == nil {
+		t.Fatal("unsupported model factory provider unexpectedly succeeded")
 	}
 }
 

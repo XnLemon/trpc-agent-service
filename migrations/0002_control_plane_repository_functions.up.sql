@@ -626,11 +626,12 @@ SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
     v_status TEXT;
+    v_current_revision BIGINT;
     v_version BIGINT;
     v_target_state TEXT;
     v_event_id BIGINT;
 BEGIN
-    SELECT status, version INTO v_status, v_version
+    SELECT status, current_revision, version INTO v_status, v_current_revision, v_version
     FROM public.agent_app
     WHERE tenant_id = p_tenant_id AND app_id = p_app_id FOR UPDATE;
     IF NOT FOUND THEN RAISE EXCEPTION 'agent app does not exist'; END IF;
@@ -642,11 +643,16 @@ BEGIN
     FOR SHARE;
     IF NOT FOUND THEN RAISE EXCEPTION 'agent app revision does not exist'; END IF;
     IF v_target_state <> 'published' THEN RAISE EXCEPTION 'rollback target must be published'; END IF;
-    IF p_previous_revision IS NULL OR p_previous_revision = p_target_revision THEN
+    IF v_current_revision IS NULL OR p_previous_revision IS NULL
+       OR p_previous_revision <> v_current_revision OR p_previous_revision = p_target_revision THEN
         RAISE EXCEPTION 'rollback must change the current revision';
     END IF;
+    IF p_current_revision IS NULL OR p_current_revision <> p_target_revision
+       OR p_event_current_revision IS NULL OR p_event_current_revision <> p_target_revision THEN
+        RAISE EXCEPTION 'rollback current revision must match rollback target';
+    END IF;
     UPDATE public.agent_app
-    SET current_revision = p_current_revision, version = p_app_version,
+    SET current_revision = p_target_revision, version = p_app_version,
         updated_at = p_app_updated_at
     WHERE tenant_id = p_tenant_id AND app_id = p_app_id
       AND version = p_expected_app_version;
@@ -657,7 +663,7 @@ BEGIN
         reason, correlation_id, previous_version, next_version, occurred_at
     ) VALUES (
         'rolled_back', p_tenant_id, p_app_id, p_previous_status, p_current_status,
-        p_previous_revision, p_event_current_revision, p_content_digest,
+        p_previous_revision, p_target_revision, p_content_digest,
         public.trim_control_plane_text(p_actor_type), public.trim_control_plane_text(p_actor_id),
         public.trim_control_plane_text(p_reason), public.trim_control_plane_text(p_correlation_id),
         p_expected_app_version, p_app_version, p_app_updated_at

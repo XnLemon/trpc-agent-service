@@ -78,6 +78,12 @@ func TestPostgreSQLRepositories(t *testing.T) {
 	if updatedTenant.Version != root.Version+1 {
 		t.Fatalf("tenant version = %d, want %d", updatedTenant.Version, root.Version+1)
 	}
+	if _, err := tenants.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{
+		TenantID: root.TenantID, ExpectedVersion: root.Version, DisplayName: "Stale Tenant",
+		AuditRetentionDays: 90, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1,
+	}); !errors.Is(err, tenant.ErrConflict) {
+		t.Fatalf("stale tenant update error = %v", err)
+	}
 	suspendedTenant, _, err := tenants.TransitionStatus(ctx, tenant.TransitionStatusInput{
 		TenantID: root.TenantID, ExpectedVersion: updatedTenant.Version,
 		NextStatus: tenant.StatusSuspended, Metadata: metadata,
@@ -108,9 +114,20 @@ func TestPostgreSQLRepositories(t *testing.T) {
 	if loadedProfile.TenantID != root.TenantID || loadedProfile.ProfileID != profile.ProfileID || loadedProfile.Configuration.Options["mode"] != "safe" {
 		t.Fatalf("loaded model scope = %s/%s", loadedProfile.TenantID, loadedProfile.ProfileID)
 	}
+	if _, err := models.Get(ctx, root.TenantID, "mp_01ARZ3NDEKTSV4RRFFQ69G5FAW"); !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("missing model profile error = %v", err)
+	}
 	loadedProfile.Configuration.Options["mode"] = "mutated"
 	if again, err := models.Get(ctx, root.TenantID, profile.ProfileID); err != nil || again.Configuration.Options["mode"] != "safe" {
 		t.Fatalf("model defensive copy = %+v, err=%v", again, err)
+	}
+	if _, _, err := models.UpdateConfiguration(ctx, model.UpdateConfigurationInput{
+		TenantID: root.TenantID, ProfileID: profile.ProfileID, ExpectedVersion: profile.Version - 1,
+		DisplayName: "Stale Model", SchemaVersion: profile.SchemaVersion,
+		Configuration: model.Configuration{Provider: "public", Model: "chat", Options: map[string]string{"mode": "safe"}},
+		Metadata:      model.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "stale", CorrelationID: "model-stale"},
+	}); !errors.Is(err, model.ErrConflict) {
+		t.Fatalf("stale model profile update error = %v", err)
 	}
 	updatedProfile, _, err := models.UpdateConfiguration(ctx, model.UpdateConfigurationInput{
 		TenantID: root.TenantID, ProfileID: profile.ProfileID, ExpectedVersion: profile.Version,
@@ -158,12 +175,31 @@ func TestPostgreSQLRepositories(t *testing.T) {
 	if publishedApp.CurrentRevision == nil || *publishedApp.CurrentRevision != publishedRevision.Revision || event.EventType != agent.ChangePublished {
 		t.Fatalf("publication result = app=%+v revision=%+v event=%+v", publishedApp, publishedRevision, event)
 	}
+	if loadedRevision, err := apps.GetRevision(ctx, root.TenantID, app.AppID, draft.Revision); err != nil || loadedRevision.State != agent.RevisionStatePublished {
+		t.Fatalf("get published revision = %+v, err=%v", loadedRevision, err)
+	}
+	if _, err := apps.Get(ctx, root.TenantID, "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"); !errors.Is(err, agent.ErrNotFound) {
+		t.Fatalf("missing agent app error = %v", err)
+	}
+	if _, err := apps.UpdateMetadata(ctx, agent.UpdateMetadataInput{
+		TenantID: root.TenantID, AppID: app.AppID, ExpectedVersion: publishedApp.Version - 1,
+		DisplayName: "Stale App", Description: "stale",
+	}); !errors.Is(err, agent.ErrConflict) {
+		t.Fatalf("stale agent metadata error = %v", err)
+	}
 	app, err = apps.UpdateMetadata(ctx, agent.UpdateMetadataInput{
 		TenantID: root.TenantID, AppID: app.AppID, ExpectedVersion: publishedApp.Version,
 		DisplayName: "Primary App Updated", Description: "integration app",
 	})
 	if err != nil {
 		t.Fatalf("update agent metadata: %v", err)
+	}
+	if _, err := apps.CreateDraft(ctx, agent.CreateDraftInput{
+		TenantID: root.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version - 1,
+		Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1,
+		Configuration: agent.DraftConfiguration{Instruction: "stale", ModelProfileID: profile.ProfileID, Runtime: agent.DefaultRuntimePolicy()},
+	}); !errors.Is(err, agent.ErrConflict) {
+		t.Fatalf("stale agent draft error = %v", err)
 	}
 	secondDraft, err := apps.CreateDraft(ctx, agent.CreateDraftInput{
 		TenantID: root.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version,
@@ -176,6 +212,13 @@ func TestPostgreSQLRepositories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create second agent draft: %v", err)
 	}
+	if _, err := apps.UpdateDraft(ctx, agent.UpdateDraftInput{
+		TenantID: root.TenantID, AppID: app.AppID, Revision: secondDraft.Revision,
+		ExpectedAppVersion: app.Version, ExpectedDraftVersion: secondDraft.DraftVersion - 1,
+		Configuration: agent.DraftConfiguration{Instruction: "stale", ModelProfileID: profile.ProfileID, Runtime: agent.DefaultRuntimePolicy()},
+	}); !errors.Is(err, agent.ErrConflict) {
+		t.Fatalf("stale agent draft update error = %v", err)
+	}
 	updatedDraft, err := apps.UpdateDraft(ctx, agent.UpdateDraftInput{
 		TenantID: root.TenantID, AppID: app.AppID, Revision: secondDraft.Revision,
 		ExpectedAppVersion: app.Version, ExpectedDraftVersion: secondDraft.DraftVersion,
@@ -186,6 +229,14 @@ func TestPostgreSQLRepositories(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("update second agent draft: %v", err)
+	}
+	if _, _, _, err := apps.Publish(ctx, agent.PublishInput{
+		TenantID: root.TenantID, AppID: app.AppID, Revision: updatedDraft.Revision,
+		ExpectedAppVersion: app.Version, ExpectedDraftVersion: updatedDraft.DraftVersion - 1,
+		TenantActive: true,
+		Metadata:     agent.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "stale", CorrelationID: "agent-publish-stale"},
+	}); !errors.Is(err, agent.ErrConflict) {
+		t.Fatalf("stale agent publish error = %v", err)
 	}
 	publishedApp, _, _, err = apps.Publish(ctx, agent.PublishInput{
 		TenantID: root.TenantID, AppID: app.AppID, Revision: updatedDraft.Revision,
@@ -208,7 +259,22 @@ func TestPostgreSQLRepositories(t *testing.T) {
 	if rolledBackApp.CurrentRevision == nil || *rolledBackApp.CurrentRevision != draft.Revision || rollbackEvent.EventType != agent.ChangeRolledBack {
 		t.Fatalf("rollback result = app=%+v event=%+v", rolledBackApp, rollbackEvent)
 	}
-	app = rolledBackApp
+	app, _, err = apps.TransitionStatus(ctx, agent.TransitionStatusInput{
+		TenantID: root.TenantID, AppID: rolledBackApp.AppID, ExpectedVersion: rolledBackApp.Version,
+		NextStatus: agent.StatusSuspended,
+		Metadata:   agent.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "integration", CorrelationID: "agent-suspend"},
+	})
+	if err != nil {
+		t.Fatalf("suspend agent app: %v", err)
+	}
+	app, _, err = apps.TransitionStatus(ctx, agent.TransitionStatusInput{
+		TenantID: root.TenantID, AppID: app.AppID, ExpectedVersion: app.Version,
+		NextStatus: agent.StatusActive,
+		Metadata:   agent.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "integration", CorrelationID: "agent-resume"},
+	})
+	if err != nil {
+		t.Fatalf("resume agent app: %v", err)
+	}
 
 	backends := postgres.NewBackendRepository(db, backendCatalog)
 	backendProfile, _, err := backends.Create(ctx, backend.CreateInput{
@@ -221,6 +287,17 @@ func TestPostgreSQLRepositories(t *testing.T) {
 	}
 	if loaded, err := backends.Get(ctx, root.TenantID, backendProfile.ProfileID); err != nil || len(loaded.Bindings) != 1 || loaded.Bindings[0].Options["namespace"] != "primary" {
 		t.Fatalf("get backend profile = %+v, err=%v", loaded, err)
+	}
+	if _, err := backends.Get(ctx, root.TenantID, "bp_01ARZ3NDEKTSV4RRFFQ69G5FAV"); !errors.Is(err, backend.ErrNotFound) {
+		t.Fatalf("missing backend profile error = %v", err)
+	}
+	if _, _, err := backends.UpdateConfiguration(ctx, backend.UpdateConfigurationInput{
+		TenantID: root.TenantID, ProfileID: backendProfile.ProfileID, ExpectedVersion: backendProfile.Version - 1,
+		DisplayName: "Stale Backend", SchemaVersion: backendProfile.SchemaVersion,
+		Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory", Options: map[string]string{"namespace": "stale"}}},
+		Metadata: backend.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "stale", CorrelationID: "backend-stale"},
+	}); !errors.Is(err, backend.ErrConflict) {
+		t.Fatalf("stale backend update error = %v", err)
 	}
 	updatedBackend, _, err := backends.UpdateConfiguration(ctx, backend.UpdateConfigurationInput{
 		TenantID: root.TenantID, ProfileID: backendProfile.ProfileID, ExpectedVersion: backendProfile.Version,
@@ -264,12 +341,23 @@ func TestPostgreSQLRepositories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create channel binding: %v", err)
 	}
+	if _, err := channelRepo.Get(ctx, root.TenantID, "cb_01ARZ3NDEKTSV4RRFFQ69G5FAV"); !errors.Is(err, channels.ErrNotFound) {
+		t.Fatalf("missing channel binding error = %v", err)
+	}
 	activeBinding, _, err := channelRepo.Activate(ctx, channels.TransitionStatusInput{
 		TenantID: root.TenantID, BindingID: binding.BindingID, ExpectedVersion: binding.Version,
 		Metadata: channels.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "integration", CorrelationID: "channel-activate"},
 	})
 	if err != nil {
 		t.Fatalf("activate channel binding: %v", err)
+	}
+	if _, _, err := channelRepo.UpdateConfiguration(ctx, channels.UpdateConfigurationInput{
+		TenantID: root.TenantID, BindingID: binding.BindingID, ExpectedVersion: activeBinding.Version - 1,
+		ProviderAccountID: "repo-account", PublicRouteKeyDigest: routeDigest, AppID: app.AppID,
+		SecretRef: "secret://repo-test", Protocol: channels.ProtocolConfiguration{Telegram: &channels.TelegramProtocolConfiguration{}},
+		Metadata: channels.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "stale", CorrelationID: "channel-stale"},
+	}); !errors.Is(err, channels.ErrConflict) {
+		t.Fatalf("stale channel update error = %v", err)
 	}
 	updatedBinding, _, err := channelRepo.UpdateConfiguration(ctx, channels.UpdateConfigurationInput{
 		TenantID: root.TenantID, BindingID: binding.BindingID, ExpectedVersion: activeBinding.Version,
@@ -308,6 +396,12 @@ func TestPostgreSQLRepositories(t *testing.T) {
 	}
 	if _, err := channelRepo.ConsumeCandidate(ctx, candidates[0]); !errors.Is(err, channels.ErrCandidateUnavailable) {
 		t.Fatalf("candidate replay error = %v", err)
+	}
+	if _, _, err := channelRepo.Disable(ctx, channels.TransitionStatusInput{
+		TenantID: root.TenantID, BindingID: activeBinding.BindingID, ExpectedVersion: activeBinding.Version,
+		Metadata: channels.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "integration", CorrelationID: "channel-disable"},
+	}); err != nil {
+		t.Fatalf("disable channel binding: %v", err)
 	}
 
 	canceled, cancelRequest := context.WithCancel(context.Background())

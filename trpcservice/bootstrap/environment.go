@@ -145,6 +145,9 @@ func loadEnvironment() (environmentConfig, error) {
 }
 
 func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalog, *backend.ProviderCatalog, error) {
+	if config.modelProvider != defaultModelProvider {
+		return nil, nil, fmt.Errorf("%w: model provider %q is unsupported", ErrInvalidConfig, config.modelProvider)
+	}
 	modelCatalog, err := modelprofile.NewProviderCatalog(modelprofile.ProviderSpec{
 		Provider:        config.modelProvider,
 		Models:          config.modelNames,
@@ -233,6 +236,10 @@ func (environmentModelFactory) New(ctx context.Context, input modelprofile.Model
 	apiKey := secret.Value()
 	if apiKey == "" {
 		return nil, errors.New("model factory secret is required")
+	}
+	provider := strings.ToLower(strings.TrimSpace(input.Provider))
+	if provider != "" && provider != defaultModelProvider {
+		return nil, fmt.Errorf("model factory provider %q is unsupported", input.Provider)
 	}
 	options := []openai.Option{openai.WithAPIKey(apiKey)}
 	if endpoint := strings.TrimSpace(input.Endpoint); endpoint != "" {
