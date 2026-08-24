@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 )
 
@@ -29,6 +30,8 @@ type serviceOptions struct {
 	address         string
 	shutdownTimeout time.Duration
 }
+
+var newBootstrapRuntime = bootstrap.NewFromEnvironment
 
 func main() {
 	signals := make(chan os.Signal, 1)
@@ -49,13 +52,15 @@ func runMain(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 		_, _ = fmt.Fprintf(stdout, "trpc-agent-service %s\nusage: trpc-service [-addr address] [-shutdown-timeout duration]\n", trpcservice.Version)
 		return nil
 	}
-	handler, err := gateway.NewHTTPHandler(gateway.HTTPConfig{})
+	bootstrapRuntime, err := newBootstrapRuntime(ctx)
 	if err != nil {
 		return err
 	}
+	handler := bootstrapRuntime.HandlerValue()
 	server := newServiceHTTPServer(handler.Handler(), options)
 	_, _ = fmt.Fprintf(stdout, "trpc-agent-service %s listening on %s\n", trpcservice.Version, options.address)
-	return runService(ctx, signals, handler, options.shutdownTimeout, server.ListenAndServe, server.Shutdown)
+	returnErr := runService(ctx, signals, handler, options.shutdownTimeout, server.ListenAndServe, server.Shutdown)
+	return errors.Join(returnErr, bootstrapRuntime.Close())
 }
 
 func parseServiceOptions(args []string, stderr io.Writer) (serviceOptions, bool, error) {

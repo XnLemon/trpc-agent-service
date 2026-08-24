@@ -38,7 +38,11 @@ trusted Tenant snapshot
 - 离线 deterministic fake model + InMemory Session 的集成测试，以及取消和 Event channel 收尾测试。
 
 本阶段明确不包含 Channel Binding、HTTP Gateway/Admin API、真实模型请求、生产 KMS/Vault、
-PostgreSQL migration、Redis/SQL/向量库/S3 adapter、OTel exporter、计费和跨节点配置缓存。
+Redis/SQL/向量库/S3 adapter、OTel exporter、计费和跨节点配置缓存。Issue #37 的
+`migrations/0001_control_plane.up.sql` 与 `0002_control_plane_repository_functions.up.sql`
+已落地本页领域契约对应的无密钥表形状和受控写入口；Go 实现在
+`trpcservice/model/postgres`，总体验证见
+[PostgreSQL 控制面与启动装配](postgresql-control-plane.md)。
 
 ## 设计阶段 ledger
 
@@ -152,6 +156,14 @@ active ────────────────────────�
 配置更新和状态迁移都接收 `expected_version`。版本不匹配返回可识别的 conflict 错误，不能
 覆盖并发修改。`InMemory Repository` 的每次操作在开始、等待锁后和提交前检查 `Context`；读锁
 和写锁都必须能在取消时返回，而不是永远等待。
+
+### 1.4 PostgreSQL 持久化形状
+
+`model_profile` 的 SQL 根表只保存已经由受信 Provider Catalog 规范化的无密钥配置。字段、
+状态、复合租户边界、唯一性、版本和摘要约束见 [PostgreSQL 控制面与启动装配](postgresql-control-plane.md)。
+`options` 和 `generation` 使用 JSONB 只是为了保存有界的结构化配置，不是允许未知字段或
+Secret 的逃生通道；Repository 必须严格解码字符串 option、已支持的 generation 字段和
+`secret_ref` 引用，并在配置更新与 Outbox 写入的同一事务中重新计算 `content_digest`。
 
 ## 2. Secret Resolver 边界
 

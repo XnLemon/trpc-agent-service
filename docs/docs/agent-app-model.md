@@ -16,7 +16,9 @@ Agent App 是租户创建、发布和路由 Agent 的控制面对象。它必须
 `agent_app_revision` 保存草稿或已发布的执行定义。
 
 本阶段覆盖领域模型、发布/回滚、InMemory Repository 和执行快照契约；不实现 Gateway、
-Worker、Admin HTTP API、具体模型客户端、Secret Manager、SQL migration 或跨节点缓存。
+Worker、Admin HTTP API、具体模型客户端、Secret Manager 或跨节点缓存。Issue #37 的
+`migrations/0001_control_plane.up.sql` 复用本页 DDL，`0002` 提供受控写入口；SQL Repository
+和运行时装配仍由该 Issue 的代码阶段实现。
 
 ## 核心决策
 
@@ -101,7 +103,7 @@ CREATE TABLE agent_app_revision (
                     CHECK (state IN ('draft', 'published')),
     draft_version   BIGINT NOT NULL DEFAULT 1 CHECK (draft_version >= 1),
     agent_kind      TEXT NOT NULL CHECK (agent_kind = 'llm'),
-    schema_version  INT NOT NULL DEFAULT 1 CHECK (schema_version >= 1),
+    schema_version  INT NOT NULL DEFAULT 1 CHECK (schema_version = 1),
 
     description        TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 2000),
     instruction        TEXT NOT NULL
@@ -109,8 +111,8 @@ CREATE TABLE agent_app_revision (
     global_instruction TEXT NOT NULL DEFAULT ''
                        CHECK (length(global_instruction) <= 65536),
 
-    -- model_profile 落地后增加同租户复合外键。
-    model_profile_id TEXT NOT NULL CHECK (length(btrim(model_profile_id)) > 0),
+    -- migration 使用同租户复合外键，防止跨租户 Profile 引用。
+    model_profile_id TEXT NOT NULL,
 
     -- 只保存按 agent_kind + schema_version 校验过的无密钥配置。
     generation_config JSONB NOT NULL DEFAULT '{}'::jsonb,
