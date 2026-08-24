@@ -140,6 +140,7 @@ type RuntimeStore interface {
 	AppendEventPayload(context.Context, EventPayload) (EventPayload, error)
 	ListEventPayloads(context.Context, string, string) ([]EventPayload, error)
 	EnqueueReply(context.Context, ReplyOutbox) (ReplyOutbox, error)
+	ListReplyCandidates(context.Context, string) ([]ReplyOutbox, error)
 	GetReply(context.Context, string, string, int) (ReplyOutbox, error)
 	ClaimReply(context.Context, string, string, int, string, time.Duration) (ReplyOutbox, error)
 	TransitionReply(context.Context, ReplyTransition) (ReplyOutbox, error)

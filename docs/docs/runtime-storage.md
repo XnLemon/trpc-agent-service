@@ -122,6 +122,13 @@ sending -> retryable | dead_letter
 每次领取递增 `fencing_token` 并设置 lease；只有最新 fence 的 Worker 可以提交
 发送结果。非法迁移返回 `ErrIllegalTransition`，不能被静默归一化。
 
+协议中立的 outbox worker 通过租户限定的候选快照领取 pending/retryable 或过期
+sending 分段；provider 成功回执只由当前 fence 写入 `sent`，可重试错误写入
+`retryable`，不可重试或超过尝试上限写入 `dead_letter`。过期 lease 先调用
+provider reconciliation，`accepted` 直接确认，`rejected` 重试，`unknown`
+不得伪造成功。一个 event 的全部分段确认后，worker 才推进
+`completed → reply_pending → replied`。
+
 ## Bootstrap 与恢复
 
 Bootstrap 必须显式选择 Session capability。`TRPC_SESSION_BACKEND=postgres` 时，

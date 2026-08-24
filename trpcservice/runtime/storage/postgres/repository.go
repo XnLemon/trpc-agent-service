@@ -298,6 +298,32 @@ func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment 
 	return cloneReply(value), nil
 }
 
+func (s *Store) ListReplyCandidates(ctx context.Context, tenantID string) ([]runtimestorage.ReplyOutbox, error) {
+	if err := check(ctx); err != nil {
+		return nil, err
+	}
+	if err := runtimestorage.ValidateTenant(tenantID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT tenant_id,reply_id,event_id,segment_index,segment_count,payload,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at FROM public.reply_outbox WHERE tenant_id=$1 ORDER BY updated_at", tenantID)
+	if err != nil {
+		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	defer func() { _ = rows.Close() }()
+	result := make([]runtimestorage.ReplyOutbox, 0)
+	for rows.Next() {
+		var value runtimestorage.ReplyOutbox
+		if err := rows.Scan(replyArgs(&value)...); err != nil {
+			return nil, runtimestorage.ErrStorage
+		}
+		result = append(result, cloneReply(value))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, runtimestorage.ErrStorage
+	}
+	return result, nil
+}
+
 func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segment int, owner string, leaseDuration time.Duration) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err

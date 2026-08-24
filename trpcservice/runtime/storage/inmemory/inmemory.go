@@ -294,6 +294,25 @@ func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment 
 	return cloneReply(value), nil
 }
 
+func (s *Store) ListReplyCandidates(ctx context.Context, tenantID string) ([]runtimestorage.ReplyOutbox, error) {
+	if err := check(ctx); err != nil {
+		return nil, err
+	}
+	if err := runtimestorage.ValidateTenant(tenantID); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]runtimestorage.ReplyOutbox, 0)
+	for _, value := range s.replies {
+		if value.TenantID != tenantID {
+			continue
+		}
+		result = append(result, cloneReply(value))
+	}
+	return result, nil
+}
+
 func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segment int, owner string, leaseDuration time.Duration) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
