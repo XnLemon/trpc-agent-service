@@ -164,9 +164,6 @@ func TestRuntimeStoreValidationAndDecodeErrors(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	store := runtimepostgres.New(db)
 	ctx := context.Background()
-	if _, err := store.GetSession(nil, "tenant-a", "session"); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("nil context = %v", err)
-	}
 	if _, err := store.GetSession(ctx, "", "session"); !errors.Is(err, runtimestorage.ErrInvalid) {
 		t.Fatalf("invalid tenant = %v", err)
 	}

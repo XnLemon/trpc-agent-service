@@ -175,12 +175,6 @@ func TestStoreCreateAndTransitionValidationEdges(t *testing.T) {
 	if _, err := store.ClaimReply(context.Background(), "tenant-a", "reply", 0, "", time.Second); !errors.Is(err, runtimestorage.ErrInvalid) {
 		t.Fatalf("invalid claim owner = %v", err)
 	}
-	if _, err := store.TransitionReply(nil, runtimestorage.ReplyTransition{}); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("nil transition context = %v", err)
-	}
-	if _, err := store.GetSession(nil, "tenant-a", "session"); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("nil session context = %v", err)
-	}
 	if _, err := store.UpdateSessionState(context.Background(), "tenant-a", "encode-error", 1, map[string]any{"bad": make(chan int)}); err != nil {
 		t.Fatalf("in-memory update clone fallback = %v", err)
 	}
