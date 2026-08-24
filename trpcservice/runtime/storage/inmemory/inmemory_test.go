@@ -335,3 +335,43 @@ func TestStoreCreateAndTransitionValidationEdges(t *testing.T) {
 		t.Fatalf("missing transition = %v", err)
 	}
 }
+
+func TestStoreEventHistoryAndMessageLifecycle(t *testing.T) {
+	store := inmemory.New()
+	seedEvent(t, store, "tenant-a", "session-history", "inbound-1")
+	payload := []byte("{\"ID\":\"runner-1\"}")
+	first, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: payload})
+	if err != nil || first.HistorySeq != 1 {
+		t.Fatalf("append = %+v err=%v", first, err)
+	}
+	first.Payload[0] = 'x'
+	replay, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: payload})
+	if err != nil || string(replay.Payload) != string(payload) {
+		t.Fatalf("idempotent append = %+v err=%v", replay, err)
+	}
+	if _, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: []byte("{\"ID\":\"changed\"}")}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("payload conflict = %v", err)
+	}
+	items, err := store.ListEventPayloads(context.Background(), "tenant-a", "session-history")
+	if err != nil || len(items) != 1 || items[0].HistorySeq != 1 {
+		t.Fatalf("history = %+v err=%v", items, err)
+	}
+	event, err := store.GetMessage(context.Background(), "tenant-a", "inbound-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	running, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: event.EventID, From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "worker-a", LeaseDuration: time.Minute})
+	if err != nil || running.Status != runtimestorage.EventRunning || running.FencingToken != 1 {
+		t.Fatalf("running = %+v err=%v", running, err)
+	}
+	if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: event.EventID, From: runtimestorage.EventRunning, To: runtimestorage.EventCompleted, Owner: "worker-b", FencingToken: running.FencingToken}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("stale message worker = %v", err)
+	}
+	completed, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: event.EventID, From: runtimestorage.EventRunning, To: runtimestorage.EventCompleted, Owner: "worker-a", FencingToken: running.FencingToken})
+	if err != nil || completed.Status != runtimestorage.EventCompleted {
+		t.Fatalf("completed = %+v err=%v", completed, err)
+	}
+	if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: event.EventID, From: runtimestorage.EventCompleted, To: runtimestorage.EventReplied, Owner: "worker-a"}); !errors.Is(err, runtimestorage.ErrIllegalTransition) {
+		t.Fatalf("illegal message transition = %v", err)
+	}
+}

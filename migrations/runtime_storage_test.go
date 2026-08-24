@@ -43,3 +43,21 @@ func TestRuntimeSessionDeletionMigrationCascadesDependentFacts(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeEventHistoryMigrationIsTenantScopedAndCascades(t *testing.T) {
+	contents, err := os.ReadFile("0005_runtime_event_history.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, fragment := range []string{
+		"PRIMARY KEY (tenant_id, session_id, event_id)",
+		"UNIQUE (tenant_id, session_id, history_seq)",
+		"REFERENCES public.runtime_session(tenant_id, session_id) ON DELETE CASCADE",
+		"payload     JSONB NOT NULL",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("migration missing %q", fragment)
+		}
+	}
+}

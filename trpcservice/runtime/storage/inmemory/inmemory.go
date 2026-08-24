@@ -11,15 +11,16 @@ import (
 )
 
 type Store struct {
-	mu       sync.RWMutex
-	sessions map[string]runtimestorage.Session
-	events   map[string]runtimestorage.MessageEvent
-	messages map[string]string
-	replies  map[string]runtimestorage.ReplyOutbox
+	mu        sync.RWMutex
+	sessions  map[string]runtimestorage.Session
+	events    map[string]runtimestorage.MessageEvent
+	histories map[string][]runtimestorage.EventPayload
+	messages  map[string]string
+	replies   map[string]runtimestorage.ReplyOutbox
 }
 
 func New() *Store {
-	return &Store{sessions: map[string]runtimestorage.Session{}, events: map[string]runtimestorage.MessageEvent{}, messages: map[string]string{}, replies: map[string]runtimestorage.ReplyOutbox{}}
+	return &Store{sessions: map[string]runtimestorage.Session{}, events: map[string]runtimestorage.MessageEvent{}, histories: map[string][]runtimestorage.EventPayload{}, messages: map[string]string{}, replies: map[string]runtimestorage.ReplyOutbox{}}
 }
 
 func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (runtimestorage.Session, error) {
@@ -93,6 +94,7 @@ func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) e
 		return runtimestorage.ErrNotFound
 	}
 	delete(s.sessions, key(tenantID, sessionID))
+	delete(s.histories, key(tenantID, sessionID))
 	for eventKey, event := range s.events {
 		if event.TenantID != tenantID || event.SessionID != sessionID {
 			continue
@@ -152,6 +154,99 @@ func (s *Store) GetMessage(ctx context.Context, tenantID, eventID string) (runti
 		return runtimestorage.MessageEvent{}, runtimestorage.ErrNotFound
 	}
 	return cloneEvent(value), nil
+}
+
+func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage.MessageTransition) (runtimestorage.MessageEvent, error) {
+	if err := check(ctx); err != nil {
+		return runtimestorage.MessageEvent{}, err
+	}
+	if runtimestorage.ValidateTenant(transition.TenantID) != nil || transition.EventID == "" || transition.Owner == "" {
+		return runtimestorage.MessageEvent{}, runtimestorage.ErrInvalid
+	}
+	if !runtimestorage.ValidateMessageTransition(transition.From, transition.To) {
+		return runtimestorage.MessageEvent{}, runtimestorage.ErrIllegalTransition
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := key(transition.TenantID, transition.EventID)
+	value, ok := s.events[k]
+	if !ok {
+		return runtimestorage.MessageEvent{}, runtimestorage.ErrNotFound
+	}
+	if value.Status != transition.From {
+		return runtimestorage.MessageEvent{}, runtimestorage.ErrConflict
+	}
+	if transition.From == runtimestorage.EventRunning {
+		if value.LeaseOwner != transition.Owner || transition.FencingToken == 0 || value.FencingToken != transition.FencingToken || (value.LeaseExpiresAt != nil && !value.LeaseExpiresAt.After(time.Now().UTC())) {
+			return runtimestorage.MessageEvent{}, runtimestorage.ErrConflict
+		}
+	}
+	if transition.To == runtimestorage.EventRunning {
+		if transition.LeaseDuration <= 0 {
+			return runtimestorage.MessageEvent{}, runtimestorage.ErrInvalid
+		}
+		deadline := time.Now().UTC().Add(transition.LeaseDuration)
+		value.LeaseOwner = transition.Owner
+		value.LeaseExpiresAt = &deadline
+	} else {
+		value.LeaseExpiresAt = nil
+	}
+	value.Status = transition.To
+	value.FencingToken++
+	value.UpdatedAt = time.Now().UTC()
+	s.events[k] = value
+	return cloneEvent(value), nil
+}
+
+func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.EventPayload) (runtimestorage.EventPayload, error) {
+	if err := check(ctx); err != nil {
+		return runtimestorage.EventPayload{}, err
+	}
+	if err := validatePayload(payload); err != nil {
+		return runtimestorage.EventPayload{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := key(payload.TenantID, payload.SessionID)
+	if _, ok := s.sessions[k]; !ok {
+		return runtimestorage.EventPayload{}, runtimestorage.ErrNotFound
+	}
+	entries := s.histories[k]
+	for _, existing := range entries {
+		if existing.EventID != payload.EventID {
+			continue
+		}
+		if string(existing.Payload) != string(payload.Payload) {
+			return runtimestorage.EventPayload{}, runtimestorage.ErrConflict
+		}
+		return clonePayload(existing), nil
+	}
+	payload.HistorySeq = int64(len(entries) + 1)
+	payload.CreatedAt = time.Now().UTC()
+	payload = clonePayload(payload)
+	s.histories[k] = append(entries, payload)
+	return clonePayload(payload), nil
+}
+
+func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]runtimestorage.EventPayload, error) {
+	if err := check(ctx); err != nil {
+		return nil, err
+	}
+	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	k := key(tenantID, sessionID)
+	if _, ok := s.sessions[k]; !ok {
+		return nil, runtimestorage.ErrNotFound
+	}
+	entries := s.histories[k]
+	result := make([]runtimestorage.EventPayload, len(entries))
+	for i, value := range entries {
+		result[i] = clonePayload(value)
+	}
+	return result, nil
 }
 
 func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutbox) (runtimestorage.ReplyOutbox, error) {
@@ -309,6 +404,16 @@ func cloneEvent(value runtimestorage.MessageEvent) runtimestorage.MessageEvent {
 		value.LeaseExpiresAt = &copy
 	}
 	return value
+}
+func clonePayload(value runtimestorage.EventPayload) runtimestorage.EventPayload {
+	value.Payload = append([]byte(nil), value.Payload...)
+	return value
+}
+func validatePayload(value runtimestorage.EventPayload) error {
+	if runtimestorage.ValidateSession(value.TenantID, value.SessionID) != nil || value.EventID == "" || len(value.Payload) == 0 || !json.Valid(value.Payload) {
+		return runtimestorage.ErrInvalid
+	}
+	return nil
 }
 func cloneReply(value runtimestorage.ReplyOutbox) runtimestorage.ReplyOutbox {
 	if value.LeaseExpiresAt != nil {

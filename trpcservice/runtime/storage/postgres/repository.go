@@ -4,6 +4,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -178,6 +179,89 @@ func (s *Store) GetMessage(ctx context.Context, tenantID, eventID string) (runti
 	return cloneEvent(value), nil
 }
 
+func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage.MessageTransition) (runtimestorage.MessageEvent, error) {
+	if err := check(ctx); err != nil {
+		return runtimestorage.MessageEvent{}, err
+	}
+	if runtimestorage.ValidateTenant(transition.TenantID) != nil || transition.EventID == "" || transition.Owner == "" {
+		return runtimestorage.MessageEvent{}, runtimestorage.ErrInvalid
+	}
+	if !runtimestorage.ValidateMessageTransition(transition.From, transition.To) {
+		return runtimestorage.MessageEvent{}, runtimestorage.ErrIllegalTransition
+	}
+	leaseSeconds := int64(0)
+	if transition.To == runtimestorage.EventRunning {
+		if transition.LeaseDuration <= 0 {
+			return runtimestorage.MessageEvent{}, runtimestorage.ErrInvalid
+		}
+		leaseSeconds = int64(transition.LeaseDuration / time.Second)
+		if leaseSeconds == 0 {
+			leaseSeconds = 1
+		}
+	}
+	var value runtimestorage.MessageEvent
+	err := s.db.QueryRowContext(ctx, "UPDATE public.message_event SET status=$4,fencing_token=fencing_token+1,lease_owner=CASE WHEN $4='running' THEN $5 ELSE lease_owner END,lease_expires_at=CASE WHEN $6>0 THEN now()+($6 * interval '1 second') ELSE NULL END,updated_at=now() WHERE tenant_id=$1 AND event_id=$2 AND status=$3 AND ($3 <> 'running' OR (lease_owner=$5 AND fencing_token=$7 AND lease_expires_at IS NOT NULL AND lease_expires_at > now())) RETURNING tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,fencing_token,lease_owner,lease_expires_at,reply_id,segment_count,created_at,updated_at", transition.TenantID, transition.EventID, transition.From, transition.To, transition.Owner, leaseSeconds, transition.FencingToken).Scan(eventArgs(&value)...)
+	if err == nil {
+		return cloneEvent(value), nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return runtimestorage.MessageEvent{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	if _, lookupErr := s.GetMessage(ctx, transition.TenantID, transition.EventID); lookupErr != nil {
+		return runtimestorage.MessageEvent{}, lookupErr
+	}
+	return runtimestorage.MessageEvent{}, runtimestorage.ErrConflict
+}
+
+func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.EventPayload) (runtimestorage.EventPayload, error) {
+	if err := check(ctx); err != nil {
+		return runtimestorage.EventPayload{}, err
+	}
+	if err := validatePayload(payload); err != nil {
+		return runtimestorage.EventPayload{}, err
+	}
+	var value runtimestorage.EventPayload
+	err := s.db.QueryRowContext(ctx, "INSERT INTO public.runtime_event_history (tenant_id,session_id,event_id,payload) VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT (tenant_id,session_id,event_id) DO UPDATE SET event_id=public.runtime_event_history.event_id WHERE public.runtime_event_history.payload=EXCLUDED.payload RETURNING tenant_id,session_id,event_id,payload::text,history_seq,created_at", payload.TenantID, payload.SessionID, payload.EventID, payload.Payload).Scan(&value.TenantID, &value.SessionID, &value.EventID, &value.Payload, &value.HistorySeq, &value.CreatedAt)
+	if err == nil {
+		return clonePayload(value), nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return runtimestorage.EventPayload{}, runtimestorage.ErrConflict
+	}
+	return runtimestorage.EventPayload{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+}
+
+func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]runtimestorage.EventPayload, error) {
+	if err := check(ctx); err != nil {
+		return nil, err
+	}
+	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT tenant_id,session_id,event_id,payload::text,history_seq,created_at FROM public.runtime_event_history WHERE tenant_id=$1 AND session_id=$2 ORDER BY history_seq", tenantID, sessionID)
+	if err != nil {
+		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	defer func() { _ = rows.Close() }()
+	result := []runtimestorage.EventPayload{}
+	for rows.Next() {
+		var value runtimestorage.EventPayload
+		if err := rows.Scan(&value.TenantID, &value.SessionID, &value.EventID, &value.Payload, &value.HistorySeq, &value.CreatedAt); err != nil {
+			return nil, runtimestorage.ErrStorage
+		}
+		result = append(result, clonePayload(value))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, runtimestorage.ErrStorage
+	}
+	if result == nil {
+		if _, err := s.GetSession(ctx, tenantID, sessionID); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
 func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutbox) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
@@ -299,6 +383,16 @@ func cloneEvent(value runtimestorage.MessageEvent) runtimestorage.MessageEvent {
 		value.LeaseExpiresAt = &copy
 	}
 	return value
+}
+func clonePayload(value runtimestorage.EventPayload) runtimestorage.EventPayload {
+	value.Payload = append([]byte(nil), value.Payload...)
+	return value
+}
+func validatePayload(value runtimestorage.EventPayload) error {
+	if runtimestorage.ValidateSession(value.TenantID, value.SessionID) != nil || value.EventID == "" || len(value.Payload) == 0 || !json.Valid(value.Payload) {
+		return runtimestorage.ErrInvalid
+	}
+	return nil
 }
 func cloneReply(value runtimestorage.ReplyOutbox) runtimestorage.ReplyOutbox {
 	if value.LeaseExpiresAt != nil {

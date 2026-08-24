@@ -71,6 +71,9 @@ func (s *Service) GetSession(ctx context.Context, key session.Key, options ...se
 			value = refreshed
 		}
 		value.State = cloneState(state)
+		if err := s.restoreHistory(ctx, value, key.SessionID, options...); err != nil {
+			return nil, err
+		}
 		s.setVersion(key.SessionID, persisted.Version)
 		return value, nil
 	}
@@ -78,8 +81,35 @@ func (s *Service) GetSession(ctx context.Context, key session.Key, options ...se
 	if err != nil {
 		return nil, err
 	}
+	if err := s.restoreHistory(ctx, value, key.SessionID, options...); err != nil {
+		return nil, err
+	}
 	s.setVersion(key.SessionID, persisted.Version)
 	return value, err
+}
+
+func (s *Service) restoreHistory(ctx context.Context, value *session.Session, sessionID string, options ...session.Option) error {
+	history, err := s.store.ListEventPayloads(ctx, s.tenantID, sessionID)
+	if err != nil {
+		return err
+	}
+	existing := make(map[string]struct{}, value.GetEventCount())
+	for _, item := range value.GetEvents() {
+		existing[item.ID] = struct{}{}
+	}
+	for _, item := range history {
+		if _, ok := existing[item.EventID]; ok {
+			continue
+		}
+		var historical trpcevent.Event
+		if err := json.Unmarshal(item.Payload, &historical); err != nil {
+			return runtimestorage.ErrStorage
+		}
+		if err := s.delegate.AppendEvent(ctx, value, &historical, options...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) UpdateSessionState(ctx context.Context, key session.Key, state session.StateMap) error {
@@ -102,10 +132,21 @@ func (s *Service) AppendEvent(ctx context.Context, sess *session.Session, value 
 	if sess == nil || value == nil {
 		return session.ErrNilSession
 	}
+	if value.ID == "" {
+		return runtimestorage.ErrInvalid
+	}
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return runtimestorage.ErrInvalid
+	}
 	// Inbound message_event rows are created by the trusted Channel/Gateway
 	// boundary, where binding_id and external_message_id are available. Runner
-	// events remain owned by the upstream delegate until the event-payload
-	// persistence stage adds a dedicated append contract.
+	// event history is a separate session-scoped immutable log.
+	if _, err := s.store.AppendEventPayload(ctx, runtimestorage.EventPayload{
+		TenantID: s.tenantID, SessionID: sess.ID, EventID: value.ID, Payload: payload,
+	}); err != nil {
+		return err
+	}
 	return s.delegate.AppendEvent(ctx, sess, value, options...)
 }
 

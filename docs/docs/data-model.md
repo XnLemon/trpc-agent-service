@@ -424,6 +424,10 @@ message_event(
   created_at, committed_at
 )
 
+runtime_event_history(
+  tenant_id, session_id, event_id, payload, history_seq, created_at
+)
+
 tool_invocation(
   tenant_id, invocation_id, event_id, session_id, tool_name,
   tool_capability_digest, idempotency_key, request_digest, request_ref,

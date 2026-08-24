@@ -74,6 +74,30 @@ type MessageEventInput struct {
 	IdempotencyKey    string
 }
 
+// EventPayload is one immutable upstream Runner event retained for durable
+// session recovery. Payload is JSON and must never be included in logs or
+// returned through an unauthorised HTTP surface.
+type EventPayload struct {
+	TenantID   string
+	SessionID  string
+	EventID    string
+	Payload    []byte
+	HistorySeq int64
+	CreatedAt  time.Time
+}
+
+// MessageTransition advances a persisted inbound message through its execution
+// lifecycle. Transitions out of running require the current owner and fence.
+type MessageTransition struct {
+	TenantID      string
+	EventID       string
+	From          string
+	To            string
+	Owner         string
+	FencingToken  int64
+	LeaseDuration time.Duration
+}
+
 type ReplyOutbox struct {
 	TenantID          string
 	ReplyID           string
@@ -112,6 +136,9 @@ type RuntimeStore interface {
 	DeleteSession(context.Context, string, string) error
 	RecordMessage(context.Context, MessageEventInput) (MessageEvent, bool, error)
 	GetMessage(context.Context, string, string) (MessageEvent, error)
+	TransitionMessage(context.Context, MessageTransition) (MessageEvent, error)
+	AppendEventPayload(context.Context, EventPayload) (EventPayload, error)
+	ListEventPayloads(context.Context, string, string) ([]EventPayload, error)
 	EnqueueReply(context.Context, ReplyOutbox) (ReplyOutbox, error)
 	GetReply(context.Context, string, string, int) (ReplyOutbox, error)
 	ClaimReply(context.Context, string, string, int, string, time.Duration) (ReplyOutbox, error)
@@ -143,6 +170,24 @@ func ValidateTransition(from, to string) bool {
 		return to == ReplySending || to == ReplyDeadLetter
 	case ReplySent, ReplyDeadLetter:
 		return false
+	default:
+		return false
+	}
+}
+
+// ValidateMessageTransition defines the durable inbound execution lifecycle.
+func ValidateMessageTransition(from, to string) bool {
+	switch from {
+	case EventReceived:
+		return to == EventRunning || to == EventFailed
+	case EventRunning:
+		return to == EventCompleted || to == EventExecutionReconciling || to == EventFailed
+	case EventExecutionReconciling:
+		return to == EventRunning || to == EventFailed
+	case EventCompleted:
+		return to == EventReplyPending || to == EventFailed
+	case EventReplyPending:
+		return to == EventReplied || to == EventFailed
 	default:
 		return false
 	}

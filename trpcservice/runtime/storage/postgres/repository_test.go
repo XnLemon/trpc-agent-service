@@ -16,6 +16,7 @@ import (
 
 var eventColumns = []string{"tenant_id", "event_id", "session_id", "binding_id", "external_message_id", "idempotency_key", "event_seq", "status", "fencing_token", "lease_owner", "lease_expires_at", "reply_id", "segment_count", "created_at", "updated_at"}
 var replyColumns = []string{"tenant_id", "reply_id", "event_id", "segment_index", "segment_count", "payload", "status", "attempts", "fencing_token", "lease_owner", "lease_expires_at", "provider_message_id", "last_error_class", "created_at", "updated_at"}
+var historyColumns = []string{"tenant_id", "session_id", "event_id", "payload", "history_seq", "created_at"}
 
 func eventRow(when time.Time) *sqlmock.Rows {
 	return sqlmock.NewRows(eventColumns).AddRow("tenant-a", "event-1", "session-1", "binding-1", "external-1", "idem-1", int64(2), "received", int64(0), "", nil, "", 1, when, when)
@@ -171,6 +172,34 @@ func TestRuntimeStoreCoversMessageAndReplyLifecycle(t *testing.T) {
 	}
 	mock.ExpectQuery("UPDATE public.reply_outbox SET status=\\$5").WithArgs("tenant-a", "reply-1", 0, "sending", "sent", "worker-a", int64(0), "provider-1", "", int64(1)).WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-1", "event-1", 0, 1, "payload", "sent", 2, int64(2), "worker-a", nil, "provider-1", "", when, when))
 	if _, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply-1", SegmentIndex: 0, From: "sending", To: "sent", Owner: "worker-a", FencingToken: 1, ProviderID: "provider-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeStoreCoversEventHistoryAndMessageLifecycle(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := runtimepostgres.New(db)
+	when := time.Now().UTC()
+	payload := []byte("{\"ID\":\"runner-1\"}")
+	mock.ExpectQuery("INSERT INTO public.runtime_event_history").WithArgs("tenant-a", "session-1", "runner-1", payload).WillReturnRows(sqlmock.NewRows(historyColumns).AddRow("tenant-a", "session-1", "runner-1", string(payload), int64(1), when))
+	value, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-1", EventID: "runner-1", Payload: payload})
+	if err != nil || value.HistorySeq != 1 {
+		t.Fatalf("append = %+v err=%v", value, err)
+	}
+	mock.ExpectQuery("SELECT tenant_id,session_id,event_id,payload::text").WithArgs("tenant-a", "session-1").WillReturnRows(sqlmock.NewRows(historyColumns).AddRow("tenant-a", "session-1", "runner-1", string(payload), int64(1), when))
+	items, err := store.ListEventPayloads(context.Background(), "tenant-a", "session-1")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("history = %+v err=%v", items, err)
+	}
+	mock.ExpectQuery("UPDATE public.message_event SET status=\\$4").WithArgs("tenant-a", "event-1", "received", "running", "worker-a", int64(60), int64(0)).WillReturnRows(sqlmock.NewRows(eventColumns).AddRow("tenant-a", "event-1", "session-1", "binding-1", "external-1", "idem-1", int64(2), "running", int64(1), "worker-a", when.Add(time.Minute), "", 0, when, when))
+	if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: "event-1", From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "worker-a", LeaseDuration: time.Minute}); err != nil {
 		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

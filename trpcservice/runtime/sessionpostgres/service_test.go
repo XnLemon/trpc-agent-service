@@ -10,6 +10,7 @@ import (
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
+	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
@@ -97,6 +98,33 @@ func TestServiceRecoversStateWithFreshDelegate(t *testing.T) {
 	recovered, err := second.GetSession(context.Background(), key)
 	if err != nil || string(recovered.State["answer"]) != "42" {
 		t.Fatalf("recovered = %+v, err=%v", recovered, err)
+	}
+}
+
+func TestServiceRecoversDurableEventHistoryWithFreshDelegate(t *testing.T) {
+	store := runtimestorageinmemory.New()
+	first, err := sessionpostgres.New("tenant-a", sessioninmemory.NewSessionService(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := session.Key{AppName: "app", UserID: "user", SessionID: "event-restart"}
+	created, err := first.CreateSession(context.Background(), key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.AppendEvent(context.Background(), created, &trpcevent.Event{ID: "event-restart-1", Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Message: trpcmodel.NewUserMessage("durable")}}, Done: true}}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessionpostgres.New("tenant-a", sessioninmemory.NewSessionService(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := second.GetSession(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.GetEventCount() != 1 || recovered.GetEvents()[0].ID != "event-restart-1" {
+		t.Fatalf("recovered events = %+v", recovered.GetEvents())
 	}
 }
 

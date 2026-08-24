@@ -42,6 +42,13 @@ erDiagram
     bigint event_seq
     text status
   }
+  runtime_event_history {
+    text tenant_id PK
+    text session_id PK
+    text event_id PK
+    jsonb payload
+    bigint history_seq
+  }
   reply_outbox {
     text tenant_id PK
     text reply_id PK
@@ -72,10 +79,16 @@ type RuntimeStore interface {
     CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (Session, error)
     UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (Session, error)
     RecordMessage(ctx context.Context, MessageEventInput) (MessageEvent, bool, error)
+    TransitionMessage(ctx context.Context, MessageTransition) (MessageEvent, error)
+    AppendEventPayload(ctx context.Context, EventPayload) (EventPayload, error)
+    ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]EventPayload, error)
     TransitionReply(ctx context.Context, ReplyTransition) (ReplyOutbox, error)
 }
 ```
 
+runtime_event_history 是 session-scoped、append-only 的完整上游 Event JSON 历史；
+同一 (tenant_id, session_id, event_id) 只能以相同 payload 幂等重放，冲突 payload 被拒绝。
+Session adapter 在上游 delegate 恢复后按 history_seq 增量回放，避免 fresh process 丢失事件。
 具体实现还可以提供读取事件、领取 Outbox 和更新 provider receipt 的窄接口；
 每个方法都要在 SQL 查询、事务、锁等待和连接获取处传递 `context.Context`。
 
@@ -122,8 +135,8 @@ Bootstrap 必须显式选择 Session capability。`TRPC_SESSION_BACKEND=postgres
 | --- | --- | --- | --- |
 | 契约、表关系、状态机和提交顺序文档 | 文档 | 本页与 `data-model.md`/`ops.md` 交叉链接 | ✅ |
 | InMemory/PostgreSQL RuntimeStore 接口 | 1 | Go 接口、错误分类、深拷贝测试 | ✅ |
-| 有序 migration、复合 FK、唯一约束、状态约束和 Session 删除级联 | 2 | `0003_runtime_storage.up.sql`、`0004_runtime_session_delete_cascade.up.sql` 与 migration 测试 | ⬜ |
-| CAS/event_seq、重复入站和 Outbox fencing | 2 | 并发、乱序、重试、死信测试 | ⬜ |
+| 有序 migration、复合 FK、唯一约束、状态约束和 Session 删除级联 | 2 | `0003_runtime_storage.up.sql`、`0004_runtime_session_delete_cascade.up.sql`、`0005_runtime_event_history.up.sql` 与 migration 测试 | ✅ |
+| CAS/event_seq、重复入站和 Outbox fencing | 2 | 并发、乱序、重试、死信测试 | ✅ |
 | Bootstrap 显式 Session capability 与 fail-closed | 3 | 环境配置、RuntimeStore-backed session.Service、重启恢复测试 | ⬜ |
 | 租户越权、取消、脱敏和防御性返回 | 1–3 | 双租户 conformance 与错误边界测试 | ⬜ |
 | `go test`、race、vet、build、MkDocs strict | 每阶段 | PR 验证记录 | ⬜ |
