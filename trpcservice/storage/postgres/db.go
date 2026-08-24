@@ -1,6 +1,7 @@
-// Package postgres contains durable PostgreSQL implementations of the
-// control-plane repositories. It deliberately exposes database/sql rather
-// than pgx types so callers can own pooling and lifecycle separately.
+// Package postgres contains the shared PostgreSQL pool, error boundary, and
+// durable implementation primitives used by the domain-owned repository
+// adapters. It deliberately exposes database/sql rather than pgx types so
+// callers can own pooling and lifecycle separately.
 package postgres
 
 import (

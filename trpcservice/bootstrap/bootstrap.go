@@ -14,16 +14,21 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/agent/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
+	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
+	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
+	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
@@ -108,19 +113,19 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 			return nil, postgres.ErrStorage
 		}
 		if config.Tenants == nil {
-			config.Tenants = postgres.NewTenantRepository(config.DB)
+			config.Tenants = tenantpostgres.NewRepository(config.DB)
 		}
 		if config.Apps == nil {
-			config.Apps = postgres.NewAgentRepository(config.DB)
+			config.Apps = agentpostgres.NewRepository(config.DB)
 		}
 		if config.Models == nil {
-			config.Models = postgres.NewModelRepository(config.DB, config.ModelCatalog)
+			config.Models = modelpostgres.NewRepository(config.DB, config.ModelCatalog)
 		}
 		if config.Backends == nil {
-			config.Backends = postgres.NewBackendRepository(config.DB, config.BackendCatalog)
+			config.Backends = backendpostgres.NewRepository(config.DB, config.BackendCatalog)
 		}
 		if config.Channels == nil {
-			config.Channels = postgres.NewChannelRepository(config.DB)
+			config.Channels = channelpostgres.NewRepository(config.DB)
 		}
 	}
 	if config.Tenants == nil || config.Apps == nil || config.Models == nil || config.Backends == nil || config.Channels == nil || config.ModelCatalog == nil || config.BackendCatalog == nil || config.SecretResolver == nil || config.ModelFactory == nil || config.Sessions == nil || config.Authenticator == nil {

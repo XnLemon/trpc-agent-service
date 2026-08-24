@@ -4,7 +4,8 @@
 > Profile 和 Channel Binding 设计，并补齐 Model Profile 的持久化形状、统一 migration 顺序、
 > Repository 事务边界和进程启动装配。控制面 DDL 与受控 Repository 写入口分别落在
 > `0001`、`0002` 两个有序 migration；Go Repository 和 bootstrap 实现在
-> `trpcservice/storage/postgres`、`trpcservice/bootstrap`。
+> `trpcservice/{tenant,agent,model,backend,channels}/postgres`、共享的
+> `trpcservice/storage/postgres` 数据库边界，以及 `trpcservice/bootstrap`。
 
 ## 目标与边界
 
