@@ -68,3 +68,5 @@ CREATE INDEX reply_outbox_delivery_idx
     WHERE status IN ('pending', 'retryable', 'sending');
 
 REVOKE ALL ON TABLE public.runtime_session, public.message_event, public.reply_outbox FROM PUBLIC;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.runtime_session, public.message_event, public.reply_outbox TO tenant_app_writer;
+GRANT ALL PRIVILEGES ON public.runtime_session, public.message_event, public.reply_outbox TO migration_owner;

@@ -3,6 +3,7 @@ package inmemory
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -168,8 +169,11 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
-	if runtimestorage.ValidateTenant(transition.TenantID) != nil || transition.ReplyID == "" || transition.Owner == "" || !runtimestorage.ValidateTransition(transition.From, transition.To) {
+	if runtimestorage.ValidateTenant(transition.TenantID) != nil || transition.ReplyID == "" || transition.Owner == "" {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
+	}
+	if !runtimestorage.ValidateTransition(transition.From, transition.To) {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrIllegalTransition
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -179,6 +183,9 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrNotFound
 	}
 	if value.Status != transition.From || (value.LeaseOwner != "" && value.LeaseOwner != transition.Owner) || (transition.FencingToken != 0 && value.FencingToken != transition.FencingToken) {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
+	}
+	if value.Status == runtimestorage.ReplySending && value.LeaseExpiresAt != nil && !value.LeaseExpiresAt.After(time.Now().UTC()) {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
 	}
 	value.Status = transition.To
@@ -219,9 +226,13 @@ func cloneMap(input map[string]any) map[string]any {
 	if input == nil {
 		return nil
 	}
-	output := make(map[string]any, len(input))
-	for k, v := range input {
-		output[k] = v
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return nil
+	}
+	var output map[string]any
+	if err := json.Unmarshal(encoded, &output); err != nil {
+		return nil
 	}
 	return output
 }

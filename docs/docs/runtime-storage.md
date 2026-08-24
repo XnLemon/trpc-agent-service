@@ -121,10 +121,10 @@ Bootstrap 必须显式选择 Session capability。`TRPC_SESSION_BACKEND=postgres
 | 项目 | 阶段 | 完成证据 | 状态 |
 | --- | --- | --- | --- |
 | 契约、表关系、状态机和提交顺序文档 | 文档 | 本页与 `data-model.md`/`ops.md` 交叉链接 | ✅ |
-| InMemory/PostgreSQL RuntimeStore 接口 | 1 | Go 接口、错误分类、深拷贝测试 | ⬜ |
+| InMemory/PostgreSQL RuntimeStore 接口 | 1 | Go 接口、错误分类、深拷贝测试 | ✅ |
 | 有序 migration、复合 FK、唯一约束和状态约束 | 2 | `0003_runtime_storage.up.sql` 与 migration 测试 | ⬜ |
 | CAS/event_seq、重复入站和 Outbox fencing | 2 | 并发、乱序、重试、死信测试 | ⬜ |
-| Bootstrap 显式 Session capability 与 fail-closed | 3 | 环境配置、重启恢复测试 | ⬜ |
+| Bootstrap 显式 Session capability 与 fail-closed | 3 | 环境配置、RuntimeStore-backed session.Service、重启恢复测试 | ⬜ |
 | 租户越权、取消、脱敏和防御性返回 | 1–3 | 双租户 conformance 与错误边界测试 | ⬜ |
 | `go test`、race、vet、build、MkDocs strict | 每阶段 | PR 验证记录 | ⬜ |
 

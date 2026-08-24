@@ -12,7 +12,7 @@ import (
 
 func TestStoreTenantIsolationAndCAS(t *testing.T) {
 	store := inmemory.New()
-	first, err := store.CreateSession(context.Background(), "tenant-a", "session-1", map[string]any{"n": 1})
+	first, err := store.CreateSession(context.Background(), "tenant-a", "session-1", map[string]any{"nested": map[string]any{"n": 1}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,9 +22,14 @@ func TestStoreTenantIsolationAndCAS(t *testing.T) {
 	if _, err := store.UpdateSessionState(context.Background(), first.TenantID, first.SessionID, 99, nil); !errors.Is(err, runtimestorage.ErrConflict) {
 		t.Fatalf("CAS error = %v", err)
 	}
-	updated, err := store.UpdateSessionState(context.Background(), first.TenantID, first.SessionID, first.Version, map[string]any{"n": 2})
+	updated, err := store.UpdateSessionState(context.Background(), first.TenantID, first.SessionID, first.Version, map[string]any{"nested": map[string]any{"n": 2}})
 	if err != nil || updated.Version != 2 {
 		t.Fatalf("update = %+v, %v", updated, err)
+	}
+	updated.State["nested"].(map[string]any)["n"] = 9
+	readBack, err := store.GetSession(context.Background(), "tenant-a", "session-1")
+	if err != nil || readBack.State["nested"].(map[string]any)["n"] == 9 {
+		t.Fatalf("nested state aliased: %+v", readBack.State)
 	}
 }
 
@@ -83,7 +88,7 @@ func TestStoreReplyStateMachineAndFencing(t *testing.T) {
 	if _, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: reply.TenantID, ReplyID: reply.ReplyID, SegmentIndex: 0, From: runtimestorage.ReplySending, To: runtimestorage.ReplySent, Owner: "worker-a", FencingToken: sending.FencingToken, ProviderID: "provider-1"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: reply.TenantID, ReplyID: reply.ReplyID, SegmentIndex: 0, From: runtimestorage.ReplySent, To: runtimestorage.ReplySending, Owner: "worker-a"}); !errors.Is(err, runtimestorage.ErrInvalid) {
+	if _, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: reply.TenantID, ReplyID: reply.ReplyID, SegmentIndex: 0, From: runtimestorage.ReplySent, To: runtimestorage.ReplySending, Owner: "worker-a"}); !errors.Is(err, runtimestorage.ErrIllegalTransition) {
 		t.Fatalf("illegal transition = %v", err)
 	}
 }

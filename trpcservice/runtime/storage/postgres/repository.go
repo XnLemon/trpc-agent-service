@@ -41,6 +41,9 @@ func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, s
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
 		return runtimestorage.Session{}, err
 	}
+	if state == nil {
+		state = map[string]any{}
+	}
 	encoded, err := pgstorage.EncodeJSON(state)
 	if err != nil {
 		return runtimestorage.Session{}, runtimestorage.ErrInvalid
@@ -63,6 +66,9 @@ func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID stri
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
 		return runtimestorage.Session{}, err
+	}
+	if state == nil {
+		state = map[string]any{}
 	}
 	encoded, err := pgstorage.EncodeJSON(state)
 	if err != nil {
@@ -112,12 +118,28 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 	}
 	err = tx.QueryRowContext(ctx, "INSERT INTO public.message_event (tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status) VALUES ($1,$2,$3,$4,$5,$6,$7,'received') RETURNING tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,fencing_token,lease_owner,lease_expires_at,reply_id,segment_count,created_at,updated_at", input.TenantID, input.EventID, input.SessionID, input.BindingID, input.ExternalMessageID, input.IdempotencyKey, version).Scan(eventArgs(&existing)...)
 	if err != nil {
-		return runtimestorage.MessageEvent{}, false, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		mapped := pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		if errors.Is(mapped, runtimestorage.ErrDuplicate) {
+			pgstorage.Rollback(tx)
+			if duplicate, lookupErr := s.lookupMessageByExternal(ctx, input.TenantID, input.BindingID, input.ExternalMessageID); lookupErr == nil {
+				return duplicate, true, nil
+			}
+		}
+		return runtimestorage.MessageEvent{}, false, mapped
 	}
 	if err := pgstorage.Commit(ctx, tx); err != nil {
 		return runtimestorage.MessageEvent{}, false, err
 	}
 	return cloneEvent(existing), false, nil
+}
+
+func (s *Store) lookupMessageByExternal(ctx context.Context, tenantID, bindingID, externalID string) (runtimestorage.MessageEvent, error) {
+	var value runtimestorage.MessageEvent
+	err := s.db.QueryRowContext(ctx, "SELECT tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,fencing_token,lease_owner,lease_expires_at,reply_id,segment_count,created_at,updated_at FROM public.message_event WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3", tenantID, bindingID, externalID).Scan(eventArgs(&value)...)
+	if err != nil {
+		return runtimestorage.MessageEvent{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	return cloneEvent(value), nil
 }
 
 func (s *Store) GetMessage(ctx context.Context, tenantID, eventID string) (runtimestorage.MessageEvent, error) {
@@ -175,8 +197,11 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
-	if runtimestorage.ValidateTenant(transition.TenantID) != nil || transition.ReplyID == "" || transition.Owner == "" || !runtimestorage.ValidateTransition(transition.From, transition.To) {
+	if runtimestorage.ValidateTenant(transition.TenantID) != nil || transition.ReplyID == "" || transition.Owner == "" {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
+	}
+	if !runtimestorage.ValidateTransition(transition.From, transition.To) {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrIllegalTransition
 	}
 	leaseSeconds := int64(0)
 	if transition.LeaseDuration > 0 {
@@ -186,7 +211,7 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 		}
 	}
 	var value runtimestorage.ReplyOutbox
-	err := s.db.QueryRowContext(ctx, "UPDATE public.reply_outbox SET status=$5, attempts=attempts+CASE WHEN $5='sending' THEN 1 ELSE 0 END, fencing_token=fencing_token+1, lease_owner=$6, lease_expires_at=CASE WHEN $7>0 THEN now()+($7 * interval '1 second') ELSE NULL END, provider_message_id=COALESCE(NULLIF($8,''),provider_message_id), last_error_class=COALESCE(NULLIF($9,''),last_error_class), updated_at=now() WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3 AND status=$4 AND (lease_owner='' OR lease_owner=$6) AND ($10=0 OR fencing_token=$10) RETURNING tenant_id,reply_id,event_id,segment_index,segment_count,payload,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at", transition.TenantID, transition.ReplyID, transition.SegmentIndex, transition.From, transition.To, transition.Owner, leaseSeconds, transition.ProviderID, transition.ErrorClass, transition.FencingToken).Scan(replyArgs(&value)...)
+	err := s.db.QueryRowContext(ctx, "UPDATE public.reply_outbox SET status=$5, attempts=attempts+CASE WHEN $5='sending' THEN 1 ELSE 0 END, fencing_token=fencing_token+1, lease_owner=$6, lease_expires_at=CASE WHEN $7>0 THEN now()+($7 * interval '1 second') ELSE NULL END, provider_message_id=COALESCE(NULLIF($8,''),provider_message_id), last_error_class=COALESCE(NULLIF($9,''),last_error_class), updated_at=now() WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3 AND status=$4 AND (lease_owner='' OR lease_owner=$6) AND ($10=0 OR fencing_token=$10) AND (status <> 'sending' OR lease_expires_at IS NULL OR lease_expires_at > now()) RETURNING tenant_id,reply_id,event_id,segment_index,segment_count,payload,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at", transition.TenantID, transition.ReplyID, transition.SegmentIndex, transition.From, transition.To, transition.Owner, leaseSeconds, transition.ProviderID, transition.ErrorClass, transition.FencingToken).Scan(replyArgs(&value)...)
 	if err == nil {
 		return cloneReply(value), nil
 	}

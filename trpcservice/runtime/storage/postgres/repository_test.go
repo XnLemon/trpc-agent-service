@@ -39,7 +39,7 @@ func TestCreateSessionMapsDuplicateWithoutDriverDetails(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
-	mock.ExpectQuery("INSERT INTO public.runtime_session").WithArgs("tenant-a", "session-1", driver.Value([]byte("null"))).WillReturnError(errors.New("duplicate key value contains secret connection detail"))
+	mock.ExpectQuery("INSERT INTO public.runtime_session").WithArgs("tenant-a", "session-1", driver.Value([]byte("{}"))).WillReturnError(errors.New("duplicate key value contains secret connection detail"))
 	_, err = runtimepostgres.New(db).CreateSession(context.Background(), "tenant-a", "session-1", nil)
 	if !errors.Is(err, runtimestorage.ErrStorage) {
 		t.Fatalf("error = %v", err)

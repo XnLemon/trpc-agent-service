@@ -13,6 +13,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
@@ -101,10 +102,17 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		}
 		return nil, fmt.Errorf("%w: PostgreSQL control plane is unavailable", ErrInvalidConfig)
 	}
-	sessions := inmemory.NewSessionService()
+	delegateSessions := inmemory.NewSessionService()
 	runtimeStore, err := environmentRuntimeStore(config.runtimeStorage, db)
 	if err != nil {
-		_ = sessions.Close()
+		_ = delegateSessions.Close()
+		_ = db.Close()
+		return nil, err
+	}
+	sessions, err := runtimesessionpostgres.New(config.tenantID, delegateSessions, runtimeStore)
+	if err != nil {
+		_ = delegateSessions.Close()
+		_ = runtimeStore.Close()
 		_ = db.Close()
 		return nil, err
 	}
