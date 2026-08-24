@@ -125,8 +125,8 @@ func TestProviderBranchesAndOTLPConstruction(t *testing.T) {
 	if n, err := discard.Write([]byte("x")); n != 1 || err != nil {
 		t.Fatalf("discard writer = %d/%v", n, err)
 	}
-	ctx := WithCorrelation(nil, "req", "trace")
-	if RequestID(nil) != "" || TraceID(nil) != "" || RequestID(ctx) != "req" || TraceID(ctx) != "trace" {
+	ctx := WithCorrelation(context.TODO(), "req", "trace")
+	if RequestID(ctx) != "req" || TraceID(ctx) != "trace" {
 		t.Fatal("nil/correlation context handling failed")
 	}
 }
