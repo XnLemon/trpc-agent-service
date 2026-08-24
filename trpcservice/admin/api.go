@@ -443,7 +443,16 @@ func normalizeKeys(value any) any {
 	case map[string]any:
 		out := make(map[string]any, len(typed)+1)
 		for key, child := range typed {
-			out[toExported(key)] = normalizeKeys(child)
+			normalizedChild := normalizeKeys(child)
+			exported := toExported(key)
+			out[exported] = normalizedChild
+			if key == "secret_ref" {
+				// Model configuration uses a snake_case JSON tag while the
+				// other control-plane inputs expose the exported Go field.
+				// Keep both spellings at this boundary so every repository
+				// receives the same secret-free reference value.
+				out[key] = normalizedChild
+			}
 		}
 		if _, ok := out["Metadata"]; !ok {
 			metadata := map[string]any{}
@@ -473,7 +482,7 @@ func toExported(key string) string {
 	// Arbitrary map keys (for example provider Options) are data and must keep
 	// their exact spelling.
 	known := map[string]string{
-		"tenant_id": "TenantID", "tenant_key": "TenantKey", "app_id": "AppID", "app_key": "AppKey",
+		"tenant_id": "TenantID", "tenant_key": "TenantKey", "app_id": "AppID", "app_key": "AppKey", "model_profile_id": "ModelProfileID",
 		"profile_id": "ProfileID", "profile_key": "ProfileKey", "binding_id": "BindingID", "display_name": "DisplayName",
 		"description": "Description", "expected_version": "ExpectedVersion",
 		"expected_app_version": "ExpectedAppVersion", "expected_draft_version": "ExpectedDraftVersion",

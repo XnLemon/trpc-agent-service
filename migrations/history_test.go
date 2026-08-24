@@ -125,6 +125,26 @@ func TestMigrationApplyAndVerifyFailures(t *testing.T) {
 			m.ExpectExec(`INSERT INTO public.schema_migrations`).WithArgs(files[0].version, files[0].name, files[0].digest, sqlmock.AnyArg()).WillReturnError(errors.New("record"))
 			m.ExpectExec(`SELECT pg_advisory_unlock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
 		}, ErrMigration},
+		{"digest mismatch", func(m sqlmock.Sqlmock) {
+			files, err := orderedFiles()
+			if err != nil {
+				panic(err)
+			}
+			m.ExpectExec(`SELECT pg_advisory_lock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec(`CREATE TABLE IF NOT EXISTS public.schema_migrations`).WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(sqlmock.NewRows([]string{"version", "sha256"}).AddRow(files[0].version, "wrong"))
+			m.ExpectExec(`SELECT pg_advisory_unlock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+		}, ErrInvalidHistory},
+		{"future history", func(m sqlmock.Sqlmock) {
+			files, err := orderedFiles()
+			if err != nil {
+				panic(err)
+			}
+			m.ExpectExec(`SELECT pg_advisory_lock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec(`CREATE TABLE IF NOT EXISTS public.schema_migrations`).WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(sqlmock.NewRows([]string{"version", "sha256"}).AddRow(files[0].version, files[0].digest).AddRow(9, "future"))
+			m.ExpectExec(`SELECT pg_advisory_unlock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+		}, ErrInvalidHistory},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -151,6 +171,40 @@ func TestMigrationApplyAndVerifyFailures(t *testing.T) {
 	mock.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnError(errors.New("read"))
 	if err := Verify(context.Background(), db); !errors.Is(err, ErrInvalidHistory) {
 		t.Fatalf("Verify error = %v", err)
+	}
+}
+
+func TestMigrationContextAndVerificationMismatchErrors(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(canceled, db); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Apply error = %v", err)
+	}
+	_ = db.Close()
+	files, err := orderedFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rows := range []*sqlmock.Rows{
+		sqlmock.NewRows([]string{"version", "sha256"}).AddRow(files[0].version, files[0].digest),
+		sqlmock.NewRows([]string{"version", "sha256"}).AddRow(files[0].version, files[0].digest).AddRow(files[1].version, "wrong"),
+	} {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		mock.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(rows)
+		if err := Verify(context.Background(), db); !errors.Is(err, ErrInvalidHistory) {
+			t.Fatalf("mismatch Verify error = %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+		_ = db.Close()
 	}
 }
 

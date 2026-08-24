@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -182,6 +183,39 @@ func TestAdminMalformedBodyMapsToBadRequest(t *testing.T) {
 	}
 }
 
+func TestAdminMapsMalformedBodiesAcrossWriteRoutes(t *testing.T) {
+	handler, _ := testHandler(t)
+	created, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "malformed-routes", DisplayName: "Malformed Routes"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.config.Authenticator, err = NewStaticAuthenticator("admin-token", []string{created.TenantID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "/admin/v1/tenants/" + created.TenantID
+	routes := []struct{ method, path string }{
+		{http.MethodPost, base + "/status"}, {http.MethodPost, base + "/apps"},
+		{http.MethodPost, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV/status"},
+		{http.MethodPost, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV/revisions"},
+		{http.MethodPatch, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV/revisions/1"},
+		{http.MethodPost, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV/revisions/1/publish"},
+		{http.MethodPost, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV/rollback"},
+		{http.MethodPost, base + "/models"}, {http.MethodPatch, base + "/models/model_01ARZ3NDEKTSV4RRFFQ69G5FAV"}, {http.MethodPost, base + "/models/model_01ARZ3NDEKTSV4RRFFQ69G5FAV/status"},
+		{http.MethodPost, base + "/backends"}, {http.MethodPatch, base + "/backends/backend_01ARZ3NDEKTSV4RRFFQ69G5FAV"}, {http.MethodPost, base + "/backends/backend_01ARZ3NDEKTSV4RRFFQ69G5FAV/status"},
+		{http.MethodPost, base + "/bindings"}, {http.MethodPatch, base + "/bindings/binding_01ARZ3NDEKTSV4RRFFQ69G5FAV"}, {http.MethodPost, base + "/bindings/binding_01ARZ3NDEKTSV4RRFFQ69G5FAV/status"},
+	}
+	for _, route := range routes {
+		request := httptest.NewRequest(route.method, route.path, strings.NewReader(`{`))
+		request.Header.Set("Authorization", "Bearer admin-token")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Errorf("%s %s status = %d, body=%s", route.method, route.path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
 func TestAdminRejectsMalformedRevisionAndExtraRouteSegments(t *testing.T) {
 	handler, _ := testHandler(t)
 	created, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "route-boundary", DisplayName: "Route Boundary"})
@@ -265,6 +299,67 @@ func TestAdminRouteSurfaceDispatchesEveryControlPlaneOperation(t *testing.T) {
 		if recorder.Code == http.StatusInternalServerError {
 			t.Fatalf("%s %s returned 500: %s", route.method, route.path, recorder.Body.String())
 		}
+	}
+}
+
+func TestAdminHappyPathCoversResourceMutations(t *testing.T) {
+	handler, _ := testHandler(t)
+	root, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "happy", DisplayName: "Happy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := Principal{SubjectID: "admin", TenantScopes: map[string]struct{}{root.TenantID: {}}}
+	request := func(method, body string) *http.Request {
+		return httptest.NewRequest(method, "/admin/v1", strings.NewReader(body))
+	}
+	modelBody := "{\"profile_key\":\"primary\",\"display_name\":\"Primary\",\"reason\":\"create\",\"correlation_id\":\"happy-1\",\"configuration\":{\"provider\":\"openai\",\"model\":\"gpt-4o-mini\",\"secret_ref\":\"env/key\"}}"
+	var decodedModel modelprofile.CreateInput
+	if err := decodeBody(request(http.MethodPost, modelBody), &decodedModel); err != nil || decodedModel.Configuration.SecretRef == "" {
+		t.Fatalf("decoded model input = %+v, normalized=%#v, err=%v", decodedModel, normalizeKeys(map[string]any{"configuration": map[string]any{"secret_ref": "env/key"}}), err)
+	}
+	status, modelValue, err := handler.models(context.Background(), request(http.MethodPost, modelBody), principal, root.TenantID, nil)
+	if err != nil || status != http.StatusCreated {
+		t.Fatalf("model create = %d, %v", status, err)
+	}
+	modelID := modelValue.(map[string]any)["profile"].(*modelprofile.Profile).ProfileID
+	if status, _, err := handler.models(context.Background(), request(http.MethodGet, ""), principal, root.TenantID, []string{modelID}); err != nil || status != http.StatusOK {
+		t.Fatalf("model get = %d, %v", status, err)
+	}
+	backendBody := "{\"profile_key\":\"primary\",\"display_name\":\"Primary\",\"reason\":\"create\",\"correlation_id\":\"happy-2\",\"bindings\":[{\"capability\":\"session\",\"provider\":\"inmemory\"}]}"
+	status, backendValue, err := handler.backends(context.Background(), request(http.MethodPost, backendBody), principal, root.TenantID, nil)
+	if err != nil || status != http.StatusCreated {
+		t.Fatalf("backend create = %d, %v", status, err)
+	}
+	backendID := backendValue.(map[string]any)["profile"].(*backend.Profile).ProfileID
+	if status, _, err := handler.backends(context.Background(), request(http.MethodGet, ""), principal, root.TenantID, []string{backendID}); err != nil || status != http.StatusOK {
+		t.Fatalf("backend get = %d, %v", status, err)
+	}
+	app, err := handler.config.Apps.Create(context.Background(), agent.CreateInput{TenantID: root.TenantID, AppKey: "support", DisplayName: "Support"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	draftBody := "{\"expected_app_version\":1,\"kind\":\"llm\",\"schema_version\":1,\"configuration\":{\"instruction\":\"answer\",\"model_profile_id\":\"mp_01ARZ3NDEKTSV4RRFFQ69G5FAV\"}}"
+	status, draftValue, err := handler.revisions(context.Background(), request(http.MethodPost, draftBody), principal, root.TenantID, app.AppID, nil)
+	if err != nil || status != http.StatusCreated {
+		t.Fatalf("draft create = %d, %v", status, err)
+	}
+	draft := draftValue.(*agent.Revision)
+	updateBody := "{\"expected_app_version\":1,\"expected_draft_version\":1,\"configuration\":{\"instruction\":\"answer updated\",\"model_profile_id\":\"mp_01ARZ3NDEKTSV4RRFFQ69G5FAV\"}}"
+	if status, _, err := handler.revisions(context.Background(), request(http.MethodPatch, updateBody), principal, root.TenantID, app.AppID, []string{strconv.FormatInt(draft.Revision, 10)}); err != nil || status != http.StatusOK {
+		t.Fatalf("draft update = %d, %v", status, err)
+	}
+	publishBody := "{\"expected_app_version\":1,\"expected_draft_version\":2,\"reason\":\"publish\",\"correlation_id\":\"happy-publish\"}"
+	if status, _, err := handler.revisions(context.Background(), request(http.MethodPost, publishBody), principal, root.TenantID, app.AppID, []string{strconv.FormatInt(draft.Revision, 10), "publish"}); err != nil || status != http.StatusOK {
+		t.Fatalf("draft publish = %d, %v", status, err)
+	}
+	bindingBody := "{\"binding_key\":\"primary\",\"channel\":\"wecom\",\"provider_account_id\":\"corp\",\"public_route_key_digest\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"app_id\":\"" + app.AppID + "\",\"secret_ref\":\"secret/corp\",\"reason\":\"create\",\"correlation_id\":\"happy-3\",\"protocol\":{\"wecom\":{\"corp_id\":\"corp\"}}}"
+	status, bindingValue, err := handler.bindings(context.Background(), request(http.MethodPost, bindingBody), principal, root.TenantID, nil)
+	if err != nil || status != http.StatusCreated {
+		t.Fatalf("binding create = %d, %v", status, err)
+	}
+	bindingID := bindingValue.(map[string]any)["binding"].(*channels.Binding).BindingID
+	if status, _, err := handler.bindings(context.Background(), request(http.MethodGet, ""), principal, root.TenantID, []string{bindingID}); err != nil || status != http.StatusOK {
+		t.Fatalf("binding get = %d, %v", status, err)
 	}
 }
 
