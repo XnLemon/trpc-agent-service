@@ -4,7 +4,7 @@ package sessionpostgres
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/base64"
 	"errors"
 	"sync"
 
@@ -42,6 +42,7 @@ func (s *Service) CreateSession(ctx context.Context, key session.Key, state sess
 		return nil, err
 	}
 	if _, err := s.store.CreateSession(ctx, s.tenantID, key.SessionID, stateToAny(created.State)); err != nil && !errors.Is(err, runtimestorage.ErrDuplicate) {
+		_ = s.delegate.DeleteSession(ctx, key)
 		return nil, err
 	}
 	s.setVersion(key.SessionID, 1)
@@ -61,6 +62,9 @@ func (s *Service) GetSession(ctx context.Context, key session.Key, options ...se
 	if err == nil && value != nil {
 		if err := s.delegate.UpdateSessionState(ctx, key, state); err != nil {
 			return nil, err
+		}
+		if refreshed, refreshErr := s.delegate.GetSession(ctx, key, options...); refreshErr == nil && refreshed != nil {
+			value = refreshed
 		}
 		s.setVersion(key.SessionID, persisted.Version)
 		return value, nil
@@ -149,7 +153,6 @@ func validateKey(key session.Key) error {
 	}
 	return nil
 }
-func (s *Service) version(id string) int64 { s.mu.Lock(); defer s.mu.Unlock(); return s.versions[id] }
 func (s *Service) setVersion(id string, version int64) {
 	s.mu.Lock()
 	s.versions[id] = version
@@ -158,17 +161,21 @@ func (s *Service) setVersion(id string, version int64) {
 func stateToAny(value session.StateMap) map[string]any {
 	result := make(map[string]any, len(value))
 	for key, data := range value {
-		result[key] = json.RawMessage(append([]byte(nil), data...))
+		result[key] = append([]byte(nil), data...)
 	}
 	return result
 }
 func anyToState(value map[string]any) session.StateMap {
 	result := make(session.StateMap, len(value))
 	for key, data := range value {
-		if raw, ok := data.(json.RawMessage); ok {
+		if raw, ok := data.([]byte); ok {
 			result[key] = append([]byte(nil), raw...)
-		} else if encoded, err := json.Marshal(data); err == nil {
-			result[key] = encoded
+		} else if encoded, ok := data.(string); ok {
+			if decoded, err := base64.StdEncoding.DecodeString(encoded); err == nil {
+				result[key] = decoded
+			} else {
+				result[key] = []byte(encoded)
+			}
 		}
 	}
 	return result

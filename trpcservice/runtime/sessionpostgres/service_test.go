@@ -3,6 +3,7 @@ package sessionpostgres_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
@@ -12,6 +13,14 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
+
+type failingCreateStore struct {
+	runtimestorage.RuntimeStore
+}
+
+func (failingCreateStore) CreateSession(context.Context, string, string, map[string]any) (runtimestorage.Session, error) {
+	return runtimestorage.Session{}, fmt.Errorf("create unavailable")
+}
 
 func TestServicePersistsSessionStateAndEventsForFixedTenant(t *testing.T) {
 	store := runtimestorageinmemory.New()
@@ -69,5 +78,49 @@ func TestServiceRecoversStateWithFreshDelegate(t *testing.T) {
 	recovered, err := second.GetSession(context.Background(), key)
 	if err != nil || string(recovered.State["answer"]) != "42" {
 		t.Fatalf("recovered = %+v, err=%v", recovered, err)
+	}
+}
+
+func TestServiceRefreshesWarmDelegateFromDurableState(t *testing.T) {
+	store := runtimestorageinmemory.New()
+	first, err := sessionpostgres.New("tenant-a", sessioninmemory.NewSessionService(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessionpostgres.New("tenant-a", sessioninmemory.NewSessionService(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := session.Key{AppName: "app", UserID: "user", SessionID: "warm"}
+	if _, err := first.CreateSession(context.Background(), key, session.StateMap{"value": []byte("old")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.GetSession(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.UpdateSessionState(context.Background(), key, session.StateMap{"value": []byte("new")}); err != nil {
+		t.Fatal(err)
+	}
+	refreshed, err := first.GetSession(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(refreshed.State["value"]) != "new" {
+		t.Fatalf("warm delegate state = %q, want new", refreshed.State["value"])
+	}
+}
+
+func TestServiceCompensatesDelegateWhenDurableCreateFails(t *testing.T) {
+	delegate := sessioninmemory.NewSessionService()
+	service, err := sessionpostgres.New("tenant-a", delegate, failingCreateStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := session.Key{AppName: "app", UserID: "user", SessionID: "rollback"}
+	if _, err := service.CreateSession(context.Background(), key, nil); err == nil {
+		t.Fatal("CreateSession succeeded despite durable failure")
+	}
+	if existing, err := delegate.GetSession(context.Background(), key); err != nil || existing != nil {
+		t.Fatal("delegate session remained after durable failure")
 	}
 }

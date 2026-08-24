@@ -179,7 +179,8 @@ func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segmen
 	if !ok {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrNotFound
 	}
-	if value.Status != runtimestorage.ReplyPending && value.Status != runtimestorage.ReplyRetryable && !(value.Status == runtimestorage.ReplySending && value.LeaseExpiresAt != nil && !value.LeaseExpiresAt.After(time.Now().UTC())) {
+	leaseExpired := value.Status == runtimestorage.ReplySending && value.LeaseExpiresAt != nil && !value.LeaseExpiresAt.After(time.Now().UTC())
+	if value.Status != runtimestorage.ReplyPending && value.Status != runtimestorage.ReplyRetryable && !leaseExpired {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
 	}
 	deadline := time.Now().UTC().Add(leaseDuration)
