@@ -216,6 +216,17 @@ func TestAdminMalformedBodyMapsToBadRequest(t *testing.T) {
 	}
 }
 
+func TestAdminEmptyBodyMapsToBadRequest(t *testing.T) {
+	handler, _ := testHandler(t)
+	request := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants", nil)
+	request.Header.Set("Authorization", "Bearer admin-token")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "\"error\":\"invalid_request\"") {
+		t.Fatalf("empty body status/category = %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestAdminMapsMalformedBodiesAcrossWriteRoutes(t *testing.T) {
 	handler, _ := testHandler(t)
 	created, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "malformed-routes", DisplayName: "Malformed Routes"})
