@@ -220,6 +220,41 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 	`)
 	resetRole(t, ctx, conn)
 
+	setRole(t, ctx, conn, "tenant_admin_writer")
+	var rollbackEventID int64
+	if err := conn.QueryRow(ctx, `
+		SELECT public.control_plane_rollback_agent_app(
+			't_01ARZ3NDEKTSV4RRFFQ69G5FAV',
+			'app_01ARZ3NDEKTSV4RRFFQ69G5FAV',
+			1, 1, 1, 2, clock_timestamp(), repeat('0', 64), 2, 1,
+			'active', 'active', 'admin', 'smoke', 'success', 'rollback-success'
+		)
+	`).Scan(&rollbackEventID); err != nil {
+		t.Fatalf("admin controlled rollback: %v", err)
+	}
+	resetRole(t, ctx, conn)
+
+	var appCurrentRevision, appVersion int64
+	if err := conn.QueryRow(ctx, `
+		SELECT current_revision, version FROM public.agent_app
+		WHERE tenant_id = 't_01ARZ3NDEKTSV4RRFFQ69G5FAV'
+		  AND app_id = 'app_01ARZ3NDEKTSV4RRFFQ69G5FAV'
+	`).Scan(&appCurrentRevision, &appVersion); err != nil {
+		t.Fatalf("read rollback app result: %v", err)
+	}
+	if appCurrentRevision != 1 || appVersion != 2 {
+		t.Fatalf("rollback app result = revision %d version %d, want revision 1 version 2", appCurrentRevision, appVersion)
+	}
+	var eventPreviousRevision, eventCurrentRevision int64
+	if err := conn.QueryRow(ctx, `
+		SELECT previous_revision, current_revision FROM public.agent_app_change_outbox WHERE event_id = $1
+	`, rollbackEventID).Scan(&eventPreviousRevision, &eventCurrentRevision); err != nil {
+		t.Fatalf("read rollback event result: %v", err)
+	}
+	if eventPreviousRevision != 2 || eventCurrentRevision != 1 {
+		t.Fatalf("rollback event result = %d -> %d, want 2 -> 1", eventPreviousRevision, eventCurrentRevision)
+	}
+
 	// The deferred backend binding guard rejects an incomplete profile but
 	// accepts a root and its binding inserted in one transaction.
 	setRole(t, ctx, conn, "migration_owner")
