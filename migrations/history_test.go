@@ -56,7 +56,11 @@ func TestMigrationHelpersAndSQLMockApplyVerify(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	mock.ExpectExec(`SELECT pg_advisory_lock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`CREATE TABLE IF NOT EXISTS public.schema_migrations`).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(sqlmock.NewRows([]string{"version", "sha256"}).AddRow(files[0].version, files[0].digest).AddRow(files[1].version, files[1].digest))
+	mock.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(sqlmock.NewRows([]string{"version", "sha256"}))
+	for _, migration := range files {
+		mock.ExpectExec(`(?s).*`).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`INSERT INTO public.schema_migrations`).WithArgs(migration.version, migration.name, migration.digest, sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	}
 	mock.ExpectExec(`SELECT pg_advisory_unlock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := Apply(context.Background(), db); err != nil {
 		t.Fatalf("Apply error = %v", err)
@@ -102,6 +106,25 @@ func TestMigrationApplyAndVerifyFailures(t *testing.T) {
 			m.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnError(errors.New("read"))
 			m.ExpectExec(`SELECT pg_advisory_unlock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
 		}, ErrInvalidHistory},
+		{"migration execution", func(m sqlmock.Sqlmock) {
+			m.ExpectExec(`SELECT pg_advisory_lock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec(`CREATE TABLE IF NOT EXISTS public.schema_migrations`).WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(sqlmock.NewRows([]string{"version", "sha256"}))
+			m.ExpectExec(`(?s).*`).WillReturnError(errors.New("migration SQL"))
+			m.ExpectExec(`SELECT pg_advisory_unlock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+		}, ErrMigration},
+		{"migration record", func(m sqlmock.Sqlmock) {
+			files, err := orderedFiles()
+			if err != nil {
+				panic(err)
+			}
+			m.ExpectExec(`SELECT pg_advisory_lock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec(`CREATE TABLE IF NOT EXISTS public.schema_migrations`).WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(sqlmock.NewRows([]string{"version", "sha256"}))
+			m.ExpectExec(`(?s).*`).WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectExec(`INSERT INTO public.schema_migrations`).WithArgs(files[0].version, files[0].name, files[0].digest, sqlmock.AnyArg()).WillReturnError(errors.New("record"))
+			m.ExpectExec(`SELECT pg_advisory_unlock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+		}, ErrMigration},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

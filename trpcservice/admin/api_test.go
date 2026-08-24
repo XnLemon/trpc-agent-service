@@ -311,6 +311,53 @@ func TestAdminHandlerRejectsInvalidConfigurationAndPaths(t *testing.T) {
 	}
 }
 
+func TestAdminRejectsUnsupportedMethodsAndRouteShapes(t *testing.T) {
+	handler, _ := testHandler(t)
+	created, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "method-test", DisplayName: "Method Test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.config.Authenticator, err = NewStaticAuthenticator("admin-token", []string{created.TenantID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "/admin/v1/tenants/" + created.TenantID
+	cases := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/admin/v1/tenants"},
+		{http.MethodDelete, base},
+		{http.MethodGet, base + "/status"},
+		{http.MethodGet, base + "/status/extra"},
+		{http.MethodGet, base + "/apps"},
+		{http.MethodDelete, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV"},
+		{http.MethodGet, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV/status"},
+		{http.MethodGet, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV/revisions"},
+		{http.MethodGet, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV/revisions/1"},
+		{http.MethodGet, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV/revisions/1/publish"},
+		{http.MethodGet, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV/rollback"},
+		{http.MethodGet, base + "/models"},
+		{http.MethodDelete, base + "/models/model_01ARZ3NDEKTSV4RRFFQ69G5FAV"},
+		{http.MethodGet, base + "/models/model_01ARZ3NDEKTSV4RRFFQ69G5FAV/status"},
+		{http.MethodGet, base + "/backends"},
+		{http.MethodDelete, base + "/backends/backend_01ARZ3NDEKTSV4RRFFQ69G5FAV"},
+		{http.MethodGet, base + "/backends/backend_01ARZ3NDEKTSV4RRFFQ69G5FAV/status"},
+		{http.MethodGet, base + "/bindings"},
+		{http.MethodDelete, base + "/bindings/binding_01ARZ3NDEKTSV4RRFFQ69G5FAV"},
+		{http.MethodGet, base + "/bindings/binding_01ARZ3NDEKTSV4RRFFQ69G5FAV/status"},
+	}
+	for _, tc := range cases {
+		request := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{}`))
+		request.Header.Set("Authorization", "Bearer admin-token")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code == http.StatusInternalServerError {
+			t.Errorf("%s %s returned 500: %s", tc.method, tc.path, recorder.Body.String())
+		}
+	}
+}
+
 func TestAdminNormalizationAndBodyBoundaries(t *testing.T) {
 	if err := decodeBody(nil, &struct{}{}); !errors.Is(err, errInvalidRequest) {
 		t.Fatalf("nil request error = %v", err)

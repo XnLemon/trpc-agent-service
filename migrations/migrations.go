@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"embed"
 	"errors"
 	"fmt"
@@ -186,8 +187,15 @@ func execMigration(ctx context.Context, conn *sql.Conn, statement string) error 
 	return conn.Raw(func(driverConn any) error {
 		pgConn, ok := driverConn.(*stdlib.Conn)
 		if !ok {
-			_, err := conn.ExecContext(ctx, statement)
-			return err
+			if execer, ok := driverConn.(driver.ExecerContext); ok {
+				_, err := execer.ExecContext(ctx, statement, nil)
+				return err
+			}
+			if execer, ok := driverConn.(driver.Execer); ok {
+				_, err := execer.Exec(statement, nil)
+				return err
+			}
+			return errors.New("migration driver does not support direct execution")
 		}
 		_, err := pgConn.Conn().Exec(ctx, statement, pgx.QueryExecModeSimpleProtocol)
 		return err
