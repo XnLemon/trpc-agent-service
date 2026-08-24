@@ -142,3 +142,66 @@ func TestServiceCompensatesDelegateWhenDurableCreateFails(t *testing.T) {
 		t.Fatal("delegate session remained after durable failure")
 	}
 }
+
+func TestServiceForwardsUpstreamCapabilities(t *testing.T) {
+	delegate := sessioninmemory.NewSessionService()
+	service, err := sessionpostgres.New("tenant-a", delegate, runtimestorageinmemory.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := session.Key{AppName: "app", UserID: "user", SessionID: "forward"}
+	value, err := service.CreateSession(context.Background(), key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = service.ListSessions(context.Background(), session.UserKey{AppName: "app", UserID: "user"})
+	_ = service.UpdateAppState(context.Background(), "app", session.StateMap{"key": []byte("value")})
+	_ = service.DeleteAppState(context.Background(), "app", "key")
+	_, _ = service.ListAppStates(context.Background(), "app")
+	_ = service.UpdateUserState(context.Background(), session.UserKey{AppName: "app", UserID: "user"}, session.StateMap{"key": []byte("value")})
+	_, _ = service.ListUserStates(context.Background(), session.UserKey{AppName: "app", UserID: "user"})
+	_ = service.DeleteUserState(context.Background(), session.UserKey{AppName: "app", UserID: "user"}, "key")
+	_ = service.CreateSessionSummary(context.Background(), value, "", false)
+	_ = service.EnqueueSummaryJob(context.Background(), value, "", false)
+	_, _ = service.GetSessionSummaryText(context.Background(), value)
+	_ = service.AppendEvent(context.Background(), value, &trpcevent.Event{ID: "forward-event"})
+	if err := service.DeleteSession(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceUpdateAndAppendErrorEdges(t *testing.T) {
+	store := runtimestorageinmemory.New()
+	service, err := sessionpostgres.New("tenant-a", sessioninmemory.NewSessionService(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.UpdateSessionState(context.Background(), session.Key{AppName: "app", UserID: "user", SessionID: "missing"}, nil); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing update = %v", err)
+	}
+	if err := service.AppendEvent(context.Background(), nil, nil); !errors.Is(err, session.ErrNilSession) {
+		t.Fatalf("nil append = %v", err)
+	}
+	if _, err := service.GetSession(context.Background(), session.Key{UserID: "user", SessionID: "id"}); !errors.Is(err, session.ErrAppNameRequired) {
+		t.Fatalf("invalid app = %v", err)
+	}
+	if _, err := service.GetSession(context.Background(), session.Key{AppName: "app", SessionID: "id"}); !errors.Is(err, session.ErrUserIDRequired) {
+		t.Fatalf("invalid user = %v", err)
+	}
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "delegate-missing", map[string]any{"number": 1}); err != nil {
+		t.Fatal(err)
+	}
+	if value, err := service.GetSession(context.Background(), session.Key{AppName: "app", UserID: "user", SessionID: "delegate-missing"}); err != nil || string(value.State["number"]) != "1" {
+		t.Fatalf("numeric durable state = %+v, err=%v", value, err)
+	}
+	service2, err := sessionpostgres.New("tenant-a", sessioninmemory.NewSessionService(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service2.UpdateSessionState(context.Background(), session.Key{AppName: "app", UserID: "user", SessionID: "delegate-missing"}, session.StateMap{"value": []byte("new")}); err == nil {
+		t.Fatal("delegate update unexpectedly succeeded")
+	}
+}

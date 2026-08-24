@@ -341,6 +341,23 @@ func TestEnvironmentDependencyErrorBoundaries(t *testing.T) {
 	}
 }
 
+func TestEnvironmentRuntimeStoreSelection(t *testing.T) {
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if store, err := environmentRuntimeStore("inmemory", db); err != nil || store == nil {
+		t.Fatalf("inmemory runtime store = %v, %v", store, err)
+	}
+	if store, err := environmentRuntimeStore("postgres", db); err != nil || store == nil {
+		t.Fatalf("postgres runtime store = %v, %v", store, err)
+	}
+	if _, err := environmentRuntimeStore("unknown", db); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("unknown runtime store = %v", err)
+	}
+}
+
 func TestNewFromEnvironmentBuildsRealGraphWhenDatabaseOpens(t *testing.T) {
 	t.Setenv(envPostgresDSN, "postgres://configured")
 	t.Setenv(envAPIToken, "api-token")

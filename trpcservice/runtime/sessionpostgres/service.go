@@ -5,6 +5,7 @@ package sessionpostgres
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"sync"
 
@@ -187,6 +188,8 @@ func anyToState(value map[string]any) session.StateMap {
 			} else {
 				result[key] = []byte(encoded)
 			}
+		} else if encoded, err := json.Marshal(data); err == nil {
+			result[key] = encoded
 		}
 	}
 	return result

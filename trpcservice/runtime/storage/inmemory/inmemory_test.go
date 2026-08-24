@@ -112,3 +112,64 @@ func TestStoreClaimReplyFencesExpiredWorker(t *testing.T) {
 		t.Fatalf("stale transition = %v", err)
 	}
 }
+
+func TestStoreMessageReplyReadsAndValidationEdges(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.GetMessage(context.Background(), "tenant-a", "missing"); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing message = %v", err)
+	}
+	if _, err := store.GetReply(context.Background(), "tenant-a", "missing", 0); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing reply = %v", err)
+	}
+	if _, err := store.GetMessage(context.Background(), "", "event"); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid message = %v", err)
+	}
+	if _, err := store.GetReply(context.Background(), "tenant-a", "reply", -1); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid reply = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.GetMessage(canceled, "tenant-a", "event"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled message = %v", err)
+	}
+	if _, err := store.GetReply(canceled, "tenant-a", "reply", 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled reply = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStoreCreateAndTransitionValidationEdges(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "encode-error", map[string]any{"bad": make(chan int)}); err != nil {
+		t.Fatalf("in-memory encode fallback = %v", err)
+	}
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "", nil); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid session = %v", err)
+	}
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 1, SegmentCount: 1}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid segment = %v", err)
+	}
+	if _, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply", Owner: "worker", From: runtimestorage.ReplyPending, To: runtimestorage.ReplySent}); !errors.Is(err, runtimestorage.ErrIllegalTransition) {
+		t.Fatalf("illegal transition = %v", err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session"}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid message = %v", err)
+	}
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 1, Status: runtimestorage.ReplySent}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid reply status = %v", err)
+	}
+	if _, err := store.ClaimReply(context.Background(), "tenant-a", "reply", 0, "", time.Second); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid claim owner = %v", err)
+	}
+	if _, err := store.TransitionReply(nil, runtimestorage.ReplyTransition{}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("nil transition context = %v", err)
+	}
+	if _, err := store.GetSession(nil, "tenant-a", "session"); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("nil session context = %v", err)
+	}
+	if _, err := store.UpdateSessionState(context.Background(), "tenant-a", "encode-error", 1, map[string]any{"bad": make(chan int)}); err != nil {
+		t.Fatalf("in-memory update clone fallback = %v", err)
+	}
+}
