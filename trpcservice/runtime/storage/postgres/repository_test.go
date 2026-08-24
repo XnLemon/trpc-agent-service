@@ -78,6 +78,47 @@ func TestMethodsRespectCanceledContextBeforeDatabaseCall(t *testing.T) {
 	}
 }
 
+func TestRuntimeStoreMethodsRespectCanceledContext(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := runtimepostgres.New(db)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.CreateSession(ctx, "tenant-a", "session", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("CreateSession = %v", err)
+	}
+	if _, err := store.UpdateSessionState(ctx, "tenant-a", "session", 1, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("UpdateSessionState = %v", err)
+	}
+	if err := store.DeleteSession(ctx, "tenant-a", "session"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("DeleteSession = %v", err)
+	}
+	if _, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session", BindingID: "binding", ExternalMessageID: "external", EventID: "event"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RecordMessage = %v", err)
+	}
+	if _, err := store.GetMessage(ctx, "tenant-a", "event"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetMessage = %v", err)
+	}
+	if _, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentCount: 1}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("EnqueueReply = %v", err)
+	}
+	if _, err := store.GetReply(ctx, "tenant-a", "reply", 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetReply = %v", err)
+	}
+	if _, err := store.ClaimReply(ctx, "tenant-a", "reply", 0, "worker", time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ClaimReply = %v", err)
+	}
+	if _, err := store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply", Owner: "worker", From: runtimestorage.ReplyPending, To: runtimestorage.ReplySending}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("TransitionReply = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimeStoreCoversMessageAndReplyLifecycle(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -158,6 +199,26 @@ func TestRuntimeStoreDeleteSessionErrors(t *testing.T) {
 	mock.ExpectExec("DELETE FROM public.runtime_session").WithArgs("tenant-a", "result-error").WillReturnResult(sqlmock.NewErrorResult(errors.New("rows failed")))
 	if err := store.DeleteSession(context.Background(), "tenant-a", "result-error"); !errors.Is(err, runtimestorage.ErrStorage) {
 		t.Fatalf("delete rows error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeStoreDeleteSessionValidationAndCanceledContext(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := runtimepostgres.New(db)
+	if err := store.DeleteSession(context.Background(), "tenant-a", ""); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid session delete = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := store.DeleteSession(canceled, "tenant-a", "session"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled delete = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

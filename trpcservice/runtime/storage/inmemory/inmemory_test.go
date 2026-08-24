@@ -129,6 +129,66 @@ func TestStoreDeleteSessionRemovesAssociatedRuntimeData(t *testing.T) {
 	}
 }
 
+func TestStoreDeleteSessionValidationAndMissingBranches(t *testing.T) {
+	store := inmemory.New()
+	if err := store.DeleteSession(context.Background(), "", "session"); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid delete = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := store.DeleteSession(canceled, "tenant-a", "session"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled delete = %v", err)
+	}
+	if err := store.DeleteSession(context.Background(), "tenant-a", "missing"); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing delete = %v", err)
+	}
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session", BindingID: "binding", ExternalMessageID: "external", EventID: "event"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteSession(context.Background(), "tenant-a", "session"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStoreMethodsRespectCanceledContext(t *testing.T) {
+	store := inmemory.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.GetSession(ctx, "tenant-a", "session"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetSession = %v", err)
+	}
+	if _, err := store.CreateSession(ctx, "tenant-a", "session", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("CreateSession = %v", err)
+	}
+	if _, err := store.UpdateSessionState(ctx, "tenant-a", "session", 1, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("UpdateSessionState = %v", err)
+	}
+	if err := store.DeleteSession(ctx, "tenant-a", "session"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("DeleteSession = %v", err)
+	}
+	if _, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session", BindingID: "binding", ExternalMessageID: "external", EventID: "event"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("RecordMessage = %v", err)
+	}
+	if _, err := store.GetMessage(ctx, "tenant-a", "event"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetMessage = %v", err)
+	}
+	if _, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentCount: 1}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("EnqueueReply = %v", err)
+	}
+	if _, err := store.GetReply(ctx, "tenant-a", "reply", 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetReply = %v", err)
+	}
+	if _, err := store.ClaimReply(ctx, "tenant-a", "reply", 0, "worker", time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ClaimReply = %v", err)
+	}
+	if _, err := store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply", Owner: "worker", From: runtimestorage.ReplyPending, To: runtimestorage.ReplySending}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("TransitionReply = %v", err)
+	}
+}
+
 func TestStoreReplyStateMachineAndFencing(t *testing.T) {
 	store := inmemory.New()
 	reply, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-1", EventID: "event-1", SegmentIndex: 0, SegmentCount: 1, Payload: "hello"})

@@ -22,6 +22,10 @@ func (failingCreateStore) CreateSession(context.Context, string, string, map[str
 	return runtimestorage.Session{}, fmt.Errorf("create unavailable")
 }
 
+func (failingCreateStore) DeleteSession(context.Context, string, string) error {
+	return fmt.Errorf("delete unavailable")
+}
+
 func TestServicePersistsSessionStateAndEventsForFixedTenant(t *testing.T) {
 	store := runtimestorageinmemory.New()
 	delegate := sessioninmemory.NewSessionService()
@@ -170,6 +174,24 @@ func TestServiceDeleteSessionRemovesDurableStateBeforeRecreate(t *testing.T) {
 	recovered, err := restarted.GetSession(context.Background(), key)
 	if err != nil || string(recovered.State["value"]) != "new" {
 		t.Fatalf("recovered recreated session = %+v err=%v", recovered, err)
+	}
+}
+
+func TestServiceDeleteSessionValidationAndDurableError(t *testing.T) {
+	service, err := sessionpostgres.New("tenant-a", sessioninmemory.NewSessionService(), runtimestorageinmemory.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeleteSession(context.Background(), session.Key{AppName: "app", UserID: "user"}); !errors.Is(err, session.ErrSessionIDRequired) {
+		t.Fatalf("invalid delete = %v", err)
+	}
+	service, err = sessionpostgres.New("tenant-a", sessioninmemory.NewSessionService(), failingCreateStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := session.Key{AppName: "app", UserID: "user", SessionID: "delete-error"}
+	if err := service.DeleteSession(context.Background(), key); err == nil || err.Error() != "delete unavailable" {
+		t.Fatalf("durable delete error = %v", err)
 	}
 }
 
