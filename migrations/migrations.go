@@ -191,10 +191,6 @@ func execMigration(ctx context.Context, conn *sql.Conn, statement string) error 
 				_, err := execer.ExecContext(ctx, statement, nil)
 				return err
 			}
-			if execer, ok := driverConn.(driver.Execer); ok {
-				_, err := execer.Exec(statement, nil)
-				return err
-			}
 			return errors.New("migration driver does not support direct execution")
 		}
 		_, err := pgConn.Conn().Exec(ctx, statement, pgx.QueryExecModeSimpleProtocol)
