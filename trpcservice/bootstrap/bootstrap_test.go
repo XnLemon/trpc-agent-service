@@ -356,6 +356,9 @@ func TestEnvironmentRuntimeStoreSelection(t *testing.T) {
 	if _, err := environmentRuntimeStore("unknown", db); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("unknown runtime store = %v", err)
 	}
+	if _, err := environmentRuntimeStore("postgres", nil); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("postgres nil db = %v", err)
+	}
 }
 
 func TestNewFromEnvironmentBuildsRealGraphWhenDatabaseOpens(t *testing.T) {

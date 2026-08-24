@@ -148,8 +148,20 @@ func TestStoreCreateAndTransitionValidationEdges(t *testing.T) {
 	if _, err := store.CreateSession(context.Background(), "tenant-a", "", nil); !errors.Is(err, runtimestorage.ErrInvalid) {
 		t.Fatalf("invalid session = %v", err)
 	}
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "encode-error", nil); !errors.Is(err, runtimestorage.ErrDuplicate) {
+		t.Fatalf("duplicate session = %v", err)
+	}
+	if _, err := store.UpdateSessionState(context.Background(), "tenant-a", "missing", 1, nil); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing update = %v", err)
+	}
 	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 1, SegmentCount: 1}); !errors.Is(err, runtimestorage.ErrInvalid) {
 		t.Fatalf("invalid segment = %v", err)
+	}
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 1}); err != nil {
+		t.Fatalf("idempotent enqueue = %v", err)
 	}
 	if _, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply", Owner: "worker", From: runtimestorage.ReplyPending, To: runtimestorage.ReplySent}); !errors.Is(err, runtimestorage.ErrIllegalTransition) {
 		t.Fatalf("illegal transition = %v", err)
@@ -171,5 +183,8 @@ func TestStoreCreateAndTransitionValidationEdges(t *testing.T) {
 	}
 	if _, err := store.UpdateSessionState(context.Background(), "tenant-a", "encode-error", 1, map[string]any{"bad": make(chan int)}); err != nil {
 		t.Fatalf("in-memory update clone fallback = %v", err)
+	}
+	if _, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "missing", Owner: "worker", From: runtimestorage.ReplyPending, To: runtimestorage.ReplySending}); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing transition = %v", err)
 	}
 }
