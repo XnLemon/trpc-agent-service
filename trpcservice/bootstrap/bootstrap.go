@@ -26,6 +26,8 @@ import (
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
@@ -58,11 +60,14 @@ type Config struct {
 	Backends backend.Repository
 	Channels channels.CandidateConsumer
 
-	ModelCatalog       *modelprofile.ProviderCatalog
-	BackendCatalog     *backend.ProviderCatalog
-	SecretResolver     modelprofile.SecretResolver
-	ModelFactory       modelprofile.ModelFactory
-	Sessions           session.Service
+	ModelCatalog   *modelprofile.ProviderCatalog
+	BackendCatalog *backend.ProviderCatalog
+	SecretResolver modelprofile.SecretResolver
+	ModelFactory   modelprofile.ModelFactory
+	Sessions       session.Service
+	// RuntimeStore is the tenant-scoped Session/Event/Outbox capability. It is
+	// separate from upstream session.Service while the runtime adapter evolves.
+	RuntimeStore       runtimestorage.RuntimeStore
 	Authenticator      gateway.APIAuthenticator
 	AdminAuthenticator admin.Authenticator
 	AdminHandler       http.Handler
@@ -141,6 +146,9 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	}
 	if config.Tenants == nil || config.Apps == nil || config.Models == nil || config.Backends == nil || config.Channels == nil || config.ModelCatalog == nil || config.BackendCatalog == nil || config.SecretResolver == nil || config.ModelFactory == nil || config.Sessions == nil || config.Authenticator == nil {
 		return nil, ErrInvalidConfig
+	}
+	if config.RuntimeStore == nil {
+		config.RuntimeStore = runtimestorageinmemory.New()
 	}
 	resolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{
 		Tenants: config.Tenants, Apps: config.Apps, Models: config.Models, Backends: config.Backends,
