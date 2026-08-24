@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
@@ -67,6 +68,67 @@ func TestNewBuildsRealGraphAndGatesReadiness(t *testing.T) {
 func TestNewRejectsMissingExplicitDependency(t *testing.T) {
 	if _, err := New(context.Background(), Config{}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("missing dependency error = %v", err)
+	}
+}
+
+func TestBootstrapFailureAndLifecycleBoundaries(t *testing.T) {
+	if _, err := New(nilContextForTest(), Config{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("nil bootstrap context error = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := New(canceled, Config{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled bootstrap context error = %v", err)
+	}
+
+	db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	config, closeDependencies := testConfig(t)
+	t.Cleanup(closeDependencies)
+	config.DB = db
+	mock.ExpectPing().WillReturnError(errors.New("database unavailable"))
+	if _, err := New(context.Background(), config); !errors.Is(err, postgres.ErrStorage) {
+		t.Fatalf("failed bootstrap ping error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	config, closeDependencies = testConfig(t)
+	t.Cleanup(closeDependencies)
+	config.Ping = func(context.Context) error { return errors.New("readiness ping failure") }
+	graph, err := New(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.Ready() {
+		t.Fatal("graph remained ready after a ping failure")
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	closeFailure := errors.New("dependency close failure")
+	config, closeDependencies = testConfig(t)
+	config.CloseDependencies = func() error {
+		closeDependencies()
+		return closeFailure
+	}
+	graph, err = New(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := graph.Close(); !errors.Is(err, closeFailure) {
+		t.Fatalf("close failure = %v", err)
+	}
+	if err := graph.Close(); !errors.Is(err, closeFailure) {
+		t.Fatalf("repeat close failure = %v", err)
+	}
+	if (&Runtime{}).Ready() {
+		t.Fatal("uninitialized runtime reported ready")
 	}
 }
 

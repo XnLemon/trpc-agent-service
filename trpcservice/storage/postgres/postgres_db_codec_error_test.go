@@ -101,7 +101,7 @@ func TestPostgreSQLDBLifecycleErrorBoundaries(t *testing.T) {
 	if got := normalizeDSN("  "); got != "" {
 		t.Fatalf("blank normalized DSN = %q", got)
 	}
-	if got := mapDBError(nil, nil, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid); got != nil {
+	if got := mapDBError(context.TODO(), nil, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid); got != nil {
 		t.Fatalf("nil database error = %v", got)
 	}
 	if got := mapDBError(context.Background(), &pgconn.PgError{Code: "99999"}, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid); !errors.Is(got, ErrStorage) {
