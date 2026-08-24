@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
@@ -370,4 +371,108 @@ func TestPostgreSQLRepositoriesRollbackWhenReadAfterControlledWriteFails(t *test
 		})
 		assertStorageFailure(t, err, mock)
 	})
+}
+
+func TestPostgreSQLControlledCreatesCommitAfterCompleteReadback(t *testing.T) {
+	ctx := context.Background()
+	modelCatalog, backendCatalog := mockCatalogs(t)
+
+	t.Run("tenant", func(t *testing.T) {
+		db, mock := newSQLMock(t)
+		stored := mockTenant(t)
+		mock.ExpectBegin()
+		mock.ExpectExec("control_plane_create_tenant").WithArgs(agentWriterArgs(17)...).WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery("FROM public\\.tenant").WithArgs(sqlmock.AnyArg()).WillReturnRows(mockTenantRows(stored))
+		mock.ExpectCommit()
+		if _, err := NewTenantRepository(db).Create(ctx, tenant.CreateInput{
+			TenantKey: "committed-tenant", DisplayName: "Committed Tenant", Status: tenant.StatusActive,
+			AuditRetentionDays: 90, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("agent", func(t *testing.T) {
+		db, mock := newSQLMock(t)
+		stored := mockApp(t, 1)
+		mock.ExpectBegin()
+		mock.ExpectExec("control_plane_create_agent_app").WithArgs(agentWriterArgs(9)...).WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery("FROM public\\.agent_app").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(mockAgentAppRows(stored))
+		mock.ExpectCommit()
+		if _, err := NewAgentRepository(db).Create(ctx, agent.CreateInput{TenantID: stored.TenantID, AppKey: "committed-app", DisplayName: "Committed App"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("model", func(t *testing.T) {
+		db, mock := newSQLMock(t)
+		stored := mockModel(t, modelCatalog)
+		mock.ExpectBegin()
+		mock.ExpectQuery("control_plane_create_model_profile").WithArgs(agentWriterArgs(21)...).WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(1)))
+		mock.ExpectQuery("FROM public\\.model_profile").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(mockModelRows(t, stored))
+		mock.ExpectQuery("FROM public\\.model_profile_change_outbox").WithArgs(int64(1)).WillReturnRows(mockCreatedChangeEventRows(stored.TenantID, stored.ProfileID, stored.ContentDigest, stored.CreatedAt))
+		mock.ExpectCommit()
+		if _, _, err := NewModelRepository(db, modelCatalog).Create(ctx, model.CreateInput{
+			TenantID: stored.TenantID, ProfileKey: "committed-model", DisplayName: "Committed Model", Status: model.StatusActive,
+			Configuration: stored.Configuration, Metadata: mockModelMetadata(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("backend", func(t *testing.T) {
+		db, mock := newSQLMock(t)
+		stored := mockBackend(t, backendCatalog)
+		mock.ExpectBegin()
+		mock.ExpectQuery("control_plane_create_backend_profile").WithArgs(agentWriterArgs(21)...).WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(1)))
+		mock.ExpectQuery("FROM public\\.backend_profile").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(mockBackendRootRows(stored))
+		mock.ExpectQuery("FROM public\\.backend_profile_binding").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(mockBackendBindingRows(stored))
+		mock.ExpectQuery("FROM public\\.backend_profile_change_outbox").WithArgs(int64(1)).WillReturnRows(mockCreatedChangeEventRows(stored.TenantID, stored.ProfileID, stored.ContentDigest, stored.CreatedAt))
+		mock.ExpectCommit()
+		if _, _, err := NewBackendRepository(db, backendCatalog).Create(ctx, backend.CreateInput{
+			TenantID: stored.TenantID, ProfileKey: "committed-backend", DisplayName: "Committed Backend", Status: backend.StatusActive,
+			Bindings: stored.Bindings, Metadata: mockBackendMetadata(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("channel", func(t *testing.T) {
+		db, mock := newSQLMock(t)
+		stored := mockBinding(t, mockAppID)
+		mock.ExpectBegin()
+		mock.ExpectQuery("control_plane_create_channel_binding").WithArgs(agentWriterArgs(24)...).WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(1)))
+		mock.ExpectQuery("FROM public\\.channel_binding").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(mockBindingRows(stored))
+		mock.ExpectQuery("FROM public\\.channel_binding_change_outbox").WithArgs(int64(1)).WillReturnRows(mockCreatedChangeEventRows(stored.TenantID, stored.BindingID, stored.ConfigDigest, stored.CreatedAt))
+		mock.ExpectCommit()
+		if _, _, err := NewChannelRepository(db).Create(ctx, channels.CreateInput{
+			TenantID: stored.TenantID, BindingKey: "committed-binding", Channel: stored.Channel,
+			ProviderAccountID: stored.ProviderAccountID, PublicRouteKeyDigest: stored.PublicRouteKeyDigest, AppID: stored.AppID,
+			SecretRef: stored.SecretRef, Protocol: stored.Protocol, Status: channels.StatusActive, Metadata: mockChannelMetadata(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func mockCreatedChangeEventRows(tenantID, objectID, digest string, occurredAt time.Time) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{
+		"event_type", "tenant_id", "object_id", "previous_status", "current_status", "previous_digest", "current_digest",
+		"actor_type", "actor_id", "reason", "correlation_id", "previous_version", "next_version", "occurred_at",
+	}).AddRow("created", tenantID, objectID, nil, "active", nil, digest, "test", "mock", "test", "mock", int64(0), int64(1), occurredAt)
 }
