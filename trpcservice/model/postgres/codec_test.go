@@ -20,4 +20,7 @@ func TestModelPostgresConfigurationCodec(t *testing.T) {
 	if err := decodeModelJSON([]byte("not-json"), []byte("{}"), &model.Configuration{}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("malformed configuration error = %v", err)
 	}
+	if err := decodeModelJSON([]byte("{}"), []byte("not-json"), &model.Configuration{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("malformed generation error = %v", err)
+	}
 }

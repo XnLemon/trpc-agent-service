@@ -24,4 +24,7 @@ func TestAgentPostgresRevisionCodec(t *testing.T) {
 	if err := decodeAgentRevisionParts([]byte("not-json"), []byte("{}"), &agent.Revision{}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("malformed generation error = %v", err)
 	}
+	if err := decodeAgentRevisionParts([]byte("{}"), []byte("not-json"), &agent.Revision{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("malformed runtime error = %v", err)
+	}
 }

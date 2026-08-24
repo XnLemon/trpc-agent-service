@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -15,39 +16,53 @@ import (
 )
 
 func main() {
-	output := flag.String("out", "", "output coverage profile")
-	flag.Parse()
-	if *output == "" || flag.NArg() == 0 {
-		fail(errors.New("usage: mergecover -out merged.out profile.out [profile.out ...]"))
-	}
-
-	mode, blocks, order, err := mergeProfiles(flag.Args())
-	if err != nil {
+	if err := run(os.Args[1:]); err != nil {
 		fail(err)
 	}
+}
 
-	file, err := os.Create(*output)
+func run(args []string) error {
+	flags := flag.NewFlagSet("mergecover", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	output := flags.String("out", "", "output coverage profile")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *output == "" || flags.NArg() == 0 {
+		return errors.New("usage: mergecover -out merged.out profile.out [profile.out ...]")
+	}
+
+	mode, blocks, order, err := mergeProfiles(flags.Args())
 	if err != nil {
-		fail(fmt.Errorf("create %s: %w", *output, err))
+		return err
+	}
+	return writeProfile(*output, mode, blocks, order)
+}
+
+func writeProfile(output, mode string, blocks map[string]int, order []string) error {
+	file, err := os.Create(output)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", output, err)
 	}
 	writer := bufio.NewWriter(file)
 	if _, err := fmt.Fprintf(writer, "mode: %s\n", mode); err != nil {
 		_ = file.Close()
-		fail(err)
+		return err
 	}
 	for _, block := range mergedCoverageBlockOrder(order, blocks) {
 		if _, err := fmt.Fprintf(writer, "%s %d\n", block, blocks[block]); err != nil {
 			_ = file.Close()
-			fail(err)
+			return err
 		}
 	}
 	if err := writer.Flush(); err != nil {
 		_ = file.Close()
-		fail(err)
+		return err
 	}
 	if err := file.Close(); err != nil {
-		fail(err)
+		return err
 	}
+	return nil
 }
 
 func mergeProfiles(paths []string) (string, map[string]int, []string, error) {

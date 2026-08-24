@@ -28,26 +28,26 @@ func TestPostgreSQLStoragePrimitives(t *testing.T) {
 		t.Fatalf("nil Ping error = %v", err)
 	}
 
-	db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	pingDB, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { _ = pingDB.Close() })
 	mock.ExpectPing().WillReturnError(errors.New("ping failure"))
-	if err := Ping(context.Background(), db); !errors.Is(err, ErrStorage) {
+	if err := Ping(context.Background(), pingDB); !errors.Is(err, ErrStorage) {
 		t.Fatalf("failed ping error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
 
-	db, mock, err = sqlmock.New()
+	transactionDB, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { _ = transactionDB.Close() })
 	mock.ExpectBegin()
-	tx, err := Begin(context.Background(), db)
+	tx, err := Begin(context.Background(), transactionDB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +88,10 @@ func TestPostgreSQLStorageJSONBoundary(t *testing.T) {
 	if _, err := EncodeJSON(math.NaN()); err == nil {
 		t.Fatal("non-finite number encoded as JSON")
 	}
+	encoded, err := EncodeJSON(map[string]string{"mode": "safe"})
+	if err != nil || string(encoded) != `{"mode":"safe"}` {
+		t.Fatalf("JSON encode = %q, err=%v", encoded, err)
+	}
 	var decoded map[string]string
 	if err := DecodeJSON([]byte(`{"mode":"safe"}`), &decoded); err != nil || decoded["mode"] != "safe" {
 		t.Fatalf("JSON decode = %#v, err=%v", decoded, err)
@@ -96,5 +100,107 @@ func TestPostgreSQLStorageJSONBoundary(t *testing.T) {
 		if err := DecodeJSON(malformed, &decoded); !errors.Is(err, ErrStorage) {
 			t.Fatalf("DecodeJSON(%q) error = %v", malformed, err)
 		}
+	}
+	var defaults struct {
+		Mode string `json:"mode"`
+	}
+	if err := DecodeJSON(nil, &defaults); err != nil || defaults.Mode != "" {
+		t.Fatalf("empty JSON decode = %#v, err=%v", defaults, err)
+	}
+	if err := DecodeJSON([]byte(`{"unknown":"value"}`), &defaults); !errors.Is(err, ErrStorage) {
+		t.Fatalf("unknown JSON field error = %v", err)
+	}
+}
+
+func TestPostgreSQLStorageErrorAndTransactionPaths(t *testing.T) {
+	notFound := errors.New("not found")
+	duplicate := errors.New("duplicate")
+	conflict := errors.New("conflict")
+	invalid := errors.New("invalid")
+	for name, testCase := range map[string]struct {
+		err  error
+		want error
+	}{
+		"canceled":       {err: context.Canceled, want: context.Canceled},
+		"deadline":       {err: context.DeadlineExceeded, want: context.DeadlineExceeded},
+		"foreign key":    {err: &pgconn.PgError{Code: "23503"}, want: invalid},
+		"check":          {err: &pgconn.PgError{Code: "23514"}, want: invalid},
+		"invalid syntax": {err: &pgconn.PgError{Code: "22P02"}, want: invalid},
+		"length":         {err: &pgconn.PgError{Code: "22001"}, want: invalid},
+		"serialization":  {err: &pgconn.PgError{Code: "40001"}, want: conflict},
+		"deadlock":       {err: &pgconn.PgError{Code: "40P01"}, want: conflict},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := MapError(context.Background(), testCase.err, notFound, duplicate, conflict, invalid); !errors.Is(got, testCase.want) {
+				t.Fatalf("MapError(%v) = %v, want %v", testCase.err, got, testCase.want)
+			}
+		})
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := MapError(canceled, errors.New("driver error"), notFound, duplicate, conflict, invalid); !errors.Is(got, context.Canceled) {
+		t.Fatalf("canceled context mapping = %v", got)
+	}
+
+	if _, err := Begin(context.Background(), nil); !errors.Is(err, ErrStorage) {
+		t.Fatalf("nil Begin error = %v", err)
+	}
+	if err := Commit(context.Background(), nil); !errors.Is(err, ErrStorage) {
+		t.Fatalf("nil Commit error = %v", err)
+	}
+	beginDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = beginDB.Close() })
+	if _, err := Begin(canceled, beginDB); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Begin error = %v", err)
+	}
+	mock.ExpectBegin().WillReturnError(errors.New("begin failure"))
+	if _, err := Begin(context.Background(), beginDB); !errors.Is(err, ErrStorage) {
+		t.Fatalf("failed Begin error = %v", err)
+	}
+	mock.ExpectBegin()
+	tx, err := Begin(context.Background(), beginDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectRollback()
+	if err := Commit(canceled, tx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Commit error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	commitDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = commitDB.Close() })
+	mock.ExpectBegin()
+	tx, err = Begin(context.Background(), commitDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectCommit().WillReturnError(errors.New("commit failure"))
+	if err := Commit(context.Background(), tx); !errors.Is(err, ErrStorage) {
+		t.Fatalf("failed Commit error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := AsUTC(time.Date(2026, 8, 24, 1, 2, 3, 0, time.FixedZone("test", 3600))); got.Location() != time.UTC {
+		t.Fatalf("UTC timestamp location = %s", got.Location())
+	}
+	if value := NullableString(sql.NullString{String: "value", Valid: true}); value == nil || *value != "value" {
+		t.Fatalf("nullable string = %v", value)
+	}
+	if got := NullableText(" value "); got != " value " {
+		t.Fatalf("nullable text = %#v", got)
+	}
+	if now := MonotonicNow(time.Time{}); now.IsZero() || now.Location() != time.UTC {
+		t.Fatalf("monotonic current timestamp = %s", now)
 	}
 }
