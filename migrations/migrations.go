@@ -13,6 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // Files is the ordered, immutable migration set owned by bootstrap.
@@ -81,7 +84,7 @@ func Apply(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return ErrMigration
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock(hashtext($1))", lockKey); err != nil {
 		return ErrMigration
 	}
@@ -95,6 +98,9 @@ func Apply(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return err
 	}
+	if err := validateHistory(history, files); err != nil {
+		return err
+	}
 	for _, migration := range files {
 		applied, ok := history[migration.version]
 		if ok {
@@ -106,7 +112,7 @@ func Apply(ctx context.Context, db *sql.DB) error {
 		if migration.version != nextVersion(history) {
 			return fmt.Errorf("%w: version %d is not the next migration", ErrInvalidHistory, migration.version)
 		}
-		if _, err := conn.ExecContext(ctx, migration.sql); err != nil {
+		if err := execMigration(ctx, conn, migration.sql); err != nil {
 			return fmt.Errorf("%w: %s", ErrMigration, migration.name)
 		}
 		if _, err := conn.ExecContext(ctx, "INSERT INTO public.schema_migrations(version, name, sha256, applied_at) VALUES ($1, $2, $3, $4)", migration.version, migration.name, migration.digest, time.Now().UTC()); err != nil {
@@ -130,7 +136,7 @@ func Verify(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return ErrMigration
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	history, err := readHistory(ctx, conn)
 	if err != nil {
 		return err
@@ -160,7 +166,7 @@ func readHistory(ctx context.Context, conn *sql.Conn) (map[int]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: read history", ErrInvalidHistory)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	history := map[int]string{}
 	for rows.Next() {
 		var version int
@@ -176,6 +182,18 @@ func readHistory(ctx context.Context, conn *sql.Conn) (map[int]string, error) {
 	return history, nil
 }
 
+func execMigration(ctx context.Context, conn *sql.Conn, statement string) error {
+	return conn.Raw(func(driverConn any) error {
+		pgConn, ok := driverConn.(*stdlib.Conn)
+		if !ok {
+			_, err := conn.ExecContext(ctx, statement)
+			return err
+		}
+		_, err := pgConn.Conn().Exec(ctx, statement, pgx.QueryExecModeSimpleProtocol)
+		return err
+	})
+}
+
 func nextVersion(history map[int]string) int {
 	max := 0
 	for version := range history {
@@ -184,4 +202,17 @@ func nextVersion(history map[int]string) int {
 		}
 	}
 	return max + 1
+}
+
+func validateHistory(history map[int]string, files []file) error {
+	if len(files) == 0 {
+		return fmt.Errorf("%w: no embedded migrations", ErrInvalidHistory)
+	}
+	maxVersion := files[len(files)-1].version
+	for version := range history {
+		if version < 1 || version > maxVersion {
+			return fmt.Errorf("%w: unknown version %d", ErrInvalidHistory, version)
+		}
+	}
+	return nil
 }

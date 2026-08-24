@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
 	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/agent/postgres"
@@ -57,12 +58,14 @@ type Config struct {
 	Backends backend.Repository
 	Channels channels.CandidateConsumer
 
-	ModelCatalog   *modelprofile.ProviderCatalog
-	BackendCatalog *backend.ProviderCatalog
-	SecretResolver modelprofile.SecretResolver
-	ModelFactory   modelprofile.ModelFactory
-	Sessions       session.Service
-	Authenticator  gateway.APIAuthenticator
+	ModelCatalog       *modelprofile.ProviderCatalog
+	BackendCatalog     *backend.ProviderCatalog
+	SecretResolver     modelprofile.SecretResolver
+	ModelFactory       modelprofile.ModelFactory
+	Sessions           session.Service
+	Authenticator      gateway.APIAuthenticator
+	AdminAuthenticator admin.Authenticator
+	AdminHandler       http.Handler
 
 	Registry          gateway.RunnerRegistryConfig
 	HTTP              gateway.HTTPConfig
@@ -173,8 +176,26 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 		db: config.DB, ownDB: config.OwnDB, readyGate: readyGate,
 		ping: ping, verifyMigrations: config.VerifyMigrations, closeDeps: config.CloseDependencies,
 	}
+	if config.AdminAuthenticator != nil {
+		bindingRepository, ok := config.Channels.(channels.Repository)
+		if !ok {
+			_ = registry.Close()
+			return nil, ErrInvalidConfig
+		}
+		adminHandler, adminErr := admin.NewHandler(admin.Config{
+			Tenants: config.Tenants, Apps: config.Apps, Models: config.Models,
+			Backends: config.Backends, Bindings: bindingRepository,
+			Authenticator: config.AdminAuthenticator,
+			ModelCatalog:  config.ModelCatalog, BackendCatalog: config.BackendCatalog,
+		})
+		if adminErr != nil {
+			_ = registry.Close()
+			return nil, ErrInvalidConfig
+		}
+		config.AdminHandler = adminHandler
+	}
 	httpConfig := gateway.HTTPConfig{
-		Dispatcher: dispatcher, Authenticator: config.Authenticator,
+		Dispatcher: dispatcher, Authenticator: config.Authenticator, Admin: config.AdminHandler,
 		Ready:   runtimeGraph.Ready,
 		Limiter: config.HTTP.Limiter, Idempotency: config.HTTP.Idempotency,
 		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout,
