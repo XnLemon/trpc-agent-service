@@ -166,37 +166,41 @@ func TestPostgreSQLRepositoryDomainAndNotFoundBoundaries(t *testing.T) {
 
 	backendID := mockBackend(t, backendCatalog).ProfileID
 	bindingID := mockBinding(t, mockAppID).BindingID
-	for name, get := range map[string]func(*sql.DB, sqlmock.Sqlmock) error{
-		"tenant": func(db *sql.DB, mock sqlmock.Sqlmock) error {
+	type notFoundCase struct {
+		get  func(*sql.DB, sqlmock.Sqlmock) error
+		want error
+	}
+	for name, testCase := range map[string]notFoundCase{
+		"tenant": {get: func(db *sql.DB, mock sqlmock.Sqlmock) error {
 			mock.ExpectQuery(".*").WithArgs(mockTenantID).WillReturnError(sql.ErrNoRows)
 			_, err := NewTenantRepository(db).Get(ctx, mockTenantID)
 			return err
-		},
-		"agent": func(db *sql.DB, mock sqlmock.Sqlmock) error {
+		}, want: tenant.ErrNotFound},
+		"agent": {get: func(db *sql.DB, mock sqlmock.Sqlmock) error {
 			mock.ExpectQuery(".*").WithArgs(mockTenantID, mockAppID).WillReturnError(sql.ErrNoRows)
 			_, err := NewAgentRepository(db).Get(ctx, mockTenantID, mockAppID)
 			return err
-		},
-		"backend": func(db *sql.DB, mock sqlmock.Sqlmock) error {
+		}, want: agent.ErrNotFound},
+		"backend": {get: func(db *sql.DB, mock sqlmock.Sqlmock) error {
 			mock.ExpectQuery(".*").WithArgs(mockTenantID, backendID).WillReturnError(sql.ErrNoRows)
 			_, err := NewBackendRepository(db, backendCatalog).Get(ctx, mockTenantID, backendID)
 			return err
-		},
-		"channel": func(db *sql.DB, mock sqlmock.Sqlmock) error {
+		}, want: backend.ErrNotFound},
+		"channel": {get: func(db *sql.DB, mock sqlmock.Sqlmock) error {
 			mock.ExpectQuery(".*").WithArgs(mockTenantID, bindingID).WillReturnError(sql.ErrNoRows)
 			_, err := NewChannelRepository(db).Get(ctx, mockTenantID, bindingID)
 			return err
-		},
-		"model": func(db *sql.DB, mock sqlmock.Sqlmock) error {
+		}, want: channels.ErrNotFound},
+		"model": {get: func(db *sql.DB, mock sqlmock.Sqlmock) error {
 			mock.ExpectQuery(".*").WithArgs(mockTenantID, mockModelID).WillReturnError(sql.ErrNoRows)
 			_, err := NewModelRepository(db, modelCatalog).Get(ctx, mockTenantID, mockModelID)
 			return err
-		},
+		}, want: model.ErrNotFound},
 	} {
 		t.Run(name+" not found", func(t *testing.T) {
 			db, mock := newSQLMock(t)
-			if err := get(db, mock); err == nil {
-				t.Fatal("not-found row was accepted")
+			if err := testCase.get(db, mock); !errors.Is(err, testCase.want) {
+				t.Fatalf("not-found error = %v, want %v", err, testCase.want)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatal(err)
