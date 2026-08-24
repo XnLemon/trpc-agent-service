@@ -15,7 +15,7 @@ CREATE TABLE public.runtime_event_history (
 );
 
 REVOKE ALL ON TABLE public.runtime_event_history FROM PUBLIC;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.runtime_event_history TO tenant_app_writer;
+GRANT SELECT, INSERT ON public.runtime_event_history TO tenant_app_writer;
 GRANT ALL PRIVILEGES ON TABLE public.runtime_event_history TO migration_owner;
 GRANT USAGE, SELECT ON SEQUENCE public.runtime_event_history_history_seq_seq TO tenant_app_writer;
 GRANT ALL PRIVILEGES ON SEQUENCE public.runtime_event_history_history_seq_seq TO migration_owner;

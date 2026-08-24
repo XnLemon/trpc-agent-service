@@ -60,4 +60,7 @@ func TestRuntimeEventHistoryMigrationIsTenantScopedAndCascades(t *testing.T) {
 			t.Fatalf("migration missing %q", fragment)
 		}
 	}
+	if strings.Contains(sql, "GRANT SELECT, INSERT, UPDATE, DELETE ON public.runtime_event_history TO tenant_app_writer") {
+		t.Fatal("runtime event history grants mutation to the runtime role")
+	}
 }

@@ -112,7 +112,10 @@ func TestServiceRecoversDurableEventHistoryWithFreshDelegate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := first.AppendEvent(context.Background(), created, &trpcevent.Event{ID: "event-restart-1", Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Message: trpcmodel.NewUserMessage("durable")}}, Done: true}}); err != nil {
+	if err := first.AppendEvent(context.Background(), created, &trpcevent.Event{ID: "event-restart-1", Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Message: trpcmodel.NewUserMessage("durable")}}, Done: true}, StateDelta: map[string][]byte{"answer": []byte("replayed-delta")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.UpdateSessionState(context.Background(), key, session.StateMap{"answer": []byte("durable-state")}); err != nil {
 		t.Fatal(err)
 	}
 	second, err := sessionpostgres.New("tenant-a", sessioninmemory.NewSessionService(), store)
@@ -125,6 +128,9 @@ func TestServiceRecoversDurableEventHistoryWithFreshDelegate(t *testing.T) {
 	}
 	if recovered.GetEventCount() != 1 || recovered.GetEvents()[0].ID != "event-restart-1" {
 		t.Fatalf("recovered events = %+v", recovered.GetEvents())
+	}
+	if string(recovered.State["answer"]) != "durable-state" {
+		t.Fatalf("replay overwrote durable state = %q", recovered.State["answer"])
 	}
 }
 

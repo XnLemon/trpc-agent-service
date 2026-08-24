@@ -74,6 +74,7 @@ func (s *Service) GetSession(ctx context.Context, key session.Key, options ...se
 		if err := s.restoreHistory(ctx, value, key.SessionID, options...); err != nil {
 			return nil, err
 		}
+		value.State = cloneState(state)
 		s.setVersion(key.SessionID, persisted.Version)
 		return value, nil
 	}
@@ -84,6 +85,7 @@ func (s *Service) GetSession(ctx context.Context, key session.Key, options ...se
 	if err := s.restoreHistory(ctx, value, key.SessionID, options...); err != nil {
 		return nil, err
 	}
+	value.State = cloneState(state)
 	s.setVersion(key.SessionID, persisted.Version)
 	return value, err
 }
