@@ -72,23 +72,16 @@ func (s *Service) UpdateSessionState(ctx context.Context, key session.Key, state
 	if err := validateKey(key); err != nil {
 		return err
 	}
-	if err := s.delegate.UpdateSessionState(ctx, key, state); err != nil {
+	persisted, err := s.store.GetSession(ctx, s.tenantID, key.SessionID)
+	if err != nil {
 		return err
 	}
-	version := s.version(key.SessionID)
-	if version == 0 {
-		persisted, err := s.store.GetSession(ctx, s.tenantID, key.SessionID)
-		if err != nil {
-			return err
-		}
-		version = persisted.Version
-	}
-	updated, err := s.store.UpdateSessionState(ctx, s.tenantID, key.SessionID, version, stateToAny(state))
+	updated, err := s.store.UpdateSessionState(ctx, s.tenantID, key.SessionID, persisted.Version, stateToAny(state))
 	if err != nil {
 		return err
 	}
 	s.setVersion(key.SessionID, updated.Version)
-	return nil
+	return s.delegate.UpdateSessionState(ctx, key, state)
 }
 
 func (s *Service) AppendEvent(ctx context.Context, sess *session.Session, value *trpcevent.Event, options ...session.Option) error {
