@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -18,7 +19,7 @@ func TestMergeProfilesPreservesUncoveredBlocksAndHighestCount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mode, blocks, err := mergeProfiles([]string{first, second})
+	mode, blocks, order, err := mergeProfiles([]string{first, second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,6 +34,9 @@ func TestMergeProfilesPreservesUncoveredBlocksAndHighestCount(t *testing.T) {
 	}
 	if got := blocks["example.go:3.1,3.2 2"]; got != 0 {
 		t.Fatalf("second uncovered block count = %d", got)
+	}
+	if got, want := strings.Join(order, ","), "example.go:1.1,1.2 1,example.go:2.1,2.2 1,example.go:3.1,3.2 2"; got != want {
+		t.Fatalf("profile order = %q, want %q", got, want)
 	}
 }
 

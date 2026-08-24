@@ -21,7 +21,7 @@ func main() {
 		fail(errors.New("usage: mergecover -out merged.out profile.out [profile.out ...]"))
 	}
 
-	mode, blocks, err := mergeProfiles(flag.Args())
+	mode, blocks, order, err := mergeProfiles(flag.Args())
 	if err != nil {
 		fail(err)
 	}
@@ -35,14 +35,7 @@ func main() {
 		_ = file.Close()
 		fail(err)
 	}
-	keys := make([]string, 0, len(blocks))
-	for block := range blocks {
-		keys = append(keys, block)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		return coverageBlockLess(keys[i], keys[j])
-	})
-	for _, block := range keys {
+	for _, block := range mergedCoverageBlockOrder(order, blocks) {
 		if _, err := fmt.Fprintf(writer, "%s %d\n", block, blocks[block]); err != nil {
 			_ = file.Close()
 			fail(err)
@@ -57,18 +50,26 @@ func main() {
 	}
 }
 
-func mergeProfiles(paths []string) (string, map[string]int, error) {
+func mergeProfiles(paths []string) (string, map[string]int, []string, error) {
 	mode := ""
 	blocks := make(map[string]int)
+	order := make([]string, 0)
+	seen := make(map[string]struct{})
 	for _, path := range paths {
-		profileMode, profileBlocks, err := readProfile(path)
+		profileMode, profileBlocks, profileOrder, err := readProfile(path)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		if mode == "" {
 			mode = profileMode
 		} else if mode != profileMode {
-			return "", nil, fmt.Errorf("coverage mode mismatch: %q and %q", mode, profileMode)
+			return "", nil, nil, fmt.Errorf("coverage mode mismatch: %q and %q", mode, profileMode)
+		}
+		for _, block := range profileOrder {
+			if _, exists := seen[block]; !exists {
+				order = append(order, block)
+				seen[block] = struct{}{}
+			}
 		}
 		for block, count := range profileBlocks {
 			previous, exists := blocks[block]
@@ -77,40 +78,64 @@ func mergeProfiles(paths []string) (string, map[string]int, error) {
 			}
 		}
 	}
-	return mode, blocks, nil
+	return mode, blocks, order, nil
 }
 
-func readProfile(path string) (string, map[string]int, error) {
+func readProfile(path string) (string, map[string]int, []string, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", nil, fmt.Errorf("open %s: %w", path, err)
+		return "", nil, nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewScanner(file)
 	if !scanner.Scan() {
-		return "", nil, fmt.Errorf("read %s: missing coverage mode", path)
+		return "", nil, nil, fmt.Errorf("read %s: missing coverage mode", path)
 	}
 	modeLine := scanner.Text()
 	if !strings.HasPrefix(modeLine, "mode: ") {
-		return "", nil, fmt.Errorf("read %s: invalid coverage mode %q", path, modeLine)
+		return "", nil, nil, fmt.Errorf("read %s: invalid coverage mode %q", path, modeLine)
 	}
 	blocks := make(map[string]int)
+	order := make([]string, 0)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) != 3 {
-			return "", nil, fmt.Errorf("read %s: invalid coverage block %q", path, scanner.Text())
+			return "", nil, nil, fmt.Errorf("read %s: invalid coverage block %q", path, scanner.Text())
 		}
 		var count int
 		if _, err := fmt.Sscanf(fields[2], "%d", &count); err != nil {
-			return "", nil, fmt.Errorf("read %s: invalid count: %w", path, err)
+			return "", nil, nil, fmt.Errorf("read %s: invalid count: %w", path, err)
 		}
-		blocks[fields[0]+" "+fields[1]] = count
+		block := fields[0] + " " + fields[1]
+		if _, exists := blocks[block]; !exists {
+			order = append(order, block)
+		}
+		blocks[block] = count
 	}
 	if err := scanner.Err(); err != nil {
-		return "", nil, fmt.Errorf("read %s: %w", path, err)
+		return "", nil, nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	return strings.TrimPrefix(modeLine, "mode: "), blocks, nil
+	return strings.TrimPrefix(modeLine, "mode: "), blocks, order, nil
+}
+
+func mergedCoverageBlockOrder(original []string, blocks map[string]int) []string {
+	order := make([]string, 0, len(blocks))
+	seen := make(map[string]struct{}, len(blocks))
+	for _, block := range original {
+		if _, exists := blocks[block]; exists {
+			order = append(order, block)
+			seen[block] = struct{}{}
+		}
+	}
+	remaining := make([]string, 0)
+	for block := range blocks {
+		if _, exists := seen[block]; !exists {
+			remaining = append(remaining, block)
+		}
+	}
+	sort.Slice(remaining, func(i, j int) bool { return coverageBlockLess(remaining[i], remaining[j]) })
+	return append(order, remaining...)
 }
 
 // coverageBlockLess preserves Go's coverage profile ordering. Lexical sorting
