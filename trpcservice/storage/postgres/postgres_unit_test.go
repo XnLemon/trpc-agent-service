@@ -41,6 +41,19 @@ func TestPostgreSQLStoragePrimitives(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	pingSuccessDB, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pingSuccessDB.Close() })
+	mock.ExpectPing()
+	if err := Ping(context.Background(), pingSuccessDB); err != nil {
+		t.Fatalf("successful ping error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
 	transactionDB, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -81,6 +94,20 @@ func TestPostgreSQLStoragePrimitives(t *testing.T) {
 	future := time.Now().UTC().Add(time.Hour)
 	if got := MonotonicNow(future); !got.Equal(future) {
 		t.Fatalf("monotonic timestamp regressed: %s", got)
+	}
+}
+
+func TestPostgreSQLStorageOpenConfiguresPoolBeforeFailedReadiness(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	db, err := Open(ctx, "postgres://127.0.0.1:1/postgres?connect_timeout=1", Options{
+		MaxOpenConns: 2, MaxIdleConns: 1, ConnMaxLifetime: time.Second, ConnMaxIdleTime: time.Second,
+	})
+	if db != nil {
+		_ = db.Close()
+	}
+	if !errors.Is(err, ErrStorage) {
+		t.Fatalf("unreachable database error = %v", err)
 	}
 }
 
@@ -145,6 +172,7 @@ func TestPostgreSQLStorageErrorAndTransactionPaths(t *testing.T) {
 	if _, err := Begin(context.Background(), nil); !errors.Is(err, ErrStorage) {
 		t.Fatalf("nil Begin error = %v", err)
 	}
+	Rollback(nil)
 	if err := Commit(context.Background(), nil); !errors.Is(err, ErrStorage) {
 		t.Fatalf("nil Commit error = %v", err)
 	}

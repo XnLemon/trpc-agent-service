@@ -133,3 +133,20 @@ func TestCoverageBlockLessOrdersSourceLocationsNumerically(t *testing.T) {
 		}
 	}
 }
+
+func TestCoverageBlockParserFallbacksAndWriteFailure(t *testing.T) {
+	for _, block := range []string{"", "missing-separator", "file.go:1.1", "file.go:one.1,2.1 1", "file.go:1.one,2.1 1"} {
+		if _, ok := parseCoverageBlockLocation(block); ok {
+			t.Fatalf("invalid coverage block accepted: %q", block)
+		}
+	}
+	if coverageBlockLess("invalid-left", "invalid-right") != ("invalid-left" < "invalid-right") {
+		t.Fatal("invalid block ordering did not fall back to lexical order")
+	}
+	if !coverageBlockLess("a.go:1.1,1.2 1", "b.go:1.1,1.2 1") || !coverageBlockLess("a.go:1.1,1.2 1", "a.go:2.1,2.2 1") || !coverageBlockLess("a.go:1.1,1.2 1", "a.go:1.2,1.3 1") || !coverageBlockLess("a.go:1.1,1.2 1", "a.go:1.1,2.1 1") || !coverageBlockLess("a.go:1.1,1.2 1", "a.go:1.1,1.3 1") {
+		t.Fatal("valid source locations were not ordered by their numeric position")
+	}
+	if err := writeProfile(t.TempDir(), "set", map[string]int{}, nil); err == nil {
+		t.Fatal("writing a coverage profile to a directory succeeded")
+	}
+}
