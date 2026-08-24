@@ -161,6 +161,11 @@ func TestDecodeBodyPreservesProviderOptionKeys(t *testing.T) {
 	if input.Configuration.Options["x_custom_option"] != "keep" {
 		t.Fatalf("provider option key was normalized: %#v", input.Configuration.Options)
 	}
+	var profile modelprofile.CreateInput
+	profileRequest := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants/t_01ARZ3NDEKTSV4RRFFQ69G5FAV/models", strings.NewReader(`{"profile_key":"support-model","display_name":"Support"}`))
+	if err := decodeBody(profileRequest, &profile); err != nil || profile.ProfileKey != "support-model" {
+		t.Fatalf("profile_key decode = %q, %v", profile.ProfileKey, err)
+	}
 }
 
 func TestAdminMalformedBodyMapsToBadRequest(t *testing.T) {

@@ -474,7 +474,7 @@ func toExported(key string) string {
 	// their exact spelling.
 	known := map[string]string{
 		"tenant_id": "TenantID", "tenant_key": "TenantKey", "app_id": "AppID", "app_key": "AppKey",
-		"profile_id": "ProfileID", "binding_id": "BindingID", "display_name": "DisplayName",
+		"profile_id": "ProfileID", "profile_key": "ProfileKey", "binding_id": "BindingID", "display_name": "DisplayName",
 		"description": "Description", "expected_version": "ExpectedVersion",
 		"expected_app_version": "ExpectedAppVersion", "expected_draft_version": "ExpectedDraftVersion",
 		"next_status": "NextStatus", "target_revision": "TargetRevision", "reason": "Reason",
