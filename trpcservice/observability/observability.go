@@ -288,7 +288,7 @@ func (l slogLogger) Log(ctx context.Context, level Level, msg string, attrs ...A
 	case LevelError:
 		slogLevel = slog.LevelError
 	}
-	l.logger.Log(ctx, slogLevel, msg, args...)
+	l.logger.Log(ctx, slogLevel, RedactString(msg), args...)
 }
 
 var sensitivePattern = regexp.MustCompile(`(?i)(bearer\s+|api[_-]?key\s*[=:]\s*|token\s*[=:]\s*|authorization\s*[=:]\s*|secret(?:[_-]?ref)?\s*[=:]\s*|password\s*[=:]\s*)[^\s,;]+`)

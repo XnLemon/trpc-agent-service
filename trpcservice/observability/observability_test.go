@@ -93,7 +93,7 @@ func TestTelemetryAdaptersEnforceSafeFieldsAndWrapSDKPrimitives(t *testing.T) {
 	meter.Counter("requests").Add(ctx, 1, Attribute{Key: "component", Value: "tool"})
 	meter.Histogram("duration").Record(ctx, 1, Attribute{Key: "operation", Value: OperationToolCall})
 	meter.UpDownCounter("active").Add(ctx, 1, Attribute{Key: "status", Value: "ok"})
-	provider.Logger().Log(ctx, LevelInfo, "operation", Attribute{Key: "message", Value: "user text"}, Attribute{Key: "operation", Value: OperationToolCall})
+	provider.Logger().Log(ctx, LevelInfo, "Authorization: Bearer secret", Attribute{Key: "message", Value: "user text"}, Attribute{Key: "operation", Value: OperationToolCall})
 	if strings.Contains(logs.String(), "user text") || strings.Contains(logs.String(), "secret") {
 		t.Fatalf("unsafe log content: %s", logs.String())
 	}
