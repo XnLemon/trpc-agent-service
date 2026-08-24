@@ -135,7 +135,7 @@ func (h *Handler) tenantRoute(ctx context.Context, r *http.Request, p Principal,
 	}
 	switch parts[1] {
 	case "status":
-		if r.Method != http.MethodPost {
+		if len(parts) != 2 || r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
 		var body struct {
@@ -195,7 +195,7 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 	}
 	switch parts[1] {
 	case "status":
-		if r.Method != http.MethodPost {
+		if len(parts) != 2 || r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
 		var body struct {
@@ -212,7 +212,7 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 	case "revisions":
 		return h.revisions(ctx, r, p, tenantID, appID, parts[2:])
 	case "rollback":
-		if r.Method != http.MethodPost {
+		if len(parts) != 2 || r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
 		var body agent.RollbackInput
@@ -243,7 +243,7 @@ func (h *Handler) revisions(ctx context.Context, r *http.Request, p Principal, t
 	}
 	revision, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("%w: revision must be numeric", errInvalidRequest)
 	}
 	if len(parts) == 1 {
 		if r.Method != http.MethodPatch {
@@ -257,7 +257,7 @@ func (h *Handler) revisions(ctx context.Context, r *http.Request, p Principal, t
 		value, err := h.config.Apps.UpdateDraft(ctx, body)
 		return http.StatusOK, value, err
 	}
-	if parts[1] != "publish" || r.Method != http.MethodPost {
+	if len(parts) != 2 || parts[1] != "publish" || r.Method != http.MethodPost {
 		return 0, nil, errNotFound
 	}
 	var body agent.PublishInput

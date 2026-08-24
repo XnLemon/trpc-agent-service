@@ -182,6 +182,41 @@ func TestAdminMalformedBodyMapsToBadRequest(t *testing.T) {
 	}
 }
 
+func TestAdminRejectsMalformedRevisionAndExtraRouteSegments(t *testing.T) {
+	handler, _ := testHandler(t)
+	created, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "route-boundary", DisplayName: "Route Boundary"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.config.Authenticator, err = NewStaticAuthenticator("admin-token", []string{created.TenantID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "/admin/v1/tenants/" + created.TenantID + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	cases := []string{
+		base + "/status/extra",
+		base + "/rollback/extra",
+		base + "/revisions/not-a-number/publish",
+		base + "/revisions/1/publish/extra",
+	}
+	for _, path := range cases {
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+		request.Header.Set("Authorization", "Bearer admin-token")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound && recorder.Code != http.StatusBadRequest {
+			t.Errorf("%s status = %d, body=%s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+	request := httptest.NewRequest(http.MethodPost, base+"/revisions/not-a-number/publish", strings.NewReader(`{}`))
+	request.Header.Set("Authorization", "Bearer admin-token")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), `"error":"invalid_request"`) {
+		t.Fatalf("malformed revision response = %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestAdminRouteSurfaceDispatchesEveryControlPlaneOperation(t *testing.T) {
 	handler, _ := testHandler(t)
 	created, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "route-test", DisplayName: "Route Test"})

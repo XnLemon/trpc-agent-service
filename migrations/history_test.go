@@ -6,6 +6,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
 
@@ -40,6 +41,102 @@ func TestValidateHistoryRejectsFutureVersions(t *testing.T) {
 	}
 	if err := validateHistory(map[int]string{1: files[0].digest, 2: files[1].digest, 3: "future"}, files); !errors.Is(err, ErrInvalidHistory) {
 		t.Fatalf("future migration history error = %v", err)
+	}
+}
+
+func TestMigrationHelpersAndSQLMockApplyVerify(t *testing.T) {
+	files, err := orderedFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectExec(`SELECT pg_advisory_lock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`CREATE TABLE IF NOT EXISTS public.schema_migrations`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(sqlmock.NewRows([]string{"version", "sha256"}).AddRow(files[0].version, files[0].digest).AddRow(files[1].version, files[1].digest))
+	mock.ExpectExec(`SELECT pg_advisory_unlock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := Apply(context.Background(), db); err != nil {
+		t.Fatalf("Apply error = %v", err)
+	}
+	if got := nextVersion(map[int]string{1: files[0].digest, 2: files[1].digest}); got != 3 {
+		t.Fatalf("nextVersion = %d", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	verifyDB, verifyMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verifyDB.Close()
+	verifyMock.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(sqlmock.NewRows([]string{"version", "sha256"}).AddRow(files[0].version, files[0].digest).AddRow(files[1].version, files[1].digest))
+	if err := Verify(context.Background(), verifyDB); err != nil {
+		t.Fatalf("Verify error = %v", err)
+	}
+	if err := verifyMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMigrationApplyAndVerifyFailures(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(sqlmock.Sqlmock)
+		want  error
+	}{
+		{"lock", func(m sqlmock.Sqlmock) {
+			m.ExpectExec(`SELECT pg_advisory_lock`).WithArgs(lockKey).WillReturnError(errors.New("lock"))
+		}, ErrMigration},
+		{"history table", func(m sqlmock.Sqlmock) {
+			m.ExpectExec(`SELECT pg_advisory_lock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec(`CREATE TABLE IF NOT EXISTS public.schema_migrations`).WillReturnError(errors.New("table"))
+			m.ExpectExec(`SELECT pg_advisory_unlock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+		}, ErrMigration},
+		{"history read", func(m sqlmock.Sqlmock) {
+			m.ExpectExec(`SELECT pg_advisory_lock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec(`CREATE TABLE IF NOT EXISTS public.schema_migrations`).WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnError(errors.New("read"))
+			m.ExpectExec(`SELECT pg_advisory_unlock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+		}, ErrInvalidHistory},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			tc.setup(mock)
+			if err := Apply(context.Background(), db); !errors.Is(err, tc.want) {
+				t.Fatalf("Apply error = %v, want %v", err, tc.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnError(errors.New("read"))
+	if err := Verify(context.Background(), db); !errors.Is(err, ErrInvalidHistory) {
+		t.Fatalf("Verify error = %v", err)
+	}
+}
+
+func TestValidateHistoryRejectsEmptyAndNextVersionHandlesGaps(t *testing.T) {
+	if err := validateHistory(nil, nil); !errors.Is(err, ErrInvalidHistory) {
+		t.Fatalf("empty history error = %v", err)
+	}
+	if got := nextVersion(map[int]string{4: "future", 2: "older"}); got != 5 {
+		t.Fatalf("nextVersion with gap = %d", got)
 	}
 }
 
