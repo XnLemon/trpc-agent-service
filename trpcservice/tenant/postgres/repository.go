@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -64,6 +65,55 @@ func (r *TenantRepository) Create(ctx context.Context, input tenant.CreateInput)
 	return stored, nil
 }
 
+// CreateFirst serializes the bootstrap-only global tenant creation gate with
+// a transaction-scoped advisory lock, so multiple service processes cannot all
+// observe an empty control plane and create competing roots.
+func (r *TenantRepository) CreateFirst(ctx context.Context, input tenant.CreateInput) (*tenant.Tenant, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	value, err := tenant.NewTenant(input)
+	if err != nil {
+		return nil, false, err
+	}
+	if r == nil || r.db == nil {
+		return nil, false, ErrStorage
+	}
+	tx, err := begin(ctx, r.db)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rollback(tx)
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended('trpc-agent-service:first-tenant', 0))"); err != nil {
+		return nil, false, mapDBError(ctx, err, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid)
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM public.tenant").Scan(&count); err != nil {
+		return nil, false, mapDBError(ctx, err, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid)
+	}
+	if count > 0 {
+		return nil, false, nil
+	}
+	if _, err := tx.ExecContext(ctx, "SELECT public.control_plane_create_tenant($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
+		value.TenantID, value.TenantKey, value.DisplayName, string(value.Status),
+		value.RateLimitRPM, value.MaxConcurrentExecutions, value.MonthlyTokenBudget,
+		value.MonthlySpendLimitMinor, nullableText(value.BillingCurrency),
+		value.AuditRetentionDays, string(value.LogMaskingLevel), value.TraceSamplingRate,
+		value.DefaultAgentAppID, value.DefaultBackendProfileID, value.Version,
+		value.CreatedAt, value.UpdatedAt,
+	); err != nil {
+		return nil, false, mapDBError(ctx, err, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid)
+	}
+	stored, err := scanTenant(tx.QueryRowContext(ctx, tenantSelect+" WHERE tenant_id = $1", value.TenantID))
+	if err != nil {
+		return nil, false, mapDBError(ctx, err, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid)
+	}
+	if err := commit(ctx, tx); err != nil {
+		return nil, false, err
+	}
+	return stored, true, nil
+}
+
 func (r *TenantRepository) Get(ctx context.Context, tenantID string) (*tenant.Tenant, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -82,6 +132,19 @@ func (r *TenantRepository) Get(ctx context.Context, tenantID string) (*tenant.Te
 		return nil, mapDBError(ctx, err, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid)
 	}
 	return value, nil
+}
+
+// Count returns the durable tenant count used by the first-tenant admin
+// authorization boundary.
+func (r *TenantRepository) Count(ctx context.Context) (int, error) {
+	if r == nil || r.db == nil {
+		return 0, storagepostgres.ErrStorage
+	}
+	var count int
+	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM public.tenant").Scan(&count); err != nil {
+		return 0, mapDBError(ctx, err, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid)
+	}
+	return count, nil
 }
 
 func (r *TenantRepository) UpdateConfiguration(ctx context.Context, input tenant.UpdateConfigurationInput) (*tenant.Tenant, error) {

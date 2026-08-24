@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/XnLemon/trpc-agent-service/migrations"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -21,6 +23,8 @@ const (
 	envAPIToken          = "TRPC_API_TOKEN"
 	envTenantID          = "TRPC_TENANT_ID"
 	envAppID             = "TRPC_APP_ID"
+	envAdminToken        = "TRPC_ADMIN_TOKEN"
+	envAdminTenants      = "TRPC_ADMIN_TENANTS"
 	envSubjectID         = "TRPC_SUBJECT_ID"
 	envModelAPIKey       = "TRPC_MODEL_API_KEY"
 	envModelProvider     = "TRPC_MODEL_PROVIDER"
@@ -35,7 +39,11 @@ const (
 	defaultSubjectID      = "service"
 )
 
-var openEnvironmentDatabase = postgres.Open
+var (
+	openEnvironmentDatabase     = postgres.Open
+	applyEnvironmentMigrations  = migrations.Apply
+	verifyEnvironmentMigrations = migrations.Verify
+)
 
 // environmentConfig is intentionally private: it contains the one secret
 // handed to the ModelFactory and must not become a serializable application
@@ -43,6 +51,8 @@ var openEnvironmentDatabase = postgres.Open
 type environmentConfig struct {
 	dsn           string
 	apiToken      string
+	adminToken    string
+	adminTenants  []string
 	tenantID      string
 	appID         string
 	subjectID     string
@@ -74,6 +84,10 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: API authenticator configuration is invalid", ErrInvalidConfig)
 	}
+	adminAuthenticator, err := admin.NewStaticAuthenticator(config.adminToken, config.adminTenants)
+	if err != nil {
+		return nil, fmt.Errorf("%w: Admin authenticator configuration is invalid", ErrInvalidConfig)
+	}
 	db, err := openEnvironmentDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
 	if err != nil {
 		if ctx.Err() != nil {
@@ -83,16 +97,19 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	}
 	sessions := inmemory.NewSessionService()
 	graph, err := NewWithDatabase(ctx, db, Config{
-		OwnDB:          true,
-		ModelCatalog:   modelCatalog,
-		BackendCatalog: backendCatalog,
-		SecretResolver: environmentSecretResolver{reference: config.secretRef, value: config.modelAPIKey},
-		ModelFactory:   environmentModelFactory{},
-		Sessions:       sessions,
-		Authenticator:  authenticator,
+		OwnDB:              true,
+		ModelCatalog:       modelCatalog,
+		BackendCatalog:     backendCatalog,
+		SecretResolver:     environmentSecretResolver{reference: config.secretRef, value: config.modelAPIKey},
+		ModelFactory:       environmentModelFactory{},
+		Sessions:           sessions,
+		Authenticator:      authenticator,
+		AdminAuthenticator: adminAuthenticator,
 		Ping: func(pingContext context.Context) error {
 			return postgres.Ping(pingContext, db)
 		},
+		Migrate:          applyEnvironmentMigrations,
+		VerifyMigrations: verifyEnvironmentMigrations,
 		CloseDependencies: func() error {
 			return sessions.Close()
 		},
@@ -124,6 +141,18 @@ func loadEnvironment() (environmentConfig, error) {
 	if config.appID, err = requiredEnvironment(envAppID); err != nil {
 		return environmentConfig{}, err
 	}
+	if config.adminToken, err = requiredEnvironment(envAdminToken); err != nil {
+		return environmentConfig{}, err
+	}
+	adminTenantValue, err := requiredEnvironment(envAdminTenants)
+	if err != nil {
+		return environmentConfig{}, err
+	}
+	adminTenants, err := environmentList(envAdminTenants, adminTenantValue, false)
+	if err != nil {
+		return environmentConfig{}, err
+	}
+	config.adminTenants = adminTenants
 	if config.modelAPIKey, err = requiredEnvironment(envModelAPIKey); err != nil {
 		return environmentConfig{}, err
 	}

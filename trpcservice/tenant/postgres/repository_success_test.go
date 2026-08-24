@@ -202,6 +202,98 @@ func TestTenantRepositoryRequiresStorage(t *testing.T) {
 	}
 }
 
+func TestTenantRepositoryCount(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM public\.tenant`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
+	count, err := NewRepository(db).Count(context.Background())
+	if err != nil || count != 2 {
+		t.Fatalf("Count = %d, %v", count, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTenantRepositoryCreateFirstUsesAtomicAdvisoryGate(t *testing.T) {
+	input := tenant.CreateInput{
+		TenantKey: "create-first", DisplayName: "Create First", Status: tenant.StatusActive,
+		AuditRetentionDays: 90, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1,
+	}
+	stored, err := tenant.NewTenant(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("creates when empty", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		mock.ExpectBegin()
+		mock.ExpectExec("SELECT pg_advisory_xact_lock").WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM public\\.tenant").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+		mock.ExpectExec("SELECT public\\.control_plane_create_tenant").WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery("SELECT .*tenant_id =").WillReturnRows(testTenantRows(stored))
+		mock.ExpectCommit()
+
+		created, allowed, err := NewRepository(db).CreateFirst(context.Background(), input)
+		if err != nil || !allowed || created == nil || created.TenantID != stored.TenantID {
+			t.Fatalf("CreateFirst = tenant=%+v allowed=%v err=%v", created, allowed, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("rejects when already populated", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		mock.ExpectBegin()
+		mock.ExpectExec("SELECT pg_advisory_xact_lock").WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM public\\.tenant").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+		mock.ExpectRollback()
+
+		created, allowed, err := NewRepository(db).CreateFirst(context.Background(), input)
+		if err != nil || allowed || created != nil {
+			t.Fatalf("CreateFirst populated = tenant=%+v allowed=%v err=%v", created, allowed, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestTenantRepositoryCreateFirstRejectsLockAndContextFailures(t *testing.T) {
+	input := tenant.CreateInput{TenantKey: "create-first-errors", DisplayName: "Create First Errors", Status: tenant.StatusActive, AuditRetentionDays: 90, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT pg_advisory_xact_lock").WillReturnError(errors.New("lock unavailable"))
+	mock.ExpectRollback()
+	if _, _, err := NewRepository(db).CreateFirst(context.Background(), input); !errors.Is(err, ErrStorage) {
+		t.Fatalf("lock failure = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := NewRepository(db).CreateFirst(canceled, input); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled CreateFirst = %v", err)
+	}
+}
+
 func testTenantRows(value *tenant.Tenant) *sqlmock.Rows {
 	return sqlmock.NewRows([]string{
 		"tenant_id", "tenant_key", "display_name", "status", "rate_limit_rpm", "max_concurrent_executions", "monthly_token_budget",

@@ -184,6 +184,8 @@ func TestEnvironmentBootstrapRequiresExplicitConfigurationAndBuildsDependencies(
 	t.Setenv(envAPIToken, "api-token")
 	t.Setenv(envTenantID, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")
 	t.Setenv(envAppID, "app_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	t.Setenv(envAdminToken, "admin-token")
+	t.Setenv(envAdminTenants, "*")
 	t.Setenv(envSubjectID, "service")
 	t.Setenv(envModelAPIKey, "test-secret")
 	t.Setenv(envModelProvider, "openai")
@@ -230,7 +232,7 @@ func TestEnvironmentBootstrapRequiresExplicitConfigurationAndBuildsDependencies(
 		t.Fatalf("environment model = %v, err=%v", model, err)
 	}
 
-	for _, name := range []string{envPostgresDSN, envAPIToken, envTenantID, envAppID, envModelAPIKey} {
+	for _, name := range []string{envPostgresDSN, envAPIToken, envTenantID, envAppID, envAdminToken, envAdminTenants, envModelAPIKey} {
 		t.Setenv(name, "")
 		if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
 			t.Fatalf("missing %s error = %v", name, err)
@@ -249,6 +251,8 @@ func TestEnvironmentBootstrapPreservesCancellationAndRejectsBadLists(t *testing.
 	t.Setenv(envAPIToken, "api-token")
 	t.Setenv(envTenantID, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")
 	t.Setenv(envAppID, "app_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	t.Setenv(envAdminToken, "admin-token")
+	t.Setenv(envAdminTenants, "*")
 	t.Setenv(envModelAPIKey, "test-secret")
 	t.Setenv(envModelNames, "gpt-4o-mini,,custom.model")
 	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
@@ -330,6 +334,8 @@ func TestNewFromEnvironmentBuildsRealGraphWhenDatabaseOpens(t *testing.T) {
 	t.Setenv(envAPIToken, "api-token")
 	t.Setenv(envTenantID, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")
 	t.Setenv(envAppID, "app_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	t.Setenv(envAdminToken, "admin-token")
+	t.Setenv(envAdminTenants, "*")
 	t.Setenv(envModelAPIKey, "test-secret")
 
 	registerBootstrapPingDriver.Do(func() {
@@ -340,10 +346,15 @@ func TestNewFromEnvironmentBuildsRealGraphWhenDatabaseOpens(t *testing.T) {
 		t.Fatal(err)
 	}
 	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousVerify := verifyEnvironmentMigrations
 	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) {
 		return db, nil
 	}
+	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
 	defer func() { openEnvironmentDatabase = previousOpen }()
+	defer func() { applyEnvironmentMigrations = previousApply; verifyEnvironmentMigrations = previousVerify }()
 
 	graph, err := NewFromEnvironment(context.Background())
 	if err != nil {

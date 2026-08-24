@@ -73,6 +73,16 @@ func (r *InMemoryRepository) Get(ctx context.Context, tenantID string) (*tenant.
 	return cloneTenant(t), nil
 }
 
+// Count returns the number of persisted tenants for bootstrap's first-tenant
+// authorization boundary.
+func (r *InMemoryRepository) Count(ctx context.Context) (int, error) {
+	if err := r.rLock(ctx); err != nil {
+		return 0, err
+	}
+	defer r.rUnlock()
+	return len(r.byID), nil
+}
+
 func (r *InMemoryRepository) UpdateConfiguration(ctx context.Context, input tenant.UpdateConfigurationInput) (*tenant.Tenant, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err

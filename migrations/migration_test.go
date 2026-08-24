@@ -48,7 +48,7 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 		t.Fatalf("check clean PostgreSQL database: %v", err)
 	}
 	if alreadyMigrated {
-		t.Fatal("migration smoke test requires an empty PostgreSQL database")
+		t.Skip("migration smoke test requires an empty PostgreSQL database")
 	}
 
 	_, sourceFile, _, ok := runtime.Caller(0)

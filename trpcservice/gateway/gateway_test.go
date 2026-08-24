@@ -170,6 +170,37 @@ func TestPlanResolverBuildsFixedPlanFromRepositoryInterfaces(t *testing.T) {
 	}
 }
 
+func TestPlanResolverResolveAuthenticatedAPIRequiresProofAndResolvesPlan(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	resolver, err := NewPlanResolver(PlanResolverConfig{
+		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
+		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticated, err := newAuthenticatedAPI(APIIdentity{TenantID: fixture.tenant.TenantID, AppID: fixture.app.AppID, SubjectID: "restart-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := resolver.ResolveAuthenticatedAPI(context.Background(), authenticated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := plan.CacheKey()
+	if err != nil || key.TenantID != fixture.tenant.TenantID || key.AppID != fixture.app.AppID {
+		t.Fatalf("resolved authenticated plan key = %+v, err=%v", key, err)
+	}
+	if _, err := resolver.ResolveAuthenticatedAPI(context.Background(), AuthenticatedAPI{}); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("unproofed authenticated API result = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := resolver.ResolveAuthenticatedAPI(canceled, authenticated); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled authenticated resolution = %v", err)
+	}
+}
+
 func TestPlanResolverPreservesCancellationAndRedactsDependencyFailures(t *testing.T) {
 	fixture := newGatewayFixture(t)
 	resolver, err := NewPlanResolver(PlanResolverConfig{

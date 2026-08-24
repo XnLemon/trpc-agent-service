@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
 	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/agent/postgres"
@@ -57,18 +58,22 @@ type Config struct {
 	Backends backend.Repository
 	Channels channels.CandidateConsumer
 
-	ModelCatalog   *modelprofile.ProviderCatalog
-	BackendCatalog *backend.ProviderCatalog
-	SecretResolver modelprofile.SecretResolver
-	ModelFactory   modelprofile.ModelFactory
-	Sessions       session.Service
-	Authenticator  gateway.APIAuthenticator
+	ModelCatalog       *modelprofile.ProviderCatalog
+	BackendCatalog     *backend.ProviderCatalog
+	SecretResolver     modelprofile.SecretResolver
+	ModelFactory       modelprofile.ModelFactory
+	Sessions           session.Service
+	Authenticator      gateway.APIAuthenticator
+	AdminAuthenticator admin.Authenticator
+	AdminHandler       http.Handler
 
 	Registry          gateway.RunnerRegistryConfig
 	HTTP              gateway.HTTPConfig
 	DrainTimeout      time.Duration
 	ReadyGate         func() bool
 	Ping              func(context.Context) error
+	Migrate           func(context.Context, *sql.DB) error
+	VerifyMigrations  func(context.Context, *sql.DB) error
 	CloseDependencies func() error
 }
 
@@ -81,14 +86,15 @@ type Runtime struct {
 	Registry   *gateway.RunnerRegistry
 	Dispatcher *gateway.Dispatcher
 
-	db        *sql.DB
-	ownDB     bool
-	readyGate func() bool
-	ping      func(context.Context) error
-	closeDeps func() error
-	closing   atomic.Bool
-	closeOnce sync.Once
-	closeErr  error
+	db               *sql.DB
+	ownDB            bool
+	readyGate        func() bool
+	ping             func(context.Context) error
+	verifyMigrations func(context.Context, *sql.DB) error
+	closeDeps        func() error
+	closing          atomic.Bool
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 // NewWithDatabase is the normal constructor for a real PostgreSQL bootstrap.
@@ -111,6 +117,11 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	if config.DB != nil {
 		if err := config.DB.PingContext(ctx); err != nil {
 			return nil, postgres.ErrStorage
+		}
+		if config.Migrate != nil {
+			if err := config.Migrate(ctx, config.DB); err != nil {
+				return nil, ErrInvalidConfig
+			}
 		}
 		if config.Tenants == nil {
 			config.Tenants = tenantpostgres.NewRepository(config.DB)
@@ -163,10 +174,28 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	runtimeGraph := &Runtime{
 		Resolver: resolver, Registry: registry, Dispatcher: dispatcher,
 		db: config.DB, ownDB: config.OwnDB, readyGate: readyGate,
-		ping: ping, closeDeps: config.CloseDependencies,
+		ping: ping, verifyMigrations: config.VerifyMigrations, closeDeps: config.CloseDependencies,
+	}
+	if config.AdminAuthenticator != nil {
+		bindingRepository, ok := config.Channels.(channels.Repository)
+		if !ok {
+			_ = registry.Close()
+			return nil, ErrInvalidConfig
+		}
+		adminHandler, adminErr := admin.NewHandler(admin.Config{
+			Tenants: config.Tenants, Apps: config.Apps, Models: config.Models,
+			Backends: config.Backends, Bindings: bindingRepository,
+			Authenticator: config.AdminAuthenticator,
+			ModelCatalog:  config.ModelCatalog, BackendCatalog: config.BackendCatalog,
+		})
+		if adminErr != nil {
+			_ = registry.Close()
+			return nil, ErrInvalidConfig
+		}
+		config.AdminHandler = adminHandler
 	}
 	httpConfig := gateway.HTTPConfig{
-		Dispatcher: dispatcher, Authenticator: config.Authenticator,
+		Dispatcher: dispatcher, Authenticator: config.Authenticator, Admin: config.AdminHandler,
 		Ready:   runtimeGraph.Ready,
 		Limiter: config.HTTP.Limiter, Idempotency: config.HTTP.Idempotency,
 		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout,
@@ -189,6 +218,14 @@ func (graph *Runtime) Ready() bool {
 	if graph.ping != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 		err := graph.ping(ctx)
+		cancel()
+		if err != nil {
+			return false
+		}
+	}
+	if graph.verifyMigrations != nil && graph.db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		err := graph.verifyMigrations(ctx, graph.db)
 		cancel()
 		if err != nil {
 			return false
