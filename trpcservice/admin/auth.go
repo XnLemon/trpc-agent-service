@@ -21,8 +21,11 @@ type Principal struct {
 }
 
 func (p Principal) Allows(tenantID string, creating bool) bool {
-	if p.Global {
-		return tenantID != "" || creating
+	// A global scope is intentionally limited to the controlled first-tenant
+	// creation boundary. It never becomes an implicit wildcard for reads or
+	// writes, which keeps every existing resource operation tenant-scoped.
+	if creating {
+		return p.Global
 	}
 	_, ok := p.TenantScopes[tenantID]
 	return ok && tenantID != ""

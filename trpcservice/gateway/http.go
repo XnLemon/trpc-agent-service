@@ -166,7 +166,7 @@ func (handler *HTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 	if request == nil {
 		return
 	}
-	if strings.HasPrefix(request.URL.Path, "/admin/v1") {
+	if request.URL.Path == "/admin/v1" || strings.HasPrefix(request.URL.Path, "/admin/v1/") {
 		if handler.admin == nil {
 			handler.writeError(writer, request, http.StatusNotFound, "not found", "", "")
 			return

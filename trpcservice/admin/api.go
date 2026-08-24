@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -44,7 +45,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if requestID == "" {
 		requestID = uuid.NewString()
 	}
-	if !strings.HasPrefix(r.URL.Path, "/admin/v1") {
+	if r.URL.Path != "/admin/v1" && !strings.HasPrefix(r.URL.Path, "/admin/v1/") {
 		writeError(w, requestID, http.StatusNotFound, "not_found")
 		return
 	}
@@ -76,6 +77,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 var errNotFound = errors.New("admin route not found")
+var errInvalidRequest = errors.New("invalid admin request")
 
 func (h *Handler) tenants(ctx context.Context, r *http.Request, p Principal) (int, any, error) {
 	if r.Method != http.MethodPost || !p.Allows("", true) {
@@ -95,11 +97,21 @@ func (h *Handler) tenantRoute(ctx context.Context, r *http.Request, p Principal,
 		return 0, nil, ErrForbidden
 	}
 	if len(parts) == 1 {
-		if r.Method != http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
+			value, err := h.config.Tenants.Get(ctx, tenantID)
+			return http.StatusOK, value, err
+		case http.MethodPatch:
+			var body tenant.UpdateConfigurationInput
+			if err := decodeBody(r, &body); err != nil {
+				return 0, nil, err
+			}
+			body.TenantID = tenantID
+			value, err := h.config.Tenants.UpdateConfiguration(ctx, body)
+			return http.StatusOK, value, err
+		default:
 			return 0, nil, errNotFound
 		}
-		value, err := h.config.Tenants.Get(ctx, tenantID)
-		return http.StatusOK, value, err
 	}
 	switch parts[1] {
 	case "status":
@@ -145,11 +157,21 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 	}
 	appID := parts[0]
 	if len(parts) == 1 {
-		if r.Method != http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
+			value, err := h.config.Apps.Get(ctx, tenantID, appID)
+			return http.StatusOK, value, err
+		case http.MethodPatch:
+			var body agent.UpdateMetadataInput
+			if err := decodeBody(r, &body); err != nil {
+				return 0, nil, err
+			}
+			body.TenantID, body.AppID = tenantID, appID
+			value, err := h.config.Apps.UpdateMetadata(ctx, body)
+			return http.StatusOK, value, err
+		default:
 			return 0, nil, errNotFound
 		}
-		value, err := h.config.Apps.Get(ctx, tenantID, appID)
-		return http.StatusOK, value, err
 	}
 	switch parts[1] {
 	case "status":
@@ -224,6 +246,11 @@ func (h *Handler) revisions(ctx context.Context, r *http.Request, p Principal, t
 	}
 	body.TenantID, body.AppID, body.Revision, body.TenantActive = tenantID, appID, revision, true
 	body.Metadata.ActorType, body.Metadata.ActorID = "admin", p.SubjectID
+	tenantRoot, tenantErr := h.config.Tenants.Get(ctx, tenantID)
+	if tenantErr != nil {
+		return 0, nil, tenantErr
+	}
+	body.TenantActive = tenantRoot.Status == tenant.StatusActive
 	value, published, event, err := h.config.Apps.Publish(ctx, body)
 	return http.StatusOK, map[string]any{"app": value, "revision": published, "event": event}, err
 }
@@ -367,25 +394,28 @@ func splitPath(path string) []string {
 
 func decodeBody(r *http.Request, dst any) error {
 	if r == nil || r.Body == nil {
-		return errors.New("request body is required")
+		return fmt.Errorf("%w: request body is required", errInvalidRequest)
 	}
 	data, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: read request body", errInvalidRequest)
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return errors.New("request body is required")
+		return fmt.Errorf("%w: request body is required", errInvalidRequest)
 	}
 	var value any
 	if err := json.Unmarshal(data, &value); err != nil {
-		return err
+		return fmt.Errorf("%w: request JSON is invalid", errInvalidRequest)
 	}
 	value = normalizeKeys(value)
 	data, err = json.Marshal(value)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: normalize request JSON", errInvalidRequest)
 	}
-	return json.Unmarshal(data, dst)
+	if err := json.Unmarshal(data, dst); err != nil {
+		return fmt.Errorf("%w: request fields are invalid", errInvalidRequest)
+	}
+	return nil
 }
 
 func normalizeKeys(value any) any {
@@ -400,7 +430,7 @@ func normalizeKeys(value any) any {
 			if reason, ok := out["Reason"]; ok {
 				metadata["Reason"] = reason
 			}
-			if correlation, ok := out["CorrelationId"]; ok {
+			if correlation, ok := out["CorrelationID"]; ok {
 				metadata["CorrelationID"] = correlation
 			}
 			if len(metadata) > 0 {
@@ -419,16 +449,31 @@ func normalizeKeys(value any) any {
 }
 
 func toExported(key string) string {
-	parts := strings.Split(key, "_")
-	var b strings.Builder
-	for _, part := range parts {
-		if part == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(part[:1]))
-		b.WriteString(part[1:])
+	// Only normalize fields that belong to the public Admin wire contract.
+	// Arbitrary map keys (for example provider Options) are data and must keep
+	// their exact spelling.
+	known := map[string]string{
+		"tenant_id": "TenantID", "tenant_key": "TenantKey", "app_id": "AppID", "app_key": "AppKey",
+		"profile_id": "ProfileID", "binding_id": "BindingID", "display_name": "DisplayName",
+		"description": "Description", "expected_version": "ExpectedVersion",
+		"expected_app_version": "ExpectedAppVersion", "expected_draft_version": "ExpectedDraftVersion",
+		"next_status": "NextStatus", "target_revision": "TargetRevision", "reason": "Reason",
+		"correlation_id": "CorrelationID", "schema_version": "SchemaVersion", "secret_ref": "SecretRef",
+		"provider_account_id": "ProviderAccountID", "public_route_key_digest": "PublicRouteKeyDigest",
+		"audit_retention_days": "AuditRetentionDays", "log_masking_level": "LogMaskingLevel",
+		"trace_sampling_rate": "TraceSamplingRate", "rate_limit_rpm": "RateLimitRPM",
+		"max_concurrent_executions": "MaxConcurrentExecutions", "monthly_token_budget": "MonthlyTokenBudget",
+		"monthly_spend_limit_minor": "MonthlySpendLimitMinor", "billing_currency": "BillingCurrency",
+		"default_agent_app_id": "DefaultAgentAppID", "default_backend_profile_id": "DefaultBackendProfileID",
+		"configuration": "Configuration", "provider": "Provider", "model": "Model",
+		"endpoint": "Endpoint", "options": "Options", "generation": "Generation",
+		"temperature": "Temperature", "top_p": "TopP", "max_output_tokens": "MaxOutputTokens",
+		"binding_key": "BindingKey", "channel": "Channel", "protocol": "Protocol",
 	}
-	return b.String()
+	if exported, ok := known[key]; ok {
+		return exported
+	}
+	return key
 }
 
 func writeJSON(w http.ResponseWriter, requestID string, status int, value any) {
@@ -455,6 +500,9 @@ func mapError(err error) (int, string) {
 	if err == nil {
 		return http.StatusInternalServerError, "internal_error"
 	}
+	if errors.Is(err, errInvalidRequest) {
+		return http.StatusBadRequest, "invalid_request"
+	}
 	if errors.Is(err, ErrUnauthenticated) {
 		return http.StatusUnauthorized, "unauthorized"
 	}
@@ -471,6 +519,9 @@ func mapError(err error) (int, string) {
 		return http.StatusServiceUnavailable, "storage_unavailable"
 	}
 	if errors.Is(err, tenant.ErrInvalid) || errors.Is(err, agent.ErrInvalid) || errors.Is(err, modelprofile.ErrInvalid) || errors.Is(err, backend.ErrInvalid) || errors.Is(err, channels.ErrInvalid) {
+		return http.StatusBadRequest, "invalid_request"
+	}
+	if errors.Is(err, tenant.ErrInvalidTransition) || errors.Is(err, agent.ErrInvalidTransition) || errors.Is(err, modelprofile.ErrInvalidTransition) || errors.Is(err, backend.ErrInvalidTransition) || errors.Is(err, channels.ErrInvalidTransition) || errors.Is(err, tenant.ErrDisabled) || errors.Is(err, agent.ErrDisabled) || errors.Is(err, modelprofile.ErrDisabled) || errors.Is(err, backend.ErrDisabled) || errors.Is(err, channels.ErrDisabled) || errors.Is(err, agent.ErrImmutableRevision) {
 		return http.StatusBadRequest, "invalid_request"
 	}
 	return http.StatusInternalServerError, "internal_error"
