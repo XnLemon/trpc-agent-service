@@ -253,10 +253,6 @@ func scanModelEvent(row rowScanner) (model.ChangeEvent, error) {
 	return event, nil
 }
 
-func (r *ModelRepository) readModelEvent(ctx context.Context, eventID int64) (model.ChangeEvent, error) {
-	return scanModelEvent(r.db.QueryRowContext(ctx, modelEventSelect+` WHERE event_id = $1`, eventID))
-}
-
 func monotonicNow(previous time.Time) time.Time {
 	now := time.Now().UTC()
 	if now.Before(previous) {
