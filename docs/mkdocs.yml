@@ -37,6 +37,7 @@ nav:
   - Backend Profile 模型: backend-profile.md
   - Model Profile 与 Runner 链路: model-profile.md
   - PostgreSQL 控制面与启动装配: postgresql-control-plane.md
+  - "Issue #41：可重启控制面与 Admin API": issue-41-runtime-bootstrap-admin-api.md
   - 运维方案: ops.md
 
 markdown_extensions:

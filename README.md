@@ -219,6 +219,7 @@
 - [x] 列出至少 8 个生产风险及对应缓解措施
 - [x] 持续标注可直接复用的 tRPC-Agent-Go 能力与平台新增模块边界
 - [x] 完成 Issue #37 PostgreSQL 控制面 migration、Repository、bootstrap 和 readiness 的文档契约
+- [x] 完成 Issue #41 Bootstrap、readiness、Admin API 和重启恢复的文档先行契约
 
 > Issue #24 只完成架构、数据模型和运维文档；当前仓库另外交付了 Issue #28 的 Gateway/API
 > 阶段能力和 Issue #31 的 Telegram long polling 文本 Adapter。完整 WeCom/Telegram webhook、

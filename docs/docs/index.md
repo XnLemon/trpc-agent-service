@@ -26,6 +26,8 @@
   Issue #33 的真实 Bot API 传输冒烟测试和手动 CI 运行说明。
 - [PostgreSQL 控制面与启动装配](postgresql-control-plane.md)：Issue #37 的实现契约，
   复用既有表设计并统一 migration、Repository 事务边界、bootstrap、readiness 和 shutdown。
+- [Issue #41：可重启控制面与 Admin API](issue-41-runtime-bootstrap-admin-api.md)：文档先行契约，
+  固定真实 Bootstrap、readiness、最小 Admin API、重启恢复和验收矩阵。
 
 ## 快速开始
 
@@ -53,6 +55,8 @@ cd trpc-agent-service
   Dispatch、健康检查、优雅停机和普通/流式 API
 - [PostgreSQL 控制面与启动装配](postgresql-control-plane.md) — 六类控制面表的 migration 顺序、
   SQL Repository 事务和真实运行时启动装配
+- [Issue #41：可重启控制面与 Admin API](issue-41-runtime-bootstrap-admin-api.md) — Bootstrap/readiness、
+  管理 API、重启恢复和测试矩阵
 - [运维方案](ops.md) — 发布灰度、监控审计、故障恢复、容量模型和生产风险清单
 
 ## CI
