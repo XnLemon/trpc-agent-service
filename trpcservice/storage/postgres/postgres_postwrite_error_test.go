@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -468,6 +469,123 @@ func TestPostgreSQLControlledCreatesCommitAfterCompleteReadback(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestPostgreSQLControlledCreateTransactionFailureBoundaries(t *testing.T) {
+	ctx := context.Background()
+	modelCatalog, backendCatalog := mockCatalogs(t)
+	tenantValue := mockTenant(t)
+	appValue := mockApp(t, 1)
+	modelValue := mockModel(t, modelCatalog)
+	backendValue := mockBackend(t, backendCatalog)
+	channelValue := mockBinding(t, mockAppID)
+	writerFailure := errors.New("controlled writer failure")
+	commitFailure := errors.New("commit failure")
+
+	type createCase struct {
+		name                string
+		create              func(*sql.DB) error
+		expectWriterFailure func(sqlmock.Sqlmock)
+		expectCommitFailure func(sqlmock.Sqlmock)
+	}
+	cases := []createCase{
+		{
+			name: "tenant",
+			create: func(db *sql.DB) error {
+				_, err := NewTenantRepository(db).Create(ctx, tenant.CreateInput{TenantKey: "transaction-tenant", DisplayName: "Transaction Tenant", Status: tenant.StatusActive, AuditRetentionDays: 90, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1})
+				return err
+			},
+			expectWriterFailure: func(mock sqlmock.Sqlmock) {
+				mock.ExpectExec("control_plane_create_tenant").WithArgs(agentWriterArgs(17)...).WillReturnError(writerFailure)
+			},
+			expectCommitFailure: func(mock sqlmock.Sqlmock) {
+				mock.ExpectExec("control_plane_create_tenant").WithArgs(agentWriterArgs(17)...).WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectQuery("FROM public\\.tenant").WithArgs(sqlmock.AnyArg()).WillReturnRows(mockTenantRows(tenantValue))
+			},
+		},
+		{
+			name: "agent",
+			create: func(db *sql.DB) error {
+				_, err := NewAgentRepository(db).Create(ctx, agent.CreateInput{TenantID: appValue.TenantID, AppKey: "transaction-app", DisplayName: "Transaction App"})
+				return err
+			},
+			expectWriterFailure: func(mock sqlmock.Sqlmock) {
+				mock.ExpectExec("control_plane_create_agent_app").WithArgs(agentWriterArgs(9)...).WillReturnError(writerFailure)
+			},
+			expectCommitFailure: func(mock sqlmock.Sqlmock) {
+				mock.ExpectExec("control_plane_create_agent_app").WithArgs(agentWriterArgs(9)...).WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectQuery("FROM public\\.agent_app").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(mockAgentAppRows(appValue))
+			},
+		},
+		{
+			name: "model",
+			create: func(db *sql.DB) error {
+				_, _, err := NewModelRepository(db, modelCatalog).Create(ctx, model.CreateInput{TenantID: modelValue.TenantID, ProfileKey: "transaction-model", DisplayName: "Transaction Model", Status: model.StatusActive, Configuration: modelValue.Configuration, Metadata: mockModelMetadata()})
+				return err
+			},
+			expectWriterFailure: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("control_plane_create_model_profile").WithArgs(agentWriterArgs(21)...).WillReturnError(writerFailure)
+			},
+			expectCommitFailure: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("control_plane_create_model_profile").WithArgs(agentWriterArgs(21)...).WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(1)))
+				mock.ExpectQuery("FROM public\\.model_profile").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(mockModelRows(t, modelValue))
+				mock.ExpectQuery("FROM public\\.model_profile_change_outbox").WithArgs(int64(1)).WillReturnRows(mockCreatedChangeEventRows(modelValue.TenantID, modelValue.ProfileID, modelValue.ContentDigest, modelValue.CreatedAt))
+			},
+		},
+		{
+			name: "backend",
+			create: func(db *sql.DB) error {
+				_, _, err := NewBackendRepository(db, backendCatalog).Create(ctx, backend.CreateInput{TenantID: backendValue.TenantID, ProfileKey: "transaction-backend", DisplayName: "Transaction Backend", Status: backend.StatusActive, Bindings: backendValue.Bindings, Metadata: mockBackendMetadata()})
+				return err
+			},
+			expectWriterFailure: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("control_plane_create_backend_profile").WithArgs(agentWriterArgs(21)...).WillReturnError(writerFailure)
+			},
+			expectCommitFailure: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("control_plane_create_backend_profile").WithArgs(agentWriterArgs(21)...).WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(1)))
+				mock.ExpectQuery("FROM public\\.backend_profile").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(mockBackendRootRows(backendValue))
+				mock.ExpectQuery("FROM public\\.backend_profile_binding").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(mockBackendBindingRows(backendValue))
+				mock.ExpectQuery("FROM public\\.backend_profile_change_outbox").WithArgs(int64(1)).WillReturnRows(mockCreatedChangeEventRows(backendValue.TenantID, backendValue.ProfileID, backendValue.ContentDigest, backendValue.CreatedAt))
+			},
+		},
+		{
+			name: "channel",
+			create: func(db *sql.DB) error {
+				_, _, err := NewChannelRepository(db).Create(ctx, channels.CreateInput{TenantID: channelValue.TenantID, BindingKey: "transaction-channel", Channel: channelValue.Channel, ProviderAccountID: channelValue.ProviderAccountID, PublicRouteKeyDigest: channelValue.PublicRouteKeyDigest, AppID: channelValue.AppID, SecretRef: channelValue.SecretRef, Protocol: channelValue.Protocol, Status: channels.StatusActive, Metadata: mockChannelMetadata()})
+				return err
+			},
+			expectWriterFailure: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("control_plane_create_channel_binding").WithArgs(agentWriterArgs(24)...).WillReturnError(writerFailure)
+			},
+			expectCommitFailure: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("control_plane_create_channel_binding").WithArgs(agentWriterArgs(24)...).WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(1)))
+				mock.ExpectQuery("FROM public\\.channel_binding").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(mockBindingRows(channelValue))
+				mock.ExpectQuery("FROM public\\.channel_binding_change_outbox").WithArgs(int64(1)).WillReturnRows(mockCreatedChangeEventRows(channelValue.TenantID, channelValue.BindingID, channelValue.ConfigDigest, channelValue.CreatedAt))
+			},
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name+" begin", func(t *testing.T) {
+			db, mock := newSQLMock(t)
+			mock.ExpectBegin().WillReturnError(writerFailure)
+			assertStorageFailure(t, testCase.create(db), mock)
+		})
+		t.Run(testCase.name+" writer", func(t *testing.T) {
+			db, mock := newSQLMock(t)
+			mock.ExpectBegin()
+			testCase.expectWriterFailure(mock)
+			mock.ExpectRollback()
+			assertStorageFailure(t, testCase.create(db), mock)
+		})
+		t.Run(testCase.name+" commit", func(t *testing.T) {
+			db, mock := newSQLMock(t)
+			mock.ExpectBegin()
+			testCase.expectCommitFailure(mock)
+			mock.ExpectCommit().WillReturnError(commitFailure)
+			assertStorageFailure(t, testCase.create(db), mock)
+		})
+	}
 }
 
 func mockCreatedChangeEventRows(tenantID, objectID, digest string, occurredAt time.Time) *sqlmock.Rows {
