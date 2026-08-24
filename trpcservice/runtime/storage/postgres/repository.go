@@ -243,7 +243,7 @@ func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID strin
 		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer func() { _ = rows.Close() }()
-	result := []runtimestorage.EventPayload{}
+	var result []runtimestorage.EventPayload
 	for rows.Next() {
 		var value runtimestorage.EventPayload
 		if err := rows.Scan(&value.TenantID, &value.SessionID, &value.EventID, &value.Payload, &value.HistorySeq, &value.CreatedAt); err != nil {
@@ -258,6 +258,7 @@ func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID strin
 		if _, err := s.GetSession(ctx, tenantID, sessionID); err != nil {
 			return nil, err
 		}
+		result = []runtimestorage.EventPayload{}
 	}
 	return result, nil
 }

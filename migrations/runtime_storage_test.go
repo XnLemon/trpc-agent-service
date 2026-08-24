@@ -63,4 +63,7 @@ func TestRuntimeEventHistoryMigrationIsTenantScopedAndCascades(t *testing.T) {
 	if strings.Contains(sql, "GRANT SELECT, INSERT, UPDATE, DELETE ON public.runtime_event_history TO tenant_app_writer") {
 		t.Fatal("runtime event history grants mutation to the runtime role")
 	}
+	if !strings.Contains(sql, "GRANT UPDATE (event_id) ON public.runtime_event_history TO tenant_app_writer") {
+		t.Fatal("runtime event history is missing the narrow idempotent update grant")
+	}
 }

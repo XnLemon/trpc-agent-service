@@ -2,6 +2,7 @@ package sessionpostgres_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -17,6 +18,49 @@ import (
 
 type failingCreateStore struct {
 	runtimestorage.RuntimeStore
+}
+
+type serviceStore struct {
+	*runtimestorageinmemory.Store
+	history   []runtimestorage.EventPayload
+	listErr   error
+	appendErr error
+	updateErr error
+}
+
+func (s *serviceStore) ListEventPayloads(context.Context, string, string) ([]runtimestorage.EventPayload, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	return s.history, nil
+}
+
+func (s *serviceStore) AppendEventPayload(ctx context.Context, value runtimestorage.EventPayload) (runtimestorage.EventPayload, error) {
+	if s.appendErr != nil {
+		return runtimestorage.EventPayload{}, s.appendErr
+	}
+	return s.Store.AppendEventPayload(ctx, value)
+}
+
+func (s *serviceStore) UpdateSessionState(ctx context.Context, tenant, sessionID string, version int64, state map[string]any) (runtimestorage.Session, error) {
+	if s.updateErr != nil {
+		return runtimestorage.Session{}, s.updateErr
+	}
+	return s.Store.UpdateSessionState(ctx, tenant, sessionID, version, state)
+}
+
+type failingDelegate struct {
+	session.Service
+	appendErr error
+	updateErr error
+}
+
+func (d failingDelegate) AppendEvent(context.Context, *session.Session, *trpcevent.Event, ...session.Option) error {
+	return d.appendErr
+}
+
+func (d failingDelegate) UpdateSessionState(context.Context, session.Key, session.StateMap) error {
+	return d.updateErr
 }
 
 func (failingCreateStore) CreateSession(context.Context, string, string, map[string]any) (runtimestorage.Session, error) {
@@ -289,5 +333,66 @@ func TestServiceUpdateAndAppendErrorEdges(t *testing.T) {
 	}
 	if err := service2.UpdateSessionState(context.Background(), session.Key{AppName: "app", UserID: "user", SessionID: "delegate-missing"}, session.StateMap{"value": []byte("new")}); err == nil {
 		t.Fatal("delegate update unexpectedly succeeded")
+	}
+}
+
+func TestServiceHistoryAndDurableAppendErrorBranches(t *testing.T) {
+	base := runtimestorageinmemory.New()
+	store := &serviceStore{Store: base}
+	key := session.Key{AppName: "app", UserID: "user", SessionID: "history-errors"}
+	delegate := sessioninmemory.NewSessionService()
+	service, err := sessionpostgres.New("tenant-a", delegate, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateSession(context.Background(), key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.history = []runtimestorage.EventPayload{{EventID: "bad", Payload: []byte("{")}}
+	if _, err := service.GetSession(context.Background(), key); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("invalid history = %v", err)
+	}
+	store.history = nil
+	if err := service.AppendEvent(context.Background(), created, &trpcevent.Event{}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("empty event ID = %v", err)
+	}
+	store.appendErr = errors.New("history append failed")
+	if err := service.AppendEvent(context.Background(), created, &trpcevent.Event{ID: "store-error"}); err == nil || err.Error() != "history append failed" {
+		t.Fatalf("store append error = %v", err)
+	}
+	store.appendErr = nil
+	delegateError := errors.New("delegate append failed")
+	service, err = sessionpostgres.New("tenant-a", failingDelegate{Service: sessioninmemory.NewSessionService(), appendErr: delegateError}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err = service.CreateSession(context.Background(), key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AppendEvent(context.Background(), created, &trpcevent.Event{ID: "delegate-error"}); !errors.Is(err, delegateError) {
+		t.Fatalf("delegate append error = %v", err)
+	}
+	store.updateErr = errors.New("state update failed")
+	if err := service.UpdateSessionState(context.Background(), key, session.StateMap{"x": []byte("1")}); err == nil || err.Error() != "state update failed" {
+		t.Fatalf("store state error = %v", err)
+	}
+	store.updateErr = nil
+	service, err = sessionpostgres.New("tenant-a", failingDelegate{Service: sessioninmemory.NewSessionService(), updateErr: errors.New("delegate state failed")}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.UpdateSessionState(context.Background(), key, session.StateMap{"x": []byte("2")}); err == nil || err.Error() != "delegate state failed" {
+		t.Fatalf("delegate state error = %v", err)
+	}
+	historyPayload, _ := json.Marshal(&trpcevent.Event{ID: "history-error"})
+	store.history = []runtimestorage.EventPayload{{EventID: "history-error", Payload: historyPayload}}
+	service, err = sessionpostgres.New("tenant-a", failingDelegate{Service: sessioninmemory.NewSessionService(), appendErr: delegateError}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.GetSession(context.Background(), key); !errors.Is(err, delegateError) {
+		t.Fatalf("history delegate error = %v", err)
 	}
 }

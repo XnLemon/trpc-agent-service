@@ -364,6 +364,9 @@ func TestStoreEventHistoryAndMessageLifecycle(t *testing.T) {
 	if err != nil || string(replay.Payload) != string(payload) {
 		t.Fatalf("idempotent append = %+v err=%v", replay, err)
 	}
+	if _, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: []byte("{ \"ID\": \"runner-1\" }")}); err != nil {
+		t.Fatalf("semantic JSON duplicate = %v", err)
+	}
 	if _, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: []byte("{\"ID\":\"changed\"}")}); !errors.Is(err, runtimestorage.ErrConflict) {
 		t.Fatalf("payload conflict = %v", err)
 	}

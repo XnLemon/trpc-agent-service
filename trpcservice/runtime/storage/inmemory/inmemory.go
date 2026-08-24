@@ -4,6 +4,7 @@ package inmemory
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"sync"
 	"time"
 
@@ -221,7 +222,7 @@ func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.E
 		if existing.EventID != payload.EventID {
 			continue
 		}
-		if string(existing.Payload) != string(payload.Payload) {
+		if !jsonEqual(existing.Payload, payload.Payload) {
 			return runtimestorage.EventPayload{}, runtimestorage.ErrConflict
 		}
 		return clonePayload(existing), nil
@@ -438,6 +439,13 @@ func validatePayload(value runtimestorage.EventPayload) error {
 		return runtimestorage.ErrInvalid
 	}
 	return nil
+}
+func jsonEqual(left, right []byte) bool {
+	var leftValue, rightValue any
+	if json.Unmarshal(left, &leftValue) != nil || json.Unmarshal(right, &rightValue) != nil {
+		return false
+	}
+	return reflect.DeepEqual(leftValue, rightValue)
 }
 func cloneReply(value runtimestorage.ReplyOutbox) runtimestorage.ReplyOutbox {
 	if value.LeaseExpiresAt != nil {

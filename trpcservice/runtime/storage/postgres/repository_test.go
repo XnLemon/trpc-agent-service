@@ -586,6 +586,7 @@ func TestRuntimeStoreListEventPayloadsEmptyAndErrorBranches(t *testing.T) {
 		t.Fatalf("history rows error = %v", err)
 	}
 	mock.ExpectQuery("SELECT tenant_id,session_id,event_id,payload::text").WithArgs("tenant-a", "empty").WillReturnRows(sqlmock.NewRows(historyColumns))
+	mock.ExpectQuery("SELECT tenant_id, session_id, status, version, state").WithArgs("tenant-a", "empty").WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "session_id", "status", "version", "state", "created_at", "updated_at"}).AddRow("tenant-a", "empty", "active", 1, []byte("{}"), when, when))
 	values, err := store.ListEventPayloads(context.Background(), "tenant-a", "empty")
 	if err != nil || values == nil || len(values) != 0 {
 		t.Fatalf("empty history = %+v err=%v", values, err)
