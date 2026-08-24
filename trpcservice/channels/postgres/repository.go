@@ -1,3 +1,5 @@
+// Package postgres provides the PostgreSQL implementation of the Channel
+// Binding repository and candidate capability index.
 package postgres
 
 import (
@@ -37,8 +39,8 @@ var _ channels.Repository = (*ChannelRepository)(nil)
 var _ channels.CandidateIndex = (*ChannelRepository)(nil)
 var _ channels.CandidateConsumer = (*ChannelRepository)(nil)
 
-// NewChannelRepository creates a Binding repository and candidate index.
-func NewChannelRepository(db *sql.DB) *ChannelRepository {
+// NewRepository creates a Binding repository and candidate index.
+func NewRepository(db *sql.DB) *ChannelRepository {
 	return &ChannelRepository{db: db, candidates: make(map[string]candidateRecord)}
 }
 

@@ -1,7 +1,6 @@
-// Package postgres contains the shared PostgreSQL pool, error boundary, and
-// durable implementation primitives used by the domain-owned repository
-// adapters. It deliberately exposes database/sql rather than pgx types so
-// callers can own pooling and lifecycle separately.
+// Package postgres provides PostgreSQL connection, transaction, error, and
+// serialization primitives shared by domain-owned PostgreSQL implementations.
+// It deliberately contains no control-plane repository or domain model logic.
 package postgres
 
 import (
@@ -57,7 +56,7 @@ func Open(ctx context.Context, dsn string, options Options) (*sql.DB, error) {
 	}
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, mapDBError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
+		return nil, MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
 	}
 	return db, nil
 }
@@ -71,7 +70,7 @@ func Ping(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := db.PingContext(ctx); err != nil {
-		return mapDBError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
+		return MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
 	}
 	return nil
 }
@@ -86,13 +85,21 @@ func normalizeDSN(dsn string) string {
 	return dsn
 }
 
-type queryer interface {
+// Queryer is the shared read/write surface implemented by both sql.DB and
+// sql.Tx. Domain repositories use it to keep query helpers transaction-agnostic.
+type Queryer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-func begin(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
+// RowScanner is implemented by sql.Row and sql.Rows for domain-specific row
+// decoding without coupling those decoders to a concrete query method.
+type RowScanner interface{ Scan(...any) error }
+
+// Begin starts a read-committed transaction and maps unexpected driver errors
+// to ErrStorage without disclosing driver details.
+func Begin(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
 	if db == nil {
 		return nil, ErrStorage
 	}
@@ -101,18 +108,20 @@ func begin(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
 	}
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
-		return nil, mapDBError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
+		return nil, MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
 	}
 	return tx, nil
 }
 
-func rollback(tx *sql.Tx) {
+// Rollback makes a best-effort rollback for a transaction that did not commit.
+func Rollback(tx *sql.Tx) {
 	if tx != nil {
 		_ = tx.Rollback()
 	}
 }
 
-func mapDBError(ctx context.Context, err error, notFound, duplicate, conflict, invalid error) error {
+// MapError maps portable SQL and PostgreSQL errors to domain error categories.
+func MapError(ctx context.Context, err error, notFound, duplicate, conflict, invalid error) error {
 	if err == nil {
 		return nil
 	}
@@ -141,25 +150,29 @@ func mapDBError(ctx context.Context, err error, notFound, duplicate, conflict, i
 	return ErrStorage
 }
 
-func commit(ctx context.Context, tx *sql.Tx) error {
+// Commit commits a transaction while preserving cancellation and error-redaction
+// behavior used by all PostgreSQL repositories.
+func Commit(ctx context.Context, tx *sql.Tx) error {
 	if tx == nil {
 		return ErrStorage
 	}
 	if err := ctx.Err(); err != nil {
-		rollback(tx)
+		Rollback(tx)
 		return err
 	}
 	if err := tx.Commit(); err != nil {
-		return mapDBError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
+		return MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
 	}
 	return nil
 }
 
-func asUTC(value time.Time) time.Time {
+// AsUTC normalizes persisted timestamps at the storage boundary.
+func AsUTC(value time.Time) time.Time {
 	return value.UTC()
 }
 
-func nullableInt(value sql.NullInt64) *int64 {
+// NullableInt converts a nullable SQL integer to an owned optional value.
+func NullableInt(value sql.NullInt64) *int64 {
 	if !value.Valid {
 		return nil
 	}
@@ -167,10 +180,29 @@ func nullableInt(value sql.NullInt64) *int64 {
 	return &copy
 }
 
-func nullableString(value sql.NullString) *string {
+// NullableString converts a nullable SQL string to an owned optional value.
+func NullableString(value sql.NullString) *string {
 	if !value.Valid {
 		return nil
 	}
 	copy := value.String
 	return &copy
+}
+
+// NullableText represents an optional persisted string argument.
+func NullableText(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
+}
+
+// MonotonicNow produces a UTC timestamp that never predates an existing
+// persisted timestamp.
+func MonotonicNow(previous time.Time) time.Time {
+	now := time.Now().UTC()
+	if now.Before(previous) {
+		return previous
+	}
+	return now
 }

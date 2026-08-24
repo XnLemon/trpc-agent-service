@@ -1,3 +1,5 @@
+// Package postgres provides the PostgreSQL implementation of the Backend
+// Profile repository.
 package postgres
 
 import (
@@ -17,9 +19,9 @@ type BackendRepository struct {
 
 var _ backend.Repository = (*BackendRepository)(nil)
 
-// NewBackendRepository creates a repository that revalidates decoded
+// NewRepository creates a repository that revalidates decoded
 // capability bindings against the trusted ProviderCatalog.
-func NewBackendRepository(db *sql.DB, catalog *backend.ProviderCatalog) *BackendRepository {
+func NewRepository(db *sql.DB, catalog *backend.ProviderCatalog) *BackendRepository {
 	return &BackendRepository{db: db, catalog: catalog}
 }
 

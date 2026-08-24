@@ -4,8 +4,9 @@
 > Profile 和 Channel Binding 设计，并补齐 Model Profile 的持久化形状、统一 migration 顺序、
 > Repository 事务边界和进程启动装配。控制面 DDL 与受控 Repository 写入口分别落在
 > `0001`、`0002` 两个有序 migration；Go Repository 和 bootstrap 实现在
-> `trpcservice/{tenant,agent,model,backend,channels}/postgres`、共享的
-> `trpcservice/storage/postgres` 数据库边界，以及 `trpcservice/bootstrap`。
+> `trpcservice/{tenant,agent,model,backend,channels}/postgres`；每个领域包拥有自己的
+> SQL Repository、行解码和领域 codec。`trpcservice/storage/postgres` 只提供不依赖任何
+> 控制面领域的连接池、事务、错误映射与 JSON 基础设施；`trpcservice/bootstrap` 负责装配。
 
 ## 目标与边界
 
@@ -222,9 +223,11 @@ SecretResolver、fake ModelFactory 和 InMemory Session，不需要真实模型�
 
 - `migrations/migration_test.go`：干净 PostgreSQL migration、权限、跨租户 FK、published
   current pointer、延迟 binding 和嵌套凭据键检查；
-- `trpcservice/storage/postgres/integration_test.go`：五类 SQL Repository 的租户作用域、
+- `trpcservice/controlplane/postgres/integration_test.go`：五类 SQL Repository 的租户作用域、
   生命周期、发布、候选消费、Outbox、Context 取消和深拷贝路径；CI 使用独立 PostgreSQL
   服务执行；
+- `scripts/coverage.sh`：除各包单测外，额外对上述跨领域集成测试的五个 Repository 包执行
+  `-coverpkg` 并按 source block 合并 profile，避免跨包测试遗漏真实实现覆盖率；
 - `trpcservice/bootstrap/bootstrap_test.go`：真实 Resolver/Registry/HTTPHandler 组装、
   readiness 503→200 和 shutdown gate；
 - 生产代码中的 `codec.go`、受控 SQL 函数和稳定错误映射保证 Secret 不进入运行时对象或底层
