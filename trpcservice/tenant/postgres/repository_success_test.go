@@ -202,6 +202,22 @@ func TestTenantRepositoryRequiresStorage(t *testing.T) {
 	}
 }
 
+func TestTenantRepositoryCount(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM public\.tenant`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
+	count, err := NewRepository(db).Count(context.Background())
+	if err != nil || count != 2 {
+		t.Fatalf("Count = %d, %v", count, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func testTenantRows(value *tenant.Tenant) *sqlmock.Rows {
 	return sqlmock.NewRows([]string{
 		"tenant_id", "tenant_key", "display_name", "status", "rate_limit_rpm", "max_concurrent_executions", "monthly_token_budget",

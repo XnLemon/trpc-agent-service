@@ -27,6 +27,26 @@ type httpDispatchStub struct {
 	blockCall bool
 }
 
+func TestHTTPHandlerAdminRouteBoundary(t *testing.T) {
+	admin := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler, err := NewHTTPHandler(HTTPConfig{Admin: admin, Ready: func() bool { return true }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/admin/v1", "/admin/v1/tenants"} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusNoContent {
+			t.Fatalf("admin path %s status = %d", path, recorder.Code)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/admin/v12", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("near-miss admin path status = %d", recorder.Code)
+	}
+}
+
 type nilDispatchService struct{}
 
 func (nilDispatchService) Dispatch(context.Context, DispatchRequest) (<-chan DispatchEvent, error) {
