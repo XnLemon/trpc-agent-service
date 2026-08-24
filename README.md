@@ -206,7 +206,7 @@
 - [ ] 完成备份恢复、故障演练和租户级发布回滚流程
 - [ ] 增加 Storage Adapter 契约测试和端到端消息链路测试
 - [ ] 增加多租户越权、密钥泄漏、并发一致性和故障注入测试
-- [ ] 在 CI 中运行 `go test -race ./...`，并设置有效覆盖率门槛
+- [ ] 在 CI 中运行 `go test -race ./...`，并设置有效覆盖率门槛（Issue #39 已完成 Race Tests；Codecov project/patch 的 85% 目标尚待分支保护或 ruleset 设为合并门禁）
 - [ ] 增加依赖漏洞、镜像和提交密钥扫描
 
 ### 设计交付物
@@ -255,6 +255,7 @@
 |   |-- build.sh           # 构建项目
 |   |-- clean.sh           # 清理中间产物
 |   |-- coverage.sh        # 运行单测覆盖率
+|   |-- race.sh            # 运行完整模块的 race 检测
 |   |-- format.sh          # 格式化 Go 代码（--check 为 CI 校验模式）
 |   |-- lint.sh            # 静态检查
 |   |-- start.sh           # 启动服务
@@ -285,8 +286,12 @@
 
 - **Format & Lint**：`gofmt` 校验、`go vet`、`golangci-lint`
 - **Build, Test & Coverage**：构建、单测覆盖率、上传 [Codecov](https://codecov.io)、清理
+- **Race Tests**：在与迁移和 PostgreSQL Repository 测试相同的临时 PostgreSQL 依赖上执行 `go test -race ./...`
 
-覆盖率上传使用仓库 Secret `CODECOV_TOKEN`（见 Codecov 仓库设置页获取），未配置时上传步骤不阻断 CI。
+Codecov 对 project 和 patch 状态均使用 **85%**、零容差的报告目标。它会将状态发布到 PR；要使已发布的
+状态成为合并门禁，仓库管理员还需在 GitHub 分支保护或 ruleset 中要求对应的状态（当前仓库尚未配置该规则）。
+覆盖率上传使用仓库 Secret `CODECOV_TOKEN`（见 Codecov 仓库设置页获取）；`scripts/coverage.sh` 只产出上传
+工件，并不实现本地 `--min` 门禁。
 
 ## 快速开始
 
