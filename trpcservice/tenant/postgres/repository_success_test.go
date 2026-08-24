@@ -88,6 +88,56 @@ func TestTenantRepositoryWritesCompleteReadback(t *testing.T) {
 	})
 }
 
+func TestTenantRepositoryCreatesAndGetsTenant(t *testing.T) {
+	input := tenant.CreateInput{
+		TenantKey: "create-and-get", DisplayName: "Create and Get", Status: tenant.StatusActive,
+		AuditRetentionDays: 90, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1,
+	}
+	stored, err := tenant.NewTenant(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	createDB, createMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = createDB.Close() })
+	createMock.ExpectBegin()
+	createMock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
+	createMock.ExpectQuery(".*").WithArgs(sqlmock.AnyArg()).WillReturnRows(testTenantRows(stored))
+	createMock.ExpectCommit()
+
+	created, err := NewRepository(createDB).Create(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.TenantKey != input.TenantKey || created.DisplayName != input.DisplayName || created.Status != tenant.StatusActive {
+		t.Fatalf("created tenant = %+v", created)
+	}
+	if err := createMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	getDB, getMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = getDB.Close() })
+	getMock.ExpectQuery(".*").WithArgs(stored.TenantID).WillReturnRows(testTenantRows(stored))
+
+	loaded, err := NewRepository(getDB).Get(context.Background(), stored.TenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.TenantID != stored.TenantID || loaded.Version != stored.Version {
+		t.Fatalf("loaded tenant = %+v", loaded)
+	}
+	if err := getMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTenantRepositoryRequiresStorage(t *testing.T) {
 	repository := NewRepository(nil)
 	ctx := context.Background()

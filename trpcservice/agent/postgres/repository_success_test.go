@@ -40,6 +40,28 @@ func TestAgentRepositoryGetDecodesStoredApp(t *testing.T) {
 	}
 }
 
+func TestAgentRepositoryGetRevisionDecodesStoredDraft(t *testing.T) {
+	app := newStoredAgentApp(t)
+	draft := newStoredAgentRevision(t, app, 1, false)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	expectAgentRevision(t, mock, draft)
+
+	stored, err := NewRepository(db).GetRevision(context.Background(), app.TenantID, app.AppID, draft.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Revision != draft.Revision || stored.State != agent.RevisionStateDraft || stored.Instruction != draft.Instruction {
+		t.Fatalf("stored draft = %+v", stored)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAgentRepositoryCreatesApp(t *testing.T) {
 	input := agent.CreateInput{
 		TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", AppKey: "created", DisplayName: "Created", Description: "created app",
