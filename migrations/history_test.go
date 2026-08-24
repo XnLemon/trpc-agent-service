@@ -53,7 +53,7 @@ func TestMigrationHelpersAndSQLMockApplyVerify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	mock.ExpectExec(`SELECT pg_advisory_lock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`CREATE TABLE IF NOT EXISTS public.schema_migrations`).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(sqlmock.NewRows([]string{"version", "sha256"}).AddRow(files[0].version, files[0].digest).AddRow(files[1].version, files[1].digest))
@@ -72,7 +72,7 @@ func TestMigrationHelpersAndSQLMockApplyVerify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer verifyDB.Close()
+	defer func() { _ = verifyDB.Close() }()
 	verifyMock.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(sqlmock.NewRows([]string{"version", "sha256"}).AddRow(files[0].version, files[0].digest).AddRow(files[1].version, files[1].digest))
 	if err := Verify(context.Background(), verifyDB); err != nil {
 		t.Fatalf("Verify error = %v", err)
@@ -109,7 +109,7 @@ func TestMigrationApplyAndVerifyFailures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			tc.setup(mock)
 			if err := Apply(context.Background(), db); !errors.Is(err, tc.want) {
 				t.Fatalf("Apply error = %v, want %v", err, tc.want)
@@ -124,7 +124,7 @@ func TestMigrationApplyAndVerifyFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	mock.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnError(errors.New("read"))
 	if err := Verify(context.Background(), db); !errors.Is(err, ErrInvalidHistory) {
 		t.Fatalf("Verify error = %v", err)
