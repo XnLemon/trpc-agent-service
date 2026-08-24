@@ -11,6 +11,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
@@ -211,6 +212,52 @@ func TestDispatcherDurableChannelClaimSuppressesDuplicateRunner(t *testing.T) {
 	close(release)
 	if err := <-firstDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDispatcherDurableClaimReclaimsReceivedAndExpiredRunning(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := inmemory.New()
+	dispatcher := &Dispatcher{runtimeStore: store}
+	message := InboundMessage{Content: "claim", ExternalMessageID: "claim-received", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"}
+	identity, err := dispatchRunnerIdentity(principal, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateSession(context.Background(), principal.TenantID(), identity.SessionID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: principal.TenantID(), EventID: "received-event", SessionID: identity.SessionID, BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID}); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := dispatcher.claimInbound(context.Background(), principal, message, identity)
+	if err != nil || reclaimed == nil {
+		t.Fatalf("received reclaim = %+v err=%v", reclaimed, err)
+	}
+	dispatcher.failDurable(reclaimed, errors.New("runner unavailable"))
+	message.ExternalMessageID = "claim-expired"
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: principal.TenantID(), EventID: "expired-event", SessionID: identity.SessionID, BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: principal.TenantID(), EventID: "expired-event", From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "old", LeaseDuration: time.Millisecond}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	recovered, err := dispatcher.claimInbound(context.Background(), principal, message, identity)
+	if err != nil || recovered == nil {
+		t.Fatalf("expired reclaim = %+v err=%v", recovered, err)
+	}
+	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrDuplicateMessage) {
+		t.Fatalf("active duplicate error = %v", err)
+	}
+	message.ExternalMessageID = ""
+	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing external ID error = %v", err)
 	}
 }
 
