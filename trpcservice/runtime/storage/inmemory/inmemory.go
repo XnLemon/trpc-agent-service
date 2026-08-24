@@ -172,6 +172,9 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 	value.UpdatedAt = now
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, ok := s.events[key(value.TenantID, value.EventID)]; !ok {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrNotFound
+	}
 	k := replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)
 	if existing, ok := s.replies[k]; ok {
 		return cloneReply(existing), nil

@@ -11,6 +11,19 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 )
 
+func seedEvent(t *testing.T, store *inmemory.Store, tenantID, sessionID, eventID string) {
+	t.Helper()
+	if _, err := store.CreateSession(context.Background(), tenantID, sessionID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{
+		TenantID: tenantID, SessionID: sessionID, BindingID: "binding-" + eventID,
+		ExternalMessageID: "external-" + eventID, EventID: eventID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStoreTenantIsolationAndCAS(t *testing.T) {
 	store := inmemory.New()
 	first, err := store.CreateSession(context.Background(), "tenant-a", "session-1", map[string]any{"nested": map[string]any{"n": 1}})
@@ -129,6 +142,27 @@ func TestStoreDeleteSessionRemovesAssociatedRuntimeData(t *testing.T) {
 	}
 }
 
+func TestStoreEnqueueReplyRequiresTenantEvent(t *testing.T) {
+	store := inmemory.New()
+	seedEvent(t, store, "tenant-a", "session-reply", "event-1")
+
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{
+		TenantID: "tenant-a", ReplyID: "missing-event", EventID: "event-missing", SegmentIndex: 0, SegmentCount: 1,
+	}); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing event = %v", err)
+	}
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{
+		TenantID: "tenant-b", ReplyID: "cross-tenant", EventID: "event-1", SegmentIndex: 0, SegmentCount: 1,
+	}); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("cross-tenant event = %v", err)
+	}
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{
+		TenantID: "tenant-a", ReplyID: "valid", EventID: "event-1", SegmentIndex: 0, SegmentCount: 1,
+	}); err != nil {
+		t.Fatalf("valid event = %v", err)
+	}
+}
+
 func TestStoreDeleteSessionValidationAndMissingBranches(t *testing.T) {
 	store := inmemory.New()
 	if err := store.DeleteSession(context.Background(), "", "session"); !errors.Is(err, runtimestorage.ErrInvalid) {
@@ -191,6 +225,7 @@ func TestStoreMethodsRespectCanceledContext(t *testing.T) {
 
 func TestStoreReplyStateMachineAndFencing(t *testing.T) {
 	store := inmemory.New()
+	seedEvent(t, store, "tenant-a", "session-reply", "event-1")
 	reply, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-1", EventID: "event-1", SegmentIndex: 0, SegmentCount: 1, Payload: "hello"})
 	if err != nil {
 		t.Fatal(err)
@@ -212,6 +247,7 @@ func TestStoreReplyStateMachineAndFencing(t *testing.T) {
 
 func TestStoreClaimReplyFencesExpiredWorker(t *testing.T) {
 	store := inmemory.New()
+	seedEvent(t, store, "tenant-a", "session-claim", "event-1")
 	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-claim", EventID: "event-1", SegmentIndex: 0, SegmentCount: 1}); err != nil {
 		t.Fatal(err)
 	}
@@ -270,6 +306,7 @@ func TestStoreCreateAndTransitionValidationEdges(t *testing.T) {
 	if _, err := store.UpdateSessionState(context.Background(), "tenant-a", "missing", 1, nil); !errors.Is(err, runtimestorage.ErrNotFound) {
 		t.Fatalf("missing update = %v", err)
 	}
+	seedEvent(t, store, "tenant-a", "session-reply", "event")
 	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 1, SegmentCount: 1}); !errors.Is(err, runtimestorage.ErrInvalid) {
 		t.Fatalf("invalid segment = %v", err)
 	}
