@@ -510,6 +510,17 @@ func TestRuntimeStoreTransitionMessageNoRowsMapsConflictOrNotFound(t *testing.T)
 	if _, err := store.TransitionMessage(context.Background(), transition); !errors.Is(err, runtimestorage.ErrNotFound) {
 		t.Fatalf("missing event = %v", err)
 	}
+	mock.ExpectQuery("UPDATE public.message_event SET status=\\$4").WithArgs("tenant-a", "query-error", runtimestorage.EventReceived, runtimestorage.EventRunning, "worker", int64(1), int64(0)).WillReturnError(errors.New("transition query failed"))
+	transition.EventID = "query-error"
+	if _, err := store.TransitionMessage(context.Background(), transition); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("transition query error = %v", err)
+	}
+	if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: "", EventID: "event", From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "worker", LeaseDuration: time.Second}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("transition validation = %v", err)
+	}
+	if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: "event", From: runtimestorage.EventCompleted, To: runtimestorage.EventRunning, Owner: "worker"}); !errors.Is(err, runtimestorage.ErrIllegalTransition) {
+		t.Fatalf("transition illegal = %v", err)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
