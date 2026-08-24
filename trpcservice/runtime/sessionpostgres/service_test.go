@@ -61,6 +61,21 @@ func TestServiceRejectsInvalidConstructionAndKeys(t *testing.T) {
 	}
 }
 
+func TestServiceTreatsMissingDurableSessionAsUpstreamMiss(t *testing.T) {
+	service, err := sessionpostgres.New("tenant-a", sessioninmemory.NewSessionService(), runtimestorageinmemory.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := session.Key{AppName: "app", UserID: "user", SessionID: "cold-start"}
+	value, err := service.GetSession(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != nil {
+		t.Fatalf("missing durable session = %+v, want upstream miss", value)
+	}
+}
+
 func TestServiceRecoversStateWithFreshDelegate(t *testing.T) {
 	store := runtimestorageinmemory.New()
 	first, err := sessionpostgres.New("tenant-a", sessioninmemory.NewSessionService(), store)

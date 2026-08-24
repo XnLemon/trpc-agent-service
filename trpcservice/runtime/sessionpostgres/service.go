@@ -55,6 +55,9 @@ func (s *Service) GetSession(ctx context.Context, key session.Key, options ...se
 	}
 	persisted, storeErr := s.store.GetSession(ctx, s.tenantID, key.SessionID)
 	if storeErr != nil {
+		if errors.Is(storeErr, runtimestorage.ErrNotFound) {
+			return s.delegate.GetSession(ctx, key, options...)
+		}
 		return nil, storeErr
 	}
 	state := anyToState(persisted.State)
