@@ -1,5 +1,9 @@
 # 基于 tRPC-Agent-Go 设计多租户节点化 Agent 部署平台
 
+[![CI](https://github.com/XnLemon/trpc-agent-service/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/XnLemon/trpc-agent-service/actions/workflows/ci.yml)
+[![Docs](https://github.com/XnLemon/trpc-agent-service/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/XnLemon/trpc-agent-service/actions/workflows/docs.yml)
+[![codecov](https://codecov.io/gh/XnLemon/trpc-agent-service/branch/main/graph/badge.svg)](https://codecov.io/gh/XnLemon/trpc-agent-service)
+
 ## 背景和价值
 
 企业在落地 Agent 应用时，通常不会只部署一个单体机器人，而是希望面向多个部门、多个业务线、多个 IM 入口和多个数据后端，构建一套可统一管理的 Agent 平台。例如：客服团队希望把 Agent 接入企业微信，研发团队希望接入内部群机器人，运营团队希望接入微信公众号或微信客服，不同租户又需要隔离会话、记忆、知识库、工具权限和审计日志。
