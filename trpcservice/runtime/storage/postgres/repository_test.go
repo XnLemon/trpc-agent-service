@@ -17,7 +17,7 @@ func TestGetSessionUsesExplicitTenantPredicateAndDefensiveState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	mock.ExpectQuery("SELECT tenant_id, session_id, status, version, state").WithArgs("tenant-a", "session-1").WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "session_id", "status", "version", "state", "created_at", "updated_at"}).AddRow("tenant-a", "session-1", "active", 1, []byte("{\"key\":\"value\"}"), when, when))
 	value, err := runtimepostgres.New(db).GetSession(context.Background(), "tenant-a", "session-1")
@@ -38,7 +38,7 @@ func TestCreateSessionMapsDuplicateWithoutDriverDetails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	mock.ExpectQuery("INSERT INTO public.runtime_session").WithArgs("tenant-a", "session-1", driver.Value([]byte("null"))).WillReturnError(errors.New("duplicate key value contains secret connection detail"))
 	_, err = runtimepostgres.New(db).CreateSession(context.Background(), "tenant-a", "session-1", nil)
 	if !errors.Is(err, runtimestorage.ErrStorage) {
@@ -54,7 +54,7 @@ func TestMethodsRespectCanceledContextBeforeDatabaseCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := runtimepostgres.New(db).GetSession(ctx, "tenant-a", "session-1"); !errors.Is(err, context.Canceled) {
