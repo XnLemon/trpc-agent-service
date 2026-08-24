@@ -1,6 +1,9 @@
 # Codecov status checks (shown on PRs).
-# The hard CI gate lives in scripts/coverage.sh --min (see .github/workflows/ci.yml);
-# this file makes the same 85% target visible in Codecov reports and PR comments.
+# Codecov evaluates the default project and patch reports at 85% with no
+# tolerated decrease and publishes their status results to pull requests.
+# GitHub branch protection or a ruleset decides whether an emitted status is
+# merge-blocking. scripts/coverage.sh only produces the upload artifact; it
+# does not implement a separate local --min gate.
 # The live example entrypoint is exercised only by the opt-in Telegram workflow;
 # its credential-free unit tests cover the pure helpers and boundary setup.
 ignore:
