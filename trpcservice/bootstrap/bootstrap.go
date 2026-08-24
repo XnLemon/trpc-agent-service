@@ -26,6 +26,7 @@ import (
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
+	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
@@ -67,7 +68,10 @@ type Config struct {
 	Sessions       session.Service
 	// RuntimeStore is the tenant-scoped Session/Event/Outbox capability. It is
 	// separate from upstream session.Service while the runtime adapter evolves.
-	RuntimeStore       runtimestorage.RuntimeStore
+	RuntimeStore runtimestorage.RuntimeStore
+	// RuntimeTenantID fixes the tenant scope when Bootstrap wraps Sessions with
+	// the RuntimeStore-backed capability. It must come from trusted config.
+	RuntimeTenantID    string
 	Authenticator      gateway.APIAuthenticator
 	AdminAuthenticator admin.Authenticator
 	AdminHandler       http.Handler
@@ -149,6 +153,13 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	}
 	if config.RuntimeStore == nil {
 		config.RuntimeStore = runtimestorageinmemory.New()
+	}
+	if config.RuntimeTenantID != "" {
+		wrapped, wrapErr := runtimesessionpostgres.New(config.RuntimeTenantID, config.Sessions, config.RuntimeStore)
+		if wrapErr != nil {
+			return nil, ErrInvalidConfig
+		}
+		config.Sessions = wrapped
 	}
 	resolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{
 		Tenants: config.Tenants, Apps: config.Apps, Models: config.Models, Backends: config.Backends,

@@ -13,7 +13,6 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
-	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
@@ -109,21 +108,15 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	sessions, err := runtimesessionpostgres.New(config.tenantID, delegateSessions, runtimeStore)
-	if err != nil {
-		_ = delegateSessions.Close()
-		_ = runtimeStore.Close()
-		_ = db.Close()
-		return nil, err
-	}
 	graph, err := NewWithDatabase(ctx, db, Config{
 		OwnDB:              true,
 		ModelCatalog:       modelCatalog,
 		BackendCatalog:     backendCatalog,
 		SecretResolver:     environmentSecretResolver{reference: config.secretRef, value: config.modelAPIKey},
 		ModelFactory:       environmentModelFactory{},
-		Sessions:           sessions,
+		Sessions:           delegateSessions,
 		RuntimeStore:       runtimeStore,
+		RuntimeTenantID:    config.tenantID,
 		Authenticator:      authenticator,
 		AdminAuthenticator: adminAuthenticator,
 		Ping: func(pingContext context.Context) error {
@@ -132,11 +125,11 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		Migrate:          applyEnvironmentMigrations,
 		VerifyMigrations: verifyEnvironmentMigrations,
 		CloseDependencies: func() error {
-			return errors.Join(sessions.Close(), runtimeStore.Close())
+			return errors.Join(delegateSessions.Close(), runtimeStore.Close())
 		},
 	})
 	if err != nil {
-		_ = sessions.Close()
+		_ = delegateSessions.Close()
 		_ = db.Close()
 		return nil, err
 	}
