@@ -340,10 +340,15 @@ func TestNewFromEnvironmentBuildsRealGraphWhenDatabaseOpens(t *testing.T) {
 		t.Fatal(err)
 	}
 	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousVerify := verifyEnvironmentMigrations
 	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) {
 		return db, nil
 	}
+	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
 	defer func() { openEnvironmentDatabase = previousOpen }()
+	defer func() { applyEnvironmentMigrations = previousApply; verifyEnvironmentMigrations = previousVerify }()
 
 	graph, err := NewFromEnvironment(context.Background())
 	if err != nil {

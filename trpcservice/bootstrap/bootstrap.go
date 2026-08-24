@@ -69,6 +69,8 @@ type Config struct {
 	DrainTimeout      time.Duration
 	ReadyGate         func() bool
 	Ping              func(context.Context) error
+	Migrate           func(context.Context, *sql.DB) error
+	VerifyMigrations  func(context.Context, *sql.DB) error
 	CloseDependencies func() error
 }
 
@@ -81,14 +83,15 @@ type Runtime struct {
 	Registry   *gateway.RunnerRegistry
 	Dispatcher *gateway.Dispatcher
 
-	db        *sql.DB
-	ownDB     bool
-	readyGate func() bool
-	ping      func(context.Context) error
-	closeDeps func() error
-	closing   atomic.Bool
-	closeOnce sync.Once
-	closeErr  error
+	db               *sql.DB
+	ownDB            bool
+	readyGate        func() bool
+	ping             func(context.Context) error
+	verifyMigrations func(context.Context, *sql.DB) error
+	closeDeps        func() error
+	closing          atomic.Bool
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 // NewWithDatabase is the normal constructor for a real PostgreSQL bootstrap.
@@ -111,6 +114,11 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	if config.DB != nil {
 		if err := config.DB.PingContext(ctx); err != nil {
 			return nil, postgres.ErrStorage
+		}
+		if config.Migrate != nil {
+			if err := config.Migrate(ctx, config.DB); err != nil {
+				return nil, ErrInvalidConfig
+			}
 		}
 		if config.Tenants == nil {
 			config.Tenants = tenantpostgres.NewRepository(config.DB)
@@ -163,7 +171,7 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	runtimeGraph := &Runtime{
 		Resolver: resolver, Registry: registry, Dispatcher: dispatcher,
 		db: config.DB, ownDB: config.OwnDB, readyGate: readyGate,
-		ping: ping, closeDeps: config.CloseDependencies,
+		ping: ping, verifyMigrations: config.VerifyMigrations, closeDeps: config.CloseDependencies,
 	}
 	httpConfig := gateway.HTTPConfig{
 		Dispatcher: dispatcher, Authenticator: config.Authenticator,
@@ -189,6 +197,14 @@ func (graph *Runtime) Ready() bool {
 	if graph.ping != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 		err := graph.ping(ctx)
+		cancel()
+		if err != nil {
+			return false
+		}
+	}
+	if graph.verifyMigrations != nil && graph.db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		err := graph.verifyMigrations(ctx, graph.db)
 		cancel()
 		if err != nil {
 			return false

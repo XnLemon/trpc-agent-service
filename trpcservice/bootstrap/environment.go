@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/XnLemon/trpc-agent-service/migrations"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -35,7 +36,11 @@ const (
 	defaultSubjectID      = "service"
 )
 
-var openEnvironmentDatabase = postgres.Open
+var (
+	openEnvironmentDatabase     = postgres.Open
+	applyEnvironmentMigrations  = migrations.Apply
+	verifyEnvironmentMigrations = migrations.Verify
+)
 
 // environmentConfig is intentionally private: it contains the one secret
 // handed to the ModelFactory and must not become a serializable application
@@ -93,6 +98,8 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		Ping: func(pingContext context.Context) error {
 			return postgres.Ping(pingContext, db)
 		},
+		Migrate:          applyEnvironmentMigrations,
+		VerifyMigrations: verifyEnvironmentMigrations,
 		CloseDependencies: func() error {
 			return sessions.Close()
 		},
