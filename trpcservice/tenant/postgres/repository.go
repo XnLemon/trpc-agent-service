@@ -1,3 +1,5 @@
+// Package postgres provides the PostgreSQL implementation of the Tenant
+// repository.
 package postgres
 
 import (
@@ -16,8 +18,8 @@ type TenantRepository struct {
 
 var _ tenant.Repository = (*TenantRepository)(nil)
 
-// NewTenantRepository creates a repository over an owned or borrowed pool.
-func NewTenantRepository(db *sql.DB) *TenantRepository { return &TenantRepository{db: db} }
+// NewRepository creates a Tenant repository over an owned or borrowed pool.
+func NewRepository(db *sql.DB) *TenantRepository { return &TenantRepository{db: db} }
 
 func (r *TenantRepository) Create(ctx context.Context, input tenant.CreateInput) (*tenant.Tenant, error) {
 	if err := ctx.Err(); err != nil {
@@ -199,8 +201,6 @@ const tenantSelect = `SELECT tenant_id, tenant_key, display_name, status,
        default_backend_profile_id, version, created_at, updated_at
 FROM public.tenant`
 
-type rowScanner interface{ Scan(...any) error }
-
 func scanTenant(row rowScanner) (*tenant.Tenant, error) {
 	var value tenant.Tenant
 	var status, masking string
@@ -264,11 +264,4 @@ func validateTenantMetadata(metadata tenant.TransitionMetadata) error {
 func validTenantTransition(from, to tenant.Status) bool {
 	return (from == tenant.StatusActive && (to == tenant.StatusSuspended || to == tenant.StatusDisabled)) ||
 		(from == tenant.StatusSuspended && (to == tenant.StatusActive || to == tenant.StatusDisabled))
-}
-
-func nullableText(value string) any {
-	if value == "" {
-		return nil
-	}
-	return value
 }

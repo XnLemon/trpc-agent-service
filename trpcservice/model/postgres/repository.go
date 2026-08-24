@@ -1,3 +1,5 @@
+// Package postgres provides the PostgreSQL implementation of the Model Profile
+// repository.
 package postgres
 
 import (
@@ -5,7 +7,6 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 )
@@ -19,9 +20,9 @@ type ModelRepository struct {
 
 var _ model.Repository = (*ModelRepository)(nil)
 
-// NewModelRepository creates a repository that revalidates every decoded
+// NewRepository creates a repository that revalidates every decoded
 // profile against the same trusted ProviderCatalog used for writes.
-func NewModelRepository(db *sql.DB, catalog *model.ProviderCatalog) *ModelRepository {
+func NewRepository(db *sql.DB, catalog *model.ProviderCatalog) *ModelRepository {
 	return &ModelRepository{db: db, catalog: catalog}
 }
 
@@ -251,12 +252,4 @@ func scanModelEvent(row rowScanner) (model.ChangeEvent, error) {
 	}
 	event.OccurredAt = asUTC(event.OccurredAt)
 	return event, nil
-}
-
-func monotonicNow(previous time.Time) time.Time {
-	now := time.Now().UTC()
-	if now.Before(previous) {
-		return previous
-	}
-	return now
 }

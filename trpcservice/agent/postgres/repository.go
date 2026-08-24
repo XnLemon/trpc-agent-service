@@ -1,3 +1,5 @@
+// Package postgres provides the PostgreSQL implementation of the Agent App
+// repository.
 package postgres
 
 import (
@@ -18,8 +20,8 @@ type AgentRepository struct {
 
 var _ agent.Repository = (*AgentRepository)(nil)
 
-// NewAgentRepository creates a repository over a PostgreSQL pool.
-func NewAgentRepository(db *sql.DB) *AgentRepository { return &AgentRepository{db: db} }
+// NewRepository creates an Agent App repository over a PostgreSQL pool.
+func NewRepository(db *sql.DB) *AgentRepository { return &AgentRepository{db: db} }
 
 func (r *AgentRepository) Create(ctx context.Context, input agent.CreateInput) (*agent.App, error) {
 	if err := ctx.Err(); err != nil {

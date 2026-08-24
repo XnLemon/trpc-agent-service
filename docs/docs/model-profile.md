@@ -41,7 +41,7 @@ trusted Tenant snapshot
 Redis/SQL/向量库/S3 adapter、OTel exporter、计费和跨节点配置缓存。Issue #37 的
 `migrations/0001_control_plane.up.sql` 与 `0002_control_plane_repository_functions.up.sql`
 已落地本页领域契约对应的无密钥表形状和受控写入口；Go 实现在
-`trpcservice/storage/postgres/model.go`，总体验证见
+`trpcservice/model/postgres`，总体验证见
 [PostgreSQL 控制面与启动装配](postgresql-control-plane.md)。
 
 ## 设计阶段 ledger

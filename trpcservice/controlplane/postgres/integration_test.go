@@ -1,4 +1,4 @@
-package postgres_test
+package postgres
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	"github.com/jackc/pgx/v5"
 )
@@ -28,7 +28,7 @@ func TestPostgreSQLRepositories(t *testing.T) {
 	if err := runRepositoryMigrations(ctx, dsn); err != nil {
 		t.Fatal(err)
 	}
-	db, err := postgres.Open(ctx, dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+	db, err := storagepostgres.Open(ctx, dsn, storagepostgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestPostgreSQLRepositories(t *testing.T) {
 	}
 
 	metadata := tenant.TransitionMetadata{ActorType: "test", ActorID: "postgres", Reason: "integration", CorrelationID: "repo-test"}
-	tenants := postgres.NewTenantRepository(db)
+	tenants := NewTenantRepository(db)
 	root, err := tenants.Create(ctx, tenant.CreateInput{
 		TenantKey: "postgres-repo", DisplayName: "Postgres Repository", Status: tenant.StatusActive,
 		AuditRetentionDays: 90, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1,
@@ -99,7 +99,7 @@ func TestPostgreSQLRepositories(t *testing.T) {
 		t.Fatalf("resume tenant: %v", err)
 	}
 
-	models := postgres.NewModelRepository(db, modelCatalog)
+	models := NewModelRepository(db, modelCatalog)
 	profile, _, err := models.Create(ctx, model.CreateInput{
 		TenantID: root.TenantID, ProfileKey: "primary", DisplayName: "Primary Model", Status: model.StatusActive,
 		Configuration: model.Configuration{Provider: "public", Model: "chat", Options: map[string]string{"mode": "safe"}},
@@ -149,7 +149,7 @@ func TestPostgreSQLRepositories(t *testing.T) {
 		t.Fatalf("suspend model profile: %v", err)
 	}
 
-	apps := postgres.NewAgentRepository(db)
+	apps := NewAgentRepository(db)
 	app, err := apps.Create(ctx, agent.CreateInput{TenantID: root.TenantID, AppKey: "primary-app", DisplayName: "Primary App"})
 	if err != nil {
 		t.Fatalf("create agent app: %v", err)
@@ -278,7 +278,7 @@ func TestPostgreSQLRepositories(t *testing.T) {
 		t.Fatalf("resume agent app: %v", err)
 	}
 
-	backends := postgres.NewBackendRepository(db, backendCatalog)
+	backends := NewBackendRepository(db, backendCatalog)
 	backendProfile, _, err := backends.Create(ctx, backend.CreateInput{
 		TenantID: root.TenantID, ProfileKey: "primary-backend", DisplayName: "Primary Backend", Status: backend.StatusActive,
 		Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory", Options: map[string]string{"namespace": "primary"}}},
@@ -332,7 +332,7 @@ func TestPostgreSQLRepositories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	channelRepo := postgres.NewChannelRepository(db)
+	channelRepo := NewChannelRepository(db)
 	binding, _, err := channelRepo.Create(ctx, channels.CreateInput{
 		TenantID: root.TenantID, BindingKey: "primary-channel", Channel: channels.ChannelTelegram,
 		ProviderAccountID: "repo-account", PublicRouteKeyDigest: routeDigest, AppID: app.AppID,
