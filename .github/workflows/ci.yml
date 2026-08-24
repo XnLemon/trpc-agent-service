@@ -84,7 +84,10 @@ jobs:
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
-          files: ./coverage.out
+          # Upload the source profiles separately. Codecov performs the
+          # cross-package merge with its native Go profile parser.
+          files: ./coverage-base.out,./coverage-controlplane.out
+          disable_search: true
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
 

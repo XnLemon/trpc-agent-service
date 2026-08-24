@@ -7,6 +7,8 @@
 bin/
 dist/
 coverage.out
+coverage-base.out
+coverage-controlplane.out
 coverage.html
 *.test
 *.exe

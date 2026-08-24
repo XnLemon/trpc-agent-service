@@ -228,7 +228,8 @@ SecretResolver、fake ModelFactory 和 InMemory Session，不需要真实模型�
   服务执行；
 - `scripts/coverage.sh`：各包单测后只执行一次上述跨领域集成测试，并对五个 Repository 包执行
   `-coverpkg`、按 source block 合并 profile，避免跨包测试遗漏真实实现覆盖率或重复初始化
-  CI PostgreSQL schema；
+  CI PostgreSQL schema；CI 同时把两个原始 Go profile 交给 Codecov，以保留其原生的跨包覆盖
+  聚合能力；
 - `trpcservice/bootstrap/bootstrap_test.go`：真实 Resolver/Registry/HTTPHandler 组装、
   readiness 503→200 和 shutdown gate；
 - 生产代码中的 `codec.go`、受控 SQL 函数和稳定错误映射保证 Secret 不进入运行时对象或底层

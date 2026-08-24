@@ -11,12 +11,13 @@ cd "$ROOT"
 # from the ordinary package pass so it does not create its integration schema
 # twice against the CI PostgreSQL service.
 mapfile -t base_packages < <(go list ./... | grep -v '/trpcservice/controlplane/postgres$')
-go test "${base_packages[@]}" -coverprofile=coverage.out
+base_profile=coverage-base.out
+control_profile=coverage-controlplane.out
+go test "${base_packages[@]}" -coverprofile="$base_profile"
 
 control_plane_packages="./trpcservice/agent/postgres,./trpcservice/backend/postgres,./trpcservice/channels/postgres,./trpcservice/model/postgres,./trpcservice/tenant/postgres"
-go test ./trpcservice/controlplane/postgres -coverpkg="$control_plane_packages" -coverprofile=coverage-controlplane.out
-go run ./scripts/mergecover -out coverage-merged.out coverage.out coverage-controlplane.out
+go test ./trpcservice/controlplane/postgres -coverpkg="$control_plane_packages" -coverprofile="$control_profile"
+go run ./scripts/mergecover -out coverage-merged.out "$base_profile" "$control_profile"
 mv coverage-merged.out coverage.out
-rm -f coverage-controlplane.out
 
 go tool cover -func=coverage.out
