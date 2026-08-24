@@ -94,6 +94,9 @@ func TestTelemetryAdaptersEnforceSafeFieldsAndWrapSDKPrimitives(t *testing.T) {
 	meter.Histogram("duration").Record(ctx, 1, Attribute{Key: "operation", Value: OperationToolCall})
 	meter.UpDownCounter("active").Add(ctx, 1, Attribute{Key: "status", Value: "ok"})
 	provider.Logger().Log(ctx, LevelInfo, "Authorization: Bearer secret", Attribute{Key: "message", Value: "user text"}, Attribute{Key: "operation", Value: OperationToolCall})
+	provider.Logger().Log(ctx, LevelDebug, "debug")
+	provider.Logger().Log(ctx, LevelWarn, "warn")
+	provider.Logger().Log(ctx, LevelError, "error")
 	if strings.Contains(logs.String(), "user text") || strings.Contains(logs.String(), "secret") {
 		t.Fatalf("unsafe log content: %s", logs.String())
 	}
@@ -106,6 +109,13 @@ func TestProviderBranchesAndOTLPConstruction(t *testing.T) {
 	}
 	if err := otlp.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if canceledProvider, err := NewOTLPProvider(canceled, OTLPConfig{Endpoint: "127.0.0.1:4318"}); err == nil {
+		if shutdownErr := canceledProvider.Shutdown(context.Background()); shutdownErr != nil {
+			t.Fatal(shutdownErr)
+		}
 	}
 	var shutdowns int
 	provider := NewProvider(Config{Shutdown: func(context.Context) error { shutdowns++; return nil }})
