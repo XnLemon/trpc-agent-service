@@ -42,8 +42,13 @@ func (r *BackendRepository) Create(ctx context.Context, input backend.CreateInpu
 	if err != nil {
 		return nil, backend.ChangeEvent{}, ErrStorage
 	}
+	tx, err := begin(ctx, r.db)
+	if err != nil {
+		return nil, backend.ChangeEvent{}, err
+	}
+	defer rollback(tx)
 	var eventID int64
-	err = r.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT public.control_plane_create_backend_profile(
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
 			$12, $13, $14, $15, $16, $17, $18, $19, $20, $21
@@ -57,13 +62,16 @@ func (r *BackendRepository) Create(ctx context.Context, input backend.CreateInpu
 	if err != nil {
 		return nil, backend.ChangeEvent{}, mapDBError(ctx, err, backend.ErrNotFound, backend.ErrDuplicateKey, backend.ErrConflict, backend.ErrInvalid)
 	}
-	stored, err := r.Get(ctx, value.TenantID, value.ProfileID)
-	if err != nil {
-		return nil, backend.ChangeEvent{}, err
-	}
-	committed, err := scanBackendEvent(r.db.QueryRowContext(ctx, backendEventSelect+` WHERE event_id = $1`, eventID))
+	stored, err := loadBackendProfile(ctx, tx, r.catalog, value.TenantID, value.ProfileID, false)
 	if err != nil {
 		return nil, backend.ChangeEvent{}, mapDBError(ctx, err, backend.ErrNotFound, backend.ErrDuplicateKey, backend.ErrConflict, backend.ErrInvalid)
+	}
+	committed, err := scanBackendEvent(tx.QueryRowContext(ctx, backendEventSelect+` WHERE event_id = $1`, eventID))
+	if err != nil {
+		return nil, backend.ChangeEvent{}, mapDBError(ctx, err, backend.ErrNotFound, backend.ErrDuplicateKey, backend.ErrConflict, backend.ErrInvalid)
+	}
+	if err := commit(ctx, tx); err != nil {
+		return nil, backend.ChangeEvent{}, err
 	}
 	return stored, committed, nil
 }

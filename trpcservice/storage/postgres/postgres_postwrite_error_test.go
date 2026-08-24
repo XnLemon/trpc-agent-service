@@ -27,8 +27,10 @@ func TestPostgreSQLRepositoriesRollbackWhenReadAfterControlledWriteFails(t *test
 	t.Run("tenant create", func(t *testing.T) {
 		db, mock := newSQLMock(t)
 		repo := NewTenantRepository(db)
+		mock.ExpectBegin()
 		mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectQuery(".*").WillReturnError(readFailure)
+		mock.ExpectRollback()
 		_, err := repo.Create(ctx, tenant.CreateInput{
 			TenantKey: "postwrite-tenant", DisplayName: "Postwrite Tenant", Status: tenant.StatusActive,
 			AuditRetentionDays: 90, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1,
@@ -71,10 +73,28 @@ func TestPostgreSQLRepositoriesRollbackWhenReadAfterControlledWriteFails(t *test
 		db, mock := newSQLMock(t)
 		repo := NewModelRepository(db, modelCatalog)
 		current := mockModel(t, modelCatalog)
+		mock.ExpectBegin()
 		mock.ExpectQuery(".*").WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(1)))
 		mock.ExpectQuery(".*").WillReturnError(readFailure)
+		mock.ExpectRollback()
 		_, _, err := repo.Create(ctx, model.CreateInput{
 			TenantID: current.TenantID, ProfileKey: "postwrite-model", DisplayName: "Postwrite Model", Status: model.StatusActive,
+			Configuration: current.Configuration, Metadata: mockModelMetadata(),
+		})
+		assertStorageFailure(t, err, mock)
+	})
+
+	t.Run("model create event read", func(t *testing.T) {
+		db, mock := newSQLMock(t)
+		repo := NewModelRepository(db, modelCatalog)
+		current := mockModel(t, modelCatalog)
+		mock.ExpectBegin()
+		mock.ExpectQuery(".*").WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(1)))
+		mock.ExpectQuery(".*").WillReturnRows(mockModelRows(t, current))
+		mock.ExpectQuery(".*").WillReturnError(readFailure)
+		mock.ExpectRollback()
+		_, _, err := repo.Create(ctx, model.CreateInput{
+			TenantID: current.TenantID, ProfileKey: "postwrite-model-event", DisplayName: "Postwrite Model Event", Status: model.StatusActive,
 			Configuration: current.Configuration, Metadata: mockModelMetadata(),
 		})
 		assertStorageFailure(t, err, mock)
@@ -116,10 +136,29 @@ func TestPostgreSQLRepositoriesRollbackWhenReadAfterControlledWriteFails(t *test
 		db, mock := newSQLMock(t)
 		repo := NewBackendRepository(db, backendCatalog)
 		current := mockBackend(t, backendCatalog)
+		mock.ExpectBegin()
 		mock.ExpectQuery(".*").WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(1)))
 		mock.ExpectQuery(".*").WillReturnError(readFailure)
+		mock.ExpectRollback()
 		_, _, err := repo.Create(ctx, backend.CreateInput{
 			TenantID: current.TenantID, ProfileKey: "postwrite-backend", DisplayName: "Postwrite Backend", Status: backend.StatusActive,
+			Bindings: current.Bindings, Metadata: mockBackendMetadata(),
+		})
+		assertStorageFailure(t, err, mock)
+	})
+
+	t.Run("backend create event read", func(t *testing.T) {
+		db, mock := newSQLMock(t)
+		repo := NewBackendRepository(db, backendCatalog)
+		current := mockBackend(t, backendCatalog)
+		mock.ExpectBegin()
+		mock.ExpectQuery(".*").WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(1)))
+		mock.ExpectQuery(".*").WillReturnRows(mockBackendRootRows(current))
+		mock.ExpectQuery(".*").WillReturnRows(mockBackendBindingRows(current))
+		mock.ExpectQuery(".*").WillReturnError(readFailure)
+		mock.ExpectRollback()
+		_, _, err := repo.Create(ctx, backend.CreateInput{
+			TenantID: current.TenantID, ProfileKey: "postwrite-backend-event", DisplayName: "Postwrite Backend Event", Status: backend.StatusActive,
 			Bindings: current.Bindings, Metadata: mockBackendMetadata(),
 		})
 		assertStorageFailure(t, err, mock)
@@ -163,10 +202,29 @@ func TestPostgreSQLRepositoriesRollbackWhenReadAfterControlledWriteFails(t *test
 		db, mock := newSQLMock(t)
 		repo := NewChannelRepository(db)
 		current := mockBinding(t, draftApp.AppID)
+		mock.ExpectBegin()
 		mock.ExpectQuery(".*").WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(1)))
 		mock.ExpectQuery(".*").WillReturnError(readFailure)
+		mock.ExpectRollback()
 		_, _, err := repo.Create(ctx, channels.CreateInput{
 			TenantID: current.TenantID, BindingKey: "postwrite-binding", Channel: current.Channel,
+			ProviderAccountID: current.ProviderAccountID, PublicRouteKeyDigest: current.PublicRouteKeyDigest, AppID: current.AppID,
+			SecretRef: current.SecretRef, Protocol: current.Protocol, Status: channels.StatusActive, Metadata: mockChannelMetadata(),
+		})
+		assertStorageFailure(t, err, mock)
+	})
+
+	t.Run("channel create event read", func(t *testing.T) {
+		db, mock := newSQLMock(t)
+		repo := NewChannelRepository(db)
+		current := mockBinding(t, draftApp.AppID)
+		mock.ExpectBegin()
+		mock.ExpectQuery(".*").WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(1)))
+		mock.ExpectQuery(".*").WillReturnRows(mockBindingRows(current))
+		mock.ExpectQuery(".*").WillReturnError(readFailure)
+		mock.ExpectRollback()
+		_, _, err := repo.Create(ctx, channels.CreateInput{
+			TenantID: current.TenantID, BindingKey: "postwrite-binding-event", Channel: current.Channel,
 			ProviderAccountID: current.ProviderAccountID, PublicRouteKeyDigest: current.PublicRouteKeyDigest, AppID: current.AppID,
 			SecretRef: current.SecretRef, Protocol: current.Protocol, Status: channels.StatusActive, Metadata: mockChannelMetadata(),
 		})
@@ -209,8 +267,10 @@ func TestPostgreSQLRepositoriesRollbackWhenReadAfterControlledWriteFails(t *test
 	t.Run("agent create", func(t *testing.T) {
 		db, mock := newSQLMock(t)
 		repo := NewAgentRepository(db)
+		mock.ExpectBegin()
 		mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectQuery(".*").WillReturnError(readFailure)
+		mock.ExpectRollback()
 		_, err := repo.Create(ctx, agent.CreateInput{TenantID: draftApp.TenantID, AppKey: "postwrite-app", DisplayName: "Postwrite App"})
 		assertStorageFailure(t, err, mock)
 	})

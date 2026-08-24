@@ -61,8 +61,13 @@ func (r *ChannelRepository) Create(ctx context.Context, input channels.CreateInp
 	if err != nil {
 		return nil, channels.ChangeEvent{}, ErrStorage
 	}
+	tx, err := begin(ctx, r.db)
+	if err != nil {
+		return nil, channels.ChangeEvent{}, err
+	}
+	defer rollback(tx)
 	var eventID int64
-	err = r.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT public.control_plane_create_channel_binding(
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
 			$13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
@@ -76,13 +81,16 @@ func (r *ChannelRepository) Create(ctx context.Context, input channels.CreateInp
 	if err != nil {
 		return nil, channels.ChangeEvent{}, mapDBError(ctx, err, channels.ErrNotFound, channels.ErrDuplicateKey, channels.ErrConflict, channels.ErrInvalid)
 	}
-	stored, err := r.Get(ctx, value.TenantID, value.BindingID)
-	if err != nil {
-		return nil, channels.ChangeEvent{}, err
-	}
-	committed, err := scanChannelEvent(r.db.QueryRowContext(ctx, channelEventSelect+` WHERE event_id = $1`, eventID))
+	stored, err := scanChannelBinding(tx.QueryRowContext(ctx, channelSelect+` WHERE tenant_id = $1 AND binding_id = $2`, value.TenantID, value.BindingID))
 	if err != nil {
 		return nil, channels.ChangeEvent{}, mapDBError(ctx, err, channels.ErrNotFound, channels.ErrDuplicateKey, channels.ErrConflict, channels.ErrInvalid)
+	}
+	committed, err := scanChannelEvent(tx.QueryRowContext(ctx, channelEventSelect+` WHERE event_id = $1`, eventID))
+	if err != nil {
+		return nil, channels.ChangeEvent{}, mapDBError(ctx, err, channels.ErrNotFound, channels.ErrDuplicateKey, channels.ErrConflict, channels.ErrInvalid)
+	}
+	if err := commit(ctx, tx); err != nil {
+		return nil, channels.ChangeEvent{}, err
 	}
 	return stored, committed, nil
 }

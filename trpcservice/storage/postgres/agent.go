@@ -32,14 +32,26 @@ func (r *AgentRepository) Create(ctx context.Context, input agent.CreateInput) (
 	if err != nil {
 		return nil, err
 	}
-	_, err = r.db.ExecContext(ctx, `
+	tx, err := begin(ctx, r.db)
+	if err != nil {
+		return nil, err
+	}
+	defer rollback(tx)
+	_, err = tx.ExecContext(ctx, `
 		SELECT public.control_plane_create_agent_app($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`, value.TenantID, value.AppID, value.AppKey, value.DisplayName, value.Description,
 		string(value.Status), value.Version, value.CreatedAt, value.UpdatedAt)
 	if err != nil {
 		return nil, mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
 	}
-	return r.Get(ctx, value.TenantID, value.AppID)
+	stored, err := loadAgentApp(ctx, tx, value.TenantID, value.AppID, false)
+	if err != nil {
+		return nil, mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
+	}
+	if err := commit(ctx, tx); err != nil {
+		return nil, err
+	}
+	return stored, nil
 }
 
 func (r *AgentRepository) Get(ctx context.Context, tenantID, appID string) (*agent.App, error) {

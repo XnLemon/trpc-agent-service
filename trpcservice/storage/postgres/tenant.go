@@ -30,7 +30,12 @@ func (r *TenantRepository) Create(ctx context.Context, input tenant.CreateInput)
 	if r == nil || r.db == nil {
 		return nil, ErrStorage
 	}
-	_, err = r.db.ExecContext(ctx, `
+	tx, err := begin(ctx, r.db)
+	if err != nil {
+		return nil, err
+	}
+	defer rollback(tx)
+	_, err = tx.ExecContext(ctx, `
 		SELECT public.control_plane_create_tenant(
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
 		)`,
@@ -44,7 +49,17 @@ func (r *TenantRepository) Create(ctx context.Context, input tenant.CreateInput)
 	if err != nil {
 		return nil, mapDBError(ctx, err, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid)
 	}
-	return r.Get(ctx, value.TenantID)
+	stored, err := scanTenant(tx.QueryRowContext(ctx, tenantSelect+` WHERE tenant_id = $1`, value.TenantID))
+	if err != nil {
+		if err == ErrStorage {
+			return nil, err
+		}
+		return nil, mapDBError(ctx, err, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid)
+	}
+	if err := commit(ctx, tx); err != nil {
+		return nil, err
+	}
+	return stored, nil
 }
 
 func (r *TenantRepository) Get(ctx context.Context, tenantID string) (*tenant.Tenant, error) {
