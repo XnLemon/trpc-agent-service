@@ -2,8 +2,6 @@ package postgres
 
 import storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 
-type queryer = storagepostgres.Queryer
-
 var (
 	ErrStorage     = storagepostgres.ErrStorage
 	begin          = storagepostgres.Begin
@@ -11,7 +9,6 @@ var (
 	commit         = storagepostgres.Commit
 	mapDBError     = storagepostgres.MapError
 	asUTC          = storagepostgres.AsUTC
-	nullableInt    = storagepostgres.NullableInt
 	nullableString = storagepostgres.NullableString
 	nullableText   = storagepostgres.NullableText
 	monotonicNow   = storagepostgres.MonotonicNow

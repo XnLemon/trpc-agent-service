@@ -46,8 +46,6 @@ func NewTenantRepository(db *sql.DB) *TenantRepository {
 	return tenantpostgres.NewRepository(db)
 }
 
-func nullableText(value string) any { return storagepostgres.NullableText(value) }
-
 func encodeAgentRevisionParts(revision agent.Revision) ([]byte, []byte, []byte, error) {
 	generation, err := storagepostgres.EncodeJSON(revision.Generation)
 	if err != nil {

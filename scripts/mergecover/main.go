@@ -29,10 +29,9 @@ func main() {
 	if err != nil {
 		fail(fmt.Errorf("create %s: %w", *output, err))
 	}
-	defer file.Close()
 	writer := bufio.NewWriter(file)
-	defer writer.Flush()
 	if _, err := fmt.Fprintf(writer, "mode: %s\n", mode); err != nil {
+		_ = file.Close()
 		fail(err)
 	}
 	keys := make([]string, 0, len(blocks))
@@ -42,8 +41,16 @@ func main() {
 	sort.Strings(keys)
 	for _, block := range keys {
 		if _, err := fmt.Fprintf(writer, "%s %d\n", block, blocks[block]); err != nil {
+			_ = file.Close()
 			fail(err)
 		}
+	}
+	if err := writer.Flush(); err != nil {
+		_ = file.Close()
+		fail(err)
+	}
+	if err := file.Close(); err != nil {
+		fail(err)
 	}
 }
 
@@ -75,7 +82,7 @@ func readProfile(path string) (string, map[string]int, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewScanner(file)
 	if !scanner.Scan() {
