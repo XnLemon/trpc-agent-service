@@ -117,7 +117,14 @@ func NewOTLPProvider(ctx context.Context, config OTLPConfig) (Provider, error) {
 		options = append(options, otlptracehttp.WithInsecure())
 	}
 	if len(config.Headers) > 0 {
-		options = append(options, otlptracehttp.WithHeaders(RedactFields(config.Headers)))
+		// Exporter credentials configure transport authentication; they are never
+		// copied into spans/logs. Redacting them here would make authenticated
+		// OTLP export impossible.
+		headers := make(map[string]string, len(config.Headers))
+		for key, value := range config.Headers {
+			headers[key] = value
+		}
+		options = append(options, otlptracehttp.WithHeaders(headers))
 	}
 	exporter, err := otlptracehttp.New(ctx, options...)
 	if err != nil {
