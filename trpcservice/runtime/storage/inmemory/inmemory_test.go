@@ -245,6 +245,21 @@ func TestStoreReplyStateMachineAndFencing(t *testing.T) {
 	}
 }
 
+func TestStoreListReplyCandidatesReturnsTenantRows(t *testing.T) {
+	store := inmemory.New()
+	seedEvent(t, store, "tenant-a", "candidate-event", "candidate-event")
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "candidate-reply", EventID: "candidate-event", SegmentIndex: 0, SegmentCount: 1, Payload: "payload"}); err != nil {
+		t.Fatal(err)
+	}
+	values, err := store.ListReplyCandidates(context.Background(), "tenant-a")
+	if err != nil || len(values) != 1 || values[0].ReplyID != "candidate-reply" {
+		t.Fatalf("reply candidates = %+v err=%v", values, err)
+	}
+	if _, err := store.ListReplyCandidates(context.Background(), ""); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid candidates = %v", err)
+	}
+}
+
 func TestStoreClaimReplyFencesExpiredWorker(t *testing.T) {
 	store := inmemory.New()
 	seedEvent(t, store, "tenant-a", "session-claim", "event-1")

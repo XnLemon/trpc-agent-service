@@ -207,6 +207,24 @@ func TestRuntimeStoreCoversEventHistoryAndMessageLifecycle(t *testing.T) {
 	}
 }
 
+func TestRuntimeStoreListReplyCandidates(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := runtimepostgres.New(db)
+	when := time.Now().UTC()
+	mock.ExpectQuery("SELECT tenant_id,reply_id,event_id,segment_index").WithArgs("tenant-a").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-1", "event-1", 0, 1, "payload", "pending", 0, int64(0), "", nil, "", "", when, when))
+	values, err := store.ListReplyCandidates(context.Background(), "tenant-a")
+	if err != nil || len(values) != 1 || values[0].ReplyID != "reply-1" {
+		t.Fatalf("reply candidates = %+v err=%v", values, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimeStoreDeleteSessionErrors(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
