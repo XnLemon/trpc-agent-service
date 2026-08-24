@@ -143,6 +143,36 @@ func TestServiceCompensatesDelegateWhenDurableCreateFails(t *testing.T) {
 	}
 }
 
+func TestServiceDeleteSessionRemovesDurableStateBeforeRecreate(t *testing.T) {
+	store := runtimestorageinmemory.New()
+	service, err := sessionpostgres.New("tenant-a", sessioninmemory.NewSessionService(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := session.Key{AppName: "app", UserID: "user", SessionID: "recreate"}
+	if _, err := service.CreateSession(context.Background(), key, session.StateMap{"value": []byte("old")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DeleteSession(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateSession(context.Background(), key, session.StateMap{"value": []byte("new")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(created.State["value"]); got != "new" {
+		t.Fatalf("recreated state = %q, want new", got)
+	}
+	restarted, err := sessionpostgres.New("tenant-a", sessioninmemory.NewSessionService(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := restarted.GetSession(context.Background(), key)
+	if err != nil || string(recovered.State["value"]) != "new" {
+		t.Fatalf("recovered recreated session = %+v err=%v", recovered, err)
+	}
+}
+
 func TestServiceForwardsUpstreamCapabilities(t *testing.T) {
 	delegate := sessioninmemory.NewSessionService()
 	service, err := sessionpostgres.New("tenant-a", delegate, runtimestorageinmemory.New())

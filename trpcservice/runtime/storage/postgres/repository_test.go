@@ -99,6 +99,10 @@ func TestRuntimeStoreCoversMessageAndReplyLifecycle(t *testing.T) {
 	if _, err := store.UpdateSessionState(context.Background(), "tenant-a", "session-2", 1, map[string]any{"x": "z"}); err != nil {
 		t.Fatal(err)
 	}
+	mock.ExpectExec("DELETE FROM public.runtime_session").WithArgs("tenant-a", "session-2").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := store.DeleteSession(context.Background(), "tenant-a", "session-2"); err != nil {
+		t.Fatal(err)
+	}
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT tenant_id,event_id,session_id,binding_id,external_message_id").WithArgs("tenant-a", "binding-1", "external-1").WillReturnError(sql.ErrNoRows)
@@ -127,6 +131,33 @@ func TestRuntimeStoreCoversMessageAndReplyLifecycle(t *testing.T) {
 	mock.ExpectQuery("UPDATE public.reply_outbox SET status=\\$5").WithArgs("tenant-a", "reply-1", 0, "sending", "sent", "worker-a", int64(0), "provider-1", "", int64(1)).WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-1", "event-1", 0, 1, "payload", "sent", 2, int64(2), "worker-a", nil, "provider-1", "", when, when))
 	if _, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply-1", SegmentIndex: 0, From: "sending", To: "sent", Owner: "worker-a", FencingToken: 1, ProviderID: "provider-1"}); err != nil {
 		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeStoreDeleteSessionErrors(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := runtimepostgres.New(db)
+	if err := store.DeleteSession(context.Background(), "", "session"); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid delete = %v", err)
+	}
+	mock.ExpectExec("DELETE FROM public.runtime_session").WithArgs("tenant-a", "missing").WillReturnResult(sqlmock.NewResult(0, 0))
+	if err := store.DeleteSession(context.Background(), "tenant-a", "missing"); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing delete = %v", err)
+	}
+	mock.ExpectExec("DELETE FROM public.runtime_session").WithArgs("tenant-a", "error").WillReturnError(errors.New("delete failed"))
+	if err := store.DeleteSession(context.Background(), "tenant-a", "error"); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("delete query error = %v", err)
+	}
+	mock.ExpectExec("DELETE FROM public.runtime_session").WithArgs("tenant-a", "result-error").WillReturnResult(sqlmock.NewErrorResult(errors.New("rows failed")))
+	if err := store.DeleteSession(context.Background(), "tenant-a", "result-error"); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("delete rows error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

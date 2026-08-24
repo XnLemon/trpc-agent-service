@@ -25,3 +25,21 @@ func TestRuntimeStorageMigrationDefinesTenantScopedInvariants(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeSessionDeletionMigrationCascadesDependentFacts(t *testing.T) {
+	contents, err := os.ReadFile("0004_runtime_session_delete_cascade.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, fragment := range []string{
+		"DROP CONSTRAINT message_event_tenant_id_session_id_fkey",
+		"REFERENCES public.runtime_session(tenant_id, session_id) ON DELETE CASCADE",
+		"DROP CONSTRAINT reply_outbox_tenant_id_event_id_fkey",
+		"REFERENCES public.message_event(tenant_id, event_id) ON DELETE CASCADE",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("migration missing %q", fragment)
+		}
+	}
+}

@@ -80,6 +80,34 @@ func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID stri
 	return cloneSession(value), nil
 }
 
+func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) error {
+	if err := check(ctx); err != nil {
+		return err
+	}
+	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.sessions[key(tenantID, sessionID)]; !ok {
+		return runtimestorage.ErrNotFound
+	}
+	delete(s.sessions, key(tenantID, sessionID))
+	for eventKey, event := range s.events {
+		if event.TenantID != tenantID || event.SessionID != sessionID {
+			continue
+		}
+		delete(s.events, eventKey)
+		delete(s.messages, key(tenantID, event.BindingID, event.ExternalMessageID))
+		for replyKey, reply := range s.replies {
+			if reply.TenantID == tenantID && reply.EventID == event.EventID {
+				delete(s.replies, replyKey)
+			}
+		}
+	}
+	return nil
+}
+
 func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageEventInput) (runtimestorage.MessageEvent, bool, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.MessageEvent{}, false, err
@@ -92,6 +120,9 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 	unique := key(input.TenantID, input.BindingID, input.ExternalMessageID)
 	if existingID, ok := s.messages[unique]; ok {
 		return cloneEvent(s.events[existingID]), true, nil
+	}
+	if _, ok := s.events[key(input.TenantID, input.EventID)]; ok {
+		return runtimestorage.MessageEvent{}, false, runtimestorage.ErrDuplicate
 	}
 	sessionKey := key(input.TenantID, input.SessionID)
 	sess, ok := s.sessions[sessionKey]

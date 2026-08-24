@@ -115,7 +115,19 @@ func (s *Service) ListSessions(ctx context.Context, key session.UserKey, options
 	return s.delegate.ListSessions(ctx, key, options...)
 }
 func (s *Service) DeleteSession(ctx context.Context, key session.Key, options ...session.Option) error {
-	return s.delegate.DeleteSession(ctx, key, options...)
+	if err := validateKey(key); err != nil {
+		return err
+	}
+	if err := s.store.DeleteSession(ctx, s.tenantID, key.SessionID); err != nil && !errors.Is(err, runtimestorage.ErrNotFound) {
+		return err
+	}
+	if err := s.delegate.DeleteSession(ctx, key, options...); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	delete(s.versions, key.SessionID)
+	s.mu.Unlock()
+	return nil
 }
 func (s *Service) UpdateAppState(ctx context.Context, app string, state session.StateMap) error {
 	return s.delegate.UpdateAppState(ctx, app, state)

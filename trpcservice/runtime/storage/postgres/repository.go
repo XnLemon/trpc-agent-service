@@ -92,6 +92,27 @@ func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID stri
 	return cloneSession(value), nil
 }
 
+func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) error {
+	if err := check(ctx); err != nil {
+		return err
+	}
+	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, "DELETE FROM public.runtime_session WHERE tenant_id=$1 AND session_id=$2", tenantID, sessionID)
+	if err != nil {
+		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return runtimestorage.ErrStorage
+	}
+	if rows == 0 {
+		return runtimestorage.ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageEventInput) (runtimestorage.MessageEvent, bool, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.MessageEvent{}, false, err

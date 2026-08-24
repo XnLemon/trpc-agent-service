@@ -73,6 +73,62 @@ func TestStoreDuplicateMessageAndConcurrentSequence(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsEventIDCollisionWithoutChangingSession(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	firstInput := runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session-1", BindingID: "binding-1", ExternalMessageID: "external-1", EventID: "event-1"}
+	first, duplicate, err := store.RecordMessage(context.Background(), firstInput)
+	if err != nil || duplicate {
+		t.Fatalf("first message = %+v duplicate=%v err=%v", first, duplicate, err)
+	}
+	_, duplicate, err = store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session-1", BindingID: "binding-2", ExternalMessageID: "external-2", EventID: "event-1"})
+	if !errors.Is(err, runtimestorage.ErrDuplicate) || duplicate {
+		t.Fatalf("event ID collision = duplicate=%v err=%v", duplicate, err)
+	}
+	persisted, err := store.GetMessage(context.Background(), "tenant-a", "event-1")
+	if err != nil || persisted.BindingID != first.BindingID || persisted.ExternalMessageID != first.ExternalMessageID {
+		t.Fatalf("first message changed = %+v err=%v", persisted, err)
+	}
+	sess, err := store.GetSession(context.Background(), "tenant-a", "session-1")
+	if err != nil || sess.Version != first.EventSeq {
+		t.Fatalf("session version after collision = %d, want %d (err=%v)", sess.Version, first.EventSeq, err)
+	}
+}
+
+func TestStoreDeleteSessionRemovesAssociatedRuntimeData(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	input := runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session-1", BindingID: "binding-1", ExternalMessageID: "external-1", EventID: "event-1"}
+	if _, _, err := store.RecordMessage(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-1", EventID: "event-1", SegmentIndex: 0, SegmentCount: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteSession(context.Background(), "tenant-a", "session-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetSession(context.Background(), "tenant-a", "session-1"); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("deleted session = %v", err)
+	}
+	if _, err := store.GetMessage(context.Background(), "tenant-a", "event-1"); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("deleted event = %v", err)
+	}
+	if _, err := store.GetReply(context.Background(), "tenant-a", "reply-1", 0); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("deleted reply = %v", err)
+	}
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-1", nil); err != nil {
+		t.Fatalf("recreate session: %v", err)
+	}
+	if _, duplicate, err := store.RecordMessage(context.Background(), input); err != nil || duplicate {
+		t.Fatalf("reuse external message after delete = duplicate=%v err=%v", duplicate, err)
+	}
+}
+
 func TestStoreReplyStateMachineAndFencing(t *testing.T) {
 	store := inmemory.New()
 	reply, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-1", EventID: "event-1", SegmentIndex: 0, SegmentCount: 1, Payload: "hello"})

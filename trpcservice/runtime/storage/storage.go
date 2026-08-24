@@ -109,6 +109,7 @@ type RuntimeStore interface {
 	GetSession(context.Context, string, string) (Session, error)
 	CreateSession(context.Context, string, string, map[string]any) (Session, error)
 	UpdateSessionState(context.Context, string, string, int64, map[string]any) (Session, error)
+	DeleteSession(context.Context, string, string) error
 	RecordMessage(context.Context, MessageEventInput) (MessageEvent, bool, error)
 	GetMessage(context.Context, string, string) (MessageEvent, error)
 	EnqueueReply(context.Context, ReplyOutbox) (ReplyOutbox, error)
