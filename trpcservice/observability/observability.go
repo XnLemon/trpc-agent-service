@@ -223,7 +223,7 @@ func (s otelSpan) SetStatus(status Status, description string) {
 	if status == StatusError {
 		code = codes.Error
 	}
-	s.span.SetStatus(code, description)
+	s.span.SetStatus(code, RedactString(description))
 }
 func (s otelSpan) RecordError(err error) {
 	if err != nil {

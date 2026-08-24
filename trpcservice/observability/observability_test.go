@@ -87,6 +87,7 @@ func TestTelemetryAdaptersEnforceSafeFieldsAndWrapSDKPrimitives(t *testing.T) {
 		Attribute{Key: "message", Value: "user text"},
 		Attribute{Key: "token", Value: "secret"})
 	span.SetAttributes(Attribute{Key: "status", Value: "ok"}, Attribute{Key: "raw", Value: "payload"})
+	span.SetStatus(StatusError, "Authorization: Bearer secret")
 	span.RecordError(errors.New("token=secret"))
 	span.End()
 	meter := provider.Meter("test")
