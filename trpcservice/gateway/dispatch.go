@@ -11,6 +11,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	"github.com/google/uuid"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
@@ -28,6 +29,7 @@ var (
 )
 
 const defaultDispatchDrainTimeout = 250 * time.Millisecond
+const durableInboundLease = 30 * time.Second
 
 // DispatchEventType identifies the protocol-neutral event surface consumed by
 // JSON and SSE adapters.
@@ -72,6 +74,9 @@ type DispatchConfig struct {
 	Registry      *RunnerRegistry
 	DrainTimeout  time.Duration
 	Observability observability.Provider
+	// RuntimeStore enables durable inbound claims for verified Channel principals.
+	// API principals remain protected by the HTTP IdempotencyStore.
+	RuntimeStore runtimestorage.RuntimeStore
 }
 
 // Dispatcher resolves a fixed plan, acquires a Runner lease, and translates
@@ -82,6 +87,15 @@ type Dispatcher struct {
 	drainTimeout time.Duration
 	telemetry    observability.Provider
 	metrics      metrics.Catalog
+	runtimeStore runtimestorage.RuntimeStore
+}
+
+type durableExecution struct {
+	store        runtimestorage.RuntimeStore
+	tenantID     string
+	eventID      string
+	owner        string
+	fencingToken int64
 }
 
 // NewDispatcher validates the protocol-neutral execution dependencies.
@@ -98,7 +112,7 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
 	}
-	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability)}, nil
+	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.
@@ -156,20 +170,28 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		finishWithError(err)
 		return nil, err
 	}
+	durable, err := dispatcher.claimInbound(ctx, request.Principal, message, identity)
+	if err != nil {
+		finishWithError(err)
+		return nil, err
+	}
 	lease, err := dispatcher.registry.Acquire(ctx, plan)
 	if err != nil {
+		dispatcher.failDurable(durable, err)
 		finishWithError(err)
 		return nil, err
 	}
 	runnerValue := lease.Runner()
 	if runnerValue == nil {
 		_ = lease.Release()
+		dispatcher.failDurable(durable, ErrRunnerUnavailable)
 		finishWithError(ErrRunnerUnavailable)
 		return nil, ErrRunnerUnavailable
 	}
 	runnerEvents, err := runnerValue.Run(ctx, identity.UserID, identity.SessionID, trpcmodel.NewUserMessage(message.Content), trpcagent.WithRequestID(requestID))
 	if err != nil {
 		_ = lease.Release()
+		dispatcher.failDurable(durable, err)
 		if IsContextCancellation(err) {
 			finishWithError(err)
 			return nil, err
@@ -179,21 +201,102 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	}
 	if runnerEvents == nil {
 		_ = lease.Release()
+		dispatcher.failDurable(durable, ErrExecution)
 		finishWithError(ErrExecution)
 		return nil, ErrExecution
 	}
 
 	output := make(chan DispatchEvent, 32)
 	_ = dispatcher.metrics.Active(ctx, 1, map[string]string{"component": "runner"})
-	go dispatcher.forward(ctx, requestID, traceID, runnerEvents, lease, output, span, started)
+	go dispatcher.forward(ctx, requestID, traceID, runnerEvents, lease, durable, output, span, started)
 	return output, nil
 }
 
-func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, output chan<- DispatchEvent, span observability.Span, started time.Time) {
+func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity) (*durableExecution, error) {
+	if dispatcher.runtimeStore == nil || principal.Kind() != PrincipalChannel {
+		return nil, nil
+	}
+	target, ok := principal.RoutingTarget()
+	if !ok || message.ExternalMessageID == "" {
+		return nil, fmt.Errorf("%w: durable Channel messages require an external message ID", ErrInvalid)
+	}
+	store := dispatcher.runtimeStore
+	if _, err := store.GetSession(ctx, principal.TenantID(), identity.SessionID); err != nil {
+		if !errors.Is(err, runtimestorage.ErrNotFound) {
+			return nil, err
+		}
+		if _, createErr := store.CreateSession(ctx, principal.TenantID(), identity.SessionID, nil); createErr != nil && !errors.Is(createErr, runtimestorage.ErrDuplicate) {
+			return nil, createErr
+		}
+	}
+	event, duplicate, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{
+		TenantID: principal.TenantID(), EventID: uuid.NewString(), SessionID: identity.SessionID,
+		BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID,
+		IdempotencyKey: message.ExternalMessageID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	owner := "gateway-" + uuid.NewString()
+	if duplicate {
+		if event.Status == runtimestorage.EventRunning && (event.LeaseExpiresAt == nil || event.LeaseExpiresAt.After(time.Now().UTC())) {
+			return nil, ErrDuplicateMessage
+		}
+		if event.Status == runtimestorage.EventRunning {
+			if _, recoverErr := store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: principal.TenantID(), EventID: event.EventID, From: runtimestorage.EventRunning, To: runtimestorage.EventExecutionReconciling, Owner: owner}); recoverErr != nil {
+				return nil, ErrDuplicateMessage
+			}
+			event.Status = runtimestorage.EventExecutionReconciling
+		}
+		if event.Status != runtimestorage.EventReceived && event.Status != runtimestorage.EventExecutionReconciling {
+			return nil, ErrDuplicateMessage
+		}
+	}
+	from := event.Status
+	running, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{
+		TenantID: principal.TenantID(), EventID: event.EventID, From: from,
+		To: runtimestorage.EventRunning, Owner: owner, LeaseDuration: durableInboundLease,
+	})
+	if err != nil {
+		if duplicate && errors.Is(err, runtimestorage.ErrConflict) {
+			return nil, ErrDuplicateMessage
+		}
+		return nil, err
+	}
+	return &durableExecution{store: store, tenantID: principal.TenantID(), eventID: event.EventID, owner: owner, fencingToken: running.FencingToken}, nil
+}
+
+func (dispatcher *Dispatcher) failDurable(durable *durableExecution, cause error) {
+	if durable == nil {
+		return
+	}
+	to := runtimestorage.EventFailed
+	_, _ = durable.store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{
+		TenantID: durable.tenantID, EventID: durable.eventID, From: runtimestorage.EventRunning,
+		To: to, Owner: durable.owner, FencingToken: durable.fencingToken,
+	})
+}
+
+func (dispatcher *Dispatcher) finishDurable(durable *durableExecution, terminalErr error) {
+	if durable == nil {
+		return
+	}
+	to := runtimestorage.EventCompleted
+	if terminalErr != nil {
+		to = runtimestorage.EventFailed
+	}
+	_, _ = durable.store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{
+		TenantID: durable.tenantID, EventID: durable.eventID, From: runtimestorage.EventRunning,
+		To: to, Owner: durable.owner, FencingToken: durable.fencingToken,
+	})
+}
+
+func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time) {
 	defer close(output)
 	defer func() { _ = lease.Release() }()
 	var terminalErr error
 	defer func() {
+		dispatcher.finishDurable(durable, terminalErr)
 		_ = dispatcher.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
 		status := "complete"
 		if terminalErr != nil {

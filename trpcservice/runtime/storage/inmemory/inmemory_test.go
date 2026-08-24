@@ -375,3 +375,21 @@ func TestStoreEventHistoryAndMessageLifecycle(t *testing.T) {
 		t.Fatalf("illegal message transition = %v", err)
 	}
 }
+
+func TestStoreExpiredRunningMessageCanBeTakenForReconciliation(t *testing.T) {
+	store := inmemory.New()
+	seedEvent(t, store, "tenant-a", "session-expired", "expired-1")
+	event, err := store.GetMessage(context.Background(), "tenant-a", "expired-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	running, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: event.EventID, From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "old-worker", LeaseDuration: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	reconciling, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: event.EventID, From: runtimestorage.EventRunning, To: runtimestorage.EventExecutionReconciling, Owner: "new-worker"})
+	if err != nil || reconciling.Status != runtimestorage.EventExecutionReconciling || reconciling.LeaseOwner != "" || reconciling.LeaseExpiresAt != nil || reconciling.FencingToken != running.FencingToken+1 {
+		t.Fatalf("expired recovery = %+v err=%v", reconciling, err)
+	}
+}

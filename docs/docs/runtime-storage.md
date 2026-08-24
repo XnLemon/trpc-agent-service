@@ -14,7 +14,9 @@ Session/Runner 使用的命名空间只用于防碰撞，不能替代数据库�
 - `reply_outbox` 分段回复、租约/fencing、重试和供应商回执。
 
 本 Issue 不实现 Redis、Memory/Knowledge/Artifact 生产适配、AuditEvent/usage/cost、
-完整 IM webhook/media、分布式调度、KMS/Vault 或告警平台。
+完整 IM webhook/media、分布式调度、KMS/Vault 或告警平台。API principal 继续由
+Gateway HTTP 层的进程内幂等存储保护；跨进程 durable inbound claim 只在已验证
+Channel principal 上启用，因为 `message_event.binding_id` 必须引用真实的控制面 Binding。
 
 ## 数据边界和关系
 
@@ -109,7 +111,10 @@ Session adapter 在上游 delegate 恢复后按 history_seq 增量回放，避�
 
 入站状态为 `received → running → completed → reply_pending → replied`；租约过期进入
 `execution_reconciling`，无法安全对账则进入 `failed`/死信。重复回调在
-`running`、`completed` 或 `replied` 时只返回已有结果，不重新启动 Runner。
+`running`、`completed` 或 `replied` 时只返回已有结果，不重新启动 Runner。Gateway 在
+配置了 RuntimeStore 时，会在 verified Channel principal 的 Runner 调用前以
+`(tenant_id, binding_id, external_message_id)` 原子 claim；已有 claim 直接返回
+`ErrDuplicateMessage`，因此第二个进程不会获取 Runner。
 
 Outbox 最小状态转换为：
 
@@ -135,6 +140,10 @@ Bootstrap 必须显式选择 Session capability。`TRPC_SESSION_BACKEND=postgres
 必须同时提供已迁移的 `TRPC_POSTGRES_DSN`；未知值、缺失 DSN 或 migration 验证失败
 均 fail-closed。`inmemory` 只用于开发和测试，并在 readiness/启动日志中明确显示
 非持久化。新进程连接同一 DSN 后应能读取已有 Session、事件和未发送 Outbox。
+真实验收测试使用可选的 `POSTGRES_RUNTIME_TEST_DSN`，并要求该 DSN 已有可写的
+`POSTGRES_RUNTIME_TEST_TENANT_ID` 与 `POSTGRES_RUNTIME_TEST_BINDING_ID`；测试会执行
+完整 RuntimeStore 操作、关闭连接、重新打开连接并验证 Session/Event/History/Outbox
+仍可读取。未提供这些变量时测试显式 skip，不得把 skip 记为 live PostgreSQL 证据。
 
 ## Issue ledger
 
@@ -144,8 +153,15 @@ Bootstrap 必须显式选择 Session capability。`TRPC_SESSION_BACKEND=postgres
 | InMemory/PostgreSQL RuntimeStore 接口 | 1 | Go 接口、错误分类、深拷贝测试 | ✅ |
 | 有序 migration、复合 FK、唯一约束、状态约束和 Session 删除级联 | 2 | `0003_runtime_storage.up.sql`、`0004_runtime_session_delete_cascade.up.sql`、`0005_runtime_event_history.up.sql` 与 migration 测试 | ✅ |
 | CAS/event_seq、重复入站和 Outbox fencing | 2 | 并发、乱序、重试、死信测试 | ✅ |
-| Bootstrap 显式 Session capability 与 fail-closed | 3 | 环境配置、RuntimeStore-backed session.Service、重启恢复测试 | ⬜ |
-| 租户越权、取消、脱敏和防御性返回 | 1–3 | 双租户 conformance 与错误边界测试 | ⬜ |
-| `go test`、race、vet、build、MkDocs strict | 每阶段 | PR 验证记录 | ⬜ |
+| Bootstrap 显式 Session capability 与 fail-closed | 3 | 环境配置、RuntimeStore-backed session.Service、重启恢复测试 | ✅ |
+| durable Event payload/history 与完整 Event 状态生命周期 | 4 | `runtime_event_history`、fresh delegate replay、状态迁移测试 | ✅ |
+| Outbox worker/reconciliation/provider delivery | 5 | fenced worker、重试/死信/过期 lease 与 provider 测试 | ✅ |
+| 真实 PostgreSQL/InMemory conformance 与 fresh-process restart | 6 | `POSTGRES_RUNTIME_TEST_DSN` 可选 live suite 与 reopen 证据 | ✅* |
+| verified Channel duplicate Runner suppression | 6 | RuntimeStore claim + 并发 Gateway Runner invocation-count 测试 | ✅ |
+| 租户越权、取消、脱敏和防御性返回 | 1–6 | 双租户 conformance 与错误边界测试 | ✅ |
+| `go test`、race、vet、build、MkDocs strict | 最终 | PR 验证记录与 CI | ✅ |
+
+`✅*` 表示测试代码和重启路径已交付；live PostgreSQL 证据只有在 CI/本地实际
+提供上述 DSN 时才可勾选，未设置 DSN 的默认测试运行会 skip。
 
 在代码阶段完成后，本表必须与 PR 描述同步；未完成项目保留为明确的后续阶段。

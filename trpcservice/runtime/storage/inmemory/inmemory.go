@@ -177,7 +177,11 @@ func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage
 		return runtimestorage.MessageEvent{}, runtimestorage.ErrConflict
 	}
 	if transition.From == runtimestorage.EventRunning {
-		if value.LeaseOwner != transition.Owner || transition.FencingToken == 0 || value.FencingToken != transition.FencingToken || (value.LeaseExpiresAt != nil && !value.LeaseExpiresAt.After(time.Now().UTC())) {
+		if transition.To == runtimestorage.EventExecutionReconciling {
+			if value.LeaseExpiresAt == nil || value.LeaseExpiresAt.After(time.Now().UTC()) {
+				return runtimestorage.MessageEvent{}, runtimestorage.ErrConflict
+			}
+		} else if value.LeaseOwner != transition.Owner || transition.FencingToken == 0 || value.FencingToken != transition.FencingToken || (value.LeaseExpiresAt != nil && !value.LeaseExpiresAt.After(time.Now().UTC())) {
 			return runtimestorage.MessageEvent{}, runtimestorage.ErrConflict
 		}
 	}
@@ -189,6 +193,7 @@ func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage
 		value.LeaseOwner = transition.Owner
 		value.LeaseExpiresAt = &deadline
 	} else {
+		value.LeaseOwner = ""
 		value.LeaseExpiresAt = nil
 	}
 	value.Status = transition.To

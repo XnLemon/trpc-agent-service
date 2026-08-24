@@ -176,7 +176,7 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 		return nil, ErrInvalidConfig
 	}
 	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{
-		Resolver: resolver, Registry: registry, DrainTimeout: config.DrainTimeout,
+		Resolver: resolver, Registry: registry, RuntimeStore: config.RuntimeStore, DrainTimeout: config.DrainTimeout,
 	})
 	if err != nil {
 		_ = registry.Close()

@@ -5,11 +5,13 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -144,6 +146,71 @@ func TestDispatcherUsesVerifiedChannelIdentity(t *testing.T) {
 	defer captured.mu.Unlock()
 	if !strings.Contains(captured.userID, target.BindingID) || !strings.Contains(captured.sessionID, target.BindingID) {
 		t.Fatalf("channel identity omitted Binding scope: user=%q session=%q", captured.userID, captured.sessionID)
+	}
+}
+
+func TestDispatcherDurableChannelClaimSuppressesDuplicateRunner(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPlanResolver(PlanResolverConfig{
+		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
+		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runnerValue := &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		events := make(chan *trpcevent.Event, 1)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
+		close(events)
+		return events, nil
+	}}
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = registry.Close() }()
+	store := inmemory.New()
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, DrainTimeout: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := DispatchRequest{Principal: principal, Message: InboundMessage{Content: "duplicate", ExternalMessageID: "channel-message-1", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"}, RequestID: "channel-message-1"}
+	firstDone := make(chan error, 1)
+	go func() {
+		stream, dispatchErr := dispatcher.Dispatch(context.Background(), request)
+		if dispatchErr != nil {
+			firstDone <- dispatchErr
+			return
+		}
+		collectDispatchEvents(stream)
+		firstDone <- nil
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first Runner did not start")
+	}
+	if _, err := dispatcher.Dispatch(context.Background(), request); !errors.Is(err, ErrDuplicateMessage) {
+		t.Fatalf("duplicate dispatch error = %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("duplicate started %d Runner calls", got)
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
 	}
 }
 

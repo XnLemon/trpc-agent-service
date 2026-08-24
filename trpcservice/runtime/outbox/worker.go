@@ -90,6 +90,7 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 		processed++
 		if candidate.Status == runtimestorage.ReplySending {
 			if w.reconcile(ctx, claimed) {
+				w.advanceEvent(ctx, claimed.EventID)
 				continue
 			}
 		}

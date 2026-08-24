@@ -96,6 +96,17 @@ func TestWorkerRetriesThenDeadLettersStableProviderErrors(t *testing.T) {
 func TestWorkerReconcilesExpiredSendingBeforeRedelivery(t *testing.T) {
 	store := inmemory.New()
 	seedReply(t, store, "tenant-a", "event-3", "reply-3")
+	event, err := store.GetMessage(context.Background(), "tenant-a", "event-3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	running, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: event.EventID, From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "runner", LeaseDuration: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: event.EventID, From: runtimestorage.EventRunning, To: runtimestorage.EventCompleted, Owner: "runner", FencingToken: running.FencingToken}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.ClaimReply(context.Background(), "tenant-a", "reply-3", 0, "old-worker", time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
@@ -111,6 +122,10 @@ func TestWorkerReconcilesExpiredSendingBeforeRedelivery(t *testing.T) {
 	value, err := store.GetReply(context.Background(), "tenant-a", "reply-3", 0)
 	if err != nil || value.Status != runtimestorage.ReplySent || value.ProviderMessageID != "provider-recovered" || provider.reconciliations != 1 || provider.deliveries != 0 {
 		t.Fatalf("reconciled = %+v provider=%+v err=%v", value, provider, err)
+	}
+	updated, err := store.GetMessage(context.Background(), "tenant-a", event.EventID)
+	if err != nil || updated.Status != runtimestorage.EventReplied {
+		t.Fatalf("reconciled event status = %+v err=%v", updated, err)
 	}
 }
 
