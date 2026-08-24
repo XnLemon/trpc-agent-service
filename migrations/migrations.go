@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"database/sql/driver"
 	"embed"
 	"errors"
 	"fmt"
@@ -14,9 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // Files is the ordered, immutable migration set owned by bootstrap.
@@ -113,11 +109,20 @@ func Apply(ctx context.Context, db *sql.DB) error {
 		if migration.version != nextVersion(history) {
 			return fmt.Errorf("%w: version %d is not the next migration", ErrInvalidHistory, migration.version)
 		}
-		if err := execMigration(ctx, conn, migration.sql); err != nil {
+		tx, err := conn.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("%w: begin %s", ErrMigration, migration.name)
+		}
+		if err := execMigration(ctx, tx, migration.sql); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("%w: %s", ErrMigration, migration.name)
 		}
-		if _, err := conn.ExecContext(ctx, "INSERT INTO public.schema_migrations(version, name, sha256, applied_at) VALUES ($1, $2, $3, $4)", migration.version, migration.name, migration.digest, time.Now().UTC()); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO public.schema_migrations(version, name, sha256, applied_at) VALUES ($1, $2, $3, $4)", migration.version, migration.name, migration.digest, time.Now().UTC()); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("%w: record %s", ErrMigration, migration.name)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("%w: commit %s", ErrMigration, migration.name)
 		}
 		history[migration.version] = migration.digest
 	}
@@ -183,19 +188,14 @@ func readHistory(ctx context.Context, conn *sql.Conn) (map[int]string, error) {
 	return history, nil
 }
 
-func execMigration(ctx context.Context, conn *sql.Conn, statement string) error {
-	return conn.Raw(func(driverConn any) error {
-		pgConn, ok := driverConn.(*stdlib.Conn)
-		if !ok {
-			if execer, ok := driverConn.(driver.ExecerContext); ok {
-				_, err := execer.ExecContext(ctx, statement, nil)
-				return err
-			}
-			return errors.New("migration driver does not support direct execution")
-		}
-		_, err := pgConn.Conn().Exec(ctx, statement, pgx.QueryExecModeSimpleProtocol)
-		return err
-	})
+func execMigration(ctx context.Context, tx *sql.Tx, statement string) error {
+	statement = strings.TrimSpace(statement)
+	statement = strings.TrimPrefix(statement, "BEGIN;")
+	statement = strings.TrimSpace(statement)
+	statement = strings.TrimSuffix(statement, "COMMIT;")
+	statement = strings.TrimSpace(statement)
+	_, err := tx.ExecContext(ctx, statement)
+	return err
 }
 
 func nextVersion(history map[int]string) int {
