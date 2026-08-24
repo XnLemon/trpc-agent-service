@@ -4,12 +4,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-go test ./... -coverprofile=coverage.out
-
 # Cross-domain PostgreSQL integration tests intentionally live outside each
 # domain package. Instrument their concrete repository packages explicitly and
 # merge the resulting profile so the CI/Codecov gate measures the exercised
-# implementation rather than only the test package itself.
+# implementation rather than only the test package itself. Exclude that suite
+# from the ordinary package pass so it does not create its integration schema
+# twice against the CI PostgreSQL service.
+mapfile -t base_packages < <(go list ./... | grep -v '/trpcservice/controlplane/postgres$')
+go test "${base_packages[@]}" -coverprofile=coverage.out
+
 control_plane_packages="./trpcservice/agent/postgres,./trpcservice/backend/postgres,./trpcservice/channels/postgres,./trpcservice/model/postgres,./trpcservice/tenant/postgres"
 go test ./trpcservice/controlplane/postgres -coverpkg="$control_plane_packages" -coverprofile=coverage-controlplane.out
 go run ./scripts/mergecover -out coverage-merged.out coverage.out coverage-controlplane.out
