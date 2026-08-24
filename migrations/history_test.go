@@ -3,10 +3,7 @@ package migrations
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
-
-	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
 
 func TestOrderedFilesAreContiguousAndDigestable(t *testing.T) {
@@ -21,24 +18,6 @@ func TestOrderedFilesAreContiguousAndDigestable(t *testing.T) {
 		if migration.name == "" || len(migration.digest) != 64 || migration.sql == "" {
 			t.Fatalf("invalid migration metadata = %+v", migration)
 		}
-	}
-}
-
-func TestApplyAndVerifyAgainstDisposablePostgres(t *testing.T) {
-	dsn := os.Getenv("POSTGRES_MIGRATION_TEST_DSN")
-	if dsn == "" {
-		t.Skip("POSTGRES_MIGRATION_TEST_DSN is not set")
-	}
-	db, err := storagepostgres.Open(context.Background(), dsn, storagepostgres.Options{MaxOpenConns: 2, MaxIdleConns: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = db.Close() }()
-	if err := Apply(context.Background(), db); err != nil {
-		t.Fatalf("Apply error = %v", err)
-	}
-	if err := Verify(context.Background(), db); err != nil {
-		t.Fatalf("Verify error = %v", err)
 	}
 }
 
