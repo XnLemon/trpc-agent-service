@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -38,7 +39,9 @@ func main() {
 	for block := range blocks {
 		keys = append(keys, block)
 	}
-	sort.Strings(keys)
+	sort.Slice(keys, func(i, j int) bool {
+		return coverageBlockLess(keys[i], keys[j])
+	})
 	for _, block := range keys {
 		if _, err := fmt.Fprintf(writer, "%s %d\n", block, blocks[block]); err != nil {
 			_ = file.Close()
@@ -108,6 +111,76 @@ func readProfile(path string) (string, map[string]int, error) {
 		return "", nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	return strings.TrimPrefix(modeLine, "mode: "), blocks, nil
+}
+
+// coverageBlockLess preserves Go's coverage profile ordering. Lexical sorting
+// is incorrect for source positions because, for example, line 101 sorts
+// before line 16; external coverage consumers require numeric source order.
+func coverageBlockLess(left, right string) bool {
+	leftLocation, leftOK := parseCoverageBlockLocation(left)
+	rightLocation, rightOK := parseCoverageBlockLocation(right)
+	if !leftOK || !rightOK {
+		return left < right
+	}
+	if leftLocation.file != rightLocation.file {
+		return leftLocation.file < rightLocation.file
+	}
+	if leftLocation.startLine != rightLocation.startLine {
+		return leftLocation.startLine < rightLocation.startLine
+	}
+	if leftLocation.startColumn != rightLocation.startColumn {
+		return leftLocation.startColumn < rightLocation.startColumn
+	}
+	if leftLocation.endLine != rightLocation.endLine {
+		return leftLocation.endLine < rightLocation.endLine
+	}
+	return leftLocation.endColumn < rightLocation.endColumn
+}
+
+type coverageBlockLocation struct {
+	file                   string
+	startLine, startColumn int
+	endLine, endColumn     int
+}
+
+func parseCoverageBlockLocation(block string) (coverageBlockLocation, bool) {
+	fields := strings.Fields(block)
+	if len(fields) == 0 {
+		return coverageBlockLocation{}, false
+	}
+	location := fields[0]
+	separator := strings.LastIndex(location, ":")
+	if separator < 1 {
+		return coverageBlockLocation{}, false
+	}
+	rangeParts := strings.Split(strings.TrimSpace(location[separator+1:]), ",")
+	if len(rangeParts) != 2 {
+		return coverageBlockLocation{}, false
+	}
+	start, startOK := parseCoveragePosition(rangeParts[0])
+	end, endOK := parseCoveragePosition(rangeParts[1])
+	if !startOK || !endOK {
+		return coverageBlockLocation{}, false
+	}
+	return coverageBlockLocation{
+		file: location[:separator], startLine: start.line, startColumn: start.column,
+		endLine: end.line, endColumn: end.column,
+	}, true
+}
+
+type coveragePosition struct{ line, column int }
+
+func parseCoveragePosition(value string) (coveragePosition, bool) {
+	parts := strings.Split(value, ".")
+	if len(parts) != 2 {
+		return coveragePosition{}, false
+	}
+	line, lineErr := strconv.Atoi(parts[0])
+	column, columnErr := strconv.Atoi(parts[1])
+	if lineErr != nil || columnErr != nil {
+		return coveragePosition{}, false
+	}
+	return coveragePosition{line: line, column: column}, true
 }
 
 func fail(err error) {

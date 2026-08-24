@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 )
 
@@ -32,5 +33,26 @@ func TestMergeProfilesPreservesUncoveredBlocksAndHighestCount(t *testing.T) {
 	}
 	if got := blocks["example.go:3.1,3.2 2"]; got != 0 {
 		t.Fatalf("second uncovered block count = %d", got)
+	}
+}
+
+func TestCoverageBlockLessOrdersSourceLocationsNumerically(t *testing.T) {
+	blocks := []string{
+		"example.go:101.1,101.2 1",
+		"other.go:1.1,1.2 1",
+		"example.go:16.3,16.4 1",
+		"example.go:16.1,16.2 1",
+	}
+	sort.Slice(blocks, func(i, j int) bool { return coverageBlockLess(blocks[i], blocks[j]) })
+	want := []string{
+		"example.go:16.1,16.2 1",
+		"example.go:16.3,16.4 1",
+		"example.go:101.1,101.2 1",
+		"other.go:1.1,1.2 1",
+	}
+	for index := range want {
+		if blocks[index] != want[index] {
+			t.Fatalf("block %d = %q, want %q", index, blocks[index], want[index])
+		}
 	}
 }
