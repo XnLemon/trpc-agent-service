@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -134,6 +135,38 @@ func TestTenantRepositoryCreatesAndGetsTenant(t *testing.T) {
 		t.Fatalf("loaded tenant = %+v", loaded)
 	}
 	if err := getMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTenantRepositoryValidatesDefaultsAndErrors(t *testing.T) {
+	input := tenant.CreateInput{
+		TenantKey: "validation-paths", DisplayName: "Validation Paths", Status: tenant.StatusActive,
+		AuditRetentionDays: 90, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1,
+	}
+	stored, err := tenant.NewTenant(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewRepository(nil).UpdateConfiguration(context.Background(), tenant.UpdateConfigurationInput{
+		TenantID: stored.TenantID, ExpectedVersion: stored.Version, DisplayName: stored.DisplayName, TraceSamplingRate: stored.TraceSamplingRate,
+	}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("defaulted configuration storage error = %v", err)
+	}
+	if _, _, err := NewRepository(nil).TransitionStatus(context.Background(), tenant.TransitionStatusInput{}); !errors.Is(err, tenant.ErrInvalid) {
+		t.Fatalf("invalid transition metadata error = %v", err)
+	}
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(".*").WithArgs(stored.TenantID).WillReturnError(sql.ErrNoRows)
+	if _, err := NewRepository(db).Get(context.Background(), stored.TenantID); !errors.Is(err, tenant.ErrNotFound) {
+		t.Fatalf("missing tenant error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
 }

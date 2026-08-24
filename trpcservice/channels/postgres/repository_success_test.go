@@ -31,6 +31,25 @@ func TestChannelRepositoryGetDecodesStoredBinding(t *testing.T) {
 	}
 }
 
+func TestChannelRepositoryRejectsInvalidCreationMetadata(t *testing.T) {
+	binding := newStoredChannelBinding(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	_, _, err = NewRepository(db).Create(context.Background(), channels.CreateInput{
+		TenantID: binding.TenantID, BindingKey: "invalid-metadata", Channel: binding.Channel, ProviderAccountID: binding.ProviderAccountID,
+		PublicRouteKeyDigest: binding.PublicRouteKeyDigest, AppID: binding.AppID, SecretRef: binding.SecretRef, Protocol: binding.Protocol, Status: binding.Status,
+	})
+	if !errors.Is(err, channels.ErrInvalid) {
+		t.Fatalf("invalid creation metadata error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestChannelRepositoryCandidateLookupAndConsumption(t *testing.T) {
 	binding := newStoredChannelBinding(t)
 	db, mock, err := sqlmock.New()

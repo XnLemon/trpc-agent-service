@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -56,6 +57,70 @@ func TestAgentRepositoryGetRevisionDecodesStoredDraft(t *testing.T) {
 	}
 	if stored.Revision != draft.Revision || stored.State != agent.RevisionStateDraft || stored.Instruction != draft.Instruction {
 		t.Fatalf("stored draft = %+v", stored)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAgentRepositoryMapsMissingRevisionToNotFound(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(".*").WithArgs("tenant", "app", int64(1)).WillReturnError(sql.ErrNoRows)
+
+	_, err = NewRepository(db).GetRevision(context.Background(), "tenant", "app", 1)
+	if !errors.Is(err, agent.ErrNotFound) {
+		t.Fatalf("missing revision error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAgentRepositoryRejectsInvalidInputsBeforeTransactions(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repository := NewRepository(db)
+	ctx := context.Background()
+	if _, err := repository.Create(ctx, agent.CreateInput{}); !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("Create invalid input error = %v", err)
+	}
+	if _, _, _, err := repository.Publish(ctx, agent.PublishInput{}); !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("Publish invalid metadata error = %v", err)
+	}
+	if _, _, err := repository.Rollback(ctx, agent.RollbackInput{}); !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("Rollback invalid metadata error = %v", err)
+	}
+	if _, _, err := repository.TransitionStatus(ctx, agent.TransitionStatusInput{}); !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("TransitionStatus invalid metadata error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAgentRepositoryRejectsInvalidMetadataUpdate(t *testing.T) {
+	current := newStoredAgentApp(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectBegin()
+	expectAgentApp(mock, current)
+	mock.ExpectRollback()
+
+	_, err = NewRepository(db).UpdateMetadata(context.Background(), agent.UpdateMetadataInput{
+		TenantID: current.TenantID, AppID: current.AppID, ExpectedVersion: current.Version, DisplayName: " ", Description: current.Description,
+	})
+	if !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("invalid metadata update error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

@@ -55,6 +55,32 @@ func TestModelRepositoryGetDecodesStoredProfile(t *testing.T) {
 	}
 }
 
+func TestModelRepositoryRejectsInvalidCreationMetadata(t *testing.T) {
+	catalog, err := model.NewProviderCatalog(model.ProviderSpec{
+		Provider: "public", Models: []string{"chat"}, EndpointPolicy: model.FieldOptional,
+		EndpointSchemes: []string{"https"}, EndpointHosts: []string{"example.test"}, SecretRefPolicy: model.FieldOptional,
+		Options: map[string]model.OptionSpec{"mode": {Kind: model.OptionString}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	_, _, err = NewRepository(db, catalog).Create(context.Background(), model.CreateInput{
+		TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", ProfileKey: "invalid-metadata", DisplayName: "Invalid metadata", Status: model.StatusActive,
+		SchemaVersion: model.SchemaVersionV1, Configuration: model.Configuration{Provider: "public", Model: "chat", Options: map[string]string{"mode": "safe"}},
+	})
+	if !errors.Is(err, model.ErrInvalid) {
+		t.Fatalf("invalid creation metadata error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestModelRepositoryUpdatesConfigurationAndReturnsEvent(t *testing.T) {
 	catalog, err := model.NewProviderCatalog(model.ProviderSpec{
 		Provider: "public", Models: []string{"chat"}, EndpointPolicy: model.FieldOptional,

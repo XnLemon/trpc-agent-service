@@ -56,6 +56,31 @@ func TestBackendRepositoryGetDecodesBindings(t *testing.T) {
 	}
 }
 
+func TestBackendRepositoryRejectsInvalidCreationMetadata(t *testing.T) {
+	catalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
+		Provider: "inmemory", Capabilities: []backend.Capability{backend.CapabilitySession}, EndpointPolicy: backend.FieldForbidden,
+		SecretRefPolicy: backend.FieldForbidden, Options: map[string]backend.OptionSpec{"namespace": {Kind: backend.OptionString}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	_, _, err = NewRepository(db, catalog).Create(context.Background(), backend.CreateInput{
+		TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", ProfileKey: "invalid-metadata", DisplayName: "Invalid metadata", Status: backend.StatusActive,
+		SchemaVersion: 1, Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory", Options: map[string]string{"namespace": "safe"}}},
+	})
+	if !errors.Is(err, backend.ErrInvalid) {
+		t.Fatalf("invalid creation metadata error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBackendRepositoryUpdatesConfigurationAndReturnsEvent(t *testing.T) {
 	catalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
 		Provider: "inmemory", Capabilities: []backend.Capability{backend.CapabilitySession}, EndpointPolicy: backend.FieldForbidden,
