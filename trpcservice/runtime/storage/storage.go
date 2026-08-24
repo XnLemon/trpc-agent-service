@@ -113,6 +113,7 @@ type RuntimeStore interface {
 	GetMessage(context.Context, string, string) (MessageEvent, error)
 	EnqueueReply(context.Context, ReplyOutbox) (ReplyOutbox, error)
 	GetReply(context.Context, string, string, int) (ReplyOutbox, error)
+	ClaimReply(context.Context, string, string, int, string, time.Duration) (ReplyOutbox, error)
 	TransitionReply(context.Context, ReplyTransition) (ReplyOutbox, error)
 	Close() error
 }

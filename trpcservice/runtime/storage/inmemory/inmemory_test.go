@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
@@ -90,5 +91,24 @@ func TestStoreReplyStateMachineAndFencing(t *testing.T) {
 	}
 	if _, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: reply.TenantID, ReplyID: reply.ReplyID, SegmentIndex: 0, From: runtimestorage.ReplySent, To: runtimestorage.ReplySending, Owner: "worker-a"}); !errors.Is(err, runtimestorage.ErrIllegalTransition) {
 		t.Fatalf("illegal transition = %v", err)
+	}
+}
+
+func TestStoreClaimReplyFencesExpiredWorker(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-claim", EventID: "event-1", SegmentIndex: 0, SegmentCount: 1}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.ClaimReply(context.Background(), "tenant-a", "reply-claim", 0, "worker-a", time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	second, err := store.ClaimReply(context.Background(), "tenant-a", "reply-claim", 0, "worker-b", time.Second)
+	if err != nil || second.FencingToken <= first.FencingToken || second.LeaseOwner != "worker-b" {
+		t.Fatalf("claim = %+v, err=%v", second, err)
+	}
+	if _, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply-claim", SegmentIndex: 0, From: runtimestorage.ReplySending, To: runtimestorage.ReplySent, Owner: "worker-a", FencingToken: first.FencingToken}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("stale transition = %v", err)
 	}
 }

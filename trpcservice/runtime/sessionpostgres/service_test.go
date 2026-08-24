@@ -32,7 +32,7 @@ func TestServicePersistsSessionStateAndEventsForFixedTenant(t *testing.T) {
 		t.Fatal(err)
 	}
 	persisted, err := store.GetSession(context.Background(), "tenant-a", "session")
-	if err != nil || persisted.Version != 3 {
+	if err != nil || persisted.Version != 2 {
 		t.Fatalf("persisted session = %+v, err=%v", persisted, err)
 	}
 }
@@ -49,5 +49,25 @@ func TestServiceRejectsInvalidConstructionAndKeys(t *testing.T) {
 	}
 	if _, err := service.GetSession(context.Background(), session.Key{AppName: "app", UserID: "user"}); !errors.Is(err, session.ErrSessionIDRequired) {
 		t.Fatalf("invalid key error = %v", err)
+	}
+}
+
+func TestServiceRecoversStateWithFreshDelegate(t *testing.T) {
+	store := runtimestorageinmemory.New()
+	first, err := sessionpostgres.New("tenant-a", sessioninmemory.NewSessionService(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := session.Key{AppName: "app", UserID: "user", SessionID: "restart"}
+	if _, err := first.CreateSession(context.Background(), key, session.StateMap{"answer": []byte("42")}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessionpostgres.New("tenant-a", sessioninmemory.NewSessionService(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := second.GetSession(context.Background(), key)
+	if err != nil || string(recovered.State["answer"]) != "42" {
+		t.Fatalf("recovered = %+v, err=%v", recovered, err)
 	}
 }

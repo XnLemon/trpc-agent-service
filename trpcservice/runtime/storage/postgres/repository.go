@@ -193,6 +193,31 @@ func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment 
 	return cloneReply(value), nil
 }
 
+func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segment int, owner string, leaseDuration time.Duration) (runtimestorage.ReplyOutbox, error) {
+	if err := check(ctx); err != nil {
+		return runtimestorage.ReplyOutbox{}, err
+	}
+	if runtimestorage.ValidateTenant(tenantID) != nil || replyID == "" || owner == "" || leaseDuration <= 0 {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
+	}
+	seconds := int64(leaseDuration / time.Second)
+	if seconds == 0 {
+		seconds = 1
+	}
+	var value runtimestorage.ReplyOutbox
+	err := s.db.QueryRowContext(ctx, "UPDATE public.reply_outbox SET status='sending', attempts=attempts+1, fencing_token=fencing_token+1, lease_owner=$4, lease_expires_at=now()+($5 * interval '1 second'), updated_at=now() WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3 AND (status IN ('pending','retryable') OR (status='sending' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now())) RETURNING tenant_id,reply_id,event_id,segment_index,segment_count,payload,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at", tenantID, replyID, segment, owner, seconds).Scan(replyArgs(&value)...)
+	if err == nil {
+		return cloneReply(value), nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return runtimestorage.ReplyOutbox{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	if _, lookupErr := s.GetReply(ctx, tenantID, replyID, segment); lookupErr != nil {
+		return runtimestorage.ReplyOutbox{}, lookupErr
+	}
+	return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
+}
+
 func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.ReplyTransition) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err

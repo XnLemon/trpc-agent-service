@@ -165,6 +165,34 @@ func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment 
 	return cloneReply(value), nil
 }
 
+func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segment int, owner string, leaseDuration time.Duration) (runtimestorage.ReplyOutbox, error) {
+	if err := check(ctx); err != nil {
+		return runtimestorage.ReplyOutbox{}, err
+	}
+	if runtimestorage.ValidateTenant(tenantID) != nil || replyID == "" || owner == "" || leaseDuration <= 0 {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := replyKey(tenantID, replyID, segment)
+	value, ok := s.replies[k]
+	if !ok {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrNotFound
+	}
+	if value.Status != runtimestorage.ReplyPending && value.Status != runtimestorage.ReplyRetryable && !(value.Status == runtimestorage.ReplySending && value.LeaseExpiresAt != nil && !value.LeaseExpiresAt.After(time.Now().UTC())) {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
+	}
+	deadline := time.Now().UTC().Add(leaseDuration)
+	value.Status = runtimestorage.ReplySending
+	value.Attempts++
+	value.FencingToken++
+	value.LeaseOwner = owner
+	value.LeaseExpiresAt = &deadline
+	value.UpdatedAt = time.Now().UTC()
+	s.replies[k] = value
+	return cloneReply(value), nil
+}
+
 func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.ReplyTransition) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err

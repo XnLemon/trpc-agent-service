@@ -53,7 +53,7 @@ func (s *Service) GetSession(ctx context.Context, key session.Key, options ...se
 		return nil, err
 	}
 	value, err := s.delegate.GetSession(ctx, key, options...)
-	if err == nil {
+	if err == nil && value != nil {
 		return value, nil
 	}
 	persisted, storeErr := s.store.GetSession(ctx, s.tenantID, key.SessionID)
@@ -95,18 +95,11 @@ func (s *Service) AppendEvent(ctx context.Context, sess *session.Session, value 
 	if sess == nil || value == nil {
 		return session.ErrNilSession
 	}
-	if err := s.delegate.AppendEvent(ctx, sess, value, options...); err != nil {
-		return err
-	}
-	eventID := value.ID
-	if eventID == "" {
-		eventID = value.InvocationID
-	}
-	if eventID == "" {
-		return runtimestorage.ErrInvalid
-	}
-	_, _, err := s.store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: s.tenantID, SessionID: sess.ID, BindingID: "runner", ExternalMessageID: eventID, EventID: eventID})
-	return err
+	// Inbound message_event rows are created by the trusted Channel/Gateway
+	// boundary, where binding_id and external_message_id are available. Runner
+	// events remain owned by the upstream delegate until the event-payload
+	// persistence stage adds a dedicated append contract.
+	return s.delegate.AppendEvent(ctx, sess, value, options...)
 }
 
 // The remaining methods preserve the complete upstream Service contract while
