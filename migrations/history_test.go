@@ -143,6 +143,13 @@ func TestMigrationApplyAndVerifyFailures(t *testing.T) {
 			m.ExpectRollback()
 			m.ExpectExec(`SELECT pg_advisory_unlock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
 		}, ErrMigration},
+		{"migration begin", func(m sqlmock.Sqlmock) {
+			m.ExpectExec("SELECT pg_advisory_lock").WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("CREATE TABLE IF NOT EXISTS public.schema_migrations").WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectQuery("SELECT version, sha256 FROM public.schema_migrations").WillReturnRows(sqlmock.NewRows([]string{"version", "sha256"}))
+			m.ExpectBegin().WillReturnError(errors.New("begin"))
+			m.ExpectExec("SELECT pg_advisory_unlock").WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+		}, ErrMigration},
 		{"migration record", func(m sqlmock.Sqlmock) {
 			files, err := orderedFiles()
 			if err != nil {
@@ -156,6 +163,20 @@ func TestMigrationApplyAndVerifyFailures(t *testing.T) {
 			m.ExpectExec(`INSERT INTO public.schema_migrations`).WithArgs(files[0].version, files[0].name, files[0].digest, sqlmock.AnyArg()).WillReturnError(errors.New("record"))
 			m.ExpectRollback()
 			m.ExpectExec(`SELECT pg_advisory_unlock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+		}, ErrMigration},
+		{"migration commit", func(m sqlmock.Sqlmock) {
+			files, err := orderedFiles()
+			if err != nil {
+				panic(err)
+			}
+			m.ExpectExec("SELECT pg_advisory_lock").WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("CREATE TABLE IF NOT EXISTS public.schema_migrations").WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectQuery("SELECT version, sha256 FROM public.schema_migrations").WillReturnRows(sqlmock.NewRows([]string{"version", "sha256"}))
+			m.ExpectBegin()
+			m.ExpectExec("(?s).*").WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectExec("INSERT INTO public.schema_migrations").WithArgs(files[0].version, files[0].name, files[0].digest, sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectCommit().WillReturnError(errors.New("commit"))
+			m.ExpectExec("SELECT pg_advisory_unlock").WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
 		}, ErrMigration},
 		{"digest mismatch", func(m sqlmock.Sqlmock) {
 			files, err := orderedFiles()
