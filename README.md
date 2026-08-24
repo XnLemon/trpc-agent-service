@@ -1,5 +1,9 @@
 # 基于 tRPC-Agent-Go 设计多租户节点化 Agent 部署平台
 
+[![CI](https://github.com/XnLemon/trpc-agent-service/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/XnLemon/trpc-agent-service/actions/workflows/ci.yml)
+[![Docs](https://github.com/XnLemon/trpc-agent-service/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/XnLemon/trpc-agent-service/actions/workflows/docs.yml)
+[![codecov](https://codecov.io/gh/XnLemon/trpc-agent-service/branch/main/graph/badge.svg)](https://codecov.io/gh/XnLemon/trpc-agent-service)
+
 ## 背景和价值
 
 企业在落地 Agent 应用时，通常不会只部署一个单体机器人，而是希望面向多个部门、多个业务线、多个 IM 入口和多个数据后端，构建一套可统一管理的 Agent 平台。例如：客服团队希望把 Agent 接入企业微信，研发团队希望接入内部群机器人，运营团队希望接入微信公众号或微信客服，不同租户又需要隔离会话、记忆、知识库、工具权限和审计日志。
@@ -114,7 +118,7 @@
 - [x] 建立 Go module、命令行入口和基础目录结构
 - [x] 提供构建、启动、停止、格式化、静态检查和覆盖率脚本
 - [x] 配置 Go CI、Codecov 和 MkDocs 文档 CI
-- [ ] 将命令行入口改造成持续运行的服务，并支持优雅停机
+- [x] 将命令行入口改造成持续运行的服务，并支持优雅停机（Issue #41）
 - [ ] 增加 Dockerfile、Docker Compose 最小部署和 Kubernetes 生产部署清单
 - [ ] 增加配置示例、环境变量说明和可验证的端到端快速开始
 
@@ -134,7 +138,7 @@
 - [x] 实现 Backend Profile 领域模型
 - [x] 完成 Model Profile、Secret Resolver 与最小 Runner 链路设计
 - [x] 实现 Model Profile 控制面、Secret Resolver 契约和最小 Runner 链路
-- [ ] 实现租户、Agent、通道和后端配置的 Admin API
+- [x] 实现租户、Agent、通道和后端配置的 Admin API（Issue #41）
 - [x] 实现 Agent App 草稿更新、原子发布和版本回滚
 - [ ] 实现配置缓存失效、租户级灰度和租户配置版本回滚
 - [ ] 接入 KMS/Secret Manager，禁止密钥进入运行时快照、日志和 trace
@@ -191,7 +195,7 @@
 - [ ] 实现工具白名单、调用前鉴权、密钥注入和危险操作二次确认
 - [ ] 实现 IM 用户权限校验、敏感信息脱敏和租户级预算控制
 - [ ] 实现包含 README 指定字段的不可篡改审计日志
-- [ ] 接入 OpenTelemetry tracing、metrics 和结构化日志
+- [x] 接入运行时 OpenTelemetry tracing、metrics 和结构化日志（Issue #45 阶段 A；业务审计和完整 IM/Storage 链路仍待完成）
 - [ ] 串联 IM callback、Gateway、Runner、Model、Tool、Storage 和 IM reply 的 trace
 - [ ] 采集请求量、延迟、错误率、IM 成功率、token、成本和后端延迟指标
 - [ ] 提供租户级 dashboard、告警规则并控制指标 label 基数
@@ -206,7 +210,7 @@
 - [ ] 完成备份恢复、故障演练和租户级发布回滚流程
 - [ ] 增加 Storage Adapter 契约测试和端到端消息链路测试
 - [ ] 增加多租户越权、密钥泄漏、并发一致性和故障注入测试
-- [ ] 在 CI 中运行 `go test -race ./...`，并设置有效覆盖率门槛（Issue #39 已完成 Race Tests；Codecov project/patch 的 85% 目标尚待分支保护或 ruleset 设为合并门禁）
+- [x] 在 CI 中运行 `go test -race ./...`（Issue #39）；Codecov project/patch 的 85% 目标仍待分支保护或 ruleset 设为合并门禁
 - [ ] 增加依赖漏洞、镜像和提交密钥扫描
 
 ### 设计交付物
@@ -220,15 +224,17 @@
 - [x] 持续标注可直接复用的 tRPC-Agent-Go 能力与平台新增模块边界
 - [x] 完成 Issue #37 PostgreSQL 控制面 migration、Repository、bootstrap 和 readiness 的文档契约
 - [x] 完成 Issue #41 Bootstrap、readiness、Admin API 和重启恢复的文档先行契约
+- [x] 完成 Issue #45 运行时 observability、指标、脱敏日志和 OTLP 配置契约
 
-> Issue #24 只完成架构、数据模型和运维文档；当前仓库另外交付了 Issue #28 的 Gateway/API
-> 阶段能力和 Issue #31 的 Telegram long polling 文本 Adapter。完整 WeCom/Telegram webhook、
-> rich update、持久化消息能力、迁移工具和生产告警仍未实现。
+> Issue #24 只完成架构、数据模型和运维文档；当前仓库另外交付了 Issue #28 的 Gateway/API、
+> Issue #31 的 Telegram long polling 文本 Adapter、Issue #37/#41 的 PostgreSQL 控制面与 Admin/
+> Bootstrap，以及 Issue #45 的运行时 observability 阶段 A。完整 WeCom/Telegram webhook、
+> rich update、Session/Event 持久化、迁移工具、业务审计和生产告警仍未实现。
 
 ## 当前 PR 实现记录（不改变原验收要求）
 
 > 以下内容仅索引当前实现 PR 的 head 和测试范围，不替代、收窄或修改上方原验收要求；
-> 上方勾选仅表示该原条目已有完整证据。PR 尚未合并，当前阶段实现也不等同于全部原验收项已完成。
+> 上方勾选仅表示该原条目已有完整证据。以下实现已经合并到当前主线；当前阶段实现仍不等同于全部原验收项已完成。
 
 - `trpcservice/gateway/auth.go` 的 proof-bearing API 身份校验对应
   `trpcservice/gateway/auth_test.go`；`resolver.go` 对应 `resolver_test.go`。
@@ -240,8 +246,13 @@
 - Issue #33 的 `examples/telegram-e2e` 使用真实 Telegram Bot API 和确定性 Dispatcher 验证
   `getMe -> getUpdates -> sendMessage`；live workflow 只手动触发并使用受保护 Environment，
   不替代完整模型供应商或生产控制面 E2E。
+- Issue #37/#41 的 PostgreSQL 控制面、可重启 Bootstrap、readiness 和最小 Admin API 已合并；
+  控制面持久化不等同于 Session/Event/Memory/Audit 的生产运行时存储。
+- Issue #45 的运行时 observability 阶段 A 已合并，提供 no-op/OTLP provider、低基数指标、
+  trace context 和脱敏结构化日志；Issue #44 阶段 B 的 AuditEvent、usage/cost 和业务治理仍未实现。
 - Issue #26 的 fake candidate resolver/verifier 与 proof-bearing routing 边界有独立测试，
-  但这不代表 WeCom/Telegram webhook、媒体能力或持久化消息能力已满足 README 原验收要求。
+  但这不代表 WeCom/Telegram webhook、媒体能力、Session/Event 持久化或完整业务观测
+  能力已满足 README 原验收要求。
 
 ## 代码目录
 
