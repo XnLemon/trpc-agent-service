@@ -21,6 +21,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 type Attribute struct{ Key, Value string }
@@ -169,7 +170,7 @@ func NewProvider(config Config) Provider {
 }
 
 func NewNoopProvider() Provider {
-	return NewProvider(Config{TracerProvider: trace.NewNoopTracerProvider(), MeterProvider: metricnoop.NewMeterProvider(), Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil))})
+	return NewProvider(Config{TracerProvider: tracenoop.NewTracerProvider(), MeterProvider: metricnoop.NewMeterProvider(), Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil))})
 }
 
 func (p *provider) Tracer(string) Tracer { return p.tracer }
