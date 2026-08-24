@@ -40,6 +40,181 @@ func TestAgentRepositoryGetDecodesStoredApp(t *testing.T) {
 	}
 }
 
+func TestAgentRepositoryCreatesApp(t *testing.T) {
+	input := agent.CreateInput{
+		TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", AppKey: "created", DisplayName: "Created", Description: "created app",
+	}
+	stored := newStoredAgentApp(t)
+	stored.AppKey = input.AppKey
+	stored.DisplayName = input.DisplayName
+	stored.Description = input.Description
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectBegin()
+	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(".*").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{
+		"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "version", "created_at", "updated_at",
+	}).AddRow(stored.TenantID, stored.AppID, stored.AppKey, stored.DisplayName, stored.Description, string(stored.Status), nil, stored.Version, stored.CreatedAt, stored.UpdatedAt))
+	mock.ExpectCommit()
+
+	value, err := NewRepository(db).Create(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.AppKey != input.AppKey || value.DisplayName != input.DisplayName || value.Status != agent.StatusDraft {
+		t.Fatalf("created app = %+v", value)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAgentRepositoryUpdatesMetadata(t *testing.T) {
+	current := newStoredAgentApp(t)
+	stored := current.Clone()
+	stored.DisplayName = "Updated workflow"
+	stored.Description = "updated metadata"
+	stored.Version++
+	stored.UpdatedAt = stored.UpdatedAt.Add(time.Second)
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectBegin()
+	expectAgentApp(mock, current)
+	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectAgentApp(mock, &stored)
+	mock.ExpectCommit()
+
+	value, err := NewRepository(db).UpdateMetadata(context.Background(), agent.UpdateMetadataInput{
+		TenantID: current.TenantID, AppID: current.AppID, ExpectedVersion: current.Version,
+		DisplayName: stored.DisplayName, Description: stored.Description,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.DisplayName != stored.DisplayName || value.Description != stored.Description || value.Version != stored.Version {
+		t.Fatalf("updated app = %+v", value)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAgentRepositoryCreatesAndUpdatesDraft(t *testing.T) {
+	app := newStoredAgentApp(t)
+	draft := newStoredAgentRevision(t, app, 1, false)
+
+	createDB, createMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = createDB.Close() })
+	createMock.ExpectBegin()
+	expectAgentApp(createMock, app)
+	createMock.ExpectQuery(".*").WithArgs(app.TenantID, app.AppID).WillReturnRows(sqlmock.NewRows([]string{"next_revision"}).AddRow(draft.Revision))
+	createMock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectAgentRevision(t, createMock, draft)
+	createMock.ExpectCommit()
+
+	created, err := NewRepository(createDB).CreateDraft(context.Background(), agent.CreateDraftInput{
+		TenantID: app.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version, Kind: draft.Kind, SchemaVersion: draft.SchemaVersion,
+		Configuration: agent.DraftConfiguration{Instruction: draft.Instruction, ModelProfileID: draft.ModelProfileID, Runtime: draft.Runtime},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Revision != draft.Revision || created.State != agent.RevisionStateDraft {
+		t.Fatalf("created draft = %+v", created)
+	}
+	if err := createMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := agent.NewRevision(agent.CreateRevisionInput{
+		TenantID: app.TenantID, AppID: app.AppID, Revision: draft.Revision, Kind: draft.Kind, SchemaVersion: draft.SchemaVersion,
+		Configuration: agent.DraftConfiguration{Instruction: "Updated instruction", ModelProfileID: draft.ModelProfileID, Runtime: draft.Runtime},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated.DraftVersion = draft.DraftVersion + 1
+	updated.CreatedAt = draft.CreatedAt
+	updated.UpdatedAt = draft.UpdatedAt.Add(time.Second)
+
+	updateDB, updateMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = updateDB.Close() })
+	updateMock.ExpectBegin()
+	expectAgentApp(updateMock, app)
+	expectAgentRevision(t, updateMock, draft)
+	updateMock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
+	expectAgentRevision(t, updateMock, updated)
+	updateMock.ExpectCommit()
+
+	value, err := NewRepository(updateDB).UpdateDraft(context.Background(), agent.UpdateDraftInput{
+		TenantID: app.TenantID, AppID: app.AppID, Revision: draft.Revision, ExpectedAppVersion: app.Version, ExpectedDraftVersion: draft.DraftVersion,
+		Configuration: agent.DraftConfiguration{Instruction: updated.Instruction, ModelProfileID: updated.ModelProfileID, Runtime: updated.Runtime},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Instruction != updated.Instruction || value.DraftVersion != updated.DraftVersion {
+		t.Fatalf("updated draft = %+v", value)
+	}
+	if err := updateMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAgentRepositoryTransitionsStatus(t *testing.T) {
+	current := newStoredAgentApp(t)
+	published := newStoredAgentRevision(t, current, 1, true)
+	current.Status = agent.StatusActive
+	current.CurrentRevision = agentInt64(published.Revision)
+	current.Version = 2
+	current.UpdatedAt = published.UpdatedAt.Add(time.Second)
+	stored := current.Clone()
+	stored.Status = agent.StatusSuspended
+	stored.Version++
+	stored.UpdatedAt = stored.UpdatedAt.Add(time.Second)
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectBegin()
+	expectAgentApp(mock, current)
+	expectAgentRevision(t, mock, published)
+	mock.ExpectQuery(".*").WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(9)))
+	expectAgentApp(mock, &stored)
+	expectAgentEvent(mock, current, agent.ChangeSuspended, agent.StatusActive, agent.StatusSuspended, current.CurrentRevision, stored.CurrentRevision, published.ContentDigest, current.Version, stored.Version, stored.UpdatedAt)
+	mock.ExpectCommit()
+
+	value, event, err := NewRepository(db).TransitionStatus(context.Background(), agent.TransitionStatusInput{
+		TenantID: current.TenantID, AppID: current.AppID, ExpectedVersion: current.Version, NextStatus: agent.StatusSuspended,
+		Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "suspend", CorrelationID: "agent-suspend"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Status != agent.StatusSuspended || value.Version != stored.Version || event.EventType != agent.ChangeSuspended || event.ContentDigest != published.ContentDigest {
+		t.Fatalf("transition result = app=%+v event=%+v", value, event)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestScanAgentEventDecodesOptionalFields(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
