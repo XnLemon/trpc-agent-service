@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
@@ -31,10 +32,17 @@ type Config struct {
 	BackendCatalog *backend.ProviderCatalog
 }
 
-type Handler struct{ config Config }
+type Handler struct {
+	config        Config
+	firstTenantMu sync.Mutex
+}
 
 type tenantCounter interface {
 	Count(context.Context) (int, error)
+}
+
+type firstTenantCreator interface {
+	CreateFirst(context.Context, tenant.CreateInput) (*tenant.Tenant, bool, error)
 }
 
 func NewHandler(config Config) (*Handler, error) {
@@ -87,7 +95,23 @@ func (h *Handler) tenants(ctx context.Context, r *http.Request, p Principal) (in
 	if r.Method != http.MethodPost || !p.Allows("", true) {
 		return 0, nil, ErrForbidden
 	}
+	var input tenant.CreateInput
+	if err := decodeBody(r, &input); err != nil {
+		return 0, nil, err
+	}
 	if p.Global {
+		if creator, ok := h.config.Tenants.(firstTenantCreator); ok {
+			created, allowed, err := creator.CreateFirst(ctx, input)
+			if err != nil {
+				return 0, nil, err
+			}
+			if !allowed {
+				return 0, nil, ErrForbidden
+			}
+			return http.StatusCreated, created, nil
+		}
+		h.firstTenantMu.Lock()
+		defer h.firstTenantMu.Unlock()
 		counter, ok := h.config.Tenants.(tenantCounter)
 		if !ok {
 			return 0, nil, ErrForbidden
@@ -99,10 +123,6 @@ func (h *Handler) tenants(ctx context.Context, r *http.Request, p Principal) (in
 		if count > 0 {
 			return 0, nil, ErrForbidden
 		}
-	}
-	var input tenant.CreateInput
-	if err := decodeBody(r, &input); err != nil {
-		return 0, nil, err
 	}
 	created, err := h.config.Tenants.Create(ctx, input)
 	return http.StatusCreated, created, err

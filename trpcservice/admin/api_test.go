@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
@@ -92,6 +93,38 @@ func TestAdminTenantCreateAndReadUseIndependentPrincipal(t *testing.T) {
 	handler.ServeHTTP(response, ordinary)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("ordinary token status = %d", response.Code)
+	}
+}
+
+func TestAdminGlobalFirstTenantCreationIsSerialized(t *testing.T) {
+	handler, _ := testHandler(t)
+	const attempts = 16
+	statuses := make(chan int, attempts)
+	var group sync.WaitGroup
+	group.Add(attempts)
+	for i := 0; i < attempts; i++ {
+		go func(index int) {
+			defer group.Done()
+			body := "{\"tenant_key\":\"parallel-" + strconv.Itoa(index) + "\",\"display_name\":\"Parallel\"}"
+			request := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants", strings.NewReader(body))
+			request.Header.Set("Authorization", "Bearer admin-token")
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			statuses <- recorder.Code
+		}(i)
+	}
+	group.Wait()
+	close(statuses)
+	created := 0
+	for status := range statuses {
+		if status == http.StatusCreated {
+			created++
+		} else if status != http.StatusForbidden {
+			t.Fatalf("parallel first-tenant status = %d, want 201 or 403", status)
+		}
+	}
+	if created != 1 {
+		t.Fatalf("parallel first-tenant creates = %d, want exactly one", created)
 	}
 }
 

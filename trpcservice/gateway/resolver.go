@@ -51,6 +51,17 @@ func (resolver *PlanResolver) Ready() bool {
 	return resolver != nil && resolver.tenants != nil && resolver.apps != nil && resolver.models != nil && resolver.backends != nil && resolver.modelCatalog != nil && resolver.backendCatalog != nil
 }
 
+// ResolveAuthenticatedAPI converts an authenticator-issued proof into the
+// trusted API principal before resolving a plan. Callers cannot manufacture
+// the proof-bearing AuthenticatedAPI value from request-shaped IDs.
+func (resolver *PlanResolver) ResolveAuthenticatedAPI(ctx context.Context, authenticated AuthenticatedAPI) (runtime.ExecutionPlan, error) {
+	principal, err := newAPIPrincipal(authenticated)
+	if err != nil {
+		return runtime.ExecutionPlan{}, err
+	}
+	return resolver.Resolve(ctx, principal)
+}
+
 // Resolve constructs one immutable plan. All non-cancellation failures are
 // reduced to ErrPlanUnavailable so repository existence and provider details do
 // not escape to a caller or reveal another tenant's configuration.

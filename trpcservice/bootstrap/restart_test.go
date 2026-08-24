@@ -13,6 +13,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
 
@@ -138,6 +139,26 @@ func TestRestartBootstrapRoundTrip(t *testing.T) {
 	read("/admin/v1/tenants/" + tenantID + "/bindings/" + bindingID)
 	if !second.Ready() {
 		t.Fatal("Process B did not become ready after migration verification")
+	}
+	apiAuth, err := gateway.NewStaticAPIAuthenticator(map[string]gateway.APIIdentity{
+		"chat-token": {TenantID: tenantID, AppID: appID, SubjectID: "restart-test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiRequest := httptest.NewRequest(http.MethodGet, "/v1/chat", nil)
+	apiRequest.Header.Set("Authorization", "Bearer chat-token")
+	authenticated, err := apiAuth.Authenticate(context.Background(), apiRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := second.Resolver.ResolveAuthenticatedAPI(context.Background(), authenticated)
+	if err != nil {
+		t.Fatalf("Process B PlanResolver.Resolve = %v", err)
+	}
+	cacheKey, err := plan.CacheKey()
+	if err != nil || cacheKey.TenantID != tenantID || cacheKey.AppID != appID || cacheKey.ModelProfileID != modelID || cacheKey.BackendProfileID != backendID || cacheKey.Revision != int64(revisionNumber) {
+		t.Fatalf("Process B execution plan key = %+v, err=%v", cacheKey, err)
 	}
 	db, err := storagepostgres.Open(context.Background(), dsn, storagepostgres.Options{MaxOpenConns: 2, MaxIdleConns: 2})
 	if err != nil {
