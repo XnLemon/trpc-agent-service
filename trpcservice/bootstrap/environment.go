@@ -35,7 +35,7 @@ const (
 	envModelNames        = "TRPC_MODEL_NAMES"
 	envModelEndpointHost = "TRPC_MODEL_ENDPOINT_HOSTS"
 	envModelSecretRef    = "TRPC_MODEL_SECRET_REF"
-	envRuntimeStorage    = "TRPC_RUNTIME_STORAGE"
+	envSessionBackend    = "TRPC_SESSION_BACKEND"
 
 	defaultModelProvider  = "openai"
 	defaultModelNames     = "gpt-4o-mini"
@@ -141,7 +141,7 @@ func loadEnvironment() (environmentConfig, error) {
 		modelProvider:  environmentOrDefault(envModelProvider, defaultModelProvider),
 		secretRef:      environmentOrDefault(envModelSecretRef, defaultModelSecretRef),
 		subjectID:      environmentOrDefault(envSubjectID, defaultSubjectID),
-		runtimeStorage: strings.ToLower(environmentOrDefault(envRuntimeStorage, "postgres")),
+		runtimeStorage: strings.ToLower(strings.TrimSpace(os.Getenv(envSessionBackend))),
 	}
 	var err error
 	if config.dsn, err = requiredEnvironment(envPostgresDSN); err != nil {
@@ -186,7 +186,7 @@ func loadEnvironment() (environmentConfig, error) {
 	}
 	config.subjectID = strings.TrimSpace(config.subjectID)
 	if config.runtimeStorage != "postgres" && config.runtimeStorage != "inmemory" {
-		return environmentConfig{}, fmt.Errorf("%w: %s must be postgres or inmemory", ErrInvalidConfig, envRuntimeStorage)
+		return environmentConfig{}, fmt.Errorf("%w: %s must be explicitly set to postgres or inmemory", ErrInvalidConfig, envSessionBackend)
 	}
 	return config, nil
 }

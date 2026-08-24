@@ -92,7 +92,7 @@ func TestServiceRefreshesWarmDelegateFromDurableState(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := session.Key{AppName: "app", UserID: "user", SessionID: "warm"}
-	if _, err := first.CreateSession(context.Background(), key, session.StateMap{"value": []byte("old")}); err != nil {
+	if _, err := first.CreateSession(context.Background(), key, session.StateMap{"value": []byte("old"), "removed": []byte("stale")}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := second.GetSession(context.Background(), key); err != nil {
@@ -107,6 +107,9 @@ func TestServiceRefreshesWarmDelegateFromDurableState(t *testing.T) {
 	}
 	if string(refreshed.State["value"]) != "new" {
 		t.Fatalf("warm delegate state = %q, want new", refreshed.State["value"])
+	}
+	if _, ok := refreshed.State["removed"]; ok {
+		t.Fatalf("warm delegate retained removed durable state: %+v", refreshed.State)
 	}
 }
 

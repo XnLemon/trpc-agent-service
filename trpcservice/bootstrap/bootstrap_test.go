@@ -192,6 +192,7 @@ func TestEnvironmentBootstrapRequiresExplicitConfigurationAndBuildsDependencies(
 	t.Setenv(envModelNames, "gpt-4o-mini,custom.model")
 	t.Setenv(envModelEndpointHost, "api.openai.com,proxy.example")
 	t.Setenv(envModelSecretRef, "env/test-key")
+	t.Setenv(envSessionBackend, "postgres")
 
 	config, err := loadEnvironment()
 	if err != nil {
@@ -200,6 +201,16 @@ func TestEnvironmentBootstrapRequiresExplicitConfigurationAndBuildsDependencies(
 	if config.modelProvider != "openai" || len(config.modelNames) != 2 || config.secretRef != "env/test-key" {
 		t.Fatalf("environment config = %+v", config)
 	}
+	t.Setenv(envSessionBackend, "inmemory")
+	devConfig, err := loadEnvironment()
+	if err != nil || devConfig.runtimeStorage != "inmemory" {
+		t.Fatalf("documented in-memory backend = %+v, err=%v", devConfig, err)
+	}
+	t.Setenv(envSessionBackend, "")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("missing explicit session backend error = %v", err)
+	}
+	t.Setenv(envSessionBackend, "postgres")
 	modelCatalog, backendCatalog, err := environmentCatalogs(config)
 	if err != nil || modelCatalog == nil || backendCatalog == nil {
 		t.Fatalf("environment catalogs = %v, %v, %v", modelCatalog, backendCatalog, err)
@@ -254,6 +265,7 @@ func TestEnvironmentBootstrapPreservesCancellationAndRejectsBadLists(t *testing.
 	t.Setenv(envAdminToken, "admin-token")
 	t.Setenv(envAdminTenants, "*")
 	t.Setenv(envModelAPIKey, "test-secret")
+	t.Setenv(envSessionBackend, "postgres")
 	t.Setenv(envModelNames, "gpt-4o-mini,,custom.model")
 	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("empty model list item error = %v", err)
@@ -337,6 +349,7 @@ func TestNewFromEnvironmentBuildsRealGraphWhenDatabaseOpens(t *testing.T) {
 	t.Setenv(envAdminToken, "admin-token")
 	t.Setenv(envAdminTenants, "*")
 	t.Setenv(envModelAPIKey, "test-secret")
+	t.Setenv(envSessionBackend, "postgres")
 
 	registerBootstrapPingDriver.Do(func() {
 		sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{})

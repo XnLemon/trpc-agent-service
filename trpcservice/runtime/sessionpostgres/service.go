@@ -66,6 +66,7 @@ func (s *Service) GetSession(ctx context.Context, key session.Key, options ...se
 		if refreshed, refreshErr := s.delegate.GetSession(ctx, key, options...); refreshErr == nil && refreshed != nil {
 			value = refreshed
 		}
+		value.State = cloneState(state)
 		s.setVersion(key.SessionID, persisted.Version)
 		return value, nil
 	}
@@ -157,6 +158,13 @@ func (s *Service) setVersion(id string, version int64) {
 	s.mu.Lock()
 	s.versions[id] = version
 	s.mu.Unlock()
+}
+func cloneState(value session.StateMap) session.StateMap {
+	result := make(session.StateMap, len(value))
+	for key, data := range value {
+		result[key] = append([]byte(nil), data...)
+	}
+	return result
 }
 func stateToAny(value session.StateMap) map[string]any {
 	result := make(map[string]any, len(value))
