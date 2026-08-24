@@ -226,8 +226,8 @@ SecretResolver、fake ModelFactory 和 InMemory Session，不需要真实模型�
 - `trpcservice/controlplane/postgres/integration_test.go`：五类 SQL Repository 的租户作用域、
   生命周期、发布、候选消费、Outbox、Context 取消和深拷贝路径；CI 使用独立 PostgreSQL
   服务执行；
-- `scripts/coverage.sh`：各包单测后只执行一次上述跨领域集成测试，并对五个 Repository 包执行
-  `-coverpkg`、按 source block 合并 profile，避免跨包测试遗漏真实实现覆盖率或重复初始化
+- `scripts/coverage.sh`：使用单次原生 Go `-coverpkg` profile 执行各包单测及上述跨领域集成测试，
+  让 Codecov 与本地 `go tool cover` 一致地统计五个 Repository 的跨包执行路径，且不会重复初始化
   CI PostgreSQL schema；
 - `trpcservice/bootstrap/bootstrap_test.go`：真实 Resolver/Registry/HTTPHandler 组装、
   readiness 503→200 和 shutdown gate；
