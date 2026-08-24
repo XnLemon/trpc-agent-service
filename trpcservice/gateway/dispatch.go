@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	"github.com/google/uuid"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
@@ -66,9 +68,10 @@ type DispatchService interface {
 
 // DispatchConfig configures the Resolver/Registry execution boundary.
 type DispatchConfig struct {
-	Resolver     *PlanResolver
-	Registry     *RunnerRegistry
-	DrainTimeout time.Duration
+	Resolver      *PlanResolver
+	Registry      *RunnerRegistry
+	DrainTimeout  time.Duration
+	Observability observability.Provider
 }
 
 // Dispatcher resolves a fixed plan, acquires a Runner lease, and translates
@@ -77,6 +80,8 @@ type Dispatcher struct {
 	resolver     *PlanResolver
 	registry     *RunnerRegistry
 	drainTimeout time.Duration
+	telemetry    observability.Provider
+	metrics      metrics.Catalog
 }
 
 // NewDispatcher validates the protocol-neutral execution dependencies.
@@ -90,7 +95,10 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if config.DrainTimeout < 0 {
 		return nil, fmt.Errorf("%w: dispatch drain timeout cannot be negative", ErrInvalid)
 	}
-	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout}, nil
+	if config.Observability == nil {
+		config.Observability = observability.NewNoopProvider()
+	}
+	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability)}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.
@@ -126,45 +134,70 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	if err != nil {
 		return nil, err
 	}
+	ctx, span := dispatcher.telemetry.Tracer("trpcservice.gateway").Start(observability.WithCorrelation(ctx, requestID, traceID), observability.OperationGatewayDispatch,
+		observability.Attribute{Key: "component", Value: "gateway"}, observability.Attribute{Key: "operation", Value: observability.OperationGatewayDispatch})
+	started := time.Now()
+	_ = dispatcher.metrics.Request(ctx, map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch, "status": "started"})
+	finishWithError := func(cause error) {
+		span.SetAttributes(observability.Attribute{Key: "error_class", Value: observability.ErrorClass(cause)})
+		span.SetStatus(observability.StatusError, observability.ErrorClass(cause))
+		span.RecordError(cause)
+		span.End()
+		_ = dispatcher.metrics.Duration(ctx, observability.DurationMilliseconds(started), map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch, "status": "error", "error_class": observability.ErrorClass(cause)})
+	}
 
 	plan, err := dispatcher.resolver.Resolve(ctx, request.Principal)
 	if err != nil {
+		finishWithError(err)
 		return nil, err
 	}
 	identity, err := dispatchRunnerIdentity(request.Principal, message)
 	if err != nil {
+		finishWithError(err)
 		return nil, err
 	}
 	lease, err := dispatcher.registry.Acquire(ctx, plan)
 	if err != nil {
+		finishWithError(err)
 		return nil, err
 	}
 	runnerValue := lease.Runner()
 	if runnerValue == nil {
 		_ = lease.Release()
+		finishWithError(ErrRunnerUnavailable)
 		return nil, ErrRunnerUnavailable
 	}
 	runnerEvents, err := runnerValue.Run(ctx, identity.UserID, identity.SessionID, trpcmodel.NewUserMessage(message.Content), trpcagent.WithRequestID(requestID))
 	if err != nil {
 		_ = lease.Release()
 		if IsContextCancellation(err) {
+			finishWithError(err)
 			return nil, err
 		}
+		finishWithError(err)
 		return nil, ErrExecution
 	}
 	if runnerEvents == nil {
 		_ = lease.Release()
+		finishWithError(ErrExecution)
 		return nil, ErrExecution
 	}
 
 	output := make(chan DispatchEvent, 32)
-	go dispatcher.forward(ctx, requestID, traceID, runnerEvents, lease, output)
+	_ = dispatcher.metrics.Active(ctx, 1, map[string]string{"component": "runner"})
+	go dispatcher.forward(ctx, requestID, traceID, runnerEvents, lease, output, span, started)
 	return output, nil
 }
 
-func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, output chan<- DispatchEvent) {
+func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, output chan<- DispatchEvent, span observability.Span, started time.Time) {
 	defer close(output)
 	defer func() { _ = lease.Release() }()
+	defer func() {
+		_ = dispatcher.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
+		_ = dispatcher.metrics.Duration(ctx, observability.DurationMilliseconds(started), map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch, "status": "complete"})
+		span.SetStatus(observability.StatusOK, "")
+		span.End()
+	}()
 	for {
 		if ctx.Err() != nil {
 			dispatcher.finishCanceled(ctx, requestID, traceID, runnerEvents, output)

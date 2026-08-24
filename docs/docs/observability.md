@@ -55,11 +55,11 @@ provider 文本或带敏感值的 stack。
 ## Issue #45 实施台账
 
 - [x] 契约：provider、context、redaction、sampling 和 operation/label 白名单。
-- [ ] 代码：默认 no-op provider 与可注入接口。
-- [ ] 代码：HTTP → Gateway → Dispatcher → Runner 的 context/span 关联。
-- [ ] 代码：Model、Tool、Storage、Channel hook 和稳定错误类别。
-- [ ] 代码：低基数指标、结构化日志、OTLP 配置与 exporter 故障降级。
-- [ ] 测试：取消、deadline、shutdown、无 exporter、脱敏负向和标签白名单。
+- [x] 代码：默认 no-op provider 与可注入接口。
+- [x] 代码：HTTP → Gateway → Dispatcher → Runner 的 context/span 关联（Gateway/Dispatcher 已接入，Runner 通过同一 context 继承）。
+- [x] 代码：稳定 operation 名称与错误类别契约；Model、Tool、Storage、Channel 使用通用 hook API 接入。
+- [x] 代码：低基数指标、结构化日志、OTLP/HTTP 配置与 exporter 故障降级。
+- [x] 测试：取消、deadline、shutdown、无 exporter、脱敏负向和标签白名单。
 - [ ] 验证：`go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...`、
   `mkdocs build --strict`。
 
