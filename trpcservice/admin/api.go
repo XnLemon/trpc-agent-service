@@ -512,7 +512,7 @@ func mapError(err error) (int, string) {
 	if errors.Is(err, errNotFound) || errors.Is(err, tenant.ErrNotFound) || errors.Is(err, agent.ErrNotFound) || errors.Is(err, modelprofile.ErrNotFound) || errors.Is(err, backend.ErrNotFound) || errors.Is(err, channels.ErrNotFound) {
 		return http.StatusNotFound, "not_found"
 	}
-	if errors.Is(err, tenant.ErrConflict) || errors.Is(err, agent.ErrConflict) || errors.Is(err, modelprofile.ErrConflict) || errors.Is(err, backend.ErrConflict) || errors.Is(err, channels.ErrConflict) {
+	if errors.Is(err, tenant.ErrConflict) || errors.Is(err, agent.ErrConflict) || errors.Is(err, modelprofile.ErrConflict) || errors.Is(err, backend.ErrConflict) || errors.Is(err, channels.ErrConflict) || errors.Is(err, tenant.ErrDuplicateKey) || errors.Is(err, agent.ErrDuplicateKey) || errors.Is(err, modelprofile.ErrDuplicateKey) || errors.Is(err, backend.ErrDuplicateKey) || errors.Is(err, channels.ErrDuplicateKey) {
 		return http.StatusConflict, "conflict"
 	}
 	if errors.Is(err, postgres.ErrStorage) {

@@ -1,18 +1,24 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
 )
 
@@ -168,5 +174,111 @@ func TestAdminMalformedBodyMapsToBadRequest(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), `"error":"invalid_request"`) {
 		t.Fatalf("malformed body category = %s", recorder.Body.String())
+	}
+}
+
+func TestAdminRouteSurfaceDispatchesEveryControlPlaneOperation(t *testing.T) {
+	handler, _ := testHandler(t)
+	created, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "route-test", DisplayName: "Route Test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoped, err := NewStaticAuthenticator("admin-token", []string{created.TenantID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.config.Authenticator = scoped
+	base := "/admin/v1/tenants/" + created.TenantID
+	routes := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodPatch, base, `{}`},
+		{http.MethodPost, base + "/status", `{}`},
+		{http.MethodPost, base + "/apps", `{}`},
+		{http.MethodGet, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV", ``},
+		{http.MethodPatch, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV", `{}`},
+		{http.MethodPost, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV/status", `{}`},
+		{http.MethodPost, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV/revisions", `{}`},
+		{http.MethodPatch, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV/revisions/1", `{}`},
+		{http.MethodPost, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV/revisions/1/publish", `{}`},
+		{http.MethodPost, base + "/apps/app_01ARZ3NDEKTSV4RRFFQ69G5FAV/rollback", `{}`},
+		{http.MethodPost, base + "/models", `{}`},
+		{http.MethodGet, base + "/models/model_01ARZ3NDEKTSV4RRFFQ69G5FAV", ``},
+		{http.MethodPatch, base + "/models/model_01ARZ3NDEKTSV4RRFFQ69G5FAV", `{}`},
+		{http.MethodPost, base + "/models/model_01ARZ3NDEKTSV4RRFFQ69G5FAV/status", `{}`},
+		{http.MethodPost, base + "/backends", `{}`},
+		{http.MethodGet, base + "/backends/backend_01ARZ3NDEKTSV4RRFFQ69G5FAV", ``},
+		{http.MethodPatch, base + "/backends/backend_01ARZ3NDEKTSV4RRFFQ69G5FAV", `{}`},
+		{http.MethodPost, base + "/backends/backend_01ARZ3NDEKTSV4RRFFQ69G5FAV/status", `{}`},
+		{http.MethodPost, base + "/bindings", `{}`},
+		{http.MethodGet, base + "/bindings/binding_01ARZ3NDEKTSV4RRFFQ69G5FAV", ``},
+		{http.MethodPatch, base + "/bindings/binding_01ARZ3NDEKTSV4RRFFQ69G5FAV", `{}`},
+		{http.MethodPost, base + "/bindings/binding_01ARZ3NDEKTSV4RRFFQ69G5FAV/status", `{}`},
+	}
+	for _, route := range routes {
+		request := httptest.NewRequest(route.method, route.path, strings.NewReader(route.body))
+		request.Header.Set("Authorization", "Bearer admin-token")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code == http.StatusInternalServerError {
+			t.Fatalf("%s %s returned 500: %s", route.method, route.path, recorder.Body.String())
+		}
+	}
+}
+
+func TestAdminErrorMappingCategories(t *testing.T) {
+	cases := []struct {
+		err    error
+		status int
+	}{
+		{ErrUnauthenticated, http.StatusUnauthorized}, {ErrForbidden, http.StatusForbidden}, {errNotFound, http.StatusNotFound},
+		{tenant.ErrConflict, http.StatusConflict}, {agent.ErrConflict, http.StatusConflict}, {modelprofile.ErrConflict, http.StatusConflict},
+		{backend.ErrConflict, http.StatusConflict}, {channels.ErrConflict, http.StatusConflict}, {postgres.ErrStorage, http.StatusServiceUnavailable},
+		{tenant.ErrInvalid, http.StatusBadRequest}, {agent.ErrInvalidTransition, http.StatusBadRequest}, {modelprofile.ErrDisabled, http.StatusBadRequest},
+		{backend.ErrInvalidTransition, http.StatusBadRequest}, {channels.ErrDisabled, http.StatusBadRequest}, {errInvalidRequest, http.StatusBadRequest},
+		{tenant.ErrDuplicateKey, http.StatusConflict}, {agent.ErrDuplicateKey, http.StatusConflict}, {modelprofile.ErrDuplicateKey, http.StatusConflict},
+		{backend.ErrDuplicateKey, http.StatusConflict}, {channels.ErrDuplicateKey, http.StatusConflict},
+	}
+	for _, tc := range cases {
+		status, _ := mapError(tc.err)
+		if status != tc.status {
+			t.Errorf("mapError(%v) = %d, want %d", tc.err, status, tc.status)
+		}
+	}
+	for _, err := range []error{nil, errors.New("unexpected")} {
+		if status, _ := mapError(err); status != http.StatusInternalServerError {
+			t.Errorf("mapError(%v) status = %d", err, status)
+		}
+	}
+}
+
+func TestAdminHandlerRejectsInvalidConfigurationAndPaths(t *testing.T) {
+	if _, err := NewHandler(Config{}); err == nil {
+		t.Fatal("NewHandler accepted an empty configuration")
+	}
+	handler, _ := testHandler(t)
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/other", nil),
+		httptest.NewRequest(http.MethodGet, "/admin/v1/tenants", nil),
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound && recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("unexpected status for invalid admin request: %d", recorder.Code)
+		}
+	}
+}
+
+func TestAdminNormalizationAndBodyBoundaries(t *testing.T) {
+	if err := decodeBody(nil, &struct{}{}); !errors.Is(err, errInvalidRequest) {
+		t.Fatalf("nil request error = %v", err)
+	}
+	if got := normalizeKeys([]any{map[string]any{"reason": "why", "correlation_id": "corr"}}); got == nil {
+		t.Fatal("normalizeKeys returned nil")
+	}
+	if toExported("x_unknown_key") != "x_unknown_key" {
+		t.Fatal("unknown keys must remain unchanged")
 	}
 }
