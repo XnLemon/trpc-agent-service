@@ -52,19 +52,24 @@ func (s *Service) GetSession(ctx context.Context, key session.Key, options ...se
 	if err := validateKey(key); err != nil {
 		return nil, err
 	}
-	value, err := s.delegate.GetSession(ctx, key, options...)
-	if err == nil && value != nil {
-		return value, nil
-	}
 	persisted, storeErr := s.store.GetSession(ctx, s.tenantID, key.SessionID)
 	if storeErr != nil {
-		return nil, err
+		return nil, storeErr
 	}
 	state := anyToState(persisted.State)
-	value, err = s.delegate.CreateSession(ctx, key, state)
-	if err == nil {
+	value, err := s.delegate.GetSession(ctx, key, options...)
+	if err == nil && value != nil {
+		if err := s.delegate.UpdateSessionState(ctx, key, state); err != nil {
+			return nil, err
+		}
 		s.setVersion(key.SessionID, persisted.Version)
+		return value, nil
 	}
+	value, err = s.delegate.CreateSession(ctx, key, state)
+	if err != nil {
+		return nil, err
+	}
+	s.setVersion(key.SessionID, persisted.Version)
 	return value, err
 }
 
