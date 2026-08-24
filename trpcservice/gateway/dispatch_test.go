@@ -26,6 +26,36 @@ type capturedRun struct {
 	requestID string
 }
 
+type claimStoreStub struct {
+	runtimestorage.RuntimeStore
+	getErr, createErr, recordErr, transitionErr error
+}
+
+func (s *claimStoreStub) GetSession(context.Context, string, string) (runtimestorage.Session, error) {
+	if s.getErr != nil {
+		return runtimestorage.Session{}, s.getErr
+	}
+	return s.RuntimeStore.GetSession(context.Background(), "unused", "unused")
+}
+func (s *claimStoreStub) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (runtimestorage.Session, error) {
+	if s.createErr != nil {
+		return runtimestorage.Session{}, s.createErr
+	}
+	return s.RuntimeStore.CreateSession(ctx, tenantID, sessionID, state)
+}
+func (s *claimStoreStub) RecordMessage(context.Context, runtimestorage.MessageEventInput) (runtimestorage.MessageEvent, bool, error) {
+	if s.recordErr != nil {
+		return runtimestorage.MessageEvent{}, false, s.recordErr
+	}
+	return runtimestorage.MessageEvent{}, false, nil
+}
+func (s *claimStoreStub) TransitionMessage(context.Context, runtimestorage.MessageTransition) (runtimestorage.MessageEvent, error) {
+	if s.transitionErr != nil {
+		return runtimestorage.MessageEvent{}, s.transitionErr
+	}
+	return runtimestorage.MessageEvent{}, nil
+}
+
 func newTestDispatcher(t *testing.T, runnerValue *testRunner) (*Dispatcher, Principal) {
 	t.Helper()
 	fixture := newGatewayFixture(t)
@@ -255,9 +285,96 @@ func TestDispatcherDurableClaimReclaimsReceivedAndExpiredRunning(t *testing.T) {
 	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrDuplicateMessage) {
 		t.Fatalf("active duplicate error = %v", err)
 	}
+	seedClaimEvent := func(eventID, externalID string, status string) {
+		t.Helper()
+		if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: principal.TenantID(), EventID: eventID, SessionID: identity.SessionID, BindingID: target.BindingID, ExternalMessageID: externalID}); err != nil {
+			t.Fatal(err)
+		}
+		if status == runtimestorage.EventFailed {
+			if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: principal.TenantID(), EventID: eventID, From: runtimestorage.EventReceived, To: runtimestorage.EventFailed, Owner: "seed"}); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		running, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: principal.TenantID(), EventID: eventID, From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "seed", LeaseDuration: time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status == runtimestorage.EventCompleted {
+			if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: principal.TenantID(), EventID: eventID, From: runtimestorage.EventRunning, To: runtimestorage.EventCompleted, Owner: "seed", FencingToken: running.FencingToken}); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: principal.TenantID(), EventID: eventID, From: runtimestorage.EventRunning, To: runtimestorage.EventExecutionReconciling, Owner: "seed", FencingToken: running.FencingToken}); err == nil {
+			t.Fatal("expected live lease reconciliation to fail")
+		}
+	}
+	seedClaimEvent("completed-event", "claim-completed", runtimestorage.EventCompleted)
+	message.ExternalMessageID = "claim-completed"
+	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrDuplicateMessage) {
+		t.Fatalf("completed duplicate error = %v", err)
+	}
+	seedClaimEvent("failed-event", "claim-failed", runtimestorage.EventFailed)
+	message.ExternalMessageID = "claim-failed"
+	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrDuplicateMessage) {
+		t.Fatalf("failed duplicate error = %v", err)
+	}
+	message.ExternalMessageID = "claim-reconciling"
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: principal.TenantID(), EventID: "reconciling-event", SessionID: identity.SessionID, BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID}); err != nil {
+		t.Fatal(err)
+	}
+	running, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: principal.TenantID(), EventID: "reconciling-event", From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "seed", LeaseDuration: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: principal.TenantID(), EventID: "reconciling-event", From: runtimestorage.EventRunning, To: runtimestorage.EventExecutionReconciling, Owner: "recovery", FencingToken: running.FencingToken}); err != nil {
+		t.Fatal(err)
+	}
+	recoveredReconciling, err := dispatcher.claimInbound(context.Background(), principal, message, identity)
+	if err != nil || recoveredReconciling == nil {
+		t.Fatalf("reconciling reclaim = %+v err=%v", recoveredReconciling, err)
+	}
+	dispatcher.finishDurable(recoveredReconciling, errors.New("execution failed"))
 	message.ExternalMessageID = ""
 	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing external ID error = %v", err)
+	}
+	message.ExternalMessageID = strings.Repeat("x", maxDurableExternalMessageIDRunes+1)
+	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("oversized durable external ID error = %v", err)
+	}
+}
+
+func TestDispatcherDurableClaimMapsStorageErrors(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := InboundMessage{Content: "claim-errors", ExternalMessageID: "claim-errors", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"}
+	identity, err := dispatchRunnerIdentity(principal, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := inmemory.New()
+	claim := func(store runtimestorage.RuntimeStore) error {
+		_, err := (&Dispatcher{runtimeStore: store}).claimInbound(context.Background(), principal, message, identity)
+		return err
+	}
+	if err := claim(&claimStoreStub{RuntimeStore: base, getErr: errors.New("storage")}); err == nil {
+		t.Fatal("expected GetSession storage error")
+	}
+	if err := claim(&claimStoreStub{RuntimeStore: base, getErr: runtimestorage.ErrNotFound, createErr: errors.New("create")}); err == nil {
+		t.Fatal("expected CreateSession storage error")
+	}
+	if err := claim(&claimStoreStub{RuntimeStore: base, recordErr: errors.New("record")}); err == nil {
+		t.Fatal("expected RecordMessage storage error")
+	}
+	if err := claim(&claimStoreStub{RuntimeStore: base, transitionErr: errors.New("transition")}); err == nil {
+		t.Fatal("expected TransitionMessage storage error")
 	}
 }
 

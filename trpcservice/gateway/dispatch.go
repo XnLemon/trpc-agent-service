@@ -30,6 +30,7 @@ var (
 
 const defaultDispatchDrainTimeout = 250 * time.Millisecond
 const durableInboundLease = 30 * time.Second
+const maxDurableExternalMessageIDRunes = 512
 
 // DispatchEventType identifies the protocol-neutral event surface consumed by
 // JSON and SSE adapters.
@@ -217,7 +218,7 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 		return nil, nil
 	}
 	target, ok := principal.RoutingTarget()
-	if !ok || message.ExternalMessageID == "" {
+	if !ok || message.ExternalMessageID == "" || len([]rune(message.ExternalMessageID)) > maxDurableExternalMessageIDRunes {
 		return nil, fmt.Errorf("%w: durable Channel messages require an external message ID", ErrInvalid)
 	}
 	store := dispatcher.runtimeStore
