@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -64,6 +65,81 @@ func TestChannelRepositoryCandidateLookupAndConsumption(t *testing.T) {
 	}
 }
 
+func TestChannelRepositoryUpdatesConfigurationAndReturnsEvent(t *testing.T) {
+	binding := newStoredChannelBinding(t)
+	routeDigest, err := channels.DigestPublicRouteKey(binding.Channel, "updated-route")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := channels.UpdateConfigurationInput{
+		TenantID: binding.TenantID, BindingID: binding.BindingID, ExpectedVersion: binding.Version, ProviderAccountID: "updated-account",
+		PublicRouteKeyDigest: routeDigest, AppID: binding.AppID, SecretRef: binding.SecretRef, Protocol: binding.Protocol,
+		Metadata: channels.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "update", CorrelationID: "channel-update"},
+	}
+	updated, _, err := channels.PrepareConfigurationChange(*binding, input, binding.UpdatedAt.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectBegin()
+	mock.ExpectQuery(".*").WillReturnRows(testChannelBindingRows(t, binding))
+	mock.ExpectQuery(".*").WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(3)))
+	mock.ExpectQuery(".*").WillReturnRows(testChannelBindingRows(t, &updated))
+	expectChannelEvent(mock, binding, channels.EventConfigurationUpdated, binding.Status, updated.Status, binding.ConfigDigest, updated.ConfigDigest, binding.Version, updated.Version, updated.UpdatedAt)
+	mock.ExpectCommit()
+
+	stored, event, err := NewRepository(db).UpdateConfiguration(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ProviderAccountID != updated.ProviderAccountID || stored.Version != updated.Version || event.EventType != channels.EventConfigurationUpdated || event.NextVersion != updated.Version {
+		t.Fatalf("updated channel binding = %+v, event = %+v", stored, event)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestChannelRepositorySuspendsBindingAndReturnsEvent(t *testing.T) {
+	binding := newStoredChannelBinding(t)
+	input := channels.TransitionStatusInput{
+		TenantID: binding.TenantID, BindingID: binding.BindingID, ExpectedVersion: binding.Version,
+		Metadata: channels.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "suspend", CorrelationID: "channel-transition"},
+	}
+	prepared := input
+	prepared.NextStatus = channels.StatusSuspended
+	updated, _, err := channels.PrepareStatusChange(*binding, prepared, binding.UpdatedAt.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectBegin()
+	mock.ExpectQuery(".*").WillReturnRows(testChannelBindingRows(t, binding))
+	mock.ExpectQuery(".*").WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(4)))
+	mock.ExpectQuery(".*").WillReturnRows(testChannelBindingRows(t, &updated))
+	expectChannelEvent(mock, binding, channels.EventSuspended, binding.Status, updated.Status, binding.ConfigDigest, updated.ConfigDigest, binding.Version, updated.Version, updated.UpdatedAt)
+	mock.ExpectCommit()
+
+	stored, event, err := NewRepository(db).Suspend(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != channels.StatusSuspended || stored.Version != updated.Version || event.EventType != channels.EventSuspended || event.NextVersion != updated.Version {
+		t.Fatalf("suspended channel binding = %+v, event = %+v", stored, event)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newStoredChannelBinding(t *testing.T) *channels.Binding {
 	t.Helper()
 	digest, err := channels.DigestPublicRouteKey(channels.ChannelTelegram, "repository-success")
@@ -96,4 +172,10 @@ func testChannelBindingRows(t *testing.T, binding *channels.Binding) *sqlmock.Ro
 		binding.AppID, binding.SecretRef, protocol, channels.SchemaVersionV1, string(binding.Status), binding.Version, binding.ConfigDigest,
 		binding.CreatedAt, binding.UpdatedAt,
 	)
+}
+
+func expectChannelEvent(mock sqlmock.Sqlmock, binding *channels.Binding, eventType channels.EventType, previousStatus, currentStatus channels.Status, previousDigest, currentDigest string, previousVersion, nextVersion int64, occurredAt time.Time) {
+	mock.ExpectQuery(".*").WillReturnRows(sqlmock.NewRows([]string{
+		"event_type", "tenant_id", "binding_id", "previous_status", "current_status", "previous_digest", "current_digest", "actor_type", "actor_id", "reason", "correlation_id", "previous_version", "next_version", "occurred_at",
+	}).AddRow(string(eventType), binding.TenantID, binding.BindingID, string(previousStatus), string(currentStatus), previousDigest, currentDigest, "test", "user", "workflow", "correlation", previousVersion, nextVersion, occurredAt))
 }
