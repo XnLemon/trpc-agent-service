@@ -4,6 +4,8 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 )
@@ -22,12 +24,26 @@ var allowedLabels = map[string]struct{}{
 	"component": {}, "operation": {}, "provider": {}, "channel": {},
 	"status": {}, "error_class": {}, "model_family": {},
 }
+var allowedValues = map[string]map[string]struct{}{
+	"component":   {"http": {}, "gateway": {}, "runner": {}, "model": {}, "tool": {}, "storage": {}, "channel": {}},
+	"operation":   {observability.OperationHTTPRequest: {}, observability.OperationGatewayDispatch: {}, observability.OperationRunnerExecution: {}, observability.OperationModelCall: {}, observability.OperationToolCall: {}, observability.OperationStorageOperation: {}, observability.OperationChannelReceive: {}, observability.OperationChannelSend: {}},
+	"status":      {"started": {}, "complete": {}, "ok": {}, "error": {}, "success": {}, "failure": {}, "canceled": {}, "timeout": {}, "retry": {}},
+	"error_class": {"": {}, "error": {}, "canceled": {}, "timeout": {}, "invalid": {}, "unauthenticated": {}, "not_ready": {}, "rate_limited": {}, "duplicate": {}, "unavailable": {}, "storage": {}, "model": {}, "tool": {}},
+}
+var highCardinalityPattern = regexp.MustCompile(`(?i)(session|user|message|request|trace|[0-9a-f]{16,}|https?://)`)
 
 // ValidateLabels rejects high-cardinality or sensitive dimensions.
 func ValidateLabels(labels map[string]string) error {
-	for key := range labels {
+	for key, value := range labels {
 		if _, ok := allowedLabels[key]; !ok {
 			return fmt.Errorf("metric label %q is not allowed", key)
+		}
+		if values, ok := allowedValues[key]; ok {
+			if _, allowed := values[value]; !allowed {
+				return fmt.Errorf("metric label %q has unsupported value", key)
+			}
+		} else if len(value) > 64 || strings.ContainsAny(value, "\r\n") || highCardinalityPattern.MatchString(value) {
+			return fmt.Errorf("metric label %q has high-cardinality value", key)
 		}
 	}
 	return nil

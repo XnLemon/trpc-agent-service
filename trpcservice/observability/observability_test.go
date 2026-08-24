@@ -1,11 +1,16 @@
 package observability
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
+
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 func TestNoopProviderLifecycleAndCorrelation(t *testing.T) {
@@ -68,4 +73,60 @@ func TestStartOperationProvidesGenericHook(t *testing.T) {
 		t.Fatal("operation context is nil")
 	}
 	finish(context.Canceled)
+}
+
+func TestTelemetryAdaptersEnforceSafeFieldsAndWrapSDKPrimitives(t *testing.T) {
+	var logs bytes.Buffer
+	provider := NewProvider(Config{
+		TracerProvider: tracenoop.NewTracerProvider(),
+		MeterProvider:  metricnoop.NewMeterProvider(),
+		Logger:         slog.New(slog.NewJSONHandler(&logs, nil)),
+	})
+	ctx, span := provider.Tracer("test").Start(context.Background(), OperationToolCall,
+		Attribute{Key: "operation", Value: OperationToolCall},
+		Attribute{Key: "message", Value: "user text"},
+		Attribute{Key: "token", Value: "secret"})
+	span.SetAttributes(Attribute{Key: "status", Value: "ok"}, Attribute{Key: "raw", Value: "payload"})
+	span.RecordError(errors.New("token=secret"))
+	span.End()
+	meter := provider.Meter("test")
+	meter.Counter("requests").Add(ctx, 1, Attribute{Key: "component", Value: "tool"})
+	meter.Histogram("duration").Record(ctx, 1, Attribute{Key: "operation", Value: OperationToolCall})
+	meter.UpDownCounter("active").Add(ctx, 1, Attribute{Key: "status", Value: "ok"})
+	provider.Logger().Log(ctx, LevelInfo, "operation", Attribute{Key: "message", Value: "user text"}, Attribute{Key: "operation", Value: OperationToolCall})
+	if strings.Contains(logs.String(), "user text") || strings.Contains(logs.String(), "secret") {
+		t.Fatalf("unsafe log content: %s", logs.String())
+	}
+}
+
+func TestProviderBranchesAndOTLPConstruction(t *testing.T) {
+	otlp, err := NewOTLPProvider(context.Background(), OTLPConfig{Endpoint: "127.0.0.1:4318", Insecure: true, Headers: map[string]string{"authorization": "Bearer secret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := otlp.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var shutdowns int
+	provider := NewProvider(Config{Shutdown: func(context.Context) error { shutdowns++; return nil }})
+	if provider.Tracer("test") == nil || provider.Meter("test") == nil || provider.Logger() == nil {
+		t.Fatal("provider components must be available")
+	}
+	if err := provider.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if shutdowns != 1 {
+		t.Fatalf("shutdown lifecycle = %d", shutdowns)
+	}
+	var discard discardWriter
+	if n, err := discard.Write([]byte("x")); n != 1 || err != nil {
+		t.Fatalf("discard writer = %d/%v", n, err)
+	}
+	ctx := WithCorrelation(nil, "req", "trace")
+	if RequestID(nil) != "" || TraceID(nil) != "" || RequestID(ctx) != "req" || TraceID(ctx) != "trace" {
+		t.Fatal("nil/correlation context handling failed")
+	}
 }

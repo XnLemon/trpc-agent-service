@@ -188,6 +188,7 @@ func (discardWriter) Write(b []byte) (int, error) { return len(b), nil }
 type otelTracer struct{ tracer trace.Tracer }
 
 func (t otelTracer) Start(ctx context.Context, name string, attrs ...Attribute) (context.Context, Span) {
+	attrs = sanitizeAttributes(attrs)
 	values := make([]attribute.KeyValue, 0, len(attrs))
 	for _, a := range attrs {
 		values = append(values, attribute.String(a.Key, a.Value))
@@ -200,6 +201,7 @@ type otelSpan struct{ span trace.Span }
 
 func (s otelSpan) End() { s.span.End() }
 func (s otelSpan) SetAttributes(attrs ...Attribute) {
+	attrs = sanitizeAttributes(attrs)
 	values := make([]attribute.KeyValue, 0, len(attrs))
 	for _, a := range attrs {
 		values = append(values, attribute.String(a.Key, a.Value))
@@ -218,7 +220,7 @@ func (s otelSpan) SetStatus(status Status, description string) {
 }
 func (s otelSpan) RecordError(err error) {
 	if err != nil {
-		s.span.RecordError(err)
+		s.span.RecordError(errors.New(ErrorClass(err)))
 	}
 }
 
@@ -265,6 +267,7 @@ func (c otelUpDownCounter) Add(ctx context.Context, v int64, attrs ...Attribute)
 type slogLogger struct{ logger *slog.Logger }
 
 func (l slogLogger) Log(ctx context.Context, level Level, msg string, attrs ...Attribute) {
+	attrs = sanitizeAttributes(attrs)
 	args := make([]any, 0, len(attrs)*2)
 	for _, a := range attrs {
 		args = append(args, a.Key, RedactString(a.Value))
@@ -284,6 +287,31 @@ func (l slogLogger) Log(ctx context.Context, level Level, msg string, attrs ...A
 var sensitivePattern = regexp.MustCompile(`(?i)(bearer\s+|api[_-]?key\s*[=:]\s*|token\s*[=:]\s*|authorization\s*[=:]\s*|secret(?:[_-]?ref)?\s*[=:]\s*|password\s*[=:]\s*)[^\s,;]+`)
 var dsnPattern = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)([^/@\s]+):([^/@\s]+)@`)
 var bearerPattern = regexp.MustCompile(`(?i)Bearer\s+[^\s,;]+`)
+var allowedAttributeKeys = map[string]struct{}{
+	"component": {}, "operation": {}, "status": {}, "error_class": {},
+	"tenant_hash": {}, "app_hash": {}, "model_family": {}, "provider": {}, "channel": {},
+}
+var allowedOperations = map[string]struct{}{
+	OperationHTTPRequest: {}, OperationGatewayDispatch: {}, OperationRunnerExecution: {},
+	OperationModelCall: {}, OperationToolCall: {}, OperationStorageOperation: {},
+	OperationChannelReceive: {}, OperationChannelSend: {},
+}
+
+func sanitizeAttributes(attrs []Attribute) []Attribute {
+	out := make([]Attribute, 0, len(attrs))
+	for _, attr := range attrs {
+		if _, ok := allowedAttributeKeys[attr.Key]; !ok {
+			continue
+		}
+		if attr.Key == "operation" {
+			if _, ok := allowedOperations[attr.Value]; !ok {
+				continue
+			}
+		}
+		out = append(out, Attribute{Key: attr.Key, Value: RedactString(attr.Value)})
+	}
+	return out
+}
 
 func RedactString(value string) string {
 	value = bearerPattern.ReplaceAllString(value, "Bearer <redacted>")
