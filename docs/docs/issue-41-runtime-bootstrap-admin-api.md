@@ -49,22 +49,24 @@ PostgreSQL
 | TRPC_API_TOKEN | 最小 API principal 凭证 | 是 |
 | TRPC_TENANT_ID | API token 固定的租户 | 是 |
 | TRPC_APP_ID | API token 固定的 Agent App | 是 |
+| TRPC_ADMIN_TOKEN | 独立 Admin principal 凭证；不能复用 TRPC_API_TOKEN | 是 |
+| TRPC_ADMIN_TENANTS | Admin principal 的租户范围，逗号分隔；* 仅表示受控的首租户/平台管理权限 | 是 |
 | TRPC_MODEL_API_KEY | 仅在运行时交给 ModelFactory | 是 |
 | TRPC_MODEL_PROVIDER | 当前支持 openai | 否 |
 | TRPC_MODEL_NAMES | 受信 Model Catalog | 否 |
 | TRPC_MODEL_ENDPOINT_HOSTS | HTTPS endpoint host 白名单 | 否 |
 | TRPC_MODEL_SECRET_REF | 控制面中的 secret reference | 否 |
 
-API token 和模型 key 只能在进程启动配置或 SecretResolver 输入边界中出现，不能写入数据库、ExecutionPlan、Factory cache key、日志、trace 或错误响应。Issue #41 的 Admin API 只接收 secret_ref，不接收明文凭据。
+TRPC_API_TOKEN 只用于普通对话 API，固定映射到一个已存在的 Tenant/App；它不能访问 /admin/v1/*。Admin API 必须使用独立的 TRPC_ADMIN_TOKEN，并由 Admin principal 携带 subject、role=admin 和 tenant scope。TRPC_ADMIN_TENANTS=* 只允许平台管理员创建首个 Tenant，创建后仍须通过显式租户范围校验；普通 API token 永远不能提权。所有 token 和模型 key 只能在进程启动配置或 SecretResolver 输入边界中出现，不能写入数据库、ExecutionPlan、Factory cache key、日志、trace 或错误响应。Issue #41 的 Admin API 只接收 secret_ref，不接收明文凭据。
 
 ### 装配顺序
 
-Bootstrap 必须保持以下依赖顺序；任何必需依赖缺失都应在 HTTP 端口绑定前失败：
+Bootstrap 必须保持以下依赖顺序。配置解析、Admin token 或 migration 执行失败时，生产入口必须在绑定业务 HTTP 端口前以稳定类别失败；已经构造出的 Runtime 对数据库、Repository、Resolver、Registry、Dispatcher 或 Handler 失效统一通过 /readyz=503 摘流：
 
 ~~~text
 validate config
   -> open/ping PostgreSQL
-  -> run or verify ordered migrations
+  -> migrations.Apply (ordered files, advisory lock, schema history)
   -> construct five control-plane Repository + Channel Candidate source
   -> construct Provider Catalogs
   -> construct SecretResolver / ModelFactory / Session capability
@@ -79,10 +81,10 @@ Channel Binding 不是 PlanResolver 的直接输入。它必须由 Channel Candi
 
 ### 资源所有权
 
-Bootstrap graph 必须记录 DB、Session、RunnerRegistry、Dispatcher、HTTP Handler 的所有权：
+Bootstrap graph 必须记录 DB、Session、RunnerRegistry、Dispatcher、HTTP Handler 的所有权；进程 supervisor 另外拥有 net/http.Server，并负责把 Runtime 的 draining gate 与 Server.Shutdown 串起来：
 
 1. 先将 Handler 和 Runtime 标记为 draining；
-2. 调用 http.Server.Shutdown，停止新请求并等待在途请求；
+2. 由 cmd/trpc-service 调用 http.Server.Shutdown，停止新请求并等待在途请求；
 3. bounded close RunnerRegistry，等待或取消剩余 Runner lease；
 4. 关闭 Bootstrap 自己拥有的 DB/pool 和依赖；
 5. 不关闭由调用方借用的 Repository、Session、Factory 或 HTTP client。
@@ -95,7 +97,7 @@ Bootstrap graph 必须记录 DB、Session、RunnerRegistry、Dispatcher、HTTP H
 
 | 条件 | /readyz |
 | --- | --- |
-| 配置缺失或 bootstrap 失败 | 503 |
+| 已运行 Runtime 的依赖失效或 readiness gate 为 false | 503 |
 | DB ping 失败或 migration 未准备好 | 503 |
 | Repository/Catalog/Secret/Model/Session capability 缺失 | 503 |
 | Resolver、Registry、Dispatcher 或 Handler 未就绪 | 503 |
@@ -117,7 +119,29 @@ Bootstrap graph 必须记录 DB、Session、RunnerRegistry、Dispatcher、HTTP H
 | Backend Profile | create/get/update/transition | binding 能力和租户引用校验；状态迁移受控 |
 | Channel Binding | create/get/update/transition | route/account 唯一性、同租户 App 引用、候选路由约束 |
 
-建议采用资源路径与动作分离的形式，例如：
+Admin API 的第一版线协议固定如下；所有 JSON 响应都包含 request_id，错误响应为 {"error":"<stable-category>","request_id":"..."}，不得返回底层 SQL/secret。expected_version 字段位于写请求 JSON；reason、correlation_id 位于同一 JSON；服务端从 Admin principal 填充 actor_type=admin、actor_id=subject。
+
+| 方法 | 路径 | 请求体/成功响应 |
+| --- | --- | --- |
+| POST | /admin/v1/tenants | tenant.CreateInput；201 + Tenant |
+| GET | /admin/v1/tenants/{tenant_id} | 无；200 + Tenant |
+| PATCH | /admin/v1/tenants/{tenant_id} | UpdateConfigurationInput；200 + Tenant |
+| POST | /admin/v1/tenants/{tenant_id}/status | expected_version,next_status,reason,correlation_id；200 + Tenant + event |
+| POST | /admin/v1/tenants/{tenant_id}/apps | agent.CreateInput；201 + App |
+| GET | /admin/v1/tenants/{tenant_id}/apps/{app_id} | 无；200 + App |
+| PATCH | /admin/v1/tenants/{tenant_id}/apps/{app_id} | UpdateMetadataInput；200 + App |
+| POST | /admin/v1/tenants/{tenant_id}/apps/{app_id}/revisions | CreateDraftInput；201 + Revision |
+| PATCH | /admin/v1/tenants/{tenant_id}/apps/{app_id}/revisions/{revision} | UpdateDraftInput；200 + Revision |
+| POST | /admin/v1/tenants/{tenant_id}/apps/{app_id}/revisions/{revision}/publish | expected_app_version,expected_draft_version,reason,correlation_id；200 + App,Revision,event |
+| POST | /admin/v1/tenants/{tenant_id}/apps/{app_id}/rollback | target_revision,expected_app_version,reason,correlation_id；200 + App,event |
+| POST | /admin/v1/tenants/{tenant_id}/apps/{app_id}/status | expected_version,next_status,reason,correlation_id；200 + App,event |
+| POST/PATCH/GET | /admin/v1/tenants/{tenant_id}/models/{profile_id} | model.CreateInput / UpdateConfigurationInput；201/200 + Profile,event |
+| POST/PATCH/GET | /admin/v1/tenants/{tenant_id}/backends/{profile_id} | backend.CreateInput / UpdateConfigurationInput；201/200 + Profile,event |
+| POST/PATCH/GET | /admin/v1/tenants/{tenant_id}/bindings/{binding_id} | channels.CreateInput / UpdateConfigurationInput；201/200 + Binding,event |
+
+所有资源的状态动作统一使用 /status，next_status 只能使用领域允许的迁移。读取不存在或跨租户对象统一为 404；认证失败为 401；租户范围不足为 403；字段/状态校验失败为 400；expected version 冲突为 409；存储/依赖故障为 503。
+
+实现必须遵循上述路径和字段；不得以“实现 PR 可调整路由”替换契约。资源路径与动作分离的示例：
 
 ~~~text
 POST   /admin/v1/tenants
@@ -128,11 +152,11 @@ POST   /admin/v1/tenants/{tenant_id}/apps/{app_id}/revisions/{revision}/publish
 POST   /admin/v1/tenants/{tenant_id}/apps/{app_id}/rollback
 ~~~
 
-具体路由可以在实现 PR 中调整，但不能绕过领域 Repository 直接拼 SQL 或更新发布表。
+示例路径与上表一致；实现不能绕过领域 Repository 直接拼 SQL 或更新发布表。
 
 ### 认证与租户隔离
 
-- Admin API 使用独立的管理员认证结果，不能把普通对话 API token 自动提升为跨租户管理员；
+- Admin API 使用独立的管理员认证结果（subject、role、tenant scope），不能把普通对话 API token 自动提升为跨租户管理员；
 - principal 的 tenant scope、resource path 的 tenant ID、Repository 的 tenant 条件三者必须一致；
 - 无权限、跨租户不存在和越权访问统一映射为稳定的 unauthorized / not found 类别；
 - 所有写操作写入审计或 Outbox 事件，记录 actor、reason、correlation ID、旧/新版本和 trace ID；
@@ -140,7 +164,7 @@ POST   /admin/v1/tenants/{tenant_id}/apps/{app_id}/rollback
 
 ## 重启恢复时序
 
-完整验收必须证明“同一 PostgreSQL 数据 + 两次独立 Bootstrap”而非仅测试 Repository：
+完整验收必须证明“同一 PostgreSQL 数据 + 两次独立 Bootstrap”而非仅测试 Repository。生产 Bootstrap 是 migration 唯一 owner：先取得 advisory lock，再按文件名顺序执行 0001_control_plane.up.sql、0002_control_plane_repository_functions.up.sql，在 schema_migrations 写入版本；重复启动只验证已应用版本，版本缺失、超前或内容 digest 不一致均失败。迁移事务失败时不构造可接流量的 Runtime。
 
 ~~~text
 Process A
@@ -185,6 +209,22 @@ Process B
 - Process A 写入的数据由 Process B 的新 Resolver/Channel Candidate Resolver 读取；
 - Process A 关闭后连接池、Runner 和 Session owner 的生命周期符合声明；
 - Process B 不能读取其他租户对象，也不能使用旧版本或未发布 Revision。
+
+## 干净 PostgreSQL 启动示例
+
+~~~bash
+createdb trpc_control_plane
+export TRPC_POSTGRES_DSN='postgres://postgres:postgres@127.0.0.1:5432/trpc_control_plane?sslmode=disable'
+export TRPC_API_TOKEN='chat-token'
+export TRPC_TENANT_ID='t_01ARZ3NDEKTSV4RRFFQ69G5FAV'
+export TRPC_APP_ID='app_01ARZ3NDEKTSV4RRFFQ69G5FAV'
+export TRPC_ADMIN_TOKEN='admin-token'
+export TRPC_ADMIN_TENANTS='*'
+export TRPC_MODEL_API_KEY='provided-outside-control-plane'
+go run ./cmd/trpc-service
+~~~
+
+启动会由 bootstrap 执行有序 migration；migration 或配置失败时进程不绑定业务端口；已运行进程的依赖失效由 /readyz 返回 503。
 
 ## 验收命令
 
