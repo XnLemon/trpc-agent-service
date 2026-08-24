@@ -25,7 +25,8 @@ or a future channel implementation.
 
 ## Lifecycle
 
-Pending and retryable rows are eligible when next_attempt_at is due. A worker
+Pending rows are eligible immediately; retryable rows are eligible when the
+exponential delay derived from attempts and updated_at is due. A worker
 claims one row, increments the attempt and receives a lease/fencing token. Only
 that owner and fence can commit sent, retryable, or dead_letter.
 
@@ -79,4 +80,3 @@ The deterministic tests run in every CI build. PostgreSQL restart and real
 Telegram E2E require explicitly provisioned test infrastructure and are never
 represented as passing when their DSN/token is absent. The PR description keeps
 those external prerequisites separate from local evidence.
-

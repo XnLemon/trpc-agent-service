@@ -4,14 +4,20 @@ package outbox
 import (
 	"context"
 	"errors"
+	"hash/fnv"
+	"math"
+	"sync"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 )
 
 var (
-	ErrInvalid  = errors.New("invalid outbox worker")
-	ErrProvider = errors.New("provider delivery failed")
+	ErrInvalid        = errors.New("invalid outbox worker")
+	ErrProvider       = errors.New("provider delivery failed")
+	ErrAlreadyRunning = errors.New("outbox worker is already running")
 )
 
 type DeliveryStatus string
@@ -43,6 +49,14 @@ type Worker struct {
 	owner         string
 	leaseDuration time.Duration
 	maxAttempts   int
+	backoffBase   time.Duration
+	backoffMax    time.Duration
+	jitter        float64
+	telemetry     observability.Provider
+	metrics       metrics.Catalog
+	mu            sync.Mutex
+	runCancel     context.CancelFunc
+	runDone       chan struct{}
 }
 
 type Config struct {
@@ -52,6 +66,10 @@ type Config struct {
 	Owner         string
 	LeaseDuration time.Duration
 	MaxAttempts   int
+	BackoffBase   time.Duration
+	BackoffMax    time.Duration
+	Jitter        float64
+	Observability observability.Provider
 }
 
 func New(config Config) (*Worker, error) {
@@ -61,7 +79,77 @@ func New(config Config) (*Worker, error) {
 	if config.MaxAttempts <= 0 {
 		config.MaxAttempts = 3
 	}
-	return &Worker{store: config.Store, provider: config.Provider, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, maxAttempts: config.MaxAttempts}, nil
+	if config.BackoffBase < 0 || config.BackoffMax < 0 || config.Jitter < 0 || config.Jitter > 1 {
+		return nil, ErrInvalid
+	}
+	if config.BackoffBase == 0 {
+		config.BackoffBase = 100 * time.Millisecond
+	}
+	if config.BackoffMax == 0 {
+		config.BackoffMax = 30 * time.Second
+	}
+	if config.BackoffMax < config.BackoffBase {
+		return nil, ErrInvalid
+	}
+	if config.Observability == nil {
+		config.Observability = observability.NewNoopProvider()
+	}
+	return &Worker{store: config.Store, provider: config.Provider, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, jitter: config.Jitter, telemetry: config.Observability, metrics: metrics.New(config.Observability)}, nil
+}
+
+// Run polls until ctx is canceled. It owns no goroutine after returning.
+func (w *Worker) Run(ctx context.Context, pollInterval time.Duration) error {
+	if w == nil || ctx == nil {
+		return ErrInvalid
+	}
+	if pollInterval <= 0 {
+		pollInterval = time.Second
+	}
+	w.mu.Lock()
+	if w.runCancel != nil {
+		w.mu.Unlock()
+		return ErrAlreadyRunning
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	w.runCancel = cancel
+	w.runDone = make(chan struct{})
+	done := w.runDone
+	w.mu.Unlock()
+	defer func() {
+		cancel()
+		w.mu.Lock()
+		w.runCancel = nil
+		close(done)
+		w.runDone = nil
+		w.mu.Unlock()
+	}()
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		if _, err := w.RunOnce(runCtx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		select {
+		case <-runCtx.Done():
+			return runCtx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// Close cancels a running poll loop and waits for it to release its lease.
+func (w *Worker) Close() error {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	cancel, done := w.runCancel, w.runDone
+	w.mu.Unlock()
+	if cancel != nil {
+		cancel()
+		<-done
+	}
+	return nil
 }
 
 // RunOnce claims and processes every currently eligible reply. Conflicts are
@@ -80,6 +168,9 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 		if !eligible(candidate) {
 			continue
 		}
+		if !w.retryDue(candidate, time.Now().UTC()) {
+			continue
+		}
 		claimed, claimErr := w.store.ClaimReply(ctx, candidate.TenantID, candidate.ReplyID, candidate.SegmentIndex, w.owner, w.leaseDuration)
 		if errors.Is(claimErr, runtimestorage.ErrConflict) || errors.Is(claimErr, runtimestorage.ErrNotFound) {
 			continue
@@ -88,6 +179,9 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 			return processed, claimErr
 		}
 		processed++
+		if w.telemetry != nil {
+			_ = w.metrics.Request(ctx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "started"})
+		}
 		if candidate.Status == runtimestorage.ReplySending {
 			// A sending lease means the previous worker may have reached the
 			// provider before losing its lease. Reconcile is the only safe
@@ -99,6 +193,9 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 		}
 		providerID, deliveryErr := w.provider.Deliver(ctx, claimed)
 		if deliveryErr == nil {
+			if w.telemetry != nil {
+				_ = w.metrics.Request(ctx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "success"})
+			}
 			_, err = w.store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: runtimestorage.ReplySent, Owner: w.owner, FencingToken: claimed.FencingToken, ProviderID: providerID})
 			if err == nil {
 				w.advanceEvent(ctx, claimed.EventID)
@@ -110,12 +207,38 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 				to = runtimestorage.ReplyDeadLetter
 			}
 			_, err = w.store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: to, Owner: w.owner, FencingToken: claimed.FencingToken, ErrorClass: class})
+			if retryable && to == runtimestorage.ReplyRetryable {
+				if w.telemetry != nil {
+					_ = w.metrics.Retry(ctx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "retry", "error_class": class})
+				}
+			}
 		}
 		if err != nil && !errors.Is(err, runtimestorage.ErrConflict) {
 			return processed, err
 		}
 	}
 	return processed, nil
+}
+
+func (w *Worker) retryDue(value runtimestorage.ReplyOutbox, now time.Time) bool {
+	if value.Status != runtimestorage.ReplyRetryable || w.backoffBase <= 0 || value.UpdatedAt.IsZero() {
+		return true
+	}
+	attempt := value.Attempts
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := float64(w.backoffBase) * math.Pow(2, float64(attempt-1))
+	if delay > float64(w.backoffMax) {
+		delay = float64(w.backoffMax)
+	}
+	if w.jitter > 0 {
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(value.ReplyID))
+		factor := 1 + ((float64(h.Sum32()%1000)/999)-0.5)*2*w.jitter
+		delay *= factor
+	}
+	return !now.Before(value.UpdatedAt.Add(time.Duration(delay)))
 }
 
 func eligible(value runtimestorage.ReplyOutbox) bool {
@@ -177,6 +300,12 @@ func (w *Worker) reconcile(ctx context.Context, claimed runtimestorage.ReplyOutb
 }
 
 func classify(err error) (string, bool) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout", true
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled", true
+	}
 	var deliveryErr *DeliveryError
 	if errors.As(err, &deliveryErr) && deliveryErr.Class != "" {
 		return deliveryErr.Class, deliveryErr.Retryable

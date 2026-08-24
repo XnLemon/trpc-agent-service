@@ -278,6 +278,9 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 	}
 	k := replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)
 	if existing, ok := s.replies[k]; ok {
+		if existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload {
+			return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
+		}
 		return cloneReply(existing), nil
 	}
 	s.replies[k] = value

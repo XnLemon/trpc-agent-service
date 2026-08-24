@@ -1,0 +1,77 @@
+package outbox
+
+import (
+	"context"
+	"errors"
+	"strings"
+
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+)
+
+var ErrMaterialization = errors.New("reply materialization failed")
+
+const defaultSegmentRunes = 4096
+
+// Materializer turns one completed Runner reply into durable, idempotent
+// segments. It is deliberately independent of any channel SDK.
+type Materializer struct {
+	store       runtimestorage.RuntimeStore
+	segmentSize int
+}
+
+type MaterializerConfig struct {
+	Store       runtimestorage.RuntimeStore
+	SegmentSize int
+}
+
+type MaterializeInput struct {
+	TenantID string
+	EventID  string
+	ReplyID  string
+	Payload  string
+}
+
+func NewMaterializer(config MaterializerConfig) (*Materializer, error) {
+	if config.Store == nil {
+		return nil, ErrInvalid
+	}
+	if config.SegmentSize <= 0 {
+		config.SegmentSize = defaultSegmentRunes
+	}
+	return &Materializer{store: config.Store, segmentSize: config.SegmentSize}, nil
+}
+
+// Materialize writes all segments under the stable reply identity. A repeated
+// call is idempotent when the existing rows have the same event and payload.
+func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) (int, error) {
+	if m == nil || ctx == nil || runtimestorage.ValidateTenant(input.TenantID) != nil || input.EventID == "" || input.ReplyID == "" {
+		return 0, ErrInvalid
+	}
+	segments := splitRunes(input.Payload, m.segmentSize)
+	if len(segments) == 0 {
+		return 0, ErrInvalid
+	}
+	for index, payload := range segments {
+		_, err := m.store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: input.TenantID, ReplyID: input.ReplyID, EventID: input.EventID, SegmentIndex: index, SegmentCount: len(segments), Payload: payload})
+		if err != nil {
+			return index, errors.Join(ErrMaterialization, err)
+		}
+	}
+	return len(segments), nil
+}
+
+func splitRunes(value string, size int) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	runes := []rune(value)
+	result := make([]string, 0, (len(runes)+size-1)/size)
+	for start := 0; start < len(runes); start += size {
+		end := start + size
+		if end > len(runes) {
+			end = len(runes)
+		}
+		result = append(result, string(runes[start:end]))
+	}
+	return result
+}
