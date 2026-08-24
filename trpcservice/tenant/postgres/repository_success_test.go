@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -85,6 +86,37 @@ func TestTenantRepositoryWritesCompleteReadback(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestTenantRepositoryRequiresStorage(t *testing.T) {
+	repository := NewRepository(nil)
+	ctx := context.Background()
+	input := tenant.CreateInput{
+		TenantKey: "storage-guard", DisplayName: "Storage Guard", Status: tenant.StatusActive,
+		AuditRetentionDays: 90, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1,
+	}
+	created, err := tenant.NewTenant(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Create(ctx, input); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Create nil-storage error = %v", err)
+	}
+	if _, err := repository.Get(ctx, "tenant"); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Get nil-storage error = %v", err)
+	}
+	if _, err := repository.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{
+		TenantID: created.TenantID, ExpectedVersion: created.Version, DisplayName: created.DisplayName,
+		AuditRetentionDays: created.AuditRetentionDays, LogMaskingLevel: created.LogMaskingLevel, TraceSamplingRate: created.TraceSamplingRate,
+	}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("UpdateConfiguration nil-storage error = %v", err)
+	}
+	if _, _, err := repository.TransitionStatus(ctx, tenant.TransitionStatusInput{
+		TenantID: created.TenantID, ExpectedVersion: created.Version, NextStatus: tenant.StatusSuspended,
+		Metadata: tenant.TransitionMetadata{ActorType: "test", ActorID: "user", Reason: "storage", CorrelationID: "tenant-storage"},
+	}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("TransitionStatus nil-storage error = %v", err)
+	}
 }
 
 func testTenantRows(value *tenant.Tenant) *sqlmock.Rows {

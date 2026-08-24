@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -152,6 +153,23 @@ func TestModelRepositoryTransitionsStatusAndReturnsEvent(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestModelRepositoryRequiresStorage(t *testing.T) {
+	repository := NewRepository(nil, nil)
+	ctx := context.Background()
+	if _, _, err := repository.Create(ctx, model.CreateInput{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Create nil-storage error = %v", err)
+	}
+	if _, err := repository.Get(ctx, "tenant", "profile"); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Get nil-storage error = %v", err)
+	}
+	if _, _, err := repository.UpdateConfiguration(ctx, model.UpdateConfigurationInput{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("UpdateConfiguration nil-storage error = %v", err)
+	}
+	if _, _, err := repository.TransitionStatus(ctx, model.TransitionStatusInput{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("TransitionStatus nil-storage error = %v", err)
 	}
 }
 

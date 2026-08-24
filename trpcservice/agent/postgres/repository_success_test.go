@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -147,6 +148,38 @@ func TestAgentRepositoryRollsBackToPublishedRevision(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAgentRepositoryRequiresStorage(t *testing.T) {
+	repository := NewRepository(nil)
+	ctx := context.Background()
+	if _, err := repository.Create(ctx, agent.CreateInput{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Create nil-storage error = %v", err)
+	}
+	if _, err := repository.Get(ctx, "tenant", "app"); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Get nil-storage error = %v", err)
+	}
+	if _, err := repository.UpdateMetadata(ctx, agent.UpdateMetadataInput{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("UpdateMetadata nil-storage error = %v", err)
+	}
+	if _, err := repository.CreateDraft(ctx, agent.CreateDraftInput{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("CreateDraft nil-storage error = %v", err)
+	}
+	if _, err := repository.UpdateDraft(ctx, agent.UpdateDraftInput{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("UpdateDraft nil-storage error = %v", err)
+	}
+	if _, err := repository.GetRevision(ctx, "tenant", "app", 1); !errors.Is(err, ErrStorage) {
+		t.Fatalf("GetRevision nil-storage error = %v", err)
+	}
+	if _, _, _, err := repository.Publish(ctx, agent.PublishInput{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Publish nil-storage error = %v", err)
+	}
+	if _, _, err := repository.Rollback(ctx, agent.RollbackInput{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Rollback nil-storage error = %v", err)
+	}
+	if _, _, err := repository.TransitionStatus(ctx, agent.TransitionStatusInput{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("TransitionStatus nil-storage error = %v", err)
 	}
 }
 

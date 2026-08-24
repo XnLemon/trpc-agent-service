@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -137,6 +138,29 @@ func TestChannelRepositorySuspendsBindingAndReturnsEvent(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestChannelRepositoryRequiresStorage(t *testing.T) {
+	repository := NewRepository(nil)
+	ctx := context.Background()
+	if _, _, err := repository.Create(ctx, channels.CreateInput{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Create nil-storage error = %v", err)
+	}
+	if _, err := repository.Get(ctx, "tenant", "binding"); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Get nil-storage error = %v", err)
+	}
+	if _, _, err := repository.UpdateConfiguration(ctx, channels.UpdateConfigurationInput{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("UpdateConfiguration nil-storage error = %v", err)
+	}
+	if _, _, err := repository.TransitionStatus(ctx, channels.TransitionStatusInput{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("TransitionStatus nil-storage error = %v", err)
+	}
+	if _, err := repository.LookupCandidates(ctx, channels.ChannelTelegram, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); !errors.Is(err, ErrStorage) {
+		t.Fatalf("LookupCandidates nil-storage error = %v", err)
+	}
+	if _, err := repository.ConsumeCandidate(ctx, channels.CandidateBindingContext{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("ConsumeCandidate nil-storage error = %v", err)
 	}
 }
 
