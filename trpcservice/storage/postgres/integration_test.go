@@ -91,10 +91,11 @@ func TestPostgreSQLRepositories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("suspend tenant: %v", err)
 	}
-	if _, _, err := tenants.TransitionStatus(ctx, tenant.TransitionStatusInput{
+	activeTenant, _, err := tenants.TransitionStatus(ctx, tenant.TransitionStatusInput{
 		TenantID: root.TenantID, ExpectedVersion: suspendedTenant.Version,
 		NextStatus: tenant.StatusActive, Metadata: metadata,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("resume tenant: %v", err)
 	}
 
@@ -139,11 +140,12 @@ func TestPostgreSQLRepositories(t *testing.T) {
 		t.Fatalf("update model profile: %v", err)
 	}
 	profile = updatedProfile
-	if _, _, err := models.TransitionStatus(ctx, model.TransitionStatusInput{
+	profile, _, err = models.TransitionStatus(ctx, model.TransitionStatusInput{
 		TenantID: root.TenantID, ProfileID: profile.ProfileID, ExpectedVersion: profile.Version,
 		NextStatus: model.StatusSuspended,
 		Metadata:   model.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "integration", CorrelationID: "model-status"},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("suspend model profile: %v", err)
 	}
 
@@ -309,15 +311,16 @@ func TestPostgreSQLRepositories(t *testing.T) {
 		t.Fatalf("update backend profile: %v", err)
 	}
 	backendProfile = updatedBackend
-	if _, _, err := backends.TransitionStatus(ctx, backend.TransitionStatusInput{
+	backendProfile, _, err = backends.TransitionStatus(ctx, backend.TransitionStatusInput{
 		TenantID: root.TenantID, ProfileID: backendProfile.ProfileID, ExpectedVersion: backendProfile.Version,
 		NextStatus: backend.StatusSuspended,
 		Metadata:   backend.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "integration", CorrelationID: "backend-suspend"},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("suspend backend profile: %v", err)
 	}
-	_, _, err = backends.TransitionStatus(ctx, backend.TransitionStatusInput{
-		TenantID: root.TenantID, ProfileID: backendProfile.ProfileID, ExpectedVersion: backendProfile.Version + 1,
+	backendProfile, _, err = backends.TransitionStatus(ctx, backend.TransitionStatusInput{
+		TenantID: root.TenantID, ProfileID: backendProfile.ProfileID, ExpectedVersion: backendProfile.Version,
 		NextStatus: backend.StatusActive,
 		Metadata:   backend.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "integration", CorrelationID: "backend-resume"},
 	})
@@ -397,11 +400,136 @@ func TestPostgreSQLRepositories(t *testing.T) {
 	if _, err := channelRepo.ConsumeCandidate(ctx, candidates[0]); !errors.Is(err, channels.ErrCandidateUnavailable) {
 		t.Fatalf("candidate replay error = %v", err)
 	}
-	if _, _, err := channelRepo.Disable(ctx, channels.TransitionStatusInput{
+	disabledBinding, _, err := channelRepo.Disable(ctx, channels.TransitionStatusInput{
 		TenantID: root.TenantID, BindingID: activeBinding.BindingID, ExpectedVersion: activeBinding.Version,
 		Metadata: channels.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "integration", CorrelationID: "channel-disable"},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("disable channel binding: %v", err)
+	}
+	if _, _, err := channelRepo.UpdateConfiguration(ctx, channels.UpdateConfigurationInput{
+		TenantID: root.TenantID, BindingID: disabledBinding.BindingID, ExpectedVersion: disabledBinding.Version,
+		ProviderAccountID: disabledBinding.ProviderAccountID, PublicRouteKeyDigest: disabledBinding.PublicRouteKeyDigest,
+		AppID: disabledBinding.AppID, SecretRef: disabledBinding.SecretRef, Protocol: disabledBinding.Protocol,
+		Metadata: channels.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "disabled", CorrelationID: "channel-disabled-update"},
+	}); !errors.Is(err, channels.ErrDisabled) {
+		t.Fatalf("disabled channel update error = %v", err)
+	}
+	if _, _, err := channelRepo.TransitionStatus(ctx, channels.TransitionStatusInput{
+		TenantID: root.TenantID, BindingID: disabledBinding.BindingID, ExpectedVersion: disabledBinding.Version,
+		NextStatus: channels.StatusActive,
+		Metadata:   channels.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "disabled", CorrelationID: "channel-disabled-transition"},
+	}); !errors.Is(err, channels.ErrDisabled) {
+		t.Fatalf("disabled channel transition error = %v", err)
+	}
+
+	disabledApp, _, err := apps.TransitionStatus(ctx, agent.TransitionStatusInput{
+		TenantID: root.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: agent.StatusDisabled,
+		Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "integration", CorrelationID: "agent-disable"},
+	})
+	if err != nil {
+		t.Fatalf("disable agent app: %v", err)
+	}
+	if _, err := apps.UpdateMetadata(ctx, agent.UpdateMetadataInput{
+		TenantID: root.TenantID, AppID: disabledApp.AppID, ExpectedVersion: disabledApp.Version,
+		DisplayName: disabledApp.DisplayName, Description: disabledApp.Description,
+	}); !errors.Is(err, agent.ErrDisabled) {
+		t.Fatalf("disabled agent metadata error = %v", err)
+	}
+	if _, err := apps.CreateDraft(ctx, agent.CreateDraftInput{
+		TenantID: root.TenantID, AppID: disabledApp.AppID, ExpectedAppVersion: disabledApp.Version,
+		Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1,
+		Configuration: agent.DraftConfiguration{Instruction: "disabled", ModelProfileID: profile.ProfileID, Runtime: agent.DefaultRuntimePolicy()},
+	}); !errors.Is(err, agent.ErrDisabled) {
+		t.Fatalf("disabled agent draft error = %v", err)
+	}
+	if _, err := apps.UpdateDraft(ctx, agent.UpdateDraftInput{
+		TenantID: root.TenantID, AppID: disabledApp.AppID, Revision: updatedDraft.Revision,
+		ExpectedAppVersion: disabledApp.Version, ExpectedDraftVersion: updatedDraft.DraftVersion,
+		Configuration: agent.DraftConfiguration{Instruction: "disabled", ModelProfileID: profile.ProfileID, Runtime: agent.DefaultRuntimePolicy()},
+	}); !errors.Is(err, agent.ErrDisabled) {
+		t.Fatalf("disabled agent draft update error = %v", err)
+	}
+	if _, _, err := apps.Rollback(ctx, agent.RollbackInput{
+		TenantID: root.TenantID, AppID: disabledApp.AppID, TargetRevision: draft.Revision, ExpectedAppVersion: disabledApp.Version,
+		Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "disabled", CorrelationID: "agent-disabled-rollback"},
+	}); !errors.Is(err, agent.ErrDisabled) {
+		t.Fatalf("disabled agent rollback error = %v", err)
+	}
+	if _, _, err := apps.TransitionStatus(ctx, agent.TransitionStatusInput{
+		TenantID: root.TenantID, AppID: disabledApp.AppID, ExpectedVersion: disabledApp.Version, NextStatus: agent.StatusActive,
+		Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "disabled", CorrelationID: "agent-disabled-transition"},
+	}); !errors.Is(err, agent.ErrDisabled) {
+		t.Fatalf("disabled agent transition error = %v", err)
+	}
+	if _, _, _, err := apps.Publish(ctx, agent.PublishInput{
+		TenantID: root.TenantID, AppID: disabledApp.AppID, Revision: updatedDraft.Revision,
+		ExpectedAppVersion: disabledApp.Version, ExpectedDraftVersion: updatedDraft.DraftVersion, TenantActive: true,
+		Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "disabled", CorrelationID: "agent-disabled-publish"},
+	}); !errors.Is(err, agent.ErrDisabled) {
+		t.Fatalf("disabled agent publish error = %v", err)
+	}
+
+	disabledProfile, _, err := models.TransitionStatus(ctx, model.TransitionStatusInput{
+		TenantID: root.TenantID, ProfileID: profile.ProfileID, ExpectedVersion: profile.Version, NextStatus: model.StatusDisabled,
+		Metadata: model.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "integration", CorrelationID: "model-disable"},
+	})
+	if err != nil {
+		t.Fatalf("disable model profile: %v", err)
+	}
+	if _, _, err := models.UpdateConfiguration(ctx, model.UpdateConfigurationInput{
+		TenantID: root.TenantID, ProfileID: disabledProfile.ProfileID, ExpectedVersion: disabledProfile.Version,
+		DisplayName: disabledProfile.DisplayName, Description: disabledProfile.Description, SchemaVersion: disabledProfile.SchemaVersion,
+		Configuration: disabledProfile.Configuration,
+		Metadata:      model.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "disabled", CorrelationID: "model-disabled-update"},
+	}); !errors.Is(err, model.ErrDisabled) {
+		t.Fatalf("disabled model update error = %v", err)
+	}
+	if _, _, err := models.TransitionStatus(ctx, model.TransitionStatusInput{
+		TenantID: root.TenantID, ProfileID: disabledProfile.ProfileID, ExpectedVersion: disabledProfile.Version, NextStatus: model.StatusActive,
+		Metadata: model.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "disabled", CorrelationID: "model-disabled-transition"},
+	}); !errors.Is(err, model.ErrDisabled) {
+		t.Fatalf("disabled model transition error = %v", err)
+	}
+
+	disabledBackend, _, err := backends.TransitionStatus(ctx, backend.TransitionStatusInput{
+		TenantID: root.TenantID, ProfileID: backendProfile.ProfileID, ExpectedVersion: backendProfile.Version, NextStatus: backend.StatusDisabled,
+		Metadata: backend.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "integration", CorrelationID: "backend-disable"},
+	})
+	if err != nil {
+		t.Fatalf("disable backend profile: %v", err)
+	}
+	if _, _, err := backends.UpdateConfiguration(ctx, backend.UpdateConfigurationInput{
+		TenantID: root.TenantID, ProfileID: disabledBackend.ProfileID, ExpectedVersion: disabledBackend.Version,
+		DisplayName: disabledBackend.DisplayName, Description: disabledBackend.Description, SchemaVersion: disabledBackend.SchemaVersion,
+		Bindings: disabledBackend.Bindings,
+		Metadata: backend.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "disabled", CorrelationID: "backend-disabled-update"},
+	}); !errors.Is(err, backend.ErrDisabled) {
+		t.Fatalf("disabled backend update error = %v", err)
+	}
+	if _, _, err := backends.TransitionStatus(ctx, backend.TransitionStatusInput{
+		TenantID: root.TenantID, ProfileID: disabledBackend.ProfileID, ExpectedVersion: disabledBackend.Version, NextStatus: backend.StatusActive,
+		Metadata: backend.ChangeMetadata{ActorType: "test", ActorID: "postgres", Reason: "disabled", CorrelationID: "backend-disabled-transition"},
+	}); !errors.Is(err, backend.ErrDisabled) {
+		t.Fatalf("disabled backend transition error = %v", err)
+	}
+
+	disabledTenant, _, err := tenants.TransitionStatus(ctx, tenant.TransitionStatusInput{
+		TenantID: root.TenantID, ExpectedVersion: activeTenant.Version, NextStatus: tenant.StatusDisabled, Metadata: metadata,
+	})
+	if err != nil {
+		t.Fatalf("disable tenant: %v", err)
+	}
+	if _, err := tenants.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{
+		TenantID: disabledTenant.TenantID, ExpectedVersion: disabledTenant.Version, DisplayName: disabledTenant.DisplayName,
+		AuditRetentionDays: disabledTenant.AuditRetentionDays, LogMaskingLevel: disabledTenant.LogMaskingLevel, TraceSamplingRate: disabledTenant.TraceSamplingRate,
+	}); !errors.Is(err, tenant.ErrDisabled) {
+		t.Fatalf("disabled tenant update error = %v", err)
+	}
+	if _, _, err := tenants.TransitionStatus(ctx, tenant.TransitionStatusInput{
+		TenantID: disabledTenant.TenantID, ExpectedVersion: disabledTenant.Version, NextStatus: tenant.StatusActive, Metadata: metadata,
+	}); !errors.Is(err, tenant.ErrDisabled) {
+		t.Fatalf("disabled tenant transition error = %v", err)
 	}
 
 	canceled, cancelRequest := context.WithCancel(context.Background())
