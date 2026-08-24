@@ -33,6 +33,10 @@ type Config struct {
 
 type Handler struct{ config Config }
 
+type tenantCounter interface {
+	Count(context.Context) (int, error)
+}
+
 func NewHandler(config Config) (*Handler, error) {
 	if config.Tenants == nil || config.Apps == nil || config.Models == nil || config.Backends == nil || config.Bindings == nil || config.Authenticator == nil {
 		return nil, errors.New("invalid admin handler configuration")
@@ -83,6 +87,19 @@ func (h *Handler) tenants(ctx context.Context, r *http.Request, p Principal) (in
 	if r.Method != http.MethodPost || !p.Allows("", true) {
 		return 0, nil, ErrForbidden
 	}
+	if p.Global {
+		counter, ok := h.config.Tenants.(tenantCounter)
+		if !ok {
+			return 0, nil, ErrForbidden
+		}
+		count, err := counter.Count(ctx)
+		if err != nil {
+			return 0, nil, err
+		}
+		if count > 0 {
+			return 0, nil, ErrForbidden
+		}
+	}
 	var input tenant.CreateInput
 	if err := decodeBody(r, &input); err != nil {
 		return 0, nil, err
@@ -94,6 +111,9 @@ func (h *Handler) tenants(ctx context.Context, r *http.Request, p Principal) (in
 func (h *Handler) tenantRoute(ctx context.Context, r *http.Request, p Principal, parts []string, requestID string) (int, any, error) {
 	tenantID := parts[0]
 	if tenantID == "" || !p.Allows(tenantID, false) {
+		if r.Method == http.MethodGet {
+			return 0, nil, errNotFound
+		}
 		return 0, nil, ErrForbidden
 	}
 	if len(parts) == 1 {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -82,6 +83,19 @@ func (r *TenantRepository) Get(ctx context.Context, tenantID string) (*tenant.Te
 		return nil, mapDBError(ctx, err, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid)
 	}
 	return value, nil
+}
+
+// Count returns the durable tenant count used by the first-tenant admin
+// authorization boundary.
+func (r *TenantRepository) Count(ctx context.Context) (int, error) {
+	if r == nil || r.db == nil {
+		return 0, storagepostgres.ErrStorage
+	}
+	var count int
+	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM public.tenant").Scan(&count); err != nil {
+		return 0, mapDBError(ctx, err, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid)
+	}
+	return count, nil
 }
 
 func (r *TenantRepository) UpdateConfiguration(ctx context.Context, input tenant.UpdateConfigurationInput) (*tenant.Tenant, error) {

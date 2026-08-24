@@ -282,3 +282,27 @@ func TestAdminNormalizationAndBodyBoundaries(t *testing.T) {
 		t.Fatal("unknown keys must remain unchanged")
 	}
 }
+
+func TestGlobalAdminIsFirstTenantOnlyAndCrossTenantReadsAreHidden(t *testing.T) {
+	handler, _ := testHandler(t)
+	for _, key := range []string{"first", "second"} {
+		request := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants", strings.NewReader(`{"tenant_key":"`+key+`","display_name":"Tenant"}`))
+		request.Header.Set("Authorization", "Bearer admin-token")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		want := http.StatusCreated
+		if key == "second" {
+			want = http.StatusForbidden
+		}
+		if recorder.Code != want {
+			t.Fatalf("%s tenant status = %d, want %d", key, recorder.Code, want)
+		}
+	}
+	cross := httptest.NewRequest(http.MethodGet, "/admin/v1/tenants/t_01ARZ3NDEKTSV4RRFFQ69G5FAV", nil)
+	cross.Header.Set("Authorization", "Bearer admin-token")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, cross)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant read status = %d, want 404", recorder.Code)
+	}
+}
