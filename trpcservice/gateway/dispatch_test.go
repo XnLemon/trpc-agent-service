@@ -378,6 +378,72 @@ func TestDispatcherDurableClaimMapsStorageErrors(t *testing.T) {
 	}
 }
 
+func TestDispatcherDurableDispatchFailurePaths(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPlanResolver(PlanResolverConfig{Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := func(id string) InboundMessage {
+		return InboundMessage{Content: "failure", ExternalMessageID: id, ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"}
+	}
+	newDispatcher := func(runFn func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error), factoryNil bool) (*Dispatcher, *RunnerRegistry) {
+		runner := &testRunner{runFn: runFn}
+		registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+			if factoryNil {
+				return nil, nil
+			}
+			return runner, nil
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: inmemory.New(), DrainTimeout: time.Millisecond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return dispatcher, registry
+	}
+	runError := func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		return nil, errors.New("runner")
+	}
+	dispatcher, registry := newDispatcher(runError, false)
+	if _, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message("run-error")}); !errors.Is(err, ErrExecution) {
+		t.Fatalf("runner error = %v", err)
+	}
+	_ = registry.Close()
+	nilEvents := func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		return nil, nil
+	}
+	dispatcher, registry = newDispatcher(nilEvents, false)
+	if _, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message("nil-events")}); !errors.Is(err, ErrExecution) {
+		t.Fatalf("nil events = %v", err)
+	}
+	_ = registry.Close()
+	dispatcher, registry = newDispatcher(nil, true)
+	if _, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message("nil-runner")}); !errors.Is(err, ErrRunnerUnavailable) {
+		t.Fatalf("nil runner = %v", err)
+	}
+	_ = registry.Close()
+	dispatcher, registry = newDispatcher(nilEvents, false)
+	_ = registry.Close()
+	if _, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message("closed-registry")}); err == nil {
+		t.Fatal("expected closed registry error")
+	}
+	_ = registry.Close()
+	badPrincipal := mustAPIPrincipal(t, fixture.tenant.TenantID, "app_01ARZ3NDEKTSV4RRFFQ69G5FAW")
+	dispatcher, registry = newDispatcher(nilEvents, false)
+	if _, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: badPrincipal, Message: InboundMessage{Content: "resolver", ExternalMessageID: "resolver", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}}); !errors.Is(err, ErrPlanUnavailable) {
+		t.Fatalf("resolver error = %v", err)
+	}
+	_ = registry.Close()
+}
+
 func TestDispatcherRedactsRunnerErrors(t *testing.T) {
 	runnerValue := &testRunner{}
 	runnerValue.runFn = func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
