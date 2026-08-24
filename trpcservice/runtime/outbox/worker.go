@@ -89,10 +89,13 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 		}
 		processed++
 		if candidate.Status == runtimestorage.ReplySending {
+			// A sending lease means the previous worker may have reached the
+			// provider before losing its lease. Reconcile is the only safe
+			// resolution path; an unknown/error result must not redeliver.
 			if w.reconcile(ctx, claimed) {
 				w.advanceEvent(ctx, claimed.EventID)
-				continue
 			}
+			continue
 		}
 		providerID, deliveryErr := w.provider.Deliver(ctx, claimed)
 		if deliveryErr == nil {
