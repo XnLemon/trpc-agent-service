@@ -192,14 +192,25 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, output chan<- DispatchEvent, span observability.Span, started time.Time) {
 	defer close(output)
 	defer func() { _ = lease.Release() }()
+	var terminalErr error
 	defer func() {
 		_ = dispatcher.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
-		_ = dispatcher.metrics.Duration(ctx, observability.DurationMilliseconds(started), map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch, "status": "complete"})
-		span.SetStatus(observability.StatusOK, "")
+		status := "complete"
+		if terminalErr != nil {
+			status = "error"
+			class := observability.ErrorClass(terminalErr)
+			span.SetAttributes(observability.Attribute{Key: "error_class", Value: class})
+			span.SetStatus(observability.StatusError, class)
+			span.RecordError(terminalErr)
+		} else {
+			span.SetStatus(observability.StatusOK, "")
+		}
+		_ = dispatcher.metrics.Duration(ctx, observability.DurationMilliseconds(started), map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch, "status": status, "error_class": observability.ErrorClass(terminalErr)})
 		span.End()
 	}()
 	for {
 		if ctx.Err() != nil {
+			terminalErr = ctx.Err()
 			dispatcher.finishCanceled(ctx, requestID, traceID, runnerEvents, output)
 			return
 		}
@@ -211,7 +222,11 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 			}
 			mapped, done := mapRunnerEvent(event, requestID, traceID)
 			for _, item := range mapped {
+				if item.Type == DispatchEventError {
+					terminalErr = ErrExecution
+				}
 				if !sendDispatchEvent(ctx, output, item) {
+					terminalErr = ctx.Err()
 					drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
 					return
 				}
@@ -221,6 +236,7 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 				return
 			}
 		case <-ctx.Done():
+			terminalErr = ctx.Err()
 			dispatcher.finishCanceled(ctx, requestID, traceID, runnerEvents, output)
 			return
 		}
