@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
@@ -20,6 +21,13 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 )
+
+type telegramAuditWriter struct{ events []audit.Event }
+
+func (w *telegramAuditWriter) Append(_ context.Context, event audit.Event) (audit.AppendResult, error) {
+	w.events = append(w.events, event)
+	return audit.AppendResult{Event: event}, nil
+}
 
 func TestNewInjectsFactoryAndRejectsBotIdentityMismatch(t *testing.T) {
 	target := newTrustedTarget(t, channels.ChannelTelegram, "constructor", "12345")
@@ -254,6 +262,8 @@ func TestHandleUpdateMapsPrivateTextAndAggregatesDispatchEvents(t *testing.T) {
 	}}
 	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
 	adapter := newTestAdapter(t, target, dispatcher, client)
+	aw := &telegramAuditWriter{}
+	adapter.audit.Writer = aw
 	key := contextKey("request-context")
 	ctx := context.WithValue(context.Background(), key, "preserved")
 	update := textUpdate(7, models.ChatTypePrivate, 100, 42, "  hello  ", 0)
@@ -282,6 +292,9 @@ func TestHandleUpdateMapsPrivateTextAndAggregatesDispatchEvents(t *testing.T) {
 	sent := client.sent()
 	if len(sent) != 1 || sent[0].Text != "hello world" || sent[0].ChatID != 100 || sent[0].ThreadID != 0 {
 		t.Fatalf("unexpected aggregated Telegram reply: %+v", sent)
+	}
+	if len(aw.events) != 2 || aw.events[0].EventType != audit.EventIMIngressAccepted || aw.events[1].EventType != audit.EventIMDeliverySent {
+		t.Fatalf("audit events = %#v", aw.events)
 	}
 }
 
