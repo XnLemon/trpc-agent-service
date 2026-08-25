@@ -27,3 +27,23 @@ func TestValidationContracts(t *testing.T) {
 		}
 	}
 }
+
+func TestReplyTargetValidation(t *testing.T) {
+	valid := storage.ReplyTarget{BindingID: "binding-1", ConversationKind: "direct", ReceiverID: "user-1", ThreadID: "topic-1"}
+	if err := storage.ValidateReplyTarget(valid); err != nil {
+		t.Fatalf("valid target = %v", err)
+	}
+	for _, target := range []storage.ReplyTarget{
+		{BindingID: "binding-1"},
+		{BindingID: "binding-1", ConversationKind: "unknown", ReceiverID: "user-1"},
+		{BindingID: "binding-1", ConversationKind: "group"},
+		{BindingID: "binding-1", ConversationKind: "group", ReceiverID: "user-1", ThreadID: "bad\nthread"},
+	} {
+		if !errors.Is(storage.ValidateReplyTarget(target), storage.ErrInvalid) {
+			t.Fatalf("invalid target accepted: %+v", target)
+		}
+	}
+	if err := storage.ValidateReplyTarget(storage.ReplyTarget{}); err != nil {
+		t.Fatalf("legacy zero target = %v", err)
+	}
+}

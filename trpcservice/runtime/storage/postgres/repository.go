@@ -15,6 +15,9 @@ import (
 // Store persists tenant-scoped runtime state in PostgreSQL.
 type Store struct{ db *sql.DB }
 
+const eventColumns = "tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,fencing_token,lease_owner,lease_expires_at,reply_id,segment_count,reply_conversation_kind,reply_receiver_id,reply_thread_id,created_at,updated_at"
+const replyColumns = "tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at"
+
 // New creates a PostgreSQL runtime store over db.
 func New(db *sql.DB) *Store { return &Store{db: db} }
 
@@ -125,7 +128,7 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 	if err := check(ctx); err != nil {
 		return runtimestorage.MessageEvent{}, false, err
 	}
-	if runtimestorage.ValidateSession(input.TenantID, input.SessionID) != nil || input.BindingID == "" || input.ExternalMessageID == "" || input.EventID == "" {
+	if runtimestorage.ValidateSession(input.TenantID, input.SessionID) != nil || input.BindingID == "" || input.ExternalMessageID == "" || input.EventID == "" || runtimestorage.ValidateReplyTarget(input.ReplyTarget) != nil || (input.ReplyTarget != (runtimestorage.ReplyTarget{}) && input.ReplyTarget.BindingID != input.BindingID) {
 		return runtimestorage.MessageEvent{}, false, runtimestorage.ErrInvalid
 	}
 	tx, err := pgstorage.Begin(ctx, s.db)
@@ -134,7 +137,7 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 	}
 	defer pgstorage.Rollback(tx)
 	var existing runtimestorage.MessageEvent
-	err = tx.QueryRowContext(ctx, "SELECT tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,fencing_token,lease_owner,lease_expires_at,reply_id,segment_count,created_at,updated_at FROM public.message_event WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3", input.TenantID, input.BindingID, input.ExternalMessageID).Scan(eventArgs(&existing)...)
+	err = tx.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM public.message_event WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3", input.TenantID, input.BindingID, input.ExternalMessageID).Scan(eventArgs(&existing)...)
 	if err == nil {
 		return cloneEvent(existing), true, nil
 	}
@@ -145,7 +148,7 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 	if err := tx.QueryRowContext(ctx, "UPDATE public.runtime_session SET version=version+1,updated_at=now() WHERE tenant_id=$1 AND session_id=$2 RETURNING version", input.TenantID, input.SessionID).Scan(&version); err != nil {
 		return runtimestorage.MessageEvent{}, false, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
-	err = tx.QueryRowContext(ctx, "INSERT INTO public.message_event (tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status) VALUES ($1,$2,$3,$4,$5,$6,$7,'received') RETURNING tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,fencing_token,lease_owner,lease_expires_at,reply_id,segment_count,created_at,updated_at", input.TenantID, input.EventID, input.SessionID, input.BindingID, input.ExternalMessageID, input.IdempotencyKey, version).Scan(eventArgs(&existing)...)
+	err = tx.QueryRowContext(ctx, "INSERT INTO public.message_event (tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,reply_conversation_kind,reply_receiver_id,reply_thread_id) VALUES ($1,$2,$3,$4,$5,$6,$7,'received',$8,$9,$10) RETURNING "+eventColumns, input.TenantID, input.EventID, input.SessionID, input.BindingID, input.ExternalMessageID, input.IdempotencyKey, version, input.ReplyTarget.ConversationKind, input.ReplyTarget.ReceiverID, input.ReplyTarget.ThreadID).Scan(eventArgs(&existing)...)
 	if err != nil {
 		mapped := pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 		if errors.Is(mapped, runtimestorage.ErrDuplicate) {
@@ -164,7 +167,7 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 
 func (s *Store) lookupMessageByExternal(ctx context.Context, tenantID, bindingID, externalID string) (runtimestorage.MessageEvent, error) {
 	var value runtimestorage.MessageEvent
-	err := s.db.QueryRowContext(ctx, "SELECT tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,fencing_token,lease_owner,lease_expires_at,reply_id,segment_count,created_at,updated_at FROM public.message_event WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3", tenantID, bindingID, externalID).Scan(eventArgs(&value)...)
+	err := s.db.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM public.message_event WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3", tenantID, bindingID, externalID).Scan(eventArgs(&value)...)
 	if err != nil {
 		return runtimestorage.MessageEvent{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
@@ -180,7 +183,7 @@ func (s *Store) GetMessage(ctx context.Context, tenantID, eventID string) (runti
 		return runtimestorage.MessageEvent{}, runtimestorage.ErrInvalid
 	}
 	var value runtimestorage.MessageEvent
-	err := s.db.QueryRowContext(ctx, "SELECT tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,fencing_token,lease_owner,lease_expires_at,reply_id,segment_count,created_at,updated_at FROM public.message_event WHERE tenant_id=$1 AND event_id=$2", tenantID, eventID).Scan(eventArgs(&value)...)
+	err := s.db.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM public.message_event WHERE tenant_id=$1 AND event_id=$2", tenantID, eventID).Scan(eventArgs(&value)...)
 	if err != nil {
 		return runtimestorage.MessageEvent{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
@@ -212,7 +215,7 @@ func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage
 	if transition.ReplyID != "" || transition.SegmentCount > 0 {
 		return s.transitionMessageWithReply(ctx, transition, leaseSeconds)
 	}
-	err := s.db.QueryRowContext(ctx, "UPDATE public.message_event SET status=$4,fencing_token=fencing_token+1,lease_owner=CASE WHEN $4='running' THEN $5 ELSE '' END,lease_expires_at=CASE WHEN $6>0 THEN now()+($6 * interval '1 second') ELSE NULL END,updated_at=now() WHERE tenant_id=$1 AND event_id=$2 AND status=$3 AND ($3 <> 'running' OR ($4='execution_reconciling' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()) OR ($4<>'execution_reconciling' AND lease_owner=$5 AND fencing_token=$7 AND lease_expires_at IS NOT NULL AND lease_expires_at > now())) RETURNING tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,fencing_token,lease_owner,lease_expires_at,reply_id,segment_count,created_at,updated_at", transition.TenantID, transition.EventID, transition.From, transition.To, transition.Owner, leaseSeconds, transition.FencingToken).Scan(eventArgs(&value)...)
+	err := s.db.QueryRowContext(ctx, "UPDATE public.message_event SET status=$4,fencing_token=fencing_token+1,lease_owner=CASE WHEN $4='running' THEN $5 ELSE '' END,lease_expires_at=CASE WHEN $6>0 THEN now()+($6 * interval '1 second') ELSE NULL END,updated_at=now() WHERE tenant_id=$1 AND event_id=$2 AND status=$3 AND ($3 <> 'running' OR ($4='execution_reconciling' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()) OR ($4<>'execution_reconciling' AND lease_owner=$5 AND fencing_token=$7 AND lease_expires_at IS NOT NULL AND lease_expires_at > now())) RETURNING "+eventColumns, transition.TenantID, transition.EventID, transition.From, transition.To, transition.Owner, leaseSeconds, transition.FencingToken).Scan(eventArgs(&value)...)
 	if err == nil {
 		return cloneEvent(value), nil
 	}
@@ -227,7 +230,7 @@ func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage
 
 func (s *Store) transitionMessageWithReply(ctx context.Context, transition runtimestorage.MessageTransition, leaseSeconds int64) (runtimestorage.MessageEvent, error) {
 	var value runtimestorage.MessageEvent
-	err := s.db.QueryRowContext(ctx, "UPDATE public.message_event SET status=$4,fencing_token=fencing_token+1,lease_owner=CASE WHEN $4='running' THEN $5 ELSE '' END,lease_expires_at=CASE WHEN $6>0 THEN now()+($6 * interval '1 second') ELSE NULL END,reply_id=COALESCE(NULLIF($8,''),reply_id),segment_count=CASE WHEN $9>0 THEN $9 ELSE segment_count END,updated_at=now() WHERE tenant_id=$1 AND event_id=$2 AND status=$3 AND ($3 <> 'running' OR ($4='execution_reconciling' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()) OR ($4<>'execution_reconciling' AND lease_owner=$5 AND fencing_token=$7 AND lease_expires_at IS NOT NULL AND lease_expires_at > now())) RETURNING tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,fencing_token,lease_owner,lease_expires_at,reply_id,segment_count,created_at,updated_at", transition.TenantID, transition.EventID, transition.From, transition.To, transition.Owner, leaseSeconds, transition.FencingToken, transition.ReplyID, transition.SegmentCount).Scan(eventArgs(&value)...)
+	err := s.db.QueryRowContext(ctx, "UPDATE public.message_event SET status=$4,fencing_token=fencing_token+1,lease_owner=CASE WHEN $4='running' THEN $5 ELSE '' END,lease_expires_at=CASE WHEN $6>0 THEN now()+($6 * interval '1 second') ELSE NULL END,reply_id=COALESCE(NULLIF($8,''),reply_id),segment_count=CASE WHEN $9>0 THEN $9 ELSE segment_count END,updated_at=now() WHERE tenant_id=$1 AND event_id=$2 AND status=$3 AND ($3 <> 'running' OR ($4='execution_reconciling' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()) OR ($4<>'execution_reconciling' AND lease_owner=$5 AND fencing_token=$7 AND lease_expires_at IS NOT NULL AND lease_expires_at > now())) RETURNING "+eventColumns, transition.TenantID, transition.EventID, transition.From, transition.To, transition.Owner, leaseSeconds, transition.FencingToken, transition.ReplyID, transition.SegmentCount).Scan(eventArgs(&value)...)
 	if err == nil {
 		return cloneEvent(value), nil
 	}
@@ -297,7 +300,7 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex {
+	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
 	}
 	if value.Status == "" {
@@ -306,8 +309,17 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 	if value.Status != runtimestorage.ReplyPending {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
 	}
+	if value.ReplyTarget != (runtimestorage.ReplyTarget{}) {
+		event, err := s.GetMessage(ctx, value.TenantID, value.EventID)
+		if err != nil {
+			return runtimestorage.ReplyOutbox{}, err
+		}
+		if event.ReplyTarget != value.ReplyTarget {
+			return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
+		}
+	}
 	var result runtimestorage.ReplyOutbox
-	err := s.db.QueryRowContext(ctx, "INSERT INTO public.reply_outbox (tenant_id,reply_id,event_id,segment_index,segment_count,payload,status) VALUES ($1,$2,$3,$4,$5,$6,'pending') ON CONFLICT (tenant_id,reply_id,segment_index) DO UPDATE SET updated_at=public.reply_outbox.updated_at WHERE public.reply_outbox.event_id=EXCLUDED.event_id AND public.reply_outbox.segment_count=EXCLUDED.segment_count AND public.reply_outbox.payload=EXCLUDED.payload RETURNING tenant_id,reply_id,event_id,segment_index,segment_count,payload,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at", value.TenantID, value.ReplyID, value.EventID, value.SegmentIndex, value.SegmentCount, value.Payload).Scan(replyArgs(&result)...)
+	err := s.db.QueryRowContext(ctx, "INSERT INTO public.reply_outbox (tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending') ON CONFLICT (tenant_id,reply_id,segment_index) DO UPDATE SET updated_at=public.reply_outbox.updated_at WHERE public.reply_outbox.event_id=EXCLUDED.event_id AND public.reply_outbox.segment_count=EXCLUDED.segment_count AND public.reply_outbox.payload=EXCLUDED.payload AND public.reply_outbox.reply_binding_id=EXCLUDED.reply_binding_id AND public.reply_outbox.reply_conversation_kind=EXCLUDED.reply_conversation_kind AND public.reply_outbox.reply_receiver_id=EXCLUDED.reply_receiver_id AND public.reply_outbox.reply_thread_id=EXCLUDED.reply_thread_id RETURNING "+replyColumns, value.TenantID, value.ReplyID, value.EventID, value.SegmentIndex, value.SegmentCount, value.Payload, value.ReplyTarget.BindingID, value.ReplyTarget.ConversationKind, value.ReplyTarget.ReceiverID, value.ReplyTarget.ThreadID).Scan(replyArgs(&result)...)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
@@ -328,7 +340,7 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 	first := values[0]
 	seen := make(map[int]struct{}, len(values))
 	for _, value := range values {
-		if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || value.Status != "" && value.Status != runtimestorage.ReplyPending || value.TenantID != first.TenantID || value.ReplyID != first.ReplyID || value.EventID != first.EventID || value.SegmentCount != first.SegmentCount {
+		if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || value.Status != "" && value.Status != runtimestorage.ReplyPending || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil || value.TenantID != first.TenantID || value.ReplyID != first.ReplyID || value.EventID != first.EventID || value.SegmentCount != first.SegmentCount || value.ReplyTarget != first.ReplyTarget {
 			return nil, runtimestorage.ErrInvalid
 		}
 		if _, duplicate := seen[value.SegmentIndex]; duplicate {
@@ -344,6 +356,15 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 			return nil, runtimestorage.ErrInvalid
 		}
 	}
+	if first.ReplyTarget != (runtimestorage.ReplyTarget{}) {
+		event, err := s.GetMessage(ctx, first.TenantID, first.EventID)
+		if err != nil {
+			return nil, err
+		}
+		if event.ReplyTarget != first.ReplyTarget {
+			return nil, runtimestorage.ErrConflict
+		}
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
@@ -352,7 +373,7 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 	result := make([]runtimestorage.ReplyOutbox, 0, len(values))
 	for _, value := range values {
 		var row runtimestorage.ReplyOutbox
-		err = tx.QueryRowContext(ctx, "INSERT INTO public.reply_outbox (tenant_id,reply_id,event_id,segment_index,segment_count,payload,status) VALUES ($1,$2,$3,$4,$5,$6,'pending') ON CONFLICT (tenant_id,reply_id,segment_index) DO UPDATE SET updated_at=public.reply_outbox.updated_at WHERE public.reply_outbox.event_id=EXCLUDED.event_id AND public.reply_outbox.segment_count=EXCLUDED.segment_count AND public.reply_outbox.payload=EXCLUDED.payload RETURNING tenant_id,reply_id,event_id,segment_index,segment_count,payload,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at", value.TenantID, value.ReplyID, value.EventID, value.SegmentIndex, value.SegmentCount, value.Payload).Scan(replyArgs(&row)...)
+		err = tx.QueryRowContext(ctx, "INSERT INTO public.reply_outbox (tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending') ON CONFLICT (tenant_id,reply_id,segment_index) DO UPDATE SET updated_at=public.reply_outbox.updated_at WHERE public.reply_outbox.event_id=EXCLUDED.event_id AND public.reply_outbox.segment_count=EXCLUDED.segment_count AND public.reply_outbox.payload=EXCLUDED.payload AND public.reply_outbox.reply_binding_id=EXCLUDED.reply_binding_id AND public.reply_outbox.reply_conversation_kind=EXCLUDED.reply_conversation_kind AND public.reply_outbox.reply_receiver_id=EXCLUDED.reply_receiver_id AND public.reply_outbox.reply_thread_id=EXCLUDED.reply_thread_id RETURNING "+replyColumns, value.TenantID, value.ReplyID, value.EventID, value.SegmentIndex, value.SegmentCount, value.Payload, value.ReplyTarget.BindingID, value.ReplyTarget.ConversationKind, value.ReplyTarget.ReceiverID, value.ReplyTarget.ThreadID).Scan(replyArgs(&row)...)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil, runtimestorage.ErrConflict
@@ -376,7 +397,7 @@ func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment 
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
 	}
 	var value runtimestorage.ReplyOutbox
-	err := s.db.QueryRowContext(ctx, "SELECT tenant_id,reply_id,event_id,segment_index,segment_count,payload,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at FROM public.reply_outbox WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3", tenantID, replyID, segment).Scan(replyArgs(&value)...)
+	err := s.db.QueryRowContext(ctx, "SELECT "+replyColumns+" FROM public.reply_outbox WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3", tenantID, replyID, segment).Scan(replyArgs(&value)...)
 	if err != nil {
 		return runtimestorage.ReplyOutbox{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
@@ -391,7 +412,7 @@ func (s *Store) ListReplyCandidates(ctx context.Context, tenantID string) ([]run
 	if err := runtimestorage.ValidateTenant(tenantID); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT tenant_id,reply_id,event_id,segment_index,segment_count,payload,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at FROM public.reply_outbox WHERE tenant_id=$1 ORDER BY updated_at", tenantID)
+	rows, err := s.db.QueryContext(ctx, "SELECT "+replyColumns+" FROM public.reply_outbox WHERE tenant_id=$1 ORDER BY updated_at", tenantID)
 	if err != nil {
 		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
@@ -423,7 +444,7 @@ func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segmen
 		seconds = 1
 	}
 	var value runtimestorage.ReplyOutbox
-	err := s.db.QueryRowContext(ctx, "UPDATE public.reply_outbox SET status='sending', attempts=attempts+1, fencing_token=fencing_token+1, lease_owner=$4, lease_expires_at=now()+($5 * interval '1 second'), updated_at=now() WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3 AND (status IN ('pending','retryable') OR (status='sending' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now())) RETURNING tenant_id,reply_id,event_id,segment_index,segment_count,payload,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at", tenantID, replyID, segment, owner, seconds).Scan(replyArgs(&value)...)
+	err := s.db.QueryRowContext(ctx, "UPDATE public.reply_outbox SET status='sending', attempts=attempts+1, fencing_token=fencing_token+1, lease_owner=$4, lease_expires_at=now()+($5 * interval '1 second'), updated_at=now() WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3 AND (status IN ('pending','retryable') OR (status='sending' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now())) RETURNING "+replyColumns, tenantID, replyID, segment, owner, seconds).Scan(replyArgs(&value)...)
 	if err == nil {
 		return cloneReply(value), nil
 	}
@@ -455,7 +476,7 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 		}
 	}
 	var value runtimestorage.ReplyOutbox
-	err := s.db.QueryRowContext(ctx, "UPDATE public.reply_outbox SET status=$5, attempts=attempts+CASE WHEN $5='sending' THEN 1 ELSE 0 END, fencing_token=fencing_token+1, lease_owner=$6, lease_expires_at=CASE WHEN $7>0 THEN now()+($7 * interval '1 second') ELSE NULL END, provider_message_id=COALESCE(NULLIF($8,''),provider_message_id), last_error_class=COALESCE(NULLIF($9,''),last_error_class), updated_at=now() WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3 AND status=$4 AND (lease_owner='' OR lease_owner=$6) AND ($10=0 OR fencing_token=$10) AND (status <> 'sending' OR lease_expires_at IS NULL OR lease_expires_at > now()) RETURNING tenant_id,reply_id,event_id,segment_index,segment_count,payload,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at", transition.TenantID, transition.ReplyID, transition.SegmentIndex, transition.From, transition.To, transition.Owner, leaseSeconds, transition.ProviderID, transition.ErrorClass, transition.FencingToken).Scan(replyArgs(&value)...)
+	err := s.db.QueryRowContext(ctx, "UPDATE public.reply_outbox SET status=$5, attempts=attempts+CASE WHEN $5='sending' THEN 1 ELSE 0 END, fencing_token=fencing_token+1, lease_owner=$6, lease_expires_at=CASE WHEN $7>0 THEN now()+($7 * interval '1 second') ELSE NULL END, provider_message_id=COALESCE(NULLIF($8,''),provider_message_id), last_error_class=COALESCE(NULLIF($9,''),last_error_class), updated_at=now() WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3 AND status=$4 AND (lease_owner='' OR lease_owner=$6) AND ($10=0 OR fencing_token=$10) AND (status <> 'sending' OR lease_expires_at IS NULL OR lease_expires_at > now()) RETURNING "+replyColumns, transition.TenantID, transition.ReplyID, transition.SegmentIndex, transition.From, transition.To, transition.Owner, leaseSeconds, transition.ProviderID, transition.ErrorClass, transition.FencingToken).Scan(replyArgs(&value)...)
 	if err == nil {
 		return cloneReply(value), nil
 	}
@@ -477,10 +498,10 @@ func check(ctx context.Context) error {
 	return ctx.Err()
 }
 func eventArgs(value *runtimestorage.MessageEvent) []any {
-	return []any{&value.TenantID, &value.EventID, &value.SessionID, &value.BindingID, &value.ExternalMessageID, &value.IdempotencyKey, &value.EventSeq, &value.Status, &value.FencingToken, &value.LeaseOwner, &value.LeaseExpiresAt, &value.ReplyID, &value.SegmentCount, &value.CreatedAt, &value.UpdatedAt}
+	return []any{&value.TenantID, &value.EventID, &value.SessionID, &value.BindingID, &value.ExternalMessageID, &value.IdempotencyKey, &value.EventSeq, &value.Status, &value.FencingToken, &value.LeaseOwner, &value.LeaseExpiresAt, &value.ReplyID, &value.SegmentCount, &value.ReplyTarget.ConversationKind, &value.ReplyTarget.ReceiverID, &value.ReplyTarget.ThreadID, &value.CreatedAt, &value.UpdatedAt}
 }
 func replyArgs(value *runtimestorage.ReplyOutbox) []any {
-	return []any{&value.TenantID, &value.ReplyID, &value.EventID, &value.SegmentIndex, &value.SegmentCount, &value.Payload, &value.Status, &value.Attempts, &value.FencingToken, &value.LeaseOwner, &value.LeaseExpiresAt, &value.ProviderMessageID, &value.LastErrorClass, &value.CreatedAt, &value.UpdatedAt}
+	return []any{&value.TenantID, &value.ReplyID, &value.EventID, &value.SegmentIndex, &value.SegmentCount, &value.Payload, &value.ReplyTarget.BindingID, &value.ReplyTarget.ConversationKind, &value.ReplyTarget.ReceiverID, &value.ReplyTarget.ThreadID, &value.Status, &value.Attempts, &value.FencingToken, &value.LeaseOwner, &value.LeaseExpiresAt, &value.ProviderMessageID, &value.LastErrorClass, &value.CreatedAt, &value.UpdatedAt}
 }
 func cloneSession(value runtimestorage.Session) runtimestorage.Session {
 	if value.State != nil {
@@ -493,6 +514,9 @@ func cloneSession(value runtimestorage.Session) runtimestorage.Session {
 	return value
 }
 func cloneEvent(value runtimestorage.MessageEvent) runtimestorage.MessageEvent {
+	if value.ReplyTarget.ConversationKind != "" {
+		value.ReplyTarget.BindingID = value.BindingID
+	}
 	if value.LeaseExpiresAt != nil {
 		copy := *value.LeaseExpiresAt
 		value.LeaseExpiresAt = &copy

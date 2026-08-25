@@ -28,10 +28,11 @@ type MaterializerConfig struct {
 
 // MaterializeInput identifies the completed reply to segment.
 type MaterializeInput struct {
-	TenantID string
-	EventID  string
-	ReplyID  string
-	Payload  string
+	TenantID    string
+	EventID     string
+	ReplyID     string
+	Payload     string
+	ReplyTarget runtimestorage.ReplyTarget
 }
 
 // NewMaterializer creates a reply materializer with a default segment size.
@@ -48,7 +49,7 @@ func NewMaterializer(config MaterializerConfig) (*Materializer, error) {
 // Materialize writes all segments under the stable reply identity. A repeated
 // call is idempotent when the existing rows have the same event and payload.
 func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) (int, error) {
-	if m == nil || ctx == nil || runtimestorage.ValidateTenant(input.TenantID) != nil || input.EventID == "" || input.ReplyID == "" {
+	if m == nil || ctx == nil || runtimestorage.ValidateTenant(input.TenantID) != nil || input.EventID == "" || input.ReplyID == "" || runtimestorage.ValidateReplyTarget(input.ReplyTarget) != nil {
 		return 0, ErrInvalid
 	}
 	segments := splitRunes(input.Payload, m.segmentSize)
@@ -61,7 +62,7 @@ func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) 
 	}
 	replies := make([]runtimestorage.ReplyOutbox, 0, len(segments))
 	for index, payload := range segments {
-		replies = append(replies, runtimestorage.ReplyOutbox{TenantID: input.TenantID, ReplyID: input.ReplyID, EventID: input.EventID, SegmentIndex: index, SegmentCount: len(segments), Payload: payload})
+		replies = append(replies, runtimestorage.ReplyOutbox{TenantID: input.TenantID, ReplyID: input.ReplyID, EventID: input.EventID, SegmentIndex: index, SegmentCount: len(segments), Payload: payload, ReplyTarget: input.ReplyTarget})
 	}
 	if _, err := batchStore.EnqueueReplies(ctx, replies); err != nil {
 		return 0, errors.Join(ErrMaterialization, err)

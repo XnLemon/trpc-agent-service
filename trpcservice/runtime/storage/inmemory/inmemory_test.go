@@ -113,6 +113,30 @@ func TestStoreDuplicateMessageAndConcurrentSequence(t *testing.T) {
 	}
 }
 
+func TestStorePersistsFirstReplyTargetForDuplicateMessage(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	first := runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session-1", BindingID: "binding-1", ExternalMessageID: "external-1", EventID: "event-1", ReplyTarget: runtimestorage.ReplyTarget{BindingID: "binding-1", ConversationKind: "direct", ReceiverID: "user-1"}}
+	event, duplicate, err := store.RecordMessage(context.Background(), first)
+	if err != nil || duplicate {
+		t.Fatalf("first record = %+v duplicate=%v err=%v", event, duplicate, err)
+	}
+	first.EventID = "event-2"
+	first.ReplyTarget.ReceiverID = "user-2"
+	duplicateEvent, duplicate, err := store.RecordMessage(context.Background(), first)
+	if err != nil || !duplicate || duplicateEvent.ReplyTarget.ReceiverID != "user-1" {
+		t.Fatalf("duplicate record = %+v duplicate=%v err=%v", duplicateEvent, duplicate, err)
+	}
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-1", EventID: event.EventID, SegmentCount: 1, ReplyTarget: event.ReplyTarget}); err != nil {
+		t.Fatalf("enqueue matching target = %v", err)
+	}
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-2", EventID: event.EventID, SegmentCount: 1, ReplyTarget: first.ReplyTarget}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("enqueue mismatched target = %v", err)
+	}
+}
+
 func TestStoreRejectsEventIDCollisionWithoutChangingSession(t *testing.T) {
 	store := inmemory.New()
 	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-1", nil); err != nil {

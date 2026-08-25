@@ -4,10 +4,22 @@ package storage
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	pgstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
+
+const maxReplyTargetIDRunes = 1024
+
+// ReplyTarget is the trusted, durable destination for a channel reply. A zero
+// target is retained only for rows created before per-message routing existed.
+type ReplyTarget struct {
+	BindingID        string
+	ConversationKind string
+	ReceiverID       string
+	ThreadID         string
+}
 
 var (
 	// ErrNotFound reports a missing tenant-scoped runtime record.
@@ -83,6 +95,7 @@ type MessageEvent struct {
 	LeaseExpiresAt    *time.Time
 	ReplyID           string
 	SegmentCount      int
+	ReplyTarget       ReplyTarget
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }
@@ -95,6 +108,7 @@ type MessageEventInput struct {
 	BindingID         string
 	ExternalMessageID string
 	IdempotencyKey    string
+	ReplyTarget       ReplyTarget
 }
 
 // EventPayload is one immutable upstream Runner event retained for durable
@@ -133,6 +147,7 @@ type ReplyOutbox struct {
 	SegmentIndex      int
 	SegmentCount      int
 	Payload           string
+	ReplyTarget       ReplyTarget
 	Status            string
 	Attempts          int
 	FencingToken      int64
@@ -199,6 +214,38 @@ func ValidateSession(tenantID, sessionID string) error {
 		return ErrInvalid
 	}
 	return nil
+}
+
+// ValidateReplyTarget accepts either the legacy zero target or a complete
+// direct/group destination. Partial values are never safe to route.
+func ValidateReplyTarget(target ReplyTarget) error {
+	if target == (ReplyTarget{}) {
+		return nil
+	}
+	if !validReplyTargetID(target.BindingID) || !validReplyTargetID(target.ReceiverID) {
+		return ErrInvalid
+	}
+	switch target.ConversationKind {
+	case "direct", "group":
+	default:
+		return ErrInvalid
+	}
+	if target.ThreadID != "" && !validReplyTargetID(target.ThreadID) {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func validReplyTargetID(value string) bool {
+	if strings.TrimSpace(value) == "" || len([]rune(value)) > maxReplyTargetIDRunes {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateTransition reports whether a reply transition is legal.

@@ -768,11 +768,11 @@ func TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle(t 
 		segments[row.SegmentIndex] = row
 	}
 	first, second := segments[0], segments[1]
-	if first.Payload != "abc" || second.Payload != "def" || first.SegmentCount != 2 || second.SegmentCount != 2 || first.ReplyID != second.ReplyID {
+	if first.Payload != "abc" || second.Payload != "def" || first.SegmentCount != 2 || second.SegmentCount != 2 || first.ReplyID != second.ReplyID || first.ReplyTarget != (runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: "direct", ReceiverID: "peer-1"}) || second.ReplyTarget != first.ReplyTarget {
 		t.Fatalf("materialized rows = %+v", rows)
 	}
 	message, err := store.GetMessage(context.Background(), principal.TenantID(), first.EventID)
-	if err != nil || message.Status != runtimestorage.EventCompleted || message.ReplyID != first.ReplyID || message.SegmentCount != 2 {
+	if err != nil || message.Status != runtimestorage.EventCompleted || message.ReplyID != first.ReplyID || message.SegmentCount != 2 || message.ReplyTarget != first.ReplyTarget {
 		t.Fatalf("materialized message = %+v / %v", message, err)
 	}
 	provider := &durableOutboxProvider{}

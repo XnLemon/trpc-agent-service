@@ -115,6 +115,7 @@ type durableExecution struct {
 	eventID      string
 	owner        string
 	fencingToken int64
+	replyTarget  runtimestorage.ReplyTarget
 }
 
 // NewDispatcher validates the protocol-neutral execution dependencies.
@@ -282,6 +283,10 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 		return nil, fmt.Errorf("%w: durable Channel messages require an external message ID", ErrInvalid)
 	}
 	store := dispatcher.runtimeStore
+	replyTarget, err := replyTarget(target, message)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := store.GetSession(ctx, principal.TenantID(), identity.SessionID); err != nil {
 		if !errors.Is(err, runtimestorage.ErrNotFound) {
 			return nil, err
@@ -294,6 +299,7 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 		TenantID: principal.TenantID(), EventID: uuid.NewString(), SessionID: identity.SessionID,
 		BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID,
 		IdempotencyKey: message.ExternalMessageID,
+		ReplyTarget:    replyTarget,
 	})
 	if err != nil {
 		return nil, err
@@ -324,7 +330,23 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 		}
 		return nil, err
 	}
-	return &durableExecution{store: store, tenantID: principal.TenantID(), eventID: event.EventID, owner: owner, fencingToken: running.FencingToken}, nil
+	return &durableExecution{store: store, tenantID: principal.TenantID(), eventID: event.EventID, owner: owner, fencingToken: running.FencingToken, replyTarget: event.ReplyTarget}, nil
+}
+
+func replyTarget(target channels.RoutingTarget, message InboundMessage) (runtimestorage.ReplyTarget, error) {
+	reply := runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: string(message.ConversationKind), ThreadID: message.ExternalThreadID}
+	switch message.ConversationKind {
+	case channels.ConversationDirect:
+		reply.ReceiverID = message.ExternalPeerID
+	case channels.ConversationGroup:
+		reply.ReceiverID = message.ExternalChatID
+	default:
+		return runtimestorage.ReplyTarget{}, fmt.Errorf("%w: reply conversation kind is invalid", ErrInvalid)
+	}
+	if err := runtimestorage.ValidateReplyTarget(reply); err != nil {
+		return runtimestorage.ReplyTarget{}, fmt.Errorf("%w: reply target is invalid", ErrInvalid)
+	}
+	return reply, nil
 }
 
 func (dispatcher *Dispatcher) failDurable(durable *durableExecution, cause error) {
@@ -350,7 +372,7 @@ func (dispatcher *Dispatcher) finishDurable(durable *durableExecution, terminalE
 	replyID := ""
 	if terminalErr == nil && dispatcher.materializer != nil && strings.TrimSpace(reply) != "" {
 		var err error
-		segments, err = dispatcher.materializer.Materialize(context.Background(), outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, Payload: reply})
+		segments, err = dispatcher.materializer.Materialize(context.Background(), outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, Payload: reply, ReplyTarget: durable.replyTarget})
 		if err != nil {
 			terminalErr = err
 		} else {
