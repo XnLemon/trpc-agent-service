@@ -19,6 +19,7 @@ type HandoffStore struct {
 
 var _ audit.HandoffStore = (*HandoffStore)(nil)
 
+// NewHandoffStore creates a PostgreSQL-backed handoff store.
 func NewHandoffStore(db *sql.DB, tenantID string) (*HandoffStore, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	if tenantID == "" || hasControl(tenantID) {
@@ -43,6 +44,7 @@ func (s *HandoffStore) check(ctx context.Context, tenantID string) error {
 	return nil
 }
 
+// Reserve stores a pending handoff.
 func (s *HandoffStore) Reserve(ctx context.Context, value audit.ExecutionHandoff) (audit.ExecutionHandoff, error) {
 	if err := s.check(ctx, value.TenantID); err != nil {
 		return audit.ExecutionHandoff{}, err
@@ -66,6 +68,7 @@ func (s *HandoffStore) Reserve(ctx context.Context, value audit.ExecutionHandoff
 	return out.Clone(), nil
 }
 
+// Finalize marks a handoff complete.
 func (s *HandoffStore) Finalize(ctx context.Context, value audit.ExecutionHandoff) (audit.ExecutionHandoff, error) {
 	if err := s.check(ctx, value.TenantID); err != nil {
 		return audit.ExecutionHandoff{}, err
@@ -89,6 +92,7 @@ func (s *HandoffStore) Finalize(ctx context.Context, value audit.ExecutionHandof
 	return out.Clone(), nil
 }
 
+// Get retrieves a handoff within the configured tenant scope.
 func (s *HandoffStore) Get(ctx context.Context, tenantID, handoffID string) (audit.ExecutionHandoff, error) {
 	if err := s.check(ctx, tenantID); err != nil {
 		return audit.ExecutionHandoff{}, err

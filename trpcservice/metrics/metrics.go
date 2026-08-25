@@ -12,13 +12,21 @@ import (
 )
 
 const (
-	RequestsTotal     = "trpcservice_requests_total"
+	// RequestsTotal counts handled requests.
+	RequestsTotal = "trpcservice_requests_total"
+	// OperationDuration records operation latency.
 	OperationDuration = "trpcservice_operation_duration_ms"
+	// ActiveExecutions tracks currently running executions.
 	ActiveExecutions  = "trpcservice_active_executions"
+	// RunnerLeases tracks active runner leases.
 	RunnerLeases      = "trpcservice_runner_leases"
+	// OperationRetries counts retried operations.
 	OperationRetries  = "trpcservice_operation_retries_total"
+	// UsageCostTotal counts aggregated usage cost.
 	UsageCostTotal    = "trpcservice_usage_cost_minor_total"
+	// Readiness tracks service readiness.
 	Readiness         = "trpcservice_readiness"
+	// Shutdown tracks service shutdown.
 	Shutdown          = "trpcservice_shutdown"
 )
 
@@ -50,6 +58,8 @@ func ValidateLabels(labels map[string]string) error {
 	}
 	return nil
 }
+
+// Attributes validates labels and converts them to telemetry attributes.
 func Attributes(labels map[string]string) ([]observability.Attribute, error) {
 	if err := ValidateLabels(labels); err != nil {
 		return nil, err
@@ -61,6 +71,7 @@ func Attributes(labels map[string]string) ([]observability.Attribute, error) {
 	return out, nil
 }
 
+// Catalog records bounded-cardinality runtime metrics.
 type Catalog struct {
 	requests  observability.Counter
 	duration  observability.Histogram
@@ -72,6 +83,7 @@ type Catalog struct {
 	shutdown  observability.UpDownCounter
 }
 
+// New creates a metric catalog backed by provider.
 func New(provider observability.Provider) Catalog {
 	meter := provider.Meter("trpcservice.metrics")
 	return Catalog{requests: meter.Counter(RequestsTotal), duration: meter.Histogram(OperationDuration), active: meter.UpDownCounter(ActiveExecutions), leases: meter.UpDownCounter(RunnerLeases), retries: meter.Counter(OperationRetries), usage: meter.Counter(UsageCostTotal), readiness: meter.UpDownCounter(Readiness), shutdown: meter.UpDownCounter(Shutdown)}
@@ -106,6 +118,8 @@ func mustAttributes(labels map[string]string) []observability.Attribute {
 	attrs, _ := Attributes(labels)
 	return attrs
 }
+
+// Request increments the request counter.
 func (c Catalog) Request(ctx context.Context, labels map[string]string) error {
 	attrs, err := Attributes(labels)
 	if err != nil {
@@ -114,6 +128,8 @@ func (c Catalog) Request(ctx context.Context, labels map[string]string) error {
 	c.requests.Add(ctx, 1, attrs...)
 	return nil
 }
+
+// Duration records operation latency.
 func (c Catalog) Duration(ctx context.Context, milliseconds float64, labels map[string]string) error {
 	attrs, err := Attributes(labels)
 	if err != nil {
@@ -122,6 +138,8 @@ func (c Catalog) Duration(ctx context.Context, milliseconds float64, labels map[
 	c.duration.Record(ctx, milliseconds, attrs...)
 	return nil
 }
+
+// Active adjusts active executions.
 func (c Catalog) Active(ctx context.Context, delta int64, labels map[string]string) error {
 	attrs, err := Attributes(labels)
 	if err != nil {
@@ -130,6 +148,8 @@ func (c Catalog) Active(ctx context.Context, delta int64, labels map[string]stri
 	c.active.Add(ctx, delta, attrs...)
 	return nil
 }
+
+// Lease adjusts runner leases.
 func (c Catalog) Lease(ctx context.Context, delta int64, labels map[string]string) error {
 	attrs, err := Attributes(labels)
 	if err != nil {
@@ -138,6 +158,8 @@ func (c Catalog) Lease(ctx context.Context, delta int64, labels map[string]strin
 	c.leases.Add(ctx, delta, attrs...)
 	return nil
 }
+
+// Retry increments operation retries.
 func (c Catalog) Retry(ctx context.Context, labels map[string]string) error {
 	attrs, err := Attributes(labels)
 	if err != nil {
@@ -146,6 +168,8 @@ func (c Catalog) Retry(ctx context.Context, labels map[string]string) error {
 	c.retries.Add(ctx, 1, attrs...)
 	return nil
 }
+
+// State adjusts readiness and shutdown gauges.
 func (c Catalog) State(ctx context.Context, readiness, shutdown int64, labels map[string]string) error {
 	attrs, err := Attributes(labels)
 	if err != nil {

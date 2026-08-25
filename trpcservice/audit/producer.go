@@ -23,6 +23,7 @@ type Recorder struct {
 	Now      func() time.Time
 }
 
+// Record appends an audit event with the recorder tenant scope.
 func (r Recorder) Record(ctx context.Context, event Event) error {
 	if r.Writer == nil {
 		return nil
@@ -66,26 +67,32 @@ func NewEventID(parts ...string) string {
 	return "audit_" + hex.EncodeToString(h.Sum(nil))[:32]
 }
 
+// ControlPlane records a control-plane mutation.
 func (r Recorder) ControlPlane(ctx context.Context, eventID, tenantID, actorType, actorID, reason, correlationID string, previous, next int64) error {
 	return r.Record(ctx, Event{EventID: eventID, EventType: EventControlPlaneChanged, TenantID: tenantID, ActorType: actorType, ActorID: actorID, Reason: reason, CorrelationID: correlationID, PreviousVersion: &previous, NextVersion: &next})
 }
 
+// ToolDecision records a tool authorization decision.
 func (r Recorder) ToolDecision(ctx context.Context, eventType EventType, requestID, traceID, toolName string, decision Decision, errorType string) error {
 	return r.Record(ctx, Event{EventType: eventType, RequestID: requestID, TraceID: traceID, ToolName: toolName, Decision: decision, ErrorType: errorType})
 }
 
+// BudgetRejected records a budget rejection.
 func (r Recorder) BudgetRejected(ctx context.Context, requestID, traceID string) error {
 	return r.Record(ctx, Event{EventType: EventBudgetRejected, RequestID: requestID, TraceID: traceID, Decision: DecisionRejected, ErrorType: string(ErrorBudget)})
 }
 
+// Redacted records content redaction.
 func (r Recorder) Redacted(ctx context.Context, requestID, traceID string) error {
 	return r.Record(ctx, Event{EventType: EventContentRedacted, RequestID: requestID, TraceID: traceID, Decision: DecisionAccepted, ErrorType: string(ErrorRedacted)})
 }
 
+// Fallback records provider fallback.
 func (r Recorder) Fallback(ctx context.Context, requestID, traceID string) error {
 	return r.Record(ctx, Event{EventType: EventExecutionFallback, RequestID: requestID, TraceID: traceID, Decision: DecisionAccepted})
 }
 
+// IMAuthorization records an instant-message authorization decision.
 func (r Recorder) IMAuthorization(ctx context.Context, requestID, traceID, userID, sessionID string, allowed bool) error {
 	eventType, decision := EventIMAuthorizationDenied, DecisionRejected
 	if allowed {
@@ -94,6 +101,7 @@ func (r Recorder) IMAuthorization(ctx context.Context, requestID, traceID, userI
 	return r.IM(ctx, eventType, requestID, traceID, userID, sessionID, decision, "")
 }
 
+// IMReconciled records instant-message reconciliation.
 func (r Recorder) IMReconciled(ctx context.Context, requestID, traceID, errorType string) error {
 	decision := DecisionAccepted
 	if errorType != "" {
@@ -102,6 +110,7 @@ func (r Recorder) IMReconciled(ctx context.Context, requestID, traceID, errorTyp
 	return r.IM(ctx, EventIMDeliveryReconciled, requestID, traceID, "", "", decision, errorType)
 }
 
+// IM records an instant-message audit event.
 func (r Recorder) IM(ctx context.Context, eventType EventType, requestID, traceID, userID, sessionID string, decision Decision, errorType string) error {
 	return r.Record(ctx, Event{EventType: eventType, RequestID: requestID, TraceID: traceID, UserID: userID, SessionID: sessionID, Decision: decision, ErrorType: errorType})
 }

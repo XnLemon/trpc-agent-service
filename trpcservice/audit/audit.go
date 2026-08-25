@@ -16,18 +16,24 @@ import (
 	"unicode"
 )
 
+// SchemaVersion identifies the audit event schema.
 const SchemaVersion = 1
 
+// Audit errors describe invalid, out-of-scope, missing, or conflicting records.
 var (
+	// ErrInvalid reports malformed audit input.
 	ErrInvalid     = errors.New("invalid audit event")
 	ErrTenantScope = errors.New("audit tenant scope violation")
 	ErrNotFound    = errors.New("audit event not found")
 	ErrConflict    = errors.New("audit event conflict")
 )
 
+// EventType identifies the audited business operation.
 type EventType string
 
+// Event type constants identify supported audit records.
 const (
+	// EventControlPlaneChanged records a control-plane mutation.
 	EventControlPlaneChanged      EventType = "control_plane.changed"
 	EventExecutionStarted         EventType = "execution.started"
 	EventExecutionCompleted       EventType = "execution.completed"
@@ -51,9 +57,12 @@ const (
 	EventAuditIncomplete          EventType = "audit_incomplete"
 )
 
+// Decision records the outcome of an authorization decision.
 type Decision string
 
+// Decision constants identify authorization outcomes.
 const (
+	// DecisionAllow permits the requested operation.
 	DecisionAllow            Decision = "allow"
 	DecisionDeny             Decision = "deny"
 	DecisionApprovalRequired Decision = "approval_required"
@@ -62,9 +71,12 @@ const (
 	DecisionRejected         Decision = "rejected"
 )
 
+// ExecutionResult records the execution outcome.
 type ExecutionResult string
 
+// Execution result constants identify terminal outcomes.
 const (
+	// ResultSuccess indicates successful execution.
 	ResultSuccess  ExecutionResult = "success"
 	ResultFailure  ExecutionResult = "failure"
 	ResultCanceled ExecutionResult = "canceled"
@@ -72,9 +84,12 @@ const (
 	ResultRejected ExecutionResult = "rejected"
 )
 
+// ErrorType classifies a failed operation.
 type ErrorType string
 
+// Error type constants identify failure classes.
 const (
+	// ErrorCanceled indicates cancellation.
 	ErrorCanceled        ErrorType = "canceled"
 	ErrorTimeout         ErrorType = "timeout"
 	ErrorInvalid         ErrorType = "invalid"
@@ -91,6 +106,7 @@ const (
 	ErrorConflict        ErrorType = "conflict"
 )
 
+// Usage contains bounded token, cost, and provider usage details.
 type Usage struct {
 	InputTokens      *int64
 	OutputTokens     *int64
@@ -104,6 +120,7 @@ type Usage struct {
 	Model            string
 }
 
+// Clone returns an isolated copy of the usage details.
 func (u *Usage) Clone() *Usage {
 	if u == nil {
 		return nil
@@ -118,6 +135,7 @@ func (u *Usage) Clone() *Usage {
 	return &copy
 }
 
+// Event is the immutable, tenant-scoped audit record.
 type Event struct {
 	SchemaVersion   int
 	EventID         string
@@ -145,6 +163,7 @@ type Event struct {
 	OccurredAt      time.Time
 }
 
+// Clone returns an isolated copy of the event.
 func (e Event) Clone() Event {
 	e.Cost = e.Cost.Clone()
 	e.Revision = cloneInt64(e.Revision)
@@ -154,6 +173,7 @@ func (e Event) Clone() Event {
 	return e
 }
 
+// Validate checks the event contract and security boundaries.
 func (e Event) Validate() error {
 	if e.SchemaVersion != SchemaVersion || e.EventID != clean(e.EventID) || e.TenantID != clean(e.TenantID) || clean(e.EventID) == "" || clean(e.TenantID) == "" || !validEventType(e.EventType) || e.OccurredAt.IsZero() || e.OccurredAt.Location() != time.UTC {
 		return ErrInvalid
@@ -181,6 +201,7 @@ func (e Event) Validate() error {
 	return nil
 }
 
+// Validate checks usage values and bounded metadata.
 func (u Usage) Validate() error {
 	for _, value := range []*int64{u.InputTokens, u.OutputTokens, u.ModelCostMinor, u.ToolCostMinor, u.BudgetUsedTokens, u.BudgetUsedMinor} {
 		if value != nil && *value < 0 {
@@ -198,6 +219,7 @@ func (u Usage) Validate() error {
 	return nil
 }
 
+// Digest returns the stable SHA-256 digest of the validated event.
 func (e Event) Digest() (string, error) {
 	if err := e.Validate(); err != nil {
 		return "", err
@@ -210,18 +232,24 @@ func (e Event) Digest() (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// AppendResult describes an append operation and its deduplication result.
 type AppendResult struct {
 	Event     Event
 	Duplicate bool
 	Digest    string
 }
+
+// Query selects audit events by type and time range.
 type Query struct {
 	EventTypes []EventType
 	Since      time.Time
 	Until      time.Time
 }
+
+// GroupBy selects a bounded usage aggregation dimension.
 type GroupBy string
 
+// Group constants identify supported aggregation dimensions.
 const (
 	GroupTenant   GroupBy = "tenant"
 	GroupApp      GroupBy = "app"
@@ -230,10 +258,13 @@ const (
 	GroupModel    GroupBy = "model"
 )
 
+// UsageQuery selects usage totals and their grouping dimensions.
 type UsageQuery struct {
 	Query   Query
 	GroupBy []GroupBy
 }
+
+// UsageTotal is an aggregated usage summary.
 type UsageTotal struct {
 	TenantID         string
 	AppID            string
@@ -250,17 +281,23 @@ type UsageTotal struct {
 	Currency         string
 }
 
+// Writer persists audit events.
 type Writer interface {
 	Append(context.Context, Event) (AppendResult, error)
 }
+
+// Reader retrieves audit events.
 type Reader interface {
 	Get(context.Context, string) (Event, error)
 	List(context.Context, Query) ([]Event, error)
 }
+
+// Aggregator computes bounded usage totals.
 type Aggregator interface {
 	AggregateUsage(context.Context, UsageQuery) ([]UsageTotal, error)
 }
 
+// Backend owns shared in-memory audit records.
 type Backend struct {
 	mu     sync.RWMutex
 	events map[eventKey]record
@@ -273,14 +310,19 @@ type eventKey struct {
 	tenantID string
 	eventID  string
 }
+
+// Store provides tenant-scoped in-memory audit persistence.
 type Store struct {
 	tenantID string
 	backend  *Backend
 }
 
+// NewInMemory creates an isolated in-memory audit store.
 func NewInMemory(tenantID string) (*Store, error) {
 	return NewInMemoryWithBackend(tenantID, &Backend{})
 }
+
+// NewInMemoryWithBackend creates a store sharing backend ownership.
 func NewInMemoryWithBackend(tenantID string, backend *Backend) (*Store, error) {
 	tenantID = clean(tenantID)
 	if tenantID == "" || hasControl(tenantID) || backend == nil {
@@ -306,6 +348,7 @@ func check(ctx context.Context) error {
 	return ctx.Err()
 }
 
+// Append validates and stores an event with idempotent deduplication.
 func (s *Store) Append(ctx context.Context, event Event) (AppendResult, error) {
 	if err := check(ctx); err != nil {
 		return AppendResult{}, err
@@ -334,6 +377,7 @@ func (s *Store) Append(ctx context.Context, event Event) (AppendResult, error) {
 	return AppendResult{Event: event.Clone(), Digest: digest}, nil
 }
 
+// Get retrieves an event by ID.
 func (s *Store) Get(ctx context.Context, eventID string) (Event, error) {
 	if err := check(ctx); err != nil {
 		return Event{}, err
@@ -350,6 +394,7 @@ func (s *Store) Get(ctx context.Context, eventID string) (Event, error) {
 	return value.event.Clone(), nil
 }
 
+// List retrieves events matching query.
 func (s *Store) List(ctx context.Context, query Query) ([]Event, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
@@ -394,6 +439,7 @@ func (s *Store) List(ctx context.Context, query Query) ([]Event, error) {
 	return values, nil
 }
 
+// AggregateUsage computes bounded usage totals.
 func (s *Store) AggregateUsage(ctx context.Context, query UsageQuery) ([]UsageTotal, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
