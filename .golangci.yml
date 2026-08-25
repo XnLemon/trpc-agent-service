@@ -26,12 +26,6 @@ linters:
       - path: ^trpcservice/agent/postgres/repository\.go$
         text: 'func .*Publish'
         linters: [gocyclo]
-      - path: ^trpcservice/channels/channels\.go$
-        text: 'func .*Validate'
-        linters: [gocyclo]
-      - path: ^trpcservice/channels/fake\.go$
-        text: 'func .*Verify'
-        linters: [gocyclo]
       - path: ^trpcservice/channels/telegram/telegram\.go$
         text: 'func .*HandleUpdate'
         linters: [gocyclo]
@@ -46,9 +40,6 @@ linters:
         linters: [gocyclo]
       - path: ^trpcservice/gateway/resolver\.go$
         text: 'func .*Resolve'
-        linters: [gocyclo]
-      - path: ^trpcservice/model/model\.go$
-        text: 'cyclomatic complexity .* of func `(?:compileOptionSpec|normalizeEndpoint)`'
         linters: [gocyclo]
       - path: ^trpcservice/runtime/storage/inmemory/inmemory\.go$
         text: 'func .*TransitionMessage|func .*EnqueueReplies'
