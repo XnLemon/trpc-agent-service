@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,9 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
@@ -31,6 +35,7 @@ const (
 	envModelNames        = "TRPC_MODEL_NAMES"
 	envModelEndpointHost = "TRPC_MODEL_ENDPOINT_HOSTS"
 	envModelSecretRef    = "TRPC_MODEL_SECRET_REF"
+	envSessionBackend    = "TRPC_SESSION_BACKEND"
 
 	defaultModelProvider  = "openai"
 	defaultModelNames     = "gpt-4o-mini"
@@ -49,18 +54,19 @@ var (
 // handed to the ModelFactory and must not become a serializable application
 // configuration object.
 type environmentConfig struct {
-	dsn           string
-	apiToken      string
-	adminToken    string
-	adminTenants  []string
-	tenantID      string
-	appID         string
-	subjectID     string
-	modelAPIKey   string
-	modelProvider string
-	modelNames    []string
-	endpointHosts []string
-	secretRef     string
+	dsn            string
+	apiToken       string
+	adminToken     string
+	adminTenants   []string
+	tenantID       string
+	appID          string
+	subjectID      string
+	modelAPIKey    string
+	modelProvider  string
+	modelNames     []string
+	endpointHosts  []string
+	secretRef      string
+	runtimeStorage string
 }
 
 // NewFromEnvironment assembles the production bootstrap graph from explicit
@@ -95,14 +101,22 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		}
 		return nil, fmt.Errorf("%w: PostgreSQL control plane is unavailable", ErrInvalidConfig)
 	}
-	sessions := inmemory.NewSessionService()
+	delegateSessions := inmemory.NewSessionService()
+	runtimeStore, err := environmentRuntimeStore(config.runtimeStorage, db)
+	if err != nil {
+		_ = delegateSessions.Close()
+		_ = db.Close()
+		return nil, err
+	}
 	graph, err := NewWithDatabase(ctx, db, Config{
 		OwnDB:              true,
 		ModelCatalog:       modelCatalog,
 		BackendCatalog:     backendCatalog,
 		SecretResolver:     environmentSecretResolver{reference: config.secretRef, value: config.modelAPIKey},
 		ModelFactory:       environmentModelFactory{},
-		Sessions:           sessions,
+		Sessions:           delegateSessions,
+		RuntimeStore:       runtimeStore,
+		RuntimeTenantID:    config.tenantID,
 		Authenticator:      authenticator,
 		AdminAuthenticator: adminAuthenticator,
 		Ping: func(pingContext context.Context) error {
@@ -111,11 +125,11 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		Migrate:          applyEnvironmentMigrations,
 		VerifyMigrations: verifyEnvironmentMigrations,
 		CloseDependencies: func() error {
-			return sessions.Close()
+			return errors.Join(delegateSessions.Close(), runtimeStore.Close())
 		},
 	})
 	if err != nil {
-		_ = sessions.Close()
+		_ = delegateSessions.Close()
 		_ = db.Close()
 		return nil, err
 	}
@@ -124,9 +138,10 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 
 func loadEnvironment() (environmentConfig, error) {
 	config := environmentConfig{
-		modelProvider: environmentOrDefault(envModelProvider, defaultModelProvider),
-		secretRef:     environmentOrDefault(envModelSecretRef, defaultModelSecretRef),
-		subjectID:     environmentOrDefault(envSubjectID, defaultSubjectID),
+		modelProvider:  environmentOrDefault(envModelProvider, defaultModelProvider),
+		secretRef:      environmentOrDefault(envModelSecretRef, defaultModelSecretRef),
+		subjectID:      environmentOrDefault(envSubjectID, defaultSubjectID),
+		runtimeStorage: strings.ToLower(strings.TrimSpace(os.Getenv(envSessionBackend))),
 	}
 	var err error
 	if config.dsn, err = requiredEnvironment(envPostgresDSN); err != nil {
@@ -170,7 +185,24 @@ func loadEnvironment() (environmentConfig, error) {
 		return environmentConfig{}, err
 	}
 	config.subjectID = strings.TrimSpace(config.subjectID)
+	if config.runtimeStorage != "postgres" && config.runtimeStorage != "inmemory" {
+		return environmentConfig{}, fmt.Errorf("%w: %s must be explicitly set to postgres or inmemory", ErrInvalidConfig, envSessionBackend)
+	}
 	return config, nil
+}
+
+func environmentRuntimeStore(kind string, db *sql.DB) (runtimestorage.RuntimeStore, error) {
+	switch kind {
+	case "postgres":
+		if db == nil {
+			return nil, fmt.Errorf("%w: PostgreSQL runtime storage requires a database", ErrInvalidConfig)
+		}
+		return runtimestoragepostgres.New(db), nil
+	case "inmemory":
+		return runtimestorageinmemory.New(), nil
+	default:
+		return nil, fmt.Errorf("%w: unsupported runtime storage", ErrInvalidConfig)
+	}
 }
 
 func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalog, *backend.ProviderCatalog, error) {

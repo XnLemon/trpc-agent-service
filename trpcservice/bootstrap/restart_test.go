@@ -31,6 +31,7 @@ func TestRestartBootstrapRoundTrip(t *testing.T) {
 	t.Setenv(envAdminToken, "admin-token")
 	t.Setenv(envAdminTenants, "*")
 	t.Setenv(envModelAPIKey, "restart-test-secret")
+	t.Setenv(envSessionBackend, "postgres")
 	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
 
 	first, err := NewFromEnvironment(context.Background())

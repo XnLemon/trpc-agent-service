@@ -15,7 +15,7 @@ func TestOrderedFilesAreContiguousAndDigestable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 2 || files[0].version != 1 || files[1].version != 2 {
+	if len(files) != 5 || files[0].version != 1 || files[1].version != 2 || files[2].version != 3 || files[3].version != 4 || files[4].version != 5 {
 		t.Fatalf("migration order = %+v", files)
 	}
 	for _, migration := range files {
@@ -39,7 +39,7 @@ func TestValidateHistoryRejectsFutureVersions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validateHistory(map[int]string{1: files[0].digest, 2: files[1].digest, 3: "future"}, files); !errors.Is(err, ErrInvalidHistory) {
+	if err := validateHistory(map[int]string{1: files[0].digest, 2: files[1].digest, 3: files[2].digest, 4: files[3].digest, 5: files[4].digest, 6: "future"}, files); !errors.Is(err, ErrInvalidHistory) {
 		t.Fatalf("future migration history error = %v", err)
 	}
 }
@@ -93,7 +93,7 @@ func TestMigrationHelpersAndSQLMockApplyVerify(t *testing.T) {
 	if err := Apply(context.Background(), db); err != nil {
 		t.Fatalf("Apply error = %v", err)
 	}
-	if got := nextVersion(map[int]string{1: files[0].digest, 2: files[1].digest}); got != 3 {
+	if got := nextVersion(map[int]string{1: files[0].digest, 2: files[1].digest, 3: files[2].digest, 4: files[3].digest, 5: files[4].digest}); got != 6 {
 		t.Fatalf("nextVersion = %d", got)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -105,7 +105,7 @@ func TestMigrationHelpersAndSQLMockApplyVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = verifyDB.Close() }()
-	verifyMock.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(sqlmock.NewRows([]string{"version", "sha256"}).AddRow(files[0].version, files[0].digest).AddRow(files[1].version, files[1].digest))
+	verifyMock.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(sqlmock.NewRows([]string{"version", "sha256"}).AddRow(files[0].version, files[0].digest).AddRow(files[1].version, files[1].digest).AddRow(files[2].version, files[2].digest).AddRow(files[3].version, files[3].digest).AddRow(files[4].version, files[4].digest))
 	if err := Verify(context.Background(), verifyDB); err != nil {
 		t.Fatalf("Verify error = %v", err)
 	}

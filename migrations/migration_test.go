@@ -59,6 +59,9 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 	for _, name := range []string{
 		"0001_control_plane.up.sql",
 		"0002_control_plane_repository_functions.up.sql",
+		"0003_runtime_storage.up.sql",
+		"0004_runtime_session_delete_cascade.up.sql",
+		"0005_runtime_event_history.up.sql",
 	} {
 		path := filepath.Join(migrationDir, name)
 		contents, err := os.ReadFile(path)
