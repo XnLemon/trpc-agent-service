@@ -109,7 +109,7 @@ func TestEventValidationAndCancellation(t *testing.T) {
 }
 
 func TestEventRejectsSensitiveValuesAndUnknownErrorTypes(t *testing.T) {
-	for _, value := range []string{"Authorization: Bearer secret", "token=secret", "dsn=postgres://user:pass@db", "provider error: secret"} {
+	for _, value := range []string{"Authorization: Bearer secret", "API key abc", "token abc", "dsn=postgres://user:pass@db", "provider error: secret"} {
 		event := testEvent("tenant-a", "event-1")
 		event.ErrorType = value
 		if !errors.Is(event.Validate(), ErrInvalid) {
@@ -129,6 +129,11 @@ func TestEventRejectsSensitiveValuesAndUnknownErrorTypes(t *testing.T) {
 	usage := Usage{BudgetUsedMinor: ptr(1), Currency: "ZZZ"}
 	if !errors.Is(usage.Validate(), ErrInvalid) {
 		t.Fatal("unknown currency accepted")
+	}
+	for _, currency := range []string{"PLN", "BRL", "RUB", "TRY", "THB", "TWD"} {
+		if err := (Usage{ModelCostMinor: ptr(1), Currency: currency}).Validate(); err != nil {
+			t.Fatalf("valid ISO currency %s rejected: %v", currency, err)
+		}
 	}
 }
 

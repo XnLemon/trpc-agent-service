@@ -530,16 +530,25 @@ func containsSensitive(values ...string) bool {
 		if strings.Contains(lower, "://") || strings.Contains(lower, "authorization") || strings.Contains(lower, "bearer ") || strings.Contains(lower, "api_key") || strings.Contains(lower, "api-key") || strings.Contains(lower, "token=") || strings.Contains(lower, "secret=") || strings.Contains(lower, "secret_ref") || strings.Contains(lower, "password=") || strings.Contains(lower, "dsn=") || strings.Contains(lower, "provider error") {
 			return true
 		}
+		words := strings.FieldsFunc(lower, func(r rune) bool { return r < 'a' || r > 'z' })
+		for i, word := range words {
+			if (word == "bearer" || word == "authorization" || word == "token" || word == "secret" || word == "password" || word == "dsn") && i+1 < len(words) {
+				return true
+			}
+			if word == "api" && i+1 < len(words) && words[i+1] == "key" {
+				return true
+			}
+		}
 	}
 	return false
 }
 func validCurrency(value string) bool {
-	switch value {
-	case "AUD", "CAD", "CHF", "CNY", "DKK", "EUR", "GBP", "HKD", "INR", "JPY", "KRW", "NOK", "NZD", "SEK", "SGD", "USD":
-		return true
-	default:
-		return false
-	}
+	_, ok := iso4217[value]
+	return ok
+}
+
+var iso4217 = map[string]struct{}{
+	"AED": {}, "AFN": {}, "ALL": {}, "AMD": {}, "ANG": {}, "AOA": {}, "ARS": {}, "AUD": {}, "AWG": {}, "AZN": {}, "BAM": {}, "BBD": {}, "BDT": {}, "BGN": {}, "BHD": {}, "BIF": {}, "BMD": {}, "BND": {}, "BOB": {}, "BOV": {}, "BRL": {}, "BSD": {}, "BTN": {}, "BWP": {}, "BYN": {}, "BZD": {}, "CAD": {}, "CDF": {}, "CHE": {}, "CHF": {}, "CHW": {}, "CLF": {}, "CLP": {}, "CNY": {}, "COP": {}, "COU": {}, "CRC": {}, "CUC": {}, "CUP": {}, "CVE": {}, "CZK": {}, "DJF": {}, "DKK": {}, "DOP": {}, "DZD": {}, "EGP": {}, "ERN": {}, "ETB": {}, "EUR": {}, "FJD": {}, "FKP": {}, "GBP": {}, "GEL": {}, "GHS": {}, "GIP": {}, "GMD": {}, "GNF": {}, "GTQ": {}, "GYD": {}, "HKD": {}, "HNL": {}, "HTG": {}, "HUF": {}, "IDR": {}, "ILS": {}, "INR": {}, "IQD": {}, "IRR": {}, "ISK": {}, "JMD": {}, "JOD": {}, "JPY": {}, "KES": {}, "KGS": {}, "KHR": {}, "KMF": {}, "KPW": {}, "KRW": {}, "KWD": {}, "KYD": {}, "KZT": {}, "LAK": {}, "LBP": {}, "LKR": {}, "LRD": {}, "LSL": {}, "LYD": {}, "MAD": {}, "MDL": {}, "MGA": {}, "MKD": {}, "MMK": {}, "MNT": {}, "MOP": {}, "MRU": {}, "MUR": {}, "MVR": {}, "MWK": {}, "MXN": {}, "MXV": {}, "MYR": {}, "MZN": {}, "NAD": {}, "NGN": {}, "NIO": {}, "NOK": {}, "NPR": {}, "NZD": {}, "OMR": {}, "PAB": {}, "PEN": {}, "PGK": {}, "PHP": {}, "PKR": {}, "PLN": {}, "PYG": {}, "QAR": {}, "RON": {}, "RSD": {}, "RUB": {}, "RWF": {}, "SAR": {}, "SBD": {}, "SCR": {}, "SDG": {}, "SEK": {}, "SGD": {}, "SHP": {}, "SLE": {}, "SLL": {}, "SOS": {}, "SRD": {}, "SSP": {}, "STN": {}, "SVC": {}, "SYP": {}, "SZL": {}, "THB": {}, "TJS": {}, "TMT": {}, "TND": {}, "TOP": {}, "TRY": {}, "TTD": {}, "TWD": {}, "TZS": {}, "UAH": {}, "UGX": {}, "USD": {}, "USN": {}, "UYI": {}, "UYU": {}, "UYW": {}, "UZS": {}, "VED": {}, "VES": {}, "VND": {}, "VUV": {}, "WST": {}, "XAF": {}, "XAG": {}, "XAU": {}, "XBA": {}, "XBB": {}, "XBC": {}, "XBD": {}, "XCD": {}, "XDR": {}, "XOF": {}, "XPD": {}, "XPF": {}, "XPT": {}, "XSU": {}, "XTS": {}, "XUA": {}, "XXX": {}, "YER": {}, "ZAR": {}, "ZMW": {}, "ZWG": {},
 }
 
 func validGroup(value GroupBy) bool {
