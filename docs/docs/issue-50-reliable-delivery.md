@@ -59,8 +59,8 @@ provider errors are redacted.
 
 ## Issue Ledger
 
-- [ ] Injectable Provider/Delivery contract and tenant-scoped worker lifecycle.
-- [ ] Runner reply materialization into idempotent outbox segments.
+- [x] Injectable Provider/Delivery contract and tenant-scoped worker lifecycle.
+- [x] Runner reply materialization into idempotent outbox segments.
 - [ ] Fenced concurrent claims with one valid winner.
 - [ ] Exponential backoff, bounded retries, permanent-error DLQ, and stable
       error classes.

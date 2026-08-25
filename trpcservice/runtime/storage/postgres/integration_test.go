@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/google/uuid"
@@ -105,5 +106,66 @@ func TestRuntimeStorePostgreSQLConformanceAndRestart(t *testing.T) {
 	}
 	if _, err := store.GetSession(ctx, tenantID, sessionID); !errors.Is(err, runtimestorage.ErrNotFound) {
 		t.Fatalf("deleted session lookup = %v", err)
+	}
+}
+
+type integrationProvider struct{ id string }
+
+func (p integrationProvider) Deliver(context.Context, runtimestorage.ReplyOutbox) (string, error) {
+	return p.id, nil
+}
+func (p integrationProvider) Reconcile(context.Context, runtimestorage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
+	return outbox.DeliveryUnknown, "", nil
+}
+
+func TestRuntimeStorePostgreSQLOutboxWorkerRestartRecovery(t *testing.T) {
+	dsn := os.Getenv("POSTGRES_RUNTIME_TEST_DSN")
+	tenantID, bindingID := os.Getenv("POSTGRES_RUNTIME_TEST_TENANT_ID"), os.Getenv("POSTGRES_RUNTIME_TEST_BINDING_ID")
+	if dsn == "" || tenantID == "" || bindingID == "" {
+		t.Skip("POSTGRES_RUNTIME_TEST_DSN, POSTGRES_RUNTIME_TEST_TENANT_ID, and POSTGRES_RUNTIME_TEST_BINDING_ID are required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	db, err := storagepostgres.Open(ctx, dsn, storagepostgres.Options{MaxOpenConns: 4, MaxIdleConns: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.Apply(ctx, db); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	store := New(db)
+	sessionID, eventID, replyID := "worker-restart-"+uuid.NewString(), uuid.NewString(), uuid.NewString()
+	if _, err := store.CreateSession(ctx, tenantID, sessionID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: tenantID, EventID: eventID, SessionID: sessionID, BindingID: bindingID, ExternalMessageID: "external-" + eventID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: tenantID, ReplyID: replyID, EventID: eventID, SegmentIndex: 0, SegmentCount: 1, Payload: "restart reply"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = storagepostgres.Open(ctx, dsn, storagepostgres.Options{MaxOpenConns: 4, MaxIdleConns: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store = New(db)
+	worker, err := outbox.New(outbox.Config{Store: store, Provider: integrationProvider{id: "provider-restart"}, TenantID: tenantID, Owner: "restart-worker", LeaseDuration: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := worker.RunOnce(ctx); err != nil || processed != 1 {
+		t.Fatalf("restart worker = %d err=%v", processed, err)
+	}
+	reply, err := store.GetReply(ctx, tenantID, replyID, 0)
+	if err != nil || reply.Status != runtimestorage.ReplySent || reply.ProviderMessageID != "provider-restart" {
+		t.Fatalf("recovered reply = %+v err=%v", reply, err)
+	}
+	if err := store.DeleteSession(ctx, tenantID, sessionID); err != nil {
+		t.Fatal(err)
 	}
 }
