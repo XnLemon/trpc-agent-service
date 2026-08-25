@@ -463,6 +463,57 @@ func TestDispatcherRunnerRunFailureAuditWriteIsRedacted(t *testing.T) {
 	}
 }
 
+func TestDispatcherDefensiveNilRunnerAuditFailure(t *testing.T) {
+	dispatcher, principal := newTestDispatcher(t, &testRunner{})
+	plan, err := dispatcher.resolver.Resolve(context.Background(), principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := plan.CacheKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.registry.mu.Lock()
+	dispatcher.registry.entries[key] = &runnerEntry{runner: nil, lastUsed: time.Now(), zero: make(chan struct{})}
+	dispatcher.registry.mu.Unlock()
+	dispatcher.auditWriter = &auditWriterFailure{failAfter: 1}
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "nil-runner-audit", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if stream != nil || !errors.Is(err, ErrAuditWriteFailed) {
+		t.Fatalf("stream=%v err=%v", stream, err)
+	}
+}
+
+func TestDispatcherDefensiveNilRunnerWritesFailedAudit(t *testing.T) {
+	dispatcher, principal := newTestDispatcher(t, &testRunner{})
+	plan, err := dispatcher.resolver.Resolve(context.Background(), principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := plan.CacheKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.registry.mu.Lock()
+	dispatcher.registry.entries[key] = &runnerEntry{runner: nil, lastUsed: time.Now(), zero: make(chan struct{})}
+	dispatcher.registry.mu.Unlock()
+	writer, err := audit.NewInMemory(principal.TenantID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.auditWriter = writer
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "nil-runner-terminal", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if stream != nil || !errors.Is(err, ErrRunnerUnavailable) {
+		t.Fatalf("stream=%v err=%v", stream, err)
+	}
+	events, err := writer.List(context.Background(), audit.Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasAuditEventTypes(events, audit.EventExecutionStarted, audit.EventExecutionFailed) {
+		t.Fatalf("events=%+v", events)
+	}
+}
+
 func TestAuditHelpers(t *testing.T) {
 	if terminalAuditError(nil) != "" || terminalAuditError(context.Canceled) != string(audit.ErrorCanceled) || terminalAuditError(ErrExecution) != string(audit.ErrorUnavailable) {
 		t.Fatal("unexpected terminal audit error mapping")
