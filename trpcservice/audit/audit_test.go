@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -183,6 +184,7 @@ func TestAuditValidationAndQueryBoundaries(t *testing.T) {
 		func(e *Event) { e.OccurredAt = time.Now() },
 		func(e *Event) { e.PreviousVersion = ptr(2) },
 		func(e *Event) { e.PreviousVersion, e.NextVersion = ptr(2), ptr(2) },
+		func(e *Event) { e.PreviousVersion, e.NextVersion = ptr(math.MaxInt64), ptr(math.MinInt64) },
 		func(e *Event) { e.LatencyMS = ptr(-1) },
 		func(e *Event) { e.Revision = ptr(-1) },
 	} {

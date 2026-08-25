@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -168,7 +169,7 @@ func (e Event) Validate() error {
 	if (e.PreviousVersion == nil) != (e.NextVersion == nil) {
 		return ErrInvalid
 	}
-	if e.PreviousVersion != nil && (*e.PreviousVersion < 0 || *e.NextVersion != *e.PreviousVersion+1) {
+	if e.PreviousVersion != nil && (*e.PreviousVersion < 0 || *e.PreviousVersion == math.MaxInt64 || *e.NextVersion != *e.PreviousVersion+1) {
 		return ErrInvalid
 	}
 	if e.EventType == EventControlPlaneChanged && (clean(e.ActorType) == "" || clean(e.ActorID) == "" || clean(e.Reason) == "" || clean(e.CorrelationID) == "" || e.PreviousVersion == nil) {
