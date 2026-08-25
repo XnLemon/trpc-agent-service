@@ -174,49 +174,23 @@ type Adapter struct {
 	runCancel context.CancelFunc
 }
 
+type normalizedConfig struct {
+	token          string
+	target         channels.RoutingTarget
+	principal      gateway.Principal
+	apiBaseURL     string
+	pollTimeout    time.Duration
+	workers        int
+	providerAcctID string
+}
+
 // New validates the trusted route, constructs the Bot client, and verifies its
 // getMe identity before returning an adapter that can handle updates.
 func New(ctx context.Context, config Config) (*Adapter, error) {
-	if ctx == nil {
-		return nil, fmt.Errorf("%w: context is required", ErrInvalid)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	token, err := normalizeToken(config.BotToken)
+	normalized, err := normalizeConfig(ctx, config)
 	if err != nil {
 		return nil, err
 	}
-	if err := config.Target.Validate(); err != nil {
-		return nil, fmt.Errorf("%w: trusted routing target is invalid", ErrInvalid)
-	}
-	if config.Target.Channel != channels.ChannelTelegram {
-		return nil, fmt.Errorf("%w: routing target is not Telegram", ErrInvalid)
-	}
-	providerAccountID, err := strconv.ParseInt(config.Target.ProviderAccountID, 10, 64)
-	if err != nil || providerAccountID <= 0 || strconv.FormatInt(providerAccountID, 10) != config.Target.ProviderAccountID {
-		return nil, fmt.Errorf("%w: Telegram provider account ID is not canonical", ErrInvalid)
-	}
-	if config.Dispatcher == nil {
-		return nil, fmt.Errorf("%w: dispatcher is required", ErrInvalid)
-	}
-	apiBaseURL, err := normalizeAPIBaseURL(config.APIBaseURL)
-	if err != nil {
-		return nil, err
-	}
-	pollTimeout, err := normalizePollTimeout(config.PollTimeout)
-	if err != nil {
-		return nil, err
-	}
-	workers, err := normalizeWorkers(config.Workers)
-	if err != nil {
-		return nil, err
-	}
-	principal, err := gateway.NewChannelPrincipal(config.Target)
-	if err != nil {
-		return nil, fmt.Errorf("%w: trusted principal is invalid", ErrInvalid)
-	}
-
 	idempotency := config.Idempotency
 	ownIdempotency := false
 	if idempotency == nil {
@@ -231,16 +205,16 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 		factory = sdkBotFactory{}
 	}
 	adapter := &Adapter{
-		dispatcher: config.Dispatcher, principal: principal, target: config.Target,
+		dispatcher: config.Dispatcher, principal: normalized.principal, target: normalized.target,
 		idempotency: idempotency, ownIdempotency: ownIdempotency, errorHook: config.ErrorHook,
-		audit: audit.Recorder{Writer: config.AuditWriter, TenantID: config.Target.TenantID},
+		audit: audit.Recorder{Writer: config.AuditWriter, TenantID: normalized.target.TenantID},
 	}
-	client, err := factory.New(token, BotFactoryConfig{
+	client, err := factory.New(normalized.token, BotFactoryConfig{
 		Handler:        adapter.sdkHandler(),
-		APIBaseURL:     apiBaseURL,
+		APIBaseURL:     normalized.apiBaseURL,
 		HTTPClient:     config.HTTPClient,
-		PollTimeout:    pollTimeout,
-		Workers:        workers,
+		PollTimeout:    normalized.pollTimeout,
+		Workers:        normalized.workers,
 		OnPollingError: func() { adapter.report(ErrorOperationPolling, ErrPolling) },
 	})
 	if err != nil || client == nil {
@@ -249,22 +223,70 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 		return nil, ErrInitialization
 	}
 	adapter.client = client
-	me, err := client.GetMe(ctx)
-	if err != nil {
-		if contextErr := ctx.Err(); contextErr != nil {
-			_ = adapter.closeOwnedIdempotency()
-			return nil, contextErr
-		}
-		adapter.report(ErrorOperationInitialization, ErrInitialization)
+	if err := adapter.verifyIdentity(ctx, normalized.providerAcctID); err != nil {
 		_ = adapter.closeOwnedIdempotency()
-		return nil, ErrInitialization
-	}
-	if me == nil || !me.IsBot || me.ID <= 0 || strconv.FormatInt(me.ID, 10) != config.Target.ProviderAccountID {
-		adapter.report(ErrorOperationInitialization, ErrBotIdentityMismatch)
-		_ = adapter.closeOwnedIdempotency()
-		return nil, ErrBotIdentityMismatch
+		return nil, err
 	}
 	return adapter, nil
+}
+
+func normalizeConfig(ctx context.Context, config Config) (normalizedConfig, error) {
+	if ctx == nil {
+		return normalizedConfig{}, fmt.Errorf("%w: context is required", ErrInvalid)
+	}
+	if err := ctx.Err(); err != nil {
+		return normalizedConfig{}, err
+	}
+	token, err := normalizeToken(config.BotToken)
+	if err != nil {
+		return normalizedConfig{}, err
+	}
+	if err := config.Target.Validate(); err != nil {
+		return normalizedConfig{}, fmt.Errorf("%w: trusted routing target is invalid", ErrInvalid)
+	}
+	if config.Target.Channel != channels.ChannelTelegram {
+		return normalizedConfig{}, fmt.Errorf("%w: routing target is not Telegram", ErrInvalid)
+	}
+	providerAccountID, err := strconv.ParseInt(config.Target.ProviderAccountID, 10, 64)
+	if err != nil || providerAccountID <= 0 || strconv.FormatInt(providerAccountID, 10) != config.Target.ProviderAccountID {
+		return normalizedConfig{}, fmt.Errorf("%w: Telegram provider account ID is not canonical", ErrInvalid)
+	}
+	if config.Dispatcher == nil {
+		return normalizedConfig{}, fmt.Errorf("%w: dispatcher is required", ErrInvalid)
+	}
+	apiBaseURL, err := normalizeAPIBaseURL(config.APIBaseURL)
+	if err != nil {
+		return normalizedConfig{}, err
+	}
+	pollTimeout, err := normalizePollTimeout(config.PollTimeout)
+	if err != nil {
+		return normalizedConfig{}, err
+	}
+	workers, err := normalizeWorkers(config.Workers)
+	if err != nil {
+		return normalizedConfig{}, err
+	}
+	principal, err := gateway.NewChannelPrincipal(config.Target)
+	if err != nil {
+		return normalizedConfig{}, fmt.Errorf("%w: trusted principal is invalid", ErrInvalid)
+	}
+	return normalizedConfig{token: token, target: config.Target, principal: principal, apiBaseURL: apiBaseURL, pollTimeout: pollTimeout, workers: workers, providerAcctID: strconv.FormatInt(providerAccountID, 10)}, nil
+}
+
+func (adapter *Adapter) verifyIdentity(ctx context.Context, providerAccountID string) error {
+	me, err := adapter.client.GetMe(ctx)
+	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
+		adapter.report(ErrorOperationInitialization, ErrInitialization)
+		return ErrInitialization
+	}
+	if me == nil || !me.IsBot || me.ID <= 0 || strconv.FormatInt(me.ID, 10) != providerAccountID {
+		adapter.report(ErrorOperationInitialization, ErrBotIdentityMismatch)
+		return ErrBotIdentityMismatch
+	}
+	return nil
 }
 
 // Run starts blocking Telegram long polling and returns after ctx is canceled
@@ -355,49 +377,65 @@ func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update)
 		adapter.report(ErrorOperationUpdate, err)
 		return err
 	}
-	claim, replay, err := adapter.idempotency.Begin(ctx, adapter.principal, message)
+	claim, replay, err := adapter.beginUpdate(ctx, message)
 	if err != nil {
-		if errors.Is(err, gateway.ErrDuplicateMessage) {
-			if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressDuplicate, message.ExternalMessageID, "", message.ExternalUserID, "", audit.DecisionDuplicate, string(audit.ErrorDuplicate)); auditErr != nil {
-				adapter.report(ErrorOperationUpdate, ErrDispatch)
-				return ErrDispatch
-			}
-			return ErrDuplicateUpdate
+		return err
+	}
+	if claim == nil {
+		return adapter.handleReplay(ctx, update.Message, message, replay)
+	}
+	return adapter.handleClaimedUpdate(ctx, update.Message, message, claim)
+}
+
+func (adapter *Adapter) beginUpdate(ctx context.Context, message gateway.InboundMessage) (*gateway.IdempotencyClaim, []gateway.DispatchEvent, error) {
+	claim, replay, err := adapter.idempotency.Begin(ctx, adapter.principal, message)
+	if err == nil {
+		return claim, replay, nil
+	}
+	if errors.Is(err, gateway.ErrDuplicateMessage) {
+		if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressDuplicate, message.ExternalMessageID, "", message.ExternalUserID, "", audit.DecisionDuplicate, string(audit.ErrorDuplicate)); auditErr != nil {
+			adapter.report(ErrorOperationUpdate, ErrDispatch)
+			return nil, nil, ErrDispatch
 		}
+		return nil, nil, ErrDuplicateUpdate
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, nil, err
+	}
+	if errors.Is(err, gateway.ErrClosed) {
+		return nil, nil, ErrClosed
+	}
+	return nil, nil, ErrInvalid
+}
+
+func (adapter *Adapter) handleReplay(ctx context.Context, message *models.Message, inbound gateway.InboundMessage, replay []gateway.DispatchEvent) error {
+	if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressAccepted, inbound.ExternalMessageID, "", inbound.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
+		return ErrDispatch
+	}
+	if err := adapter.sendEvents(ctx, message, replay); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
-		if errors.Is(err, gateway.ErrClosed) {
-			return ErrClosed
-		}
-		return ErrInvalid
+		adapter.report(ErrorOperationSend, ErrSendMessage)
+		return err
 	}
-	if claim == nil {
-		if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressAccepted, message.ExternalMessageID, "", message.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
-			return ErrDispatch
-		}
-		if err := adapter.sendEvents(ctx, update.Message, replay); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
-			}
-			adapter.report(ErrorOperationSend, ErrSendMessage)
-			return err
-		}
-		return nil
-	}
-	if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressAccepted, message.ExternalMessageID, "", message.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
+	return nil
+}
+
+func (adapter *Adapter) handleClaimedUpdate(ctx context.Context, message *models.Message, inbound gateway.InboundMessage, claim *gateway.IdempotencyClaim) error {
+	if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressAccepted, inbound.ExternalMessageID, "", inbound.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
 		_ = claim.Fail()
 		return ErrDispatch
 	}
 
-	events, dispatchErr := adapter.dispatch(ctx, message)
+	events, dispatchErr := adapter.dispatch(ctx, inbound)
 	if dispatchErr != nil {
 		_ = claim.Fail()
 		if errors.Is(dispatchErr, context.Canceled) || errors.Is(dispatchErr, context.DeadlineExceeded) {
 			return dispatchErr
 		}
 		adapter.report(ErrorOperationDispatch, ErrDispatch)
-		if sendErr := adapter.sendText(ctx, update.Message, failureReply); sendErr != nil {
+		if sendErr := adapter.sendText(ctx, message, failureReply); sendErr != nil {
 			if !errors.Is(sendErr, context.Canceled) && !errors.Is(sendErr, context.DeadlineExceeded) {
 				adapter.report(ErrorOperationSend, ErrSendMessage)
 			}
@@ -407,14 +445,14 @@ func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update)
 	if err := claim.Complete(events); err != nil {
 		return ErrDispatch
 	}
-	if err := adapter.sendEvents(ctx, update.Message, events); err != nil {
+	if err := adapter.sendEvents(ctx, message, events); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
 		adapter.report(ErrorOperationSend, ErrSendMessage)
 		return err
 	}
-	if auditErr := adapter.audit.IM(ctx, audit.EventIMDeliverySent, message.ExternalMessageID, "", message.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
+	if auditErr := adapter.audit.IM(ctx, audit.EventIMDeliverySent, inbound.ExternalMessageID, "", inbound.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
 		return ErrDispatch
 	}
 	return nil
