@@ -83,9 +83,6 @@ linters:
       - path: ^trpcservice/runtime/storage/postgres/repository\.go$
         text: 'func .*EnqueueReplies'
         linters: [gocyclo]
-      - path: ^trpcservice/tenant/tenant\.go$
-        text: 'cyclomatic complexity .* of func `validateConfiguration`'
-        linters: [gocyclo]
       - path: ^examples/telegram-e2e/outbox_runner_e2e_test\.go$
         text: 'cyclomatic complexity .* of func `runTelegramOutboxScenario`'
         linters: [gocyclo]
