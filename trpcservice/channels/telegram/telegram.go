@@ -559,26 +559,67 @@ func hasUnsupportedMessage(message *models.Message) bool {
 }
 
 func hasUnsupportedMessageMetadata(message *models.Message) bool {
-	return message.DirectMessagesTopic != nil || message.SenderChat != nil || message.SenderBusinessBot != nil || message.ReceiverUser != nil || message.BusinessConnectionID != "" || message.RichMessage != nil || message.Caption != "" || len(message.CaptionEntities) > 0 || message.HasMediaSpoiler || message.MediaGroupID != "" || message.ReplyToStore != nil || message.SuggestedPostInfo != nil || message.EffectID != "" || message.EditDate != 0 || message.GuestQueryID != "" || message.ReplyToPollOptionID != ""
+	return hasUnsupportedMessageRoutingMetadata(message) || hasUnsupportedMessageReplyMetadata(message)
+}
+
+func hasUnsupportedMessageRoutingMetadata(message *models.Message) bool {
+	return message.DirectMessagesTopic != nil || message.SenderChat != nil || message.SenderBusinessBot != nil || message.ReceiverUser != nil || message.BusinessConnectionID != "" || message.RichMessage != nil || message.Caption != "" || len(message.CaptionEntities) > 0
+}
+
+func hasUnsupportedMessageReplyMetadata(message *models.Message) bool {
+	return message.HasMediaSpoiler || message.MediaGroupID != "" || message.ReplyToStore != nil || message.SuggestedPostInfo != nil || message.EffectID != "" || message.EditDate != 0 || message.GuestQueryID != "" || message.ReplyToPollOptionID != ""
 }
 
 func hasUnsupportedMessageMedia(message *models.Message) bool {
-	return message.Animation != nil || message.Audio != nil || message.Document != nil || message.PaidMedia != nil || len(message.Photo) > 0 || message.Sticker != nil || message.Story != nil || message.Video != nil || message.VideoNote != nil || message.Voice != nil || message.Checklist != nil || message.Contact != nil || message.Dice != nil || message.Game != nil || message.Poll != nil || message.Venue != nil || message.Location != nil || message.Invoice != nil || message.SuccessfulPayment != nil || message.RefundedPayment != nil || message.UsersShared != nil || message.ChatShared != nil || message.Gift != nil || message.UniqueGift != nil || message.GiftUpgradeSent != nil || message.LivePhoto != nil
+	return hasUnsupportedMessageMediaPrimary(message) || hasUnsupportedMessageMediaSecondary(message)
+}
+
+func hasUnsupportedMessageMediaPrimary(message *models.Message) bool {
+	return message.Animation != nil || message.Audio != nil || message.Document != nil || message.PaidMedia != nil || len(message.Photo) > 0 || message.Sticker != nil || message.Story != nil || message.Video != nil || message.VideoNote != nil || message.Voice != nil || message.Checklist != nil || message.Contact != nil
+}
+
+func hasUnsupportedMessageMediaSecondary(message *models.Message) bool {
+	return message.Dice != nil || message.Game != nil || message.Poll != nil || message.Venue != nil || message.Location != nil || message.Invoice != nil || message.SuccessfulPayment != nil || message.RefundedPayment != nil || message.UsersShared != nil || message.ChatShared != nil || message.Gift != nil || message.UniqueGift != nil || message.GiftUpgradeSent != nil || message.LivePhoto != nil
 }
 
 func hasUnsupportedMessageChatEvents(message *models.Message) bool {
-	return len(message.NewChatMembers) > 0 || message.LeftChatMember != nil || message.NewChatTitle != "" || len(message.NewChatPhoto) > 0 || message.DeleteChatPhoto || message.GroupChatCreated || message.SupergroupChatCreated || message.ChannelChatCreated || message.MessageAutoDeleteTimerChanged != nil || message.MigrateToChatID != 0 || message.MigrateFromChatID != 0 || message.PinnedMessage != nil || message.ConnectedWebsite != "" || message.WriteAccessAllowed != nil || message.PassportData != nil || message.ProximityAlertTriggered != nil || message.BoostAdded != nil || message.ChatBackgroundSet != nil || message.ChecklistTasksDone != nil || message.ChecklistTasksAdded != nil || message.DirectMessagePriceChanged != nil || message.ForumTopicCreated != nil || message.ForumTopicEdited != nil || message.ForumTopicClosed != nil || message.ForumTopicReopened != nil || message.GeneralForumTopicHidden != nil || message.GeneralForumTopicUnhidden != nil || message.GiveawayCreated != nil || message.Giveaway != nil || message.GiveawayWinners != nil || message.GiveawayCompleted != nil || message.PaidMessagePriceChanged != nil || message.ChatOwnerLeft != nil || message.ChatOwnerChanged != nil || message.CommunityChatAdded != nil || message.CommunityChatRemoved != nil || message.SuggestedPostApproved != nil || message.SuggestedPostApprovalFailed != nil || message.SuggestedPostDeclined != nil || message.SuggestedPostPaid != nil || message.SuggestedPostRefunded != nil || message.VideoChatScheduled != nil || message.VideoChatStarted != nil || message.VideoChatEnded != nil || message.VideoChatParticipantsInvited != nil || message.WebAppData != nil || message.ManagedBotCreated != nil || message.PollOptionAdded != nil || message.PollOptionDeleted != nil || message.GuestBotCallerUser != nil || message.GuestBotCallerChat != nil
+	return hasUnsupportedMessageChatLifecycle(message) || hasUnsupportedMessageChatTopics(message) || hasUnsupportedMessageChatCommerce(message)
+}
+
+func hasUnsupportedMessageChatLifecycle(message *models.Message) bool {
+	return hasUnsupportedMessageChatLifecycleCore(message) || hasUnsupportedMessageChatLifecycleMetadata(message)
+}
+
+func hasUnsupportedMessageChatLifecycleCore(message *models.Message) bool {
+	return len(message.NewChatMembers) > 0 || message.LeftChatMember != nil || message.NewChatTitle != "" || len(message.NewChatPhoto) > 0 || message.DeleteChatPhoto || message.GroupChatCreated || message.SupergroupChatCreated || message.ChannelChatCreated || message.MessageAutoDeleteTimerChanged != nil || message.MigrateToChatID != 0 || message.MigrateFromChatID != 0
+}
+
+func hasUnsupportedMessageChatLifecycleMetadata(message *models.Message) bool {
+	return message.PinnedMessage != nil || message.ConnectedWebsite != "" || message.WriteAccessAllowed != nil || message.PassportData != nil || message.ProximityAlertTriggered != nil || message.BoostAdded != nil || message.ChatBackgroundSet != nil || message.ChecklistTasksDone != nil || message.ChecklistTasksAdded != nil || message.DirectMessagePriceChanged != nil
+}
+
+func hasUnsupportedMessageChatTopics(message *models.Message) bool {
+	return message.ForumTopicCreated != nil || message.ForumTopicEdited != nil || message.ForumTopicClosed != nil || message.ForumTopicReopened != nil || message.GeneralForumTopicHidden != nil || message.GeneralForumTopicUnhidden != nil || message.GiveawayCreated != nil || message.Giveaway != nil || message.GiveawayWinners != nil || message.GiveawayCompleted != nil || message.PaidMessagePriceChanged != nil || message.ChatOwnerLeft != nil || message.ChatOwnerChanged != nil || message.CommunityChatAdded != nil || message.CommunityChatRemoved != nil
+}
+
+func hasUnsupportedMessageChatCommerce(message *models.Message) bool {
+	return message.SuggestedPostApproved != nil || message.SuggestedPostApprovalFailed != nil || message.SuggestedPostDeclined != nil || message.SuggestedPostPaid != nil || message.SuggestedPostRefunded != nil || message.VideoChatScheduled != nil || message.VideoChatStarted != nil || message.VideoChatEnded != nil || message.VideoChatParticipantsInvited != nil || message.WebAppData != nil || message.ManagedBotCreated != nil || message.PollOptionAdded != nil || message.PollOptionDeleted != nil || message.GuestBotCallerUser != nil || message.GuestBotCallerChat != nil
 }
 
 func hasUnsupportedUpdate(update *models.Update) bool {
-	return update.EditedMessage != nil || update.ChannelPost != nil || update.EditedChannelPost != nil ||
-		update.BusinessConnection != nil || update.BusinessMessage != nil || update.EditedBusinessMessage != nil ||
-		update.DeletedBusinessMessages != nil || update.MessageReaction != nil || update.MessageReactionCount != nil ||
-		update.InlineQuery != nil || update.ChosenInlineResult != nil || update.CallbackQuery != nil ||
-		update.ShippingQuery != nil || update.PreCheckoutQuery != nil || update.PurchasedPaidMedia != nil ||
-		update.Poll != nil || update.PollAnswer != nil || update.ManagedBot != nil || update.GuestMessage != nil ||
-		update.MyChatMember != nil || update.ChatMember != nil || update.ChatJoinRequest != nil ||
-		update.ChatBoost != nil || update.RemovedChatBoost != nil || update.Subscription != nil
+	return hasUnsupportedUpdateMessages(update) || hasUnsupportedUpdateInteractions(update) || hasUnsupportedUpdateMembership(update)
+}
+
+func hasUnsupportedUpdateMessages(update *models.Update) bool {
+	return update.EditedMessage != nil || update.ChannelPost != nil || update.EditedChannelPost != nil || update.BusinessConnection != nil || update.BusinessMessage != nil || update.EditedBusinessMessage != nil || update.DeletedBusinessMessages != nil
+}
+
+func hasUnsupportedUpdateInteractions(update *models.Update) bool {
+	return update.MessageReaction != nil || update.MessageReactionCount != nil || update.InlineQuery != nil || update.ChosenInlineResult != nil || update.CallbackQuery != nil || update.ShippingQuery != nil || update.PreCheckoutQuery != nil || update.PurchasedPaidMedia != nil || update.Poll != nil || update.PollAnswer != nil || update.ManagedBot != nil || update.GuestMessage != nil
+}
+
+func hasUnsupportedUpdateMembership(update *models.Update) bool {
+	return update.MyChatMember != nil || update.ChatMember != nil || update.ChatJoinRequest != nil || update.ChatBoost != nil || update.RemovedChatBoost != nil || update.Subscription != nil
 }
 
 func externalMessageID(target channels.RoutingTarget, updateID int64) string {
