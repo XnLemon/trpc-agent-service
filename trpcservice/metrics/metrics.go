@@ -17,17 +17,17 @@ const (
 	// OperationDuration records operation latency.
 	OperationDuration = "trpcservice_operation_duration_ms"
 	// ActiveExecutions tracks currently running executions.
-	ActiveExecutions  = "trpcservice_active_executions"
+	ActiveExecutions = "trpcservice_active_executions"
 	// RunnerLeases tracks active runner leases.
-	RunnerLeases      = "trpcservice_runner_leases"
+	RunnerLeases = "trpcservice_runner_leases"
 	// OperationRetries counts retried operations.
-	OperationRetries  = "trpcservice_operation_retries_total"
+	OperationRetries = "trpcservice_operation_retries_total"
 	// UsageCostTotal counts aggregated usage cost.
-	UsageCostTotal    = "trpcservice_usage_cost_minor_total"
+	UsageCostTotal = "trpcservice_usage_cost_minor_total"
 	// Readiness tracks service readiness.
-	Readiness         = "trpcservice_readiness"
+	Readiness = "trpcservice_readiness"
 	// Shutdown tracks service shutdown.
-	Shutdown          = "trpcservice_shutdown"
+	Shutdown = "trpcservice_shutdown"
 )
 
 var allowedLabels = map[string]struct{}{

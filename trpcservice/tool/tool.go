@@ -23,7 +23,7 @@ const (
 	// Allow permits tool execution.
 	Allow Decision = "allow"
 	// Deny rejects tool execution.
-	Deny             Decision = "deny"
+	Deny Decision = "deny"
 	// ApprovalRequired requires explicit tool approval.
 	ApprovalRequired Decision = "approval_required"
 )
