@@ -388,73 +388,97 @@ func compileProviderSpec(spec ProviderSpec) (compiledProviderSpec, error) {
 	if provider == "" || provider != spec.Provider || !validName(provider) {
 		return compiledProviderSpec{}, fmt.Errorf("%w: provider schema name must be normalized", ErrInvalid)
 	}
-	if len(spec.Models) == 0 {
-		return compiledProviderSpec{}, fmt.Errorf("%w: provider schema requires models", ErrInvalid)
+	models, err := compileProviderModels(spec.Models)
+	if err != nil {
+		return compiledProviderSpec{}, err
 	}
-	models := make(map[string]struct{}, len(spec.Models))
-	for _, value := range spec.Models {
-		normalized := strings.ToLower(strings.TrimSpace(value))
-		if normalized == "" || normalized != value || !validName(normalized) {
-			return compiledProviderSpec{}, fmt.Errorf("%w: provider schema has invalid model", ErrInvalid)
-		}
-		if _, exists := models[normalized]; exists {
-			return compiledProviderSpec{}, fmt.Errorf("%w: provider schema repeats model", ErrInvalid)
-		}
-		models[normalized] = struct{}{}
+	schemes, hosts, err := compileEndpointRules(spec)
+	if err != nil {
+		return compiledProviderSpec{}, err
 	}
-	if !validFieldPolicy(spec.EndpointPolicy) || !validFieldPolicy(spec.SecretRefPolicy) {
-		return compiledProviderSpec{}, fmt.Errorf("%w: provider schema has invalid field policy", ErrInvalid)
-	}
-	schemes := make(map[string]struct{}, len(spec.EndpointSchemes))
-	for _, scheme := range spec.EndpointSchemes {
-		normalized := strings.ToLower(strings.TrimSpace(scheme))
-		if normalized != scheme || !validName(normalized) {
-			return compiledProviderSpec{}, fmt.Errorf("%w: endpoint scheme is invalid", ErrInvalid)
-		}
-		if _, exists := schemes[normalized]; exists {
-			return compiledProviderSpec{}, fmt.Errorf("%w: duplicate endpoint scheme", ErrInvalid)
-		}
-		schemes[normalized] = struct{}{}
-	}
-	if spec.EndpointPolicy == FieldForbidden && len(schemes) != 0 {
-		return compiledProviderSpec{}, fmt.Errorf("%w: forbidden endpoint cannot declare schemes", ErrInvalid)
-	}
-	if spec.EndpointPolicy != FieldForbidden && len(schemes) == 0 {
-		return compiledProviderSpec{}, fmt.Errorf("%w: endpoint schema requires an allowed scheme", ErrInvalid)
-	}
-	hosts := make(map[string]struct{}, len(spec.EndpointHosts))
-	for _, host := range spec.EndpointHosts {
-		normalized, err := normalizeEndpointHost(host)
-		if err != nil || normalized != host {
-			return compiledProviderSpec{}, fmt.Errorf("%w: endpoint host is invalid", ErrInvalid)
-		}
-		if _, exists := hosts[normalized]; exists {
-			return compiledProviderSpec{}, fmt.Errorf("%w: duplicate endpoint host", ErrInvalid)
-		}
-		hosts[normalized] = struct{}{}
-	}
-	if spec.EndpointPolicy == FieldForbidden && len(hosts) != 0 {
-		return compiledProviderSpec{}, fmt.Errorf("%w: forbidden endpoint cannot declare hosts", ErrInvalid)
-	}
-	if spec.EndpointPolicy != FieldForbidden && len(hosts) == 0 {
-		return compiledProviderSpec{}, fmt.Errorf("%w: endpoint schema requires an allowed host", ErrInvalid)
-	}
-	options := make(map[string]OptionSpec, len(spec.Options))
-	for key, option := range spec.Options {
-		normalizedKey := strings.ToLower(strings.TrimSpace(key))
-		if normalizedKey != key || !validOptionKey(normalizedKey) || sensitiveOptionKey(normalizedKey) {
-			return compiledProviderSpec{}, fmt.Errorf("%w: provider schema has invalid option key", ErrInvalid)
-		}
-		compiled, err := compileOptionSpec(option)
-		if err != nil {
-			return compiledProviderSpec{}, fmt.Errorf("%w: invalid schema for option", ErrInvalid)
-		}
-		options[normalizedKey] = compiled
+	options, err := compileProviderOptions(spec.Options)
+	if err != nil {
+		return compiledProviderSpec{}, err
 	}
 	return compiledProviderSpec{
 		provider: provider, models: models, endpointPolicy: spec.EndpointPolicy,
 		endpointSchemes: schemes, endpointHosts: hosts, secretRefPolicy: spec.SecretRefPolicy, options: options,
 	}, nil
+}
+
+func compileProviderModels(values []string) (map[string]struct{}, error) {
+	if len(values) == 0 {
+		return nil, fmt.Errorf("%w: provider schema requires models", ErrInvalid)
+	}
+	models := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if normalized == "" || normalized != value || !validName(normalized) {
+			return nil, fmt.Errorf("%w: provider schema has invalid model", ErrInvalid)
+		}
+		if _, exists := models[normalized]; exists {
+			return nil, fmt.Errorf("%w: provider schema repeats model", ErrInvalid)
+		}
+		models[normalized] = struct{}{}
+	}
+	return models, nil
+}
+
+func compileEndpointRules(spec ProviderSpec) (map[string]struct{}, map[string]struct{}, error) {
+	if !validFieldPolicy(spec.EndpointPolicy) || !validFieldPolicy(spec.SecretRefPolicy) {
+		return nil, nil, fmt.Errorf("%w: provider schema has invalid field policy", ErrInvalid)
+	}
+	schemes := make(map[string]struct{}, len(spec.EndpointSchemes))
+	for _, scheme := range spec.EndpointSchemes {
+		normalized := strings.ToLower(strings.TrimSpace(scheme))
+		if normalized != scheme || !validName(normalized) {
+			return nil, nil, fmt.Errorf("%w: endpoint scheme is invalid", ErrInvalid)
+		}
+		if _, exists := schemes[normalized]; exists {
+			return nil, nil, fmt.Errorf("%w: duplicate endpoint scheme", ErrInvalid)
+		}
+		schemes[normalized] = struct{}{}
+	}
+	if spec.EndpointPolicy == FieldForbidden && len(schemes) != 0 {
+		return nil, nil, fmt.Errorf("%w: forbidden endpoint cannot declare schemes", ErrInvalid)
+	}
+	if spec.EndpointPolicy != FieldForbidden && len(schemes) == 0 {
+		return nil, nil, fmt.Errorf("%w: endpoint schema requires an allowed scheme", ErrInvalid)
+	}
+	hosts := make(map[string]struct{}, len(spec.EndpointHosts))
+	for _, host := range spec.EndpointHosts {
+		normalized, err := normalizeEndpointHost(host)
+		if err != nil || normalized != host {
+			return nil, nil, fmt.Errorf("%w: endpoint host is invalid", ErrInvalid)
+		}
+		if _, exists := hosts[normalized]; exists {
+			return nil, nil, fmt.Errorf("%w: duplicate endpoint host", ErrInvalid)
+		}
+		hosts[normalized] = struct{}{}
+	}
+	if spec.EndpointPolicy == FieldForbidden && len(hosts) != 0 {
+		return nil, nil, fmt.Errorf("%w: forbidden endpoint cannot declare hosts", ErrInvalid)
+	}
+	if spec.EndpointPolicy != FieldForbidden && len(hosts) == 0 {
+		return nil, nil, fmt.Errorf("%w: endpoint schema requires an allowed host", ErrInvalid)
+	}
+	return schemes, hosts, nil
+}
+
+func compileProviderOptions(specs map[string]OptionSpec) (map[string]OptionSpec, error) {
+	options := make(map[string]OptionSpec, len(specs))
+	for key, option := range specs {
+		normalizedKey := strings.ToLower(strings.TrimSpace(key))
+		if normalizedKey != key || !validOptionKey(normalizedKey) || sensitiveOptionKey(normalizedKey) {
+			return nil, fmt.Errorf("%w: provider schema has invalid option key", ErrInvalid)
+		}
+		compiled, err := compileOptionSpec(option)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid schema for option", ErrInvalid)
+		}
+		options[normalizedKey] = compiled
+	}
+	return options, nil
 }
 
 func compileOptionSpec(spec OptionSpec) (OptionSpec, error) {
