@@ -200,6 +200,24 @@ func TestRecordMessagePersistsReplyTarget(t *testing.T) {
 	}
 }
 
+func TestEnqueueReplyRejectsLegacyTargetForRoutedEvent(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	when := time.Now().UTC()
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-1", "event-1", 0, 1, "payload", "", "", "", "").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT tenant_id,event_id,session_id,binding_id,external_message_id").WithArgs("tenant-a", "event-1").WillReturnRows(sqlmock.NewRows(eventColumns).AddRow("tenant-a", "event-1", "session-1", "binding-1", "external-1", "", int64(2), "completed", int64(1), "", nil, "reply-1", 1, "direct", "user-1", "", when, when))
+	_, err = runtimepostgres.New(db).EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-1", EventID: "event-1", SegmentCount: 1, Payload: "payload"})
+	if !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("legacy target for routed event = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimeStoreCoversEventHistoryAndMessageLifecycle(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
