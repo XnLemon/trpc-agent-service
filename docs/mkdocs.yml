@@ -38,6 +38,7 @@ nav:
       - Model Profile 与 Runner 链路: model-profile.md
       - Gateway、Execution Plan 与 HTTP/SSE: gateway.md
       - Telegram 长轮询 Adapter: telegram.md
+      - 企业微信自建应用 Text Webhook: wecom.md
       - Tenant 运行时持久化: runtime-storage.md
       - PostgreSQL 控制面与启动装配: postgresql-control-plane.md
       - 可重启控制面与 Admin API: issue-41-runtime-bootstrap-admin-api.md
