@@ -320,6 +320,9 @@ func (s *Store) Append(ctx context.Context, event Event) (AppendResult, error) {
 	event = event.Clone()
 	s.backend.mu.Lock()
 	defer s.backend.mu.Unlock()
+	if err := check(ctx); err != nil {
+		return AppendResult{}, err
+	}
 	key := eventKey{tenantID: event.TenantID, eventID: event.EventID}
 	if existing, ok := s.backend.events[key]; ok {
 		if existing.digest != digest {

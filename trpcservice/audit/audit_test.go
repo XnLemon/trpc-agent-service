@@ -338,6 +338,31 @@ func TestStoreQueryAndContextBranches(t *testing.T) {
 	if _, err := nilStore.AggregateUsage(context.Background(), UsageQuery{}); !errors.Is(err, ErrTenantScope) {
 		t.Fatalf("nil aggregate = %v", err)
 	}
+	backend := &Backend{}
+	lockedStore, err := NewInMemoryWithBackend("tenant-a", backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &cancelOnSecondCheck{}
+	if _, err := lockedStore.Append(ctx, testEvent("tenant-a", "canceled-before-commit")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled before commit = %v", err)
+	}
+	if _, err := lockedStore.Get(context.Background(), "canceled-before-commit"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("canceled append persisted = %v", err)
+	}
 }
+
+type cancelOnSecondCheck struct{ calls int }
+
+func (c *cancelOnSecondCheck) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *cancelOnSecondCheck) Done() <-chan struct{}       { return nil }
+func (c *cancelOnSecondCheck) Err() error {
+	c.calls++
+	if c.calls > 1 {
+		return context.Canceled
+	}
+	return nil
+}
+func (c *cancelOnSecondCheck) Value(any) any { return nil }
 
 func ptr(value int64) *int64 { return &value }
