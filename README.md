@@ -167,7 +167,7 @@
 - [ ] 实现租户级 Backend Registry/Factory 和后端路由
 - [ ] 接入 InMemory、Redis 及 PostgreSQL/MySQL Session 后端
 - [ ] 接入至少一种向量库和一种对象存储
-- [ ] 实现同一 Session 并发写入的版本/CAS/事务控制和事件序号
+- [x] 实现同一 Session 并发写入的版本/CAS/事务控制和事件序号（Issue #49）
 - [ ] 明确并实现 event、state、summary 的更新顺序及冲突重放
 - [ ] 实现 Memory 写入后的跨节点可见性和异步向量索引
 - [ ] 实现 Redis 到 SQL、以及本地到远端向量库的租户级迁移流程
@@ -183,7 +183,7 @@
 - [x] 增加真实 Telegram live E2E 示例与 CI workflow（Issue #33；根目录 `examples/telegram-e2e`）
 - [ ] 接入 Telegram webhook、媒体/rich update 或其他 IM 通道
 - [ ] 实现 webhook 验签、账号与租户绑定、用户身份映射
-- [ ] 使用 `tenant + channel + message_id` 实现幂等去重和缓存回复
+- [x] 使用 `tenant + channel + message_id` 实现幂等去重和缓存回复（Issue #49）
 - [x] 实现单聊/群聊 Session ID 规则及跨群、跨租户隔离
 - [x] Telegram 文本回复分段、重复投递和论坛线程路由
 - [ ] 处理频率限制、异步回复、图片/文件、撤回和失败重试
@@ -208,7 +208,7 @@
 - [x] 实现 IM 异步重试队列、指数退避和死信处理（Issue #50）
 - [ ] 完成容量模型，并对并发 Session、Redis/SQL QPS 和 IM 峰值进行压测
 - [ ] 完成备份恢复、故障演练和租户级发布回滚流程
-- [x] 增加 Storage Adapter 契约测试和端到端消息链路测试（Issue #50）
+- [x] 增加 Storage Adapter 契约测试和端到端消息链路测试（Issue #49/#50）
 - [ ] 增加多租户越权、密钥泄漏、并发一致性和故障注入测试
 - [x] 在 CI 中运行 `go test -race ./...`（Issue #39）；Codecov project/patch 的 85% 目标仍待分支保护或 ruleset 设为合并门禁
 - [ ] 增加依赖漏洞、镜像和提交密钥扫描
