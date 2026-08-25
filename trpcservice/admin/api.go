@@ -666,32 +666,35 @@ func mapError(err error) (int, string) {
 	if err == nil {
 		return http.StatusInternalServerError, "internal_error"
 	}
-	if errors.Is(err, errInvalidRequest) {
+	switch {
+	case errors.Is(err, errInvalidRequest):
 		return http.StatusBadRequest, "invalid_request"
-	}
-	if errors.Is(err, ErrUnauthenticated) {
+	case errors.Is(err, ErrUnauthenticated):
 		return http.StatusUnauthorized, "unauthorized"
-	}
-	if errors.Is(err, ErrForbidden) {
+	case errors.Is(err, ErrForbidden):
 		return http.StatusForbidden, "forbidden"
-	}
-	if errors.Is(err, audit.ErrWriteFailed) {
+	case errors.Is(err, audit.ErrWriteFailed):
 		return http.StatusServiceUnavailable, "audit_unavailable"
-	}
-	if errors.Is(err, errNotFound) || errors.Is(err, tenant.ErrNotFound) || errors.Is(err, agent.ErrNotFound) || errors.Is(err, modelprofile.ErrNotFound) || errors.Is(err, backend.ErrNotFound) || errors.Is(err, channels.ErrNotFound) {
+	case matchesAny(err, errNotFound, tenant.ErrNotFound, agent.ErrNotFound, modelprofile.ErrNotFound, backend.ErrNotFound, channels.ErrNotFound):
 		return http.StatusNotFound, "not_found"
-	}
-	if errors.Is(err, tenant.ErrConflict) || errors.Is(err, agent.ErrConflict) || errors.Is(err, modelprofile.ErrConflict) || errors.Is(err, backend.ErrConflict) || errors.Is(err, channels.ErrConflict) || errors.Is(err, tenant.ErrDuplicateKey) || errors.Is(err, agent.ErrDuplicateKey) || errors.Is(err, modelprofile.ErrDuplicateKey) || errors.Is(err, backend.ErrDuplicateKey) || errors.Is(err, channels.ErrDuplicateKey) {
+	case matchesAny(err, tenant.ErrConflict, agent.ErrConflict, modelprofile.ErrConflict, backend.ErrConflict, channels.ErrConflict, tenant.ErrDuplicateKey, agent.ErrDuplicateKey, modelprofile.ErrDuplicateKey, backend.ErrDuplicateKey, channels.ErrDuplicateKey):
 		return http.StatusConflict, "conflict"
-	}
-	if errors.Is(err, postgres.ErrStorage) {
+	case errors.Is(err, postgres.ErrStorage):
 		return http.StatusServiceUnavailable, "storage_unavailable"
-	}
-	if errors.Is(err, tenant.ErrInvalid) || errors.Is(err, agent.ErrInvalid) || errors.Is(err, modelprofile.ErrInvalid) || errors.Is(err, backend.ErrInvalid) || errors.Is(err, channels.ErrInvalid) {
+	case matchesAny(err, tenant.ErrInvalid, agent.ErrInvalid, modelprofile.ErrInvalid, backend.ErrInvalid, channels.ErrInvalid):
 		return http.StatusBadRequest, "invalid_request"
-	}
-	if errors.Is(err, tenant.ErrInvalidTransition) || errors.Is(err, agent.ErrInvalidTransition) || errors.Is(err, modelprofile.ErrInvalidTransition) || errors.Is(err, backend.ErrInvalidTransition) || errors.Is(err, channels.ErrInvalidTransition) || errors.Is(err, tenant.ErrDisabled) || errors.Is(err, agent.ErrDisabled) || errors.Is(err, modelprofile.ErrDisabled) || errors.Is(err, backend.ErrDisabled) || errors.Is(err, channels.ErrDisabled) || errors.Is(err, agent.ErrImmutableRevision) {
+	case matchesAny(err, tenant.ErrInvalidTransition, agent.ErrInvalidTransition, modelprofile.ErrInvalidTransition, backend.ErrInvalidTransition, channels.ErrInvalidTransition, tenant.ErrDisabled, agent.ErrDisabled, modelprofile.ErrDisabled, backend.ErrDisabled, channels.ErrDisabled, agent.ErrImmutableRevision):
 		return http.StatusBadRequest, "invalid_request"
+	default:
+		return http.StatusInternalServerError, "internal_error"
 	}
-	return http.StatusInternalServerError, "internal_error"
+}
+
+func matchesAny(err error, candidates ...error) bool {
+	for _, candidate := range candidates {
+		if errors.Is(err, candidate) {
+			return true
+		}
+	}
+	return false
 }

@@ -383,7 +383,7 @@ func newTrustedTarget(providerAccountID string) (channels.RoutingTarget, error) 
 		return channels.RoutingTarget{}, errConfiguration
 	}
 	repository := channelsinmemory.NewRepository()
-	secret := "telegram-e2e-verifier-secret"
+	secret := "telegram-e2e-verifier-secret" // #nosec G101 -- deterministic verifier fixture, not a credential.
 	binding, _, err := repository.Create(context.Background(), channels.CreateInput{
 		TenantID: root.TenantID, BindingKey: "telegram-e2e", Channel: channels.ChannelTelegram,
 		ProviderAccountID: providerAccountID, PublicRouteKeyDigest: routeDigest, AppID: app.AppID,
