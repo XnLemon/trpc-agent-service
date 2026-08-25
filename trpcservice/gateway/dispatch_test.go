@@ -344,6 +344,50 @@ func TestDispatcherSelectCancellationBranchFinalizesCanceledOutcome(t *testing.T
 	}
 }
 
+func TestDispatcherSelectCancellationAuditFailure(t *testing.T) {
+	runnerStarted := make(chan struct{})
+	runnerEvents := make(chan *trpcevent.Event)
+	dispatcher, principal := newTestDispatcher(t, &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		close(runnerStarted)
+		return runnerEvents, nil
+	}})
+	dispatcher.auditWriter = &auditWriterFailure{failAfter: 1}
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := dispatcher.Dispatch(ctx, DispatchRequest{Principal: principal, RequestID: "select-cancel-audit-fail", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-runnerStarted
+	cancel()
+	events := collectDispatchEvents(stream)
+	close(runnerEvents)
+	if len(events) != 2 || events[0].Error != ErrAuditWriteFailed.Error() || events[1].Status != "error" {
+		t.Fatalf("events=%+v", events)
+	}
+}
+
+func TestDispatcherSelectCancellationHandoffFailure(t *testing.T) {
+	runnerStarted := make(chan struct{})
+	runnerEvents := make(chan *trpcevent.Event)
+	dispatcher, principal := newTestDispatcher(t, &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		close(runnerStarted)
+		return runnerEvents, nil
+	}})
+	dispatcher.handoffStore = &handoffStub{finalizeErr: errors.New("handoff unavailable")}
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := dispatcher.Dispatch(ctx, DispatchRequest{Principal: principal, RequestID: "select-cancel-handoff-fail", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-runnerStarted
+	cancel()
+	events := collectDispatchEvents(stream)
+	close(runnerEvents)
+	if len(events) != 2 || events[0].Error != ErrAuditWriteFailed.Error() || events[1].Status != "error" {
+		t.Fatalf("events=%+v", events)
+	}
+}
+
 func TestDispatcherTerminalErrorFinalizesFailureHandoff(t *testing.T) {
 	dispatcher, principal := newTestDispatcher(t, &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
 		events := make(chan *trpcevent.Event, 1)
