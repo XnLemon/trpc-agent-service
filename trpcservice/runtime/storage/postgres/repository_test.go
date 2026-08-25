@@ -563,6 +563,51 @@ func TestRuntimeStoreEnqueueRepliesRollsBackPartialMaterialization(t *testing.T)
 	}
 }
 
+func TestRuntimeStoreEnqueueRepliesCommitsCompleteBatch(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := runtimepostgres.New(db)
+	when := time.Now().UTC()
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-batch", "event", 0, 2, "first").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-batch", "event", 0, 2, "first", "pending", 0, int64(0), "", nil, "", "", when, when))
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-batch", "event", 1, 2, "second").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-batch", "event", 1, 2, "second", "pending", 0, int64(0), "", nil, "", "", when, when))
+	mock.ExpectCommit()
+	rows, err := store.EnqueueReplies(context.Background(), []runtimestorage.ReplyOutbox{
+		{TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event", SegmentIndex: 0, SegmentCount: 2, Payload: "first"},
+		{TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event", SegmentIndex: 1, SegmentCount: 2, Payload: "second"},
+	})
+	if err != nil || len(rows) != 2 || rows[1].SegmentIndex != 1 {
+		t.Fatalf("committed batch = %+v err=%v", rows, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeStoreEnqueueRepliesRejectsInvalidBatchBeforeDatabase(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := runtimepostgres.New(db)
+	invalid := [][]runtimestorage.ReplyOutbox{
+		{{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 2}},
+		{{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 1}, {TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 1}},
+	}
+	for i, values := range invalid {
+		if _, err := store.EnqueueReplies(context.Background(), values); !errors.Is(err, runtimestorage.ErrInvalid) {
+			t.Errorf("invalid batch %d = %v", i, err)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimeStoreTransitionMessageExpiredLeaseReconciliation(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

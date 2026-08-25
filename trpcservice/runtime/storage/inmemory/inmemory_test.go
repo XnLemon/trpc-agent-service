@@ -163,6 +163,34 @@ func TestStoreEnqueueReplyRequiresTenantEvent(t *testing.T) {
 	}
 }
 
+func TestStoreEnqueueRepliesValidatesAndCommitsAtomically(t *testing.T) {
+	store := inmemory.New()
+	seedEvent(t, store, "tenant-a", "session-batch", "event-batch")
+	ctx := context.Background()
+	if _, err := store.EnqueueReplies(ctx, nil); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("empty batch = %v", err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := store.EnqueueReplies(canceled, []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "reply", EventID: "event-batch", SegmentIndex: 0, SegmentCount: 1}}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled batch = %v", err)
+	}
+	valid := []runtimestorage.ReplyOutbox{
+		{TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event-batch", SegmentIndex: 0, SegmentCount: 2, Payload: "one"},
+		{TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event-batch", SegmentIndex: 1, SegmentCount: 2, Payload: "two"},
+	}
+	rows, err := store.EnqueueReplies(ctx, valid)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("valid batch = %d err=%v", len(rows), err)
+	}
+	if _, err := store.EnqueueReplies(ctx, []runtimestorage.ReplyOutbox{valid[0], {TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event-batch", SegmentIndex: 1, SegmentCount: 2, Payload: "changed"}}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("conflicting batch = %v", err)
+	}
+	if _, err := store.EnqueueReplies(ctx, []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "missing", EventID: "missing", SegmentIndex: 0, SegmentCount: 1}}); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing event batch = %v", err)
+	}
+}
+
 func TestStoreDeleteSessionValidationAndMissingBranches(t *testing.T) {
 	store := inmemory.New()
 	if err := store.DeleteSession(context.Background(), "", "session"); !errors.Is(err, runtimestorage.ErrInvalid) {

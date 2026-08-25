@@ -109,6 +109,26 @@ func TestRuntimeStartsAndStopsConfiguredOutboxWorker(t *testing.T) {
 	}
 }
 
+func TestNewRejectsAlreadyRunningOutboxWorker(t *testing.T) {
+	worker, err := outbox.New(outbox.Config{
+		Store: runtimestorageinmemory.New(), Provider: &bootstrapBlockingProvider{started: make(chan struct{}), canceled: make(chan struct{})},
+		TenantID: "tenant-a", Owner: "already-running", LeaseDuration: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Start(context.Background(), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = worker.Close() })
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	config.OutboxWorker = worker
+	if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("already-running worker error = %v", err)
+	}
+}
+
 func TestNewRejectsMissingExplicitDependency(t *testing.T) {
 	if _, err := New(context.Background(), Config{}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("missing dependency error = %v", err)
