@@ -36,3 +36,29 @@ func TestHandoffStoreScopeAndReserve(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestHandoffStoreFinalizeAndGet(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store, _ := NewHandoffStore(db, "t")
+	now := time.Now().UTC()
+	rows := sqlmock.NewRows([]string{"tenant_id", "handoff_id", "request_id", "trace_id", "event_id", "state", "result", "error_type", "latency_ms", "created_at", "updated_at"}).AddRow("t", "h", "r", "tr", "e", "finalized", "success", nil, 12, now, now)
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT tenant_id,handoff_id,request_id").WillReturnRows(rows)
+	mock.ExpectCommit()
+	got, err := store.Finalize(context.Background(), audit.ExecutionHandoff{TenantID: "t", HandoffID: "h", State: audit.HandoffFinalized, Result: audit.ResultSuccess})
+	if err != nil || got.State != audit.HandoffFinalized {
+		t.Fatalf("finalize=%+v err=%v", got, err)
+	}
+	getRows := sqlmock.NewRows([]string{"tenant_id", "handoff_id", "request_id", "trace_id", "event_id", "state", "result", "error_type", "latency_ms", "created_at", "updated_at"}).AddRow("t", "h", "r", "tr", "e", "finalized", "success", nil, 12, now, now)
+	mock.ExpectQuery("SELECT tenant_id,handoff_id,request_id").WillReturnRows(getRows)
+	if got, err := store.Get(context.Background(), "t", "h"); err != nil || got.State != audit.HandoffFinalized {
+		t.Fatalf("get=%+v err=%v", got, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
