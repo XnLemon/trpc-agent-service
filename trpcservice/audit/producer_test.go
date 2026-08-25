@@ -83,4 +83,11 @@ func TestRecorderConvenienceProducersAndNoop(t *testing.T) {
 	if err := (Recorder{}).Record(context.Background(), Event{}); err != nil {
 		t.Fatal(err)
 	}
+	if err := r.IMReconciled(context.Background(), "req", "trace", string(ErrorUnavailable)); err != nil {
+		t.Fatal(err)
+	}
+	var nilCtx context.Context
+	if err := r.Record(nilCtx, Event{EventType: EventContentRedacted}); !errors.Is(err, ErrWriteFailed) {
+		t.Fatalf("nil context err=%v", err)
+	}
 }

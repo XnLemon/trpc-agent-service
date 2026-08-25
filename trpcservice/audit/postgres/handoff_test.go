@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
@@ -87,5 +88,33 @@ func TestHandoffStoreValidationAndDatabaseErrors(t *testing.T) {
 	mock.ExpectBegin().WillReturnError(errors.New("begin"))
 	if _, err := store.Reserve(context.Background(), audit.ExecutionHandoff{TenantID: "t", HandoffID: "h", RequestID: "r", State: audit.HandoffPending}); err == nil {
 		t.Fatal("expected begin error")
+	}
+}
+
+func TestHandoffStoreRemainingErrorBranches(t *testing.T) {
+	if nullableTime(time.Time{}) != nil {
+		t.Fatal("zero time should be nil")
+	}
+	if nullableTime(time.Unix(1, 0)) == nil {
+		t.Fatal("non-zero time should be retained")
+	}
+	var nilStore *HandoffStore
+	if _, err := nilStore.Get(context.Background(), "t", "h"); !errors.Is(err, ErrStorage) {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store, _ := NewHandoffStore(db, "t")
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT tenant_id,handoff_id,request_id").WillReturnError(sql.ErrNoRows)
+	mock.ExpectRollback()
+	if _, err := store.Finalize(context.Background(), audit.ExecutionHandoff{TenantID: "t", HandoffID: "h", State: audit.HandoffFinalized, Result: audit.ResultSuccess}); err == nil {
+		t.Fatal("expected finalize query failure")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
