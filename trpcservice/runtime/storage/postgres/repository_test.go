@@ -539,6 +539,30 @@ func TestRuntimeStoreTransitionValidationAndLease(t *testing.T) {
 	}
 }
 
+func TestRuntimeStoreEnqueueRepliesRollsBackPartialMaterialization(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := runtimepostgres.New(db)
+	when := time.Now().UTC()
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-batch", "event", 0, 2, "first").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-batch", "event", 0, 2, "first", "pending", 0, int64(0), "", nil, "", "", when, when))
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-batch", "event", 1, 2, "second").WillReturnError(errors.New("second insert failed"))
+	mock.ExpectRollback()
+	_, err = store.EnqueueReplies(context.Background(), []runtimestorage.ReplyOutbox{
+		{TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event", SegmentIndex: 0, SegmentCount: 2, Payload: "first"},
+		{TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event", SegmentIndex: 1, SegmentCount: 2, Payload: "second"},
+	})
+	if !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("batch error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimeStoreTransitionMessageExpiredLeaseReconciliation(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

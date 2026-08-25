@@ -23,6 +23,11 @@ error. It receives a tenant-scoped RuntimeStore, a Provider, a context, and
 bounded retry/shutdown configuration. A provider may be Telegram, a test fake,
 or a future channel implementation.
 
+Reply materialization is an atomic batch operation. Every segment is validated
+against the same event/reply identity before any new row is committed. A failed
+batch leaves no newly deliverable prefix: PostgreSQL commits the batch in one
+transaction and the in-memory store validates then commits under one lock.
+
 ## Lifecycle
 
 Pending rows are eligible immediately; retryable rows are eligible when the
@@ -56,6 +61,14 @@ dead-letters, lease recovery, and delivery latency. Traces and logs carry only
 request_id, trace_id, component, operation, provider/channel, status, and
 stable error class. Tenant/session/user/message bodies, tokens, DSNs, and raw
 provider errors are redacted.
+
+Bootstrap does not choose a channel route from an inbound request. A production
+caller that has already constructed a trusted, tenant-scoped Provider constructs
+an `outbox.Worker`, passes it through `bootstrap.Config.OutboxWorker`, and may
+set `OutboxPollInterval`. Bootstrap starts that worker only after the complete
+runtime graph exists, and Runtime.Close cancels and joins it before closing the
+store or database. Leaving this dependency unset deliberately disables delivery
+instead of guessing a recipient.
 
 ## Issue Ledger
 

@@ -305,6 +305,56 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 	return cloneReply(result), nil
 }
 
+// EnqueueReplies commits an entire reply's segment set in one transaction.
+func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	if err := check(ctx); err != nil {
+		return nil, err
+	}
+	if len(values) == 0 {
+		return nil, runtimestorage.ErrInvalid
+	}
+	first := values[0]
+	seen := make(map[int]struct{}, len(values))
+	for _, value := range values {
+		if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || value.Status != "" && value.Status != runtimestorage.ReplyPending || value.TenantID != first.TenantID || value.ReplyID != first.ReplyID || value.EventID != first.EventID || value.SegmentCount != first.SegmentCount {
+			return nil, runtimestorage.ErrInvalid
+		}
+		if _, duplicate := seen[value.SegmentIndex]; duplicate {
+			return nil, runtimestorage.ErrInvalid
+		}
+		seen[value.SegmentIndex] = struct{}{}
+	}
+	if len(seen) != first.SegmentCount {
+		return nil, runtimestorage.ErrInvalid
+	}
+	for index := 0; index < first.SegmentCount; index++ {
+		if _, present := seen[index]; !present {
+			return nil, runtimestorage.ErrInvalid
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result := make([]runtimestorage.ReplyOutbox, 0, len(values))
+	for _, value := range values {
+		var row runtimestorage.ReplyOutbox
+		err = tx.QueryRowContext(ctx, "INSERT INTO public.reply_outbox (tenant_id,reply_id,event_id,segment_index,segment_count,payload,status) VALUES ($1,$2,$3,$4,$5,$6,'pending') ON CONFLICT (tenant_id,reply_id,segment_index) DO UPDATE SET updated_at=public.reply_outbox.updated_at WHERE public.reply_outbox.event_id=EXCLUDED.event_id AND public.reply_outbox.segment_count=EXCLUDED.segment_count AND public.reply_outbox.payload=EXCLUDED.payload RETURNING tenant_id,reply_id,event_id,segment_index,segment_count,payload,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at", value.TenantID, value.ReplyID, value.EventID, value.SegmentIndex, value.SegmentCount, value.Payload).Scan(replyArgs(&row)...)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, runtimestorage.ErrConflict
+			}
+			return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		}
+		result = append(result, cloneReply(row))
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	return result, nil
+}
+
 func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment int) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err

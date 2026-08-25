@@ -151,6 +151,14 @@ type RuntimeStore interface {
 	Close() error
 }
 
+// ReplyBatchEnqueuer is the atomic reply-materialization capability. A batch
+// either makes every segment durable or makes none of its new segments visible
+// to a delivery worker. It remains separate from RuntimeStore so existing
+// readers can keep a narrow dependency surface.
+type ReplyBatchEnqueuer interface {
+	EnqueueReplies(context.Context, []ReplyOutbox) ([]ReplyOutbox, error)
+}
+
 func ValidateTenant(tenantID string) error {
 	if tenantID == "" {
 		return ErrInvalid

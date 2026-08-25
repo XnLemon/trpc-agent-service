@@ -310,11 +310,16 @@ func TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle(t 
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("outbox rows = %+v / %v", rows, err)
 	}
-	if rows[0].Payload != "abc" || rows[1].Payload != "def" || rows[0].SegmentCount != 2 || rows[1].SegmentCount != 2 || rows[0].ReplyID != rows[1].ReplyID {
+	segments := make(map[int]runtimestorage.ReplyOutbox, len(rows))
+	for _, row := range rows {
+		segments[row.SegmentIndex] = row
+	}
+	first, second := segments[0], segments[1]
+	if first.Payload != "abc" || second.Payload != "def" || first.SegmentCount != 2 || second.SegmentCount != 2 || first.ReplyID != second.ReplyID {
 		t.Fatalf("materialized rows = %+v", rows)
 	}
-	message, err := store.GetMessage(context.Background(), principal.TenantID(), rows[0].EventID)
-	if err != nil || message.Status != runtimestorage.EventCompleted || message.ReplyID != rows[0].ReplyID || message.SegmentCount != 2 {
+	message, err := store.GetMessage(context.Background(), principal.TenantID(), first.EventID)
+	if err != nil || message.Status != runtimestorage.EventCompleted || message.ReplyID != first.ReplyID || message.SegmentCount != 2 {
 		t.Fatalf("materialized message = %+v / %v", message, err)
 	}
 	provider := &durableOutboxProvider{}

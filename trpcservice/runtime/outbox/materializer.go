@@ -51,11 +51,16 @@ func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) 
 	if len(segments) == 0 {
 		return 0, ErrInvalid
 	}
+	batchStore, ok := m.store.(runtimestorage.ReplyBatchEnqueuer)
+	if !ok {
+		return 0, errors.Join(ErrMaterialization, runtimestorage.ErrInvalid)
+	}
+	replies := make([]runtimestorage.ReplyOutbox, 0, len(segments))
 	for index, payload := range segments {
-		_, err := m.store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: input.TenantID, ReplyID: input.ReplyID, EventID: input.EventID, SegmentIndex: index, SegmentCount: len(segments), Payload: payload})
-		if err != nil {
-			return index, errors.Join(ErrMaterialization, err)
-		}
+		replies = append(replies, runtimestorage.ReplyOutbox{TenantID: input.TenantID, ReplyID: input.ReplyID, EventID: input.EventID, SegmentIndex: index, SegmentCount: len(segments), Payload: payload})
+	}
+	if _, err := batchStore.EnqueueReplies(ctx, replies); err != nil {
+		return 0, errors.Join(ErrMaterialization, err)
 	}
 	return len(segments), nil
 }

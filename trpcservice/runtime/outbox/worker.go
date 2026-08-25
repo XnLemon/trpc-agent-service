@@ -99,29 +99,59 @@ func New(config Config) (*Worker, error) {
 
 // Run polls until ctx is canceled. It owns no goroutine after returning.
 func (w *Worker) Run(ctx context.Context, pollInterval time.Duration) error {
-	if w == nil || ctx == nil {
-		return ErrInvalid
+	runCtx, err := w.beginRun(ctx)
+	if err != nil {
+		return err
 	}
-	if pollInterval <= 0 {
-		pollInterval = time.Second
+	return w.runLoop(runCtx, pollInterval)
+}
+
+// Start reserves the worker lifecycle before launching its polling goroutine.
+// It is intended for process owners that must ensure Close can join it.
+func (w *Worker) Start(ctx context.Context, pollInterval time.Duration) error {
+	runCtx, err := w.beginRun(ctx)
+	if err != nil {
+		return err
+	}
+	go func() { _ = w.runLoop(runCtx, pollInterval) }()
+	return nil
+}
+
+func (w *Worker) beginRun(ctx context.Context) (context.Context, error) {
+	if w == nil || ctx == nil {
+		return nil, ErrInvalid
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.runCancel != nil {
-		w.mu.Unlock()
-		return ErrAlreadyRunning
+		return nil, ErrAlreadyRunning
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	w.runCancel = cancel
 	w.runDone = make(chan struct{})
-	done := w.runDone
-	w.mu.Unlock()
+	return runCtx, nil
+}
+
+func (w *Worker) runLoop(runCtx context.Context, pollInterval time.Duration) error {
+	if pollInterval <= 0 {
+		pollInterval = time.Second
+	}
 	defer func() {
-		cancel()
 		w.mu.Lock()
+		cancel := w.runCancel
+		done := w.runDone
 		w.runCancel = nil
-		close(done)
 		w.runDone = nil
 		w.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		if done != nil {
+			close(done)
+		}
 	}()
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
