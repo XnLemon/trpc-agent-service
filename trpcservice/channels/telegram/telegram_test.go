@@ -444,6 +444,31 @@ func TestDispatchAndSendFailuresAreRedacted(t *testing.T) {
 	}
 }
 
+func TestAuditWriterRecordsTelegramIngressAndDelivery(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "audit-hooks", "12345")
+	writer := &telegramAuditWriter{}
+	dispatcher := &dispatchStub{events: []gateway.DispatchEvent{{Type: gateway.DispatchEventMessage, Text: "reply"}, {Type: gateway.DispatchEventDone, Done: true}}}
+	adapter, err := New(context.Background(), Config{BotToken: "12345:runtime-secret", Target: target, Dispatcher: dispatcher, Factory: &fakeFactory{client: &fakeBot{me: &models.User{ID: 12345, IsBot: true}}}, AuditWriter: writer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = adapter.Close() }()
+	if err := adapter.HandleUpdate(context.Background(), textUpdate(30, models.ChatTypePrivate, 100, 42, "input", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.HandleUpdate(context.Background(), textUpdate(30, models.ChatTypePrivate, 100, 42, "input", 0)); err != nil {
+		t.Fatalf("replay err=%v", err)
+	}
+	events := writer.events
+	seen := map[audit.EventType]bool{}
+	for _, event := range events {
+		seen[event.EventType] = true
+	}
+	if !seen[audit.EventIMIngressAccepted] || !seen[audit.EventIMDeliverySent] {
+		t.Fatalf("audit events=%v", events)
+	}
+}
+
 func TestRunCancellationAndCloseStopPolling(t *testing.T) {
 	target := newTrustedTarget(t, channels.ChannelTelegram, "lifecycle", "12345")
 	started := make(chan struct{})
