@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, codex/48-tenant-runtime-storage]
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
