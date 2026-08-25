@@ -194,8 +194,8 @@
 - [ ] 使用 Plugin / Guardrail / Callbacks 实现租户级治理链
 - [ ] 实现工具白名单、调用前鉴权、密钥注入和危险操作二次确认
 - [ ] 实现 IM 用户权限校验、敏感信息脱敏和租户级预算控制
-- [ ] 实现包含 README 指定字段的不可篡改审计日志
-- [x] 接入运行时 OpenTelemetry tracing、metrics 和结构化日志（Issue #45 阶段 A；业务审计和完整 IM/Storage 链路仍待完成）
+- [x] 实现包含 README 指定字段的不可篡改审计日志（Issue #54/#55）
+- [x] 接入运行时 OpenTelemetry tracing、metrics 和结构化日志（Issue #45 阶段 A；完整 IM 协议和生产告警仍待完成）
 - [ ] 串联 IM callback、Gateway、Runner、Model、Tool、Storage 和 IM reply 的 trace
 - [ ] 采集请求量、延迟、错误率、IM 成功率、token、成本和后端延迟指标
 - [ ] 提供租户级 dashboard、告警规则并控制指标 label 基数
@@ -226,12 +226,13 @@
 - [x] 完成 Issue #41 Bootstrap、readiness、Admin API 和重启恢复的文档先行契约
 - [x] 完成 Issue #45 运行时 observability、指标、脱敏日志和 OTLP 配置契约
 - [x] 完成 Issue #54 租户审计、用量成本、失败处理、保留与访问控制的文档先行契约
+- [x] 实现 Issue #54 租户审计、用量成本、失败处理、保留与访问控制（PR #55）
 
 > Issue #24 只完成架构、数据模型和运维文档；当前仓库另外交付了 Issue #28 的 Gateway/API、
 > Issue #31 的 Telegram long polling 文本 Adapter、Issue #37/#41 的 PostgreSQL 控制面与 Admin/
 > Bootstrap、Issue #45 的运行时 observability 阶段 A，以及 Issue #49/#50 的 Session/Event/
 > Reply Outbox 持久化和可靠投递。完整 WeCom/Telegram webhook、rich update、Memory/Knowledge/
-> Artifact 后端、迁移工具、业务审计和生产告警仍未实现。
+> Artifact 后端、迁移工具和生产告警仍未实现；业务审计与用量成本已由 Issue #54/PR #55 交付。
 
 ## 当前 PR 实现记录（不改变原验收要求）
 
@@ -249,9 +250,10 @@
   `getMe -> getUpdates -> sendMessage`；live workflow 只手动触发并使用受保护 Environment，
   不替代完整模型供应商或生产控制面 E2E。
 - Issue #37/#41 的 PostgreSQL 控制面、可重启 Bootstrap、readiness 和最小 Admin API 已合并；
-  控制面持久化不等同于 Memory/Knowledge/Artifact/Audit 的生产运行时存储。
+  控制面持久化不等同于 Memory/Knowledge/Artifact 的生产运行时存储；审计事实由 Issue #54/PR #55 单独持久化。
 - Issue #45 的运行时 observability 阶段 A 已合并，提供 no-op/OTLP provider、低基数指标、
-  trace context 和脱敏结构化日志；Issue #44 阶段 B 的 AuditEvent、usage/cost 和业务治理仍未实现。
+  trace context 和脱敏结构化日志；Issue #54/PR #55 已补齐 Stage B 的 AuditEvent、usage/cost、
+  审计持久化、执行/IM 生产者和失败处理。
 - Issue #52 的 examples/telegram-e2e 增加 Runner -> reply outbox -> Telegram Provider ->
   provider_message_id -> sent -> message_event=replied 的受保护 live E2E；它不替代无凭证的
   确定性单元测试，也不承诺外部 Telegram exactly-once 投递。
