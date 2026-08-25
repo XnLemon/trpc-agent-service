@@ -351,6 +351,30 @@ func TestDispatcherRunnerBoundaryAuditFailures(t *testing.T) {
 	}
 }
 
+func TestDispatcherAcquireFailureWritesTerminalAudit(t *testing.T) {
+	dispatcher, principal := newTestDispatcher(t, &testRunner{})
+	dispatcher.registry.factory = func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+		return nil, errors.New("factory provider detail")
+	}
+	writer := &auditWriterFailure{failAfter: 1}
+	dispatcher.auditWriter = writer
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "acquire-audit", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if stream != nil || !errors.Is(err, ErrAuditWriteFailed) {
+		t.Fatalf("stream=%v err=%v", stream, err)
+	}
+}
+
+func TestDispatcherRunnerRunFailureAuditWriteIsRedacted(t *testing.T) {
+	dispatcher, principal := newTestDispatcher(t, &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		return nil, errors.New("provider secret")
+	}})
+	dispatcher.auditWriter = &auditWriterFailure{failAfter: 1}
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "run-audit", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if stream != nil || !errors.Is(err, ErrAuditWriteFailed) {
+		t.Fatalf("stream=%v err=%v", stream, err)
+	}
+}
+
 func TestAuditHelpers(t *testing.T) {
 	if terminalAuditError(nil) != "" || terminalAuditError(context.Canceled) != string(audit.ErrorCanceled) || terminalAuditError(ErrExecution) != string(audit.ErrorUnavailable) {
 		t.Fatal("unexpected terminal audit error mapping")
