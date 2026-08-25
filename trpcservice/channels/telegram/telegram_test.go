@@ -22,11 +22,32 @@ import (
 	"github.com/go-telegram/bot/models"
 )
 
-type telegramAuditWriter struct{ events []audit.Event }
+type telegramAuditWriter struct {
+	events    []audit.Event
+	failAfter int
+}
 
 func (w *telegramAuditWriter) Append(_ context.Context, event audit.Event) (audit.AppendResult, error) {
+	if w.failAfter > 0 && len(w.events) >= w.failAfter {
+		return audit.AppendResult{}, errors.New("audit unavailable")
+	}
 	w.events = append(w.events, event)
 	return audit.AppendResult{Event: event}, nil
+}
+
+func TestAuditWriterFailureAfterDeliveryIsRedacted(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "audit-failure", "12345")
+	writer := &telegramAuditWriter{failAfter: 1}
+	dispatcher := &dispatchStub{events: []gateway.DispatchEvent{{Type: gateway.DispatchEventMessage, Text: "reply"}, {Type: gateway.DispatchEventDone, Done: true}}}
+	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
+	adapter, err := New(context.Background(), Config{BotToken: "12345:runtime-secret", Target: target, Dispatcher: dispatcher, Factory: &fakeFactory{client: client}, AuditWriter: writer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = adapter.Close() }()
+	if err := adapter.HandleUpdate(context.Background(), textUpdate(40, models.ChatTypePrivate, 100, 42, "input", 0)); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("err=%v", err)
+	}
 }
 
 func TestNewInjectsFactoryAndRejectsBotIdentityMismatch(t *testing.T) {
