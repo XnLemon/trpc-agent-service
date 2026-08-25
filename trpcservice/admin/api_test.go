@@ -10,9 +10,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -23,6 +25,26 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
 )
+
+type adminAuditWriter struct{ events []audit.Event }
+
+func (w *adminAuditWriter) Append(_ context.Context, event audit.Event) (audit.AppendResult, error) {
+	w.events = append(w.events, event)
+	return audit.AppendResult{Event: event}, nil
+}
+
+func TestRecordMutationWritesControlPlaneAudit(t *testing.T) {
+	w := &adminAuditWriter{}
+	h := &Handler{config: Config{AuditWriter: w}}
+	previous, next := int64(1), int64(2)
+	value := map[string]any{"event": channels.ChangeEvent{EventType: channels.EventConfigurationUpdated, TenantID: "tenant-a", ActorType: "admin", ActorID: "actor", Reason: "change", CorrelationID: "corr", PreviousVersion: previous, NextVersion: next, OccurredAt: time.Now().UTC()}}
+	if err := h.recordMutation(context.Background(), Principal{}, "request", value); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.events) != 1 || w.events[0].EventType != audit.EventControlPlaneChanged || w.events[0].TenantID != "tenant-a" {
+		t.Fatalf("events = %#v", w.events)
+	}
+}
 
 func testHandler(t *testing.T) (*Handler, *StaticAuthenticator) {
 	t.Helper()

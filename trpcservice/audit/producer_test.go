@@ -45,3 +45,30 @@ func TestRecorderPropagatesWriterFailure(t *testing.T) {
 		t.Fatalf("writer failure = %v", err)
 	}
 }
+
+func TestRecorderConvenienceProducersAndNoop(t *testing.T) {
+	w := &producerWriter{}
+	r := Recorder{Writer: w, TenantID: "tenant-a"}
+	previous, next := int64(1), int64(2)
+	if err := r.ControlPlane(context.Background(), "", "tenant-a", "admin", "actor", "changed", "corr", previous, next); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ToolDecision(context.Background(), EventToolDenied, "req", "trace", "tool", DecisionDeny, string(ErrorTool)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.BudgetRejected(context.Background(), "req", "trace"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Redacted(context.Background(), "req", "trace"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.IM(context.Background(), EventIMDeliverySent, "req", "trace", "user", "session", DecisionAccepted, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.events) != 5 {
+		t.Fatalf("events = %d", len(w.events))
+	}
+	if err := (Recorder{}).Record(context.Background(), Event{}); err != nil {
+		t.Fatal(err)
+	}
+}
