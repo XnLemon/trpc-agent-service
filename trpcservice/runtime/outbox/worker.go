@@ -16,17 +16,24 @@ import (
 )
 
 var (
-	ErrInvalid        = errors.New("invalid outbox worker")
-	ErrProvider       = errors.New("provider delivery failed")
+	// ErrInvalid reports an invalid worker configuration or request.
+	ErrInvalid = errors.New("invalid outbox worker")
+	// ErrProvider reports a provider delivery failure.
+	ErrProvider = errors.New("provider delivery failed")
+	// ErrAlreadyRunning reports an attempt to start a second worker loop.
 	ErrAlreadyRunning = errors.New("outbox worker is already running")
 )
 
+// DeliveryStatus describes the provider's reconciliation result.
 type DeliveryStatus string
 
 const (
+	// DeliveryAccepted confirms that the provider accepted the reply.
 	DeliveryAccepted DeliveryStatus = "accepted"
+	// DeliveryRejected confirms that the provider rejected the reply.
 	DeliveryRejected DeliveryStatus = "rejected"
-	DeliveryUnknown  DeliveryStatus = "unknown"
+	// DeliveryUnknown means the provider could not confirm delivery.
+	DeliveryUnknown DeliveryStatus = "unknown"
 )
 
 // Provider is intentionally protocol-neutral. Implementations must use the
@@ -36,6 +43,7 @@ type Provider interface {
 	Reconcile(context.Context, runtimestorage.ReplyOutbox) (DeliveryStatus, string, error)
 }
 
+// DeliveryError classifies a provider delivery failure for retry decisions.
 type DeliveryError struct {
 	Class     string
 	Retryable bool
@@ -43,6 +51,7 @@ type DeliveryError struct {
 
 func (e *DeliveryError) Error() string { return ErrProvider.Error() }
 
+// Worker delivers durable reply segments with lease fencing.
 type Worker struct {
 	store         runtimestorage.RuntimeStore
 	provider      Provider
@@ -61,6 +70,7 @@ type Worker struct {
 	runDone       chan struct{}
 }
 
+// Config controls a durable reply worker.
 type Config struct {
 	Store         runtimestorage.RuntimeStore
 	Provider      Provider
@@ -76,6 +86,7 @@ type Config struct {
 	AuditWriter audit.Writer
 }
 
+// New creates a reply worker after validating delivery and lease settings.
 func New(config Config) (*Worker, error) {
 	if config.Store == nil || config.Provider == nil || runtimestorage.ValidateTenant(config.TenantID) != nil || config.Owner == "" || config.LeaseDuration <= 0 {
 		return nil, ErrInvalid

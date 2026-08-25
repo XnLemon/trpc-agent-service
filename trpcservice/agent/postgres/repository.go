@@ -23,6 +23,7 @@ var _ agent.Repository = (*AgentRepository)(nil)
 // NewRepository creates an Agent App repository over a PostgreSQL pool.
 func NewRepository(db *sql.DB) *AgentRepository { return &AgentRepository{db: db} }
 
+// Create persists a new agent application.
 func (r *AgentRepository) Create(ctx context.Context, input agent.CreateInput) (*agent.App, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -56,6 +57,7 @@ func (r *AgentRepository) Create(ctx context.Context, input agent.CreateInput) (
 	return stored, nil
 }
 
+// Get loads an agent application within a tenant.
 func (r *AgentRepository) Get(ctx context.Context, tenantID, appID string) (*agent.App, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -73,6 +75,7 @@ func (r *AgentRepository) Get(ctx context.Context, tenantID, appID string) (*age
 	return value, nil
 }
 
+// UpdateMetadata applies an expected-version metadata update.
 func (r *AgentRepository) UpdateMetadata(ctx context.Context, input agent.UpdateMetadataInput) (*agent.App, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -120,6 +123,7 @@ func (r *AgentRepository) UpdateMetadata(ctx context.Context, input agent.Update
 	return stored, nil
 }
 
+// CreateDraft persists a draft revision.
 func (r *AgentRepository) CreateDraft(ctx context.Context, input agent.CreateDraftInput) (*agent.Revision, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -178,6 +182,7 @@ func (r *AgentRepository) CreateDraft(ctx context.Context, input agent.CreateDra
 	return stored, nil
 }
 
+// UpdateDraft applies an expected-version draft update.
 func (r *AgentRepository) UpdateDraft(ctx context.Context, input agent.UpdateDraftInput) (*agent.Revision, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -245,6 +250,7 @@ func (r *AgentRepository) UpdateDraft(ctx context.Context, input agent.UpdateDra
 	return stored, nil
 }
 
+// GetRevision loads a specific application revision.
 func (r *AgentRepository) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (*agent.Revision, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -262,6 +268,7 @@ func (r *AgentRepository) GetRevision(ctx context.Context, tenantID, appID strin
 	return value, nil
 }
 
+// Publish makes a draft revision active and returns its change event.
 func (r *AgentRepository) Publish(ctx context.Context, input agent.PublishInput) (*agent.App, *agent.Revision, agent.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, agent.ChangeEvent{}, err
@@ -356,6 +363,7 @@ func (r *AgentRepository) Publish(ctx context.Context, input agent.PublishInput)
 	return storedApp, storedRevision, committed, nil
 }
 
+// Rollback restores an earlier published revision.
 func (r *AgentRepository) Rollback(ctx context.Context, input agent.RollbackInput) (*agent.App, agent.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, agent.ChangeEvent{}, err
@@ -431,6 +439,7 @@ func (r *AgentRepository) Rollback(ctx context.Context, input agent.RollbackInpu
 	return stored, committed, nil
 }
 
+// TransitionStatus changes an application status with optimistic concurrency.
 func (r *AgentRepository) TransitionStatus(ctx context.Context, input agent.TransitionStatusInput) (*agent.App, agent.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, agent.ChangeEvent{}, err

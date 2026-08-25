@@ -45,6 +45,7 @@ func NewRepository() *InMemoryRepository { return NewInMemoryRepository() }
 
 var _ agent.Repository = (*InMemoryRepository)(nil)
 
+// Create stores a new agent application in memory.
 func (r *InMemoryRepository) Create(ctx context.Context, input agent.CreateInput) (*agent.App, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
@@ -75,6 +76,7 @@ func (r *InMemoryRepository) Create(ctx context.Context, input agent.CreateInput
 	return cloneApp(app), nil
 }
 
+// Get loads an agent application within the requested tenant.
 func (r *InMemoryRepository) Get(ctx context.Context, tenantID, appID string) (*agent.App, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
@@ -93,6 +95,7 @@ func (r *InMemoryRepository) Get(ctx context.Context, tenantID, appID string) (*
 	return cloneApp(app), nil
 }
 
+// UpdateMetadata applies an expected-version application metadata update.
 func (r *InMemoryRepository) UpdateMetadata(ctx context.Context, input agent.UpdateMetadataInput) (*agent.App, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
@@ -120,6 +123,7 @@ func (r *InMemoryRepository) UpdateMetadata(ctx context.Context, input agent.Upd
 	return cloneApp(&updated), nil
 }
 
+// CreateDraft stores a draft revision for an agent application.
 func (r *InMemoryRepository) CreateDraft(ctx context.Context, input agent.CreateDraftInput) (*agent.Revision, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
@@ -152,6 +156,7 @@ func (r *InMemoryRepository) CreateDraft(ctx context.Context, input agent.Create
 	return cloneRevision(draft), nil
 }
 
+// UpdateDraft applies an expected-version draft update in memory.
 func (r *InMemoryRepository) UpdateDraft(ctx context.Context, input agent.UpdateDraftInput) (*agent.Revision, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
@@ -197,6 +202,7 @@ func (r *InMemoryRepository) UpdateDraft(ctx context.Context, input agent.Update
 	return cloneRevision(candidate), nil
 }
 
+// GetRevision loads a specific in-memory application revision.
 func (r *InMemoryRepository) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (*agent.Revision, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
@@ -215,6 +221,7 @@ func (r *InMemoryRepository) GetRevision(ctx context.Context, tenantID, appID st
 	return cloneRevision(value), nil
 }
 
+// Publish makes a draft revision active in memory.
 func (r *InMemoryRepository) Publish(ctx context.Context, input agent.PublishInput) (*agent.App, *agent.Revision, agent.ChangeEvent, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, nil, agent.ChangeEvent{}, err
@@ -273,6 +280,7 @@ func (r *InMemoryRepository) Publish(ctx context.Context, input agent.PublishInp
 	return cloneApp(&updated), cloneRevision(&published), event.Clone(), nil
 }
 
+// Rollback restores an earlier published revision in memory.
 func (r *InMemoryRepository) Rollback(ctx context.Context, input agent.RollbackInput) (*agent.App, agent.ChangeEvent, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, agent.ChangeEvent{}, err
@@ -318,6 +326,7 @@ func (r *InMemoryRepository) Rollback(ctx context.Context, input agent.RollbackI
 	return cloneApp(&updated), event.Clone(), nil
 }
 
+// TransitionStatus changes an application status with optimistic concurrency.
 func (r *InMemoryRepository) TransitionStatus(ctx context.Context, input agent.TransitionStatusInput) (*agent.App, agent.ChangeEvent, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, agent.ChangeEvent{}, err

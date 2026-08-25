@@ -308,7 +308,7 @@ func (graph *Runtime) Close() error {
 	return graph.closeErr
 }
 
-// Handler returns the real HTTP handler assembled by New.
+// HandlerValue returns the real HTTP handler assembled by New.
 func (graph *Runtime) HandlerValue() *gateway.HTTPHandler {
 	if graph == nil {
 		return nil

@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 )
 
+// Config supplies the repositories and authentication policy for an admin handler.
 type Config struct {
 	Tenants        tenant.Repository
 	Apps           agent.Repository
@@ -37,6 +38,7 @@ type Config struct {
 	AuditWriter audit.Writer
 }
 
+// Handler serves the tenant-scoped control-plane HTTP API.
 type Handler struct {
 	config        Config
 	firstTenantMu sync.Mutex
@@ -50,6 +52,7 @@ type firstTenantCreator interface {
 	CreateFirst(context.Context, tenant.CreateInput) (*tenant.Tenant, bool, error)
 }
 
+// NewHandler validates dependencies and creates an admin HTTP handler.
 func NewHandler(config Config) (*Handler, error) {
 	if config.Tenants == nil || config.Apps == nil || config.Models == nil || config.Backends == nil || config.Bindings == nil || config.Authenticator == nil {
 		return nil, errors.New("invalid admin handler configuration")

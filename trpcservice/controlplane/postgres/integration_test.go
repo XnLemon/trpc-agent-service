@@ -556,7 +556,7 @@ func runRepositoryMigrations(ctx context.Context, dsn string) error {
 	}
 	migrationDir := filepath.Join(filepath.Dir(sourceFile), "..", "..", "..", "migrations")
 	for _, name := range []string{"0001_control_plane.up.sql", "0002_control_plane_repository_functions.up.sql"} {
-		contents, err := os.ReadFile(filepath.Join(migrationDir, name))
+		contents, err := os.ReadFile(filepath.Join(migrationDir, name)) // #nosec G304 -- names are fixed migration files under the repository root.
 		if err != nil {
 			return err
 		}

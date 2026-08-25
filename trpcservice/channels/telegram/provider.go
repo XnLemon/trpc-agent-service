@@ -23,6 +23,7 @@ type Provider struct {
 	receipts map[string]string
 }
 
+// NewProvider creates a Telegram reply provider for a chat and optional thread.
 func NewProvider(client BotClient, chatID int64, threadID int) (*Provider, error) {
 	if client == nil || chatID == 0 || threadID < 0 {
 		return nil, outbox.ErrInvalid
@@ -30,6 +31,7 @@ func NewProvider(client BotClient, chatID int64, threadID int) (*Provider, error
 	return &Provider{client: client, chatID: chatID, threadID: threadID, receipts: map[string]string{}}, nil
 }
 
+// Deliver sends one durable reply segment and returns the provider message ID.
 func (p *Provider) Deliver(ctx context.Context, value runtimestorage.ReplyOutbox) (string, error) {
 	if p == nil || p.client == nil || ctx == nil {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
@@ -58,6 +60,7 @@ func (p *Provider) Deliver(ctx context.Context, value runtimestorage.ReplyOutbox
 	return receipt, nil
 }
 
+// Reconcile checks whether a previously attempted segment can be confirmed.
 func (p *Provider) Reconcile(_ context.Context, value runtimestorage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
 	if p == nil {
 		return outbox.DeliveryUnknown, "", nil

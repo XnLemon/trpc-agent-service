@@ -24,9 +24,12 @@ const (
 type IdempotencyState string
 
 const (
-	IdempotencyPending   IdempotencyState = "pending"
+	// IdempotencyPending marks a request whose execution is still in progress.
+	IdempotencyPending IdempotencyState = "pending"
+	// IdempotencyCompleted marks a request with a stored successful response.
 	IdempotencyCompleted IdempotencyState = "completed"
-	IdempotencyFailed    IdempotencyState = "failed"
+	// IdempotencyFailed marks a request whose execution failed.
+	IdempotencyFailed IdempotencyState = "failed"
 )
 
 // IdempotencyConfig bounds the process-local execution de-duplication store.

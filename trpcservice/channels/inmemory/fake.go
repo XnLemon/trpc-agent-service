@@ -9,25 +9,33 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 )
 
+// FakeResolverOptions configures the offline fake's verification behavior.
 // These aliases keep the offline fake's existing package path while the
 // proof-bearing implementation remains inside channels, where it can mint a
 // VerifiedBinding only after successful verification.
 type FakeResolverOptions = channels.FakeResolverOptions
+
+// FakeCandidateResolver resolves signed offline channel candidates.
 type FakeCandidateResolver = channels.FakeCandidateResolver
 
 const (
+	// DefaultFakeMaxClockSkew is the default accepted timestamp skew.
 	DefaultFakeMaxClockSkew = channels.DefaultFakeMaxClockSkew
-	DefaultFakeMaxHandles   = channels.DefaultFakeMaxHandles
+	// DefaultFakeMaxHandles bounds candidate handles retained by the fake.
+	DefaultFakeMaxHandles = channels.DefaultFakeMaxHandles
 )
 
+// NewFakeCandidateResolver creates an offline candidate resolver.
 func NewFakeCandidateResolver(repo *InMemoryRepository, secrets map[channels.SecretScope]string, options ...FakeResolverOptions) *FakeCandidateResolver {
 	return channels.NewFakeCandidateResolver(repo, secrets, options...)
 }
 
+// NewFakeResolver is an alias for NewFakeCandidateResolver.
 func NewFakeResolver(repo *InMemoryRepository, secrets map[channels.SecretScope]string, options ...FakeResolverOptions) *FakeCandidateResolver {
 	return NewFakeCandidateResolver(repo, secrets, options...)
 }
 
+// SignFakeRequest signs an offline verification request with secret.
 func SignFakeRequest(secret string, request channels.VerificationRequest) string {
 	return channels.SignFakeRequest(secret, request)
 }

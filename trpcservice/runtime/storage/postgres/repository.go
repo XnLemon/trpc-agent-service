@@ -12,10 +12,13 @@ import (
 	pgstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
 
+// Store persists tenant-scoped runtime state in PostgreSQL.
 type Store struct{ db *sql.DB }
 
+// New creates a PostgreSQL runtime store over db.
 func New(db *sql.DB) *Store { return &Store{db: db} }
 
+// GetSession loads a tenant-scoped session.
 func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (runtimestorage.Session, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.Session{}, err
@@ -35,6 +38,7 @@ func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (run
 	return cloneSession(value), nil
 }
 
+// CreateSession persists a new tenant-scoped session.
 func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (runtimestorage.Session, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.Session{}, err
@@ -61,6 +65,7 @@ func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, s
 	return cloneSession(value), nil
 }
 
+// UpdateSessionState applies an expected-version session state update.
 func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (runtimestorage.Session, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.Session{}, err
@@ -93,6 +98,7 @@ func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID stri
 	return cloneSession(value), nil
 }
 
+// DeleteSession removes a tenant-scoped session.
 func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) error {
 	if err := check(ctx); err != nil {
 		return err
@@ -114,6 +120,7 @@ func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) e
 	return nil
 }
 
+// RecordMessage inserts or returns an idempotent inbound message event.
 func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageEventInput) (runtimestorage.MessageEvent, bool, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.MessageEvent{}, false, err
@@ -164,6 +171,7 @@ func (s *Store) lookupMessageByExternal(ctx context.Context, tenantID, bindingID
 	return cloneEvent(value), nil
 }
 
+// GetMessage loads a tenant-scoped inbound message event.
 func (s *Store) GetMessage(ctx context.Context, tenantID, eventID string) (runtimestorage.MessageEvent, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.MessageEvent{}, err
@@ -179,6 +187,7 @@ func (s *Store) GetMessage(ctx context.Context, tenantID, eventID string) (runti
 	return cloneEvent(value), nil
 }
 
+// TransitionMessage applies a fenced message lifecycle transition.
 func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage.MessageTransition) (runtimestorage.MessageEvent, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.MessageEvent{}, err
@@ -231,6 +240,7 @@ func (s *Store) transitionMessageWithReply(ctx context.Context, transition runti
 	return runtimestorage.MessageEvent{}, runtimestorage.ErrConflict
 }
 
+// AppendEventPayload stores an immutable session event payload.
 func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.EventPayload) (runtimestorage.EventPayload, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.EventPayload{}, err
@@ -249,6 +259,7 @@ func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.E
 	return runtimestorage.EventPayload{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 }
 
+// ListEventPayloads returns ordered event history for a session.
 func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]runtimestorage.EventPayload, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
@@ -281,6 +292,7 @@ func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID strin
 	return result, nil
 }
 
+// EnqueueReply stores one durable reply segment idempotently.
 func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutbox) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
@@ -355,6 +367,7 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 	return result, nil
 }
 
+// GetReply loads one durable reply segment.
 func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment int) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
@@ -370,6 +383,7 @@ func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment 
 	return cloneReply(value), nil
 }
 
+// ListReplyCandidates returns reply segments eligible for delivery.
 func (s *Store) ListReplyCandidates(ctx context.Context, tenantID string) ([]runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
@@ -396,6 +410,7 @@ func (s *Store) ListReplyCandidates(ctx context.Context, tenantID string) ([]run
 	return result, nil
 }
 
+// ClaimReply leases one reply segment to a delivery worker.
 func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segment int, owner string, leaseDuration time.Duration) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
@@ -421,6 +436,7 @@ func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segmen
 	return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
 }
 
+// TransitionReply applies a fenced reply delivery transition.
 func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.ReplyTransition) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
@@ -452,6 +468,7 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 	return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
 }
 
+// Close releases store resources; the borrowed database remains caller-owned.
 func (s *Store) Close() error { return nil }
 func check(ctx context.Context) error {
 	if ctx == nil {

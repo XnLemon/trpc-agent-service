@@ -8,8 +8,10 @@ import (
 )
 
 var (
+	// ErrUnauthenticated reports a missing or invalid admin credential.
 	ErrUnauthenticated = errors.New("admin authentication required")
-	ErrForbidden       = errors.New("admin principal is outside tenant scope")
+	// ErrForbidden reports a principal outside the requested tenant scope.
+	ErrForbidden = errors.New("admin principal is outside tenant scope")
 )
 
 // Principal is the proof-bearing identity for the control-plane API. A global
@@ -20,6 +22,7 @@ type Principal struct {
 	Global       bool
 }
 
+// Allows reports whether the principal may access the tenant operation.
 func (p Principal) Allows(tenantID string, creating bool) bool {
 	// A global scope is intentionally limited to the controlled first-tenant
 	// creation boundary. It never becomes an implicit wildcard for reads or
@@ -45,6 +48,7 @@ type StaticAuthenticator struct {
 	principal Principal
 }
 
+// NewStaticAuthenticator creates a bearer-token authenticator with fixed scopes.
 func NewStaticAuthenticator(token string, scopes []string) (*StaticAuthenticator, error) {
 	token = strings.TrimSpace(token)
 	if token == "" || strings.ContainsAny(token, "\r\n") {
@@ -67,6 +71,7 @@ func NewStaticAuthenticator(token string, scopes []string) (*StaticAuthenticator
 	return &StaticAuthenticator{token: token, principal: principal}, nil
 }
 
+// Authenticate validates the request bearer token and returns its principal.
 func (a *StaticAuthenticator) Authenticate(ctx context.Context, request *http.Request) (Principal, error) {
 	if a == nil || request == nil || ctx == nil {
 		return Principal{}, ErrUnauthenticated

@@ -14,10 +14,81 @@ linters:
     revive:
       rules:
         - name: package-comments
+        - name: exported
+          arguments:
+            - disable-stuttering-check
   exclusions:
     rules:
-      # Incremental baseline for functions that predate this lint policy.
-      - path: ^(?:examples/telegram-e2e/main\.go|trpcservice/(?:admin/api|agent/(?:app|revision)|agent/postgres/repository|audit/audit|backend/backend|bootstrap/bootstrap|channels/(?:channels|fake)|channels/telegram/telegram|gateway/(?:dispatch|registry|resolver)|model/model|runtime/outbox/worker|runtime/storage/inmemory/inmemory|runtime/storage/postgres/repository|tenant/tenant)\.go)$
+      # Function-scoped complexity baseline; remove entries as each function is split.
+      - path: ^examples/telegram-e2e/main\.go$
+        text: 'cyclomatic complexity .* of func `runAutomatedSender`'
+        linters: [gocyclo]
+      - path: ^trpcservice/admin/api\.go$
+        text: 'cyclomatic complexity .* of func `mapError`'
+        linters: [gocyclo]
+      - path: ^trpcservice/agent/app\.go$
+        text: 'func .*Validate'
+        linters: [gocyclo]
+      - path: ^trpcservice/agent/postgres/repository\.go$
+        text: 'func .*Publish'
+        linters: [gocyclo]
+      - path: ^trpcservice/agent/revision\.go$
+        text: 'func .*Validate'
+        linters: [gocyclo]
+      - path: ^trpcservice/backend/backend\.go$
+        text: 'cyclomatic complexity .* of func `(?:compileProviderSpec|compileOptionSpec|normalizeEndpoint|normalizeEndpointAuthority)`'
+        linters: [gocyclo]
+      - path: ^trpcservice/bootstrap/bootstrap\.go$
+        text: 'cyclomatic complexity .* of func `New`'
+        linters: [gocyclo]
+      - path: ^trpcservice/channels/channels\.go$
+        text: 'func .*Validate'
+        linters: [gocyclo]
+      - path: ^trpcservice/channels/fake\.go$
+        text: 'func .*Verify'
+        linters: [gocyclo]
+      - path: ^trpcservice/channels/telegram/telegram\.go$
+        text: 'func .*HandleUpdate'
+        linters: [gocyclo]
+      - path: ^trpcservice/channels/telegram/telegram\.go$
+        text: 'cyclomatic complexity .* of func `New`'
+        linters: [gocyclo]
+      - path: ^trpcservice/channels/telegram/telegram\.go$
+        text: 'cyclomatic complexity .* of func `hasUnsupportedMessageMedia`'
+        linters: [gocyclo]
+      - path: ^trpcservice/channels/telegram/telegram\.go$
+        text: 'cyclomatic complexity .* of func `hasUnsupportedMessageChatEvents`'
+        linters: [gocyclo]
+      - path: ^trpcservice/channels/telegram/telegram\.go$
+        text: 'cyclomatic complexity .* of func `hasUnsupportedUpdate`'
+        linters: [gocyclo]
+      - path: ^trpcservice/gateway/dispatch\.go$
+        text: 'func .*claimInbound'
+        linters: [gocyclo]
+      - path: ^trpcservice/gateway/registry\.go$
+        text: 'func .*Acquire'
+        linters: [gocyclo]
+      - path: ^trpcservice/gateway/resolver\.go$
+        text: 'func .*Resolve'
+        linters: [gocyclo]
+      - path: ^trpcservice/model/model\.go$
+        text: 'cyclomatic complexity .* of func `(?:compileProviderSpec|compileOptionSpec|normalizeEndpoint)`'
+        linters: [gocyclo]
+      - path: ^trpcservice/runtime/outbox/worker\.go$
+        text: 'func .*RunOnce'
+        linters: [gocyclo]
+      - path: ^trpcservice/runtime/storage/inmemory/inmemory\.go$
+        text: 'func .*TransitionMessage|func .*EnqueueReplies'
+        linters: [gocyclo]
+      - path: ^trpcservice/runtime/storage/postgres/repository\.go$
+        text: 'func .*EnqueueReplies'
+        linters: [gocyclo]
+      - path: ^trpcservice/tenant/tenant\.go$
+        text: 'cyclomatic complexity .* of func `validateConfiguration`'
+        linters: [gocyclo]
+      # Test scenarios intentionally exercise many branches in one contract.
+      # TODO(#57): split these scenarios as the production baseline is reduced.
+      - path: .*_test\.go$
         linters:
           - gocyclo
       # These constants are identifiers/default test secrets, not credentials.
@@ -27,7 +98,6 @@ linters:
     paths:
       - .*\.pb\.go$
       - .*_mock\.go$
-      - .*_test\.go$
 
 formatters:
   enable:
@@ -37,4 +107,3 @@ formatters:
     paths:
       - .*\.pb\.go$
       - .*_mock\.go$
-      - .*_test\.go$

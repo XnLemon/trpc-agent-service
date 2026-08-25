@@ -65,7 +65,7 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 		"0006_audit_usage.up.sql",
 	} {
 		path := filepath.Join(migrationDir, name)
-		contents, err := os.ReadFile(path)
+		contents, err := os.ReadFile(path) // #nosec G304 -- names are fixed migration files under the repository root.
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}

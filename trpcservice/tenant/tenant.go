@@ -15,26 +15,38 @@ import (
 type Status string
 
 const (
-	StatusActive    Status = "active"
+	// StatusActive permits normal tenant operations.
+	StatusActive Status = "active"
+	// StatusSuspended pauses normal tenant operations.
 	StatusSuspended Status = "suspended"
-	StatusDisabled  Status = "disabled"
+	// StatusDisabled prevents all tenant operations.
+	StatusDisabled Status = "disabled"
 )
 
 // LogMaskingLevel controls the default masking policy for tenant telemetry.
 type LogMaskingLevel string
 
 const (
-	MaskingNone   LogMaskingLevel = "none"
-	MaskingBasic  LogMaskingLevel = "basic"
+	// MaskingNone disables value masking for approved telemetry fields.
+	MaskingNone LogMaskingLevel = "none"
+	// MaskingBasic applies the standard telemetry redaction policy.
+	MaskingBasic LogMaskingLevel = "basic"
+	// MaskingStrict applies the strongest telemetry redaction policy.
 	MaskingStrict LogMaskingLevel = "strict"
 )
 
 var (
-	ErrInvalid           = errors.New("invalid tenant")
-	ErrNotFound          = errors.New("tenant not found")
-	ErrConflict          = errors.New("tenant version conflict")
-	ErrDuplicateKey      = errors.New("tenant key already exists")
-	ErrDisabled          = errors.New("tenant is disabled")
+	// ErrInvalid reports invalid tenant input.
+	ErrInvalid = errors.New("invalid tenant")
+	// ErrNotFound reports a missing tenant.
+	ErrNotFound = errors.New("tenant not found")
+	// ErrConflict reports an optimistic-concurrency tenant update conflict.
+	ErrConflict = errors.New("tenant version conflict")
+	// ErrDuplicateKey reports a tenant key collision.
+	ErrDuplicateKey = errors.New("tenant key already exists")
+	// ErrDisabled reports an operation against a disabled tenant.
+	ErrDisabled = errors.New("tenant is disabled")
+	// ErrInvalidTransition reports a disallowed tenant lifecycle change.
 	ErrInvalidTransition = errors.New("invalid tenant status transition")
 )
 

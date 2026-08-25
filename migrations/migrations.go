@@ -1,3 +1,4 @@
+// Package migrations embeds and applies the service database migrations.
 package migrations
 
 import (
@@ -21,8 +22,10 @@ import (
 var Files embed.FS
 
 var (
+	// ErrInvalidHistory reports a migration history that cannot be trusted.
 	ErrInvalidHistory = errors.New("invalid migration history")
-	ErrMigration      = errors.New("migration failed")
+	// ErrMigration reports failure while applying a migration.
+	ErrMigration = errors.New("migration failed")
 )
 
 const lockKey = "trpc-agent-service/control-plane-migrations"

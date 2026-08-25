@@ -43,11 +43,16 @@ const (
 type Capability string
 
 const (
-	CapabilitySession   Capability = "session"
-	CapabilityMemory    Capability = "memory"
+	// CapabilitySession permits session-aware backend execution.
+	CapabilitySession Capability = "session"
+	// CapabilityMemory permits memory-aware backend execution.
+	CapabilityMemory Capability = "memory"
+	// CapabilityKnowledge permits knowledge-aware backend execution.
 	CapabilityKnowledge Capability = "knowledge"
-	CapabilityArtifact  Capability = "artifact"
-	CapabilityAudit     Capability = "audit"
+	// CapabilityArtifact permits artifact-aware backend execution.
+	CapabilityArtifact Capability = "artifact"
+	// CapabilityAudit permits audit-aware backend execution.
+	CapabilityAudit Capability = "audit"
 )
 
 var (
@@ -324,19 +329,26 @@ func normalizeProfileKey(key string) (string, error) {
 type FieldPolicy string
 
 const (
+	// FieldForbidden prevents a backend field from being configured.
 	FieldForbidden FieldPolicy = "forbidden"
-	FieldOptional  FieldPolicy = "optional"
-	FieldRequired  FieldPolicy = "required"
+	// FieldOptional permits callers to omit a backend field.
+	FieldOptional FieldPolicy = "optional"
+	// FieldRequired requires callers to configure a backend field.
+	FieldRequired FieldPolicy = "required"
 )
 
 // OptionKind controls normalization of an allowlisted provider option.
 type OptionKind string
 
 const (
-	OptionString  OptionKind = "string"
+	// OptionString identifies a string-valued backend option.
+	OptionString OptionKind = "string"
+	// OptionBoolean identifies a boolean-valued backend option.
 	OptionBoolean OptionKind = "boolean"
+	// OptionInteger identifies an integer-valued backend option.
 	OptionInteger OptionKind = "integer"
-	OptionEnum    OptionKind = "enum"
+	// OptionEnum identifies an enumerated backend option.
+	OptionEnum OptionKind = "enum"
 )
 
 // OptionSpec is the trusted schema for one non-secret provider option.

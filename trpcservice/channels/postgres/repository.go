@@ -44,6 +44,7 @@ func NewRepository(db *sql.DB) *ChannelRepository {
 	return &ChannelRepository{db: db, candidates: make(map[string]candidateRecord)}
 }
 
+// Create persists a channel binding.
 func (r *ChannelRepository) Create(ctx context.Context, input channels.CreateInput) (*channels.Binding, channels.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, channels.ChangeEvent{}, err
@@ -97,6 +98,7 @@ func (r *ChannelRepository) Create(ctx context.Context, input channels.CreateInp
 	return stored, committed, nil
 }
 
+// Get loads a channel binding within a tenant.
 func (r *ChannelRepository) Get(ctx context.Context, tenantID, bindingID string) (*channels.Binding, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -114,6 +116,7 @@ func (r *ChannelRepository) Get(ctx context.Context, tenantID, bindingID string)
 	return value, nil
 }
 
+// UpdateConfiguration applies an expected-version binding update.
 func (r *ChannelRepository) UpdateConfiguration(ctx context.Context, input channels.UpdateConfigurationInput) (*channels.Binding, channels.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, channels.ChangeEvent{}, err
@@ -166,6 +169,7 @@ func (r *ChannelRepository) UpdateConfiguration(ctx context.Context, input chann
 	return stored, committed, nil
 }
 
+// TransitionStatus changes a binding status with optimistic concurrency.
 func (r *ChannelRepository) TransitionStatus(ctx context.Context, input channels.TransitionStatusInput) (*channels.Binding, channels.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, channels.ChangeEvent{}, err
@@ -211,26 +215,31 @@ func (r *ChannelRepository) TransitionStatus(ctx context.Context, input channels
 	return stored, committed, nil
 }
 
+// Activate enables a channel binding.
 func (r *ChannelRepository) Activate(ctx context.Context, input channels.TransitionStatusInput) (*channels.Binding, channels.ChangeEvent, error) {
 	input.NextStatus = channels.StatusActive
 	return r.TransitionStatus(ctx, input)
 }
 
+// Suspend pauses a channel binding.
 func (r *ChannelRepository) Suspend(ctx context.Context, input channels.TransitionStatusInput) (*channels.Binding, channels.ChangeEvent, error) {
 	input.NextStatus = channels.StatusSuspended
 	return r.TransitionStatus(ctx, input)
 }
 
+// Resume re-enables a suspended channel binding.
 func (r *ChannelRepository) Resume(ctx context.Context, input channels.TransitionStatusInput) (*channels.Binding, channels.ChangeEvent, error) {
 	input.NextStatus = channels.StatusActive
 	return r.TransitionStatus(ctx, input)
 }
 
+// Disable permanently disables a channel binding.
 func (r *ChannelRepository) Disable(ctx context.Context, input channels.TransitionStatusInput) (*channels.Binding, channels.ChangeEvent, error) {
 	input.NextStatus = channels.StatusDisabled
 	return r.TransitionStatus(ctx, input)
 }
 
+// LookupCandidates finds tenant bindings matching a verified route.
 func (r *ChannelRepository) LookupCandidates(ctx context.Context, channel channels.Channel, routeDigest string) ([]channels.CandidateBindingContext, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -297,6 +306,7 @@ func (r *ChannelRepository) LookupCandidates(ctx context.Context, channel channe
 	return contexts, nil
 }
 
+// ConsumeCandidate atomically consumes a one-time verified candidate.
 func (r *ChannelRepository) ConsumeCandidate(ctx context.Context, candidate channels.CandidateBindingContext) (*channels.Binding, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

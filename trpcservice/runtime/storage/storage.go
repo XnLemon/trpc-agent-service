@@ -10,33 +10,54 @@ import (
 )
 
 var (
-	ErrNotFound          = errors.New("runtime record not found")
-	ErrDuplicate         = errors.New("runtime record already exists")
-	ErrConflict          = errors.New("runtime version conflict")
-	ErrInvalid           = errors.New("invalid runtime record")
+	// ErrNotFound reports a missing tenant-scoped runtime record.
+	ErrNotFound = errors.New("runtime record not found")
+	// ErrDuplicate reports an existing runtime record with the same identity.
+	ErrDuplicate = errors.New("runtime record already exists")
+	// ErrConflict reports an optimistic-concurrency conflict.
+	ErrConflict = errors.New("runtime version conflict")
+	// ErrInvalid reports malformed runtime input.
+	ErrInvalid = errors.New("invalid runtime record")
+	// ErrIllegalTransition reports a disallowed runtime lifecycle change.
 	ErrIllegalTransition = errors.New("illegal runtime state transition")
-	ErrStorage           = pgstorage.ErrStorage
+	// ErrStorage reports unavailable runtime persistence.
+	ErrStorage = pgstorage.ErrStorage
 )
 
 const (
+	// SessionActive marks a session that accepts new events.
 	SessionActive = "active"
+	// SessionClosed marks a session that no longer accepts events.
 	SessionClosed = "closed"
 
-	EventReceived             = "received"
-	EventRunning              = "running"
-	EventCompleted            = "completed"
+	// EventReceived marks a message accepted for execution.
+	EventReceived = "received"
+	// EventRunning marks a message currently being executed.
+	EventRunning = "running"
+	// EventCompleted marks a successfully executed message.
+	EventCompleted = "completed"
+	// EventExecutionReconciling marks an execution being reconciled after lease loss.
 	EventExecutionReconciling = "execution_reconciling"
-	EventReplyPending         = "reply_pending"
-	EventReplied              = "replied"
-	EventFailed               = "failed"
+	// EventReplyPending marks a message waiting for durable reply delivery.
+	EventReplyPending = "reply_pending"
+	// EventReplied marks a message whose reply has been delivered.
+	EventReplied = "replied"
+	// EventFailed marks a message that cannot complete.
+	EventFailed = "failed"
 
-	ReplyPending    = "pending"
-	ReplySending    = "sending"
-	ReplySent       = "sent"
-	ReplyRetryable  = "retryable"
+	// ReplyPending marks a reply segment waiting for delivery.
+	ReplyPending = "pending"
+	// ReplySending marks a reply segment currently being delivered.
+	ReplySending = "sending"
+	// ReplySent marks a reply segment confirmed by the provider.
+	ReplySent = "sent"
+	// ReplyRetryable marks a reply segment eligible for another attempt.
+	ReplyRetryable = "retryable"
+	// ReplyDeadLetter marks a reply segment that exhausted delivery attempts.
 	ReplyDeadLetter = "dead_letter"
 )
 
+// Session is the durable tenant-scoped conversation state.
 type Session struct {
 	TenantID  string
 	SessionID string
@@ -47,6 +68,7 @@ type Session struct {
 	UpdatedAt time.Time
 }
 
+// MessageEvent is the durable inbound message lifecycle record.
 type MessageEvent struct {
 	TenantID          string
 	EventID           string
@@ -65,6 +87,7 @@ type MessageEvent struct {
 	UpdatedAt         time.Time
 }
 
+// MessageEventInput contains the identity fields for recording an inbound message.
 type MessageEventInput struct {
 	TenantID          string
 	EventID           string
@@ -102,6 +125,7 @@ type MessageTransition struct {
 	SegmentCount int
 }
 
+// ReplyOutbox is one durable, independently deliverable reply segment.
 type ReplyOutbox struct {
 	TenantID          string
 	ReplyID           string
@@ -120,6 +144,7 @@ type ReplyOutbox struct {
 	UpdatedAt         time.Time
 }
 
+// ReplyTransition requests a fenced reply lifecycle transition.
 type ReplyTransition struct {
 	TenantID      string
 	ReplyID       string
@@ -133,6 +158,7 @@ type ReplyTransition struct {
 	ProviderID    string
 }
 
+// RuntimeStore is the tenant-scoped persistence contract used by Runner.
 type RuntimeStore interface {
 	GetSession(context.Context, string, string) (Session, error)
 	CreateSession(context.Context, string, string, map[string]any) (Session, error)
@@ -159,6 +185,7 @@ type ReplyBatchEnqueuer interface {
 	EnqueueReplies(context.Context, []ReplyOutbox) ([]ReplyOutbox, error)
 }
 
+// ValidateTenant checks the required tenant identity.
 func ValidateTenant(tenantID string) error {
 	if tenantID == "" {
 		return ErrInvalid
@@ -166,6 +193,7 @@ func ValidateTenant(tenantID string) error {
 	return nil
 }
 
+// ValidateSession checks a tenant and session identity pair.
 func ValidateSession(tenantID, sessionID string) error {
 	if ValidateTenant(tenantID) != nil || sessionID == "" {
 		return ErrInvalid
@@ -173,6 +201,7 @@ func ValidateSession(tenantID, sessionID string) error {
 	return nil
 }
 
+// ValidateTransition reports whether a reply transition is legal.
 func ValidateTransition(from, to string) bool {
 	switch from {
 	case ReplyPending:
