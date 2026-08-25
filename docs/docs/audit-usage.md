@@ -1,7 +1,7 @@
 # 租户审计与用量成本契约
 
-本页是 Issue #54 的实现契约。它在运行时 telemetry 之上定义不可采样的业务审计、用量和
-成本事实，并先于代码落地。`trpcservice/observability` 的 trace、metric 和 log 可以采样或在
+本页是 Issue #54/PR #55 的实现契约。它在运行时 telemetry 之上定义不可采样的业务审计、用量和
+成本事实，并已由代码、迁移和 CI 测试落地。`trpcservice/observability` 的 trace、metric 和 log 可以采样或在
 exporter 故障时丢弃；本页定义的 mandatory audit 事件必须写入 append-only writer，不能因
 trace sampling、指标基数限制或 exporter 状态而省略。
 

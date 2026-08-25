@@ -26,11 +26,11 @@
   Issue #33 的真实 Bot API 传输冒烟测试和手动 CI 运行说明。
 - [PostgreSQL 控制面与启动装配](postgresql-control-plane.md)：Issue #37 的实现契约，
   复用既有表设计并统一 migration、Repository 事务边界、bootstrap、readiness 和 shutdown。
-- [Issue #41：可重启控制面与 Admin API](issue-41-runtime-bootstrap-admin-api.md)：文档先行契约，
+- [Issue #41：可重启控制面与 Admin API](issue-41-runtime-bootstrap-admin-api.md)：已合并的实现契约，
   固定真实 Bootstrap、readiness、最小 Admin API、重启恢复和验收矩阵。
 - [Issue #50：Reliable Reply Delivery](issue-50-reliable-delivery.md)：Outbox worker、Provider
   交付、重试/DLQ、lease recovery、telemetry 与验收 ledger。
-- [租户审计与用量成本](audit-usage.md)：Issue #54 的文档先行契约，固定 mandatory audit
+- [租户审计与用量成本](audit-usage.md)：Issue #54/PR #55 的实现契约，固定 mandatory audit
   与 telemetry 边界、事件 schema、append-only/重复语义、失败策略、聚合和运维 ledger。
 
 ## 快速开始
