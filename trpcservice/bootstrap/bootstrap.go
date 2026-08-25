@@ -129,44 +129,91 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if config.DB != nil {
-		if err := config.DB.PingContext(ctx); err != nil {
-			return nil, postgres.ErrStorage
-		}
-		if config.Migrate != nil {
-			if err := config.Migrate(ctx, config.DB); err != nil {
-				return nil, ErrInvalidConfig
-			}
-		}
-		if config.Tenants == nil {
-			config.Tenants = tenantpostgres.NewRepository(config.DB)
-		}
-		if config.Apps == nil {
-			config.Apps = agentpostgres.NewRepository(config.DB)
-		}
-		if config.Models == nil {
-			config.Models = modelpostgres.NewRepository(config.DB, config.ModelCatalog)
-		}
-		if config.Backends == nil {
-			config.Backends = backendpostgres.NewRepository(config.DB, config.BackendCatalog)
-		}
-		if config.Channels == nil {
-			config.Channels = channelpostgres.NewRepository(config.DB)
+	if err := prepareDatabaseConfig(ctx, &config); err != nil {
+		return nil, err
+	}
+	if err := validateConfig(config); err != nil {
+		return nil, err
+	}
+	if err := prepareRuntimeConfig(&config); err != nil {
+		return nil, err
+	}
+	runtimeGraph, err := newRuntimeGraph(config)
+	if err != nil {
+		return nil, err
+	}
+	if err := configureAdmin(&config, runtimeGraph.Registry); err != nil {
+		return nil, err
+	}
+	if err := configureHandler(runtimeGraph, config); err != nil {
+		return nil, err
+	}
+	if err := startOutboxWorker(runtimeGraph, config.OutboxPollInterval); err != nil {
+		return nil, err
+	}
+	return runtimeGraph, nil
+}
+
+func prepareDatabaseConfig(ctx context.Context, config *Config) error {
+	if config.DB == nil {
+		return nil
+	}
+	if err := config.DB.PingContext(ctx); err != nil {
+		return postgres.ErrStorage
+	}
+	if config.Migrate != nil {
+		if err := config.Migrate(ctx, config.DB); err != nil {
+			return ErrInvalidConfig
 		}
 	}
-	if config.Tenants == nil || config.Apps == nil || config.Models == nil || config.Backends == nil || config.Channels == nil || config.ModelCatalog == nil || config.BackendCatalog == nil || config.SecretResolver == nil || config.ModelFactory == nil || config.Sessions == nil || config.Authenticator == nil {
-		return nil, ErrInvalidConfig
+	if config.Tenants == nil {
+		config.Tenants = tenantpostgres.NewRepository(config.DB)
 	}
+	if config.Apps == nil {
+		config.Apps = agentpostgres.NewRepository(config.DB)
+	}
+	if config.Models == nil {
+		config.Models = modelpostgres.NewRepository(config.DB, config.ModelCatalog)
+	}
+	if config.Backends == nil {
+		config.Backends = backendpostgres.NewRepository(config.DB, config.BackendCatalog)
+	}
+	if config.Channels == nil {
+		config.Channels = channelpostgres.NewRepository(config.DB)
+	}
+	return nil
+}
+
+func validateConfig(config Config) error {
+	dependencies := []any{
+		config.Tenants, config.Apps, config.Models, config.Backends, config.Channels,
+		config.ModelCatalog, config.BackendCatalog, config.SecretResolver, config.ModelFactory,
+		config.Sessions, config.Authenticator,
+	}
+	for _, dependency := range dependencies {
+		if dependency == nil {
+			return ErrInvalidConfig
+		}
+	}
+	return nil
+}
+
+func prepareRuntimeConfig(config *Config) error {
 	if config.RuntimeStore == nil {
 		config.RuntimeStore = runtimestorageinmemory.New()
 	}
-	if config.RuntimeTenantID != "" {
-		wrapped, wrapErr := runtimesessionpostgres.New(config.RuntimeTenantID, config.Sessions, config.RuntimeStore)
-		if wrapErr != nil {
-			return nil, ErrInvalidConfig
-		}
-		config.Sessions = wrapped
+	if config.RuntimeTenantID == "" {
+		return nil
 	}
+	wrapped, err := runtimesessionpostgres.New(config.RuntimeTenantID, config.Sessions, config.RuntimeStore)
+	if err != nil {
+		return ErrInvalidConfig
+	}
+	config.Sessions = wrapped
+	return nil
+}
+
+func newRuntimeGraph(config Config) (*Runtime, error) {
 	resolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{
 		Tenants: config.Tenants, Apps: config.Apps, Models: config.Models, Backends: config.Backends,
 		ModelCatalog: config.ModelCatalog, BackendCatalog: config.BackendCatalog,
@@ -196,49 +243,61 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	if ping == nil && config.DB != nil {
 		ping = config.DB.PingContext
 	}
-	runtimeGraph := &Runtime{
+	return &Runtime{
 		Resolver: resolver, Registry: registry, Dispatcher: dispatcher,
 		OutboxWorker: config.OutboxWorker,
 		db:           config.DB, ownDB: config.OwnDB, readyGate: readyGate,
 		ping: ping, verifyMigrations: config.VerifyMigrations, closeDeps: config.CloseDependencies,
+	}, nil
+}
+
+func configureAdmin(config *Config, registry *gateway.RunnerRegistry) error {
+	if config.AdminAuthenticator == nil {
+		return nil
 	}
-	if config.AdminAuthenticator != nil {
-		bindingRepository, ok := config.Channels.(channels.Repository)
-		if !ok {
-			_ = registry.Close()
-			return nil, ErrInvalidConfig
-		}
-		adminHandler, adminErr := admin.NewHandler(admin.Config{
-			Tenants: config.Tenants, Apps: config.Apps, Models: config.Models,
-			Backends: config.Backends, Bindings: bindingRepository,
-			Authenticator: config.AdminAuthenticator,
-			ModelCatalog:  config.ModelCatalog, BackendCatalog: config.BackendCatalog,
-		})
-		if adminErr != nil {
-			_ = registry.Close()
-			return nil, ErrInvalidConfig
-		}
-		config.AdminHandler = adminHandler
+	bindingRepository, ok := config.Channels.(channels.Repository)
+	if !ok {
+		_ = registry.Close()
+		return ErrInvalidConfig
 	}
-	httpConfig := gateway.HTTPConfig{
-		Dispatcher: dispatcher, Authenticator: config.Authenticator, Admin: config.AdminHandler,
-		Ready:   runtimeGraph.Ready,
-		Limiter: config.HTTP.Limiter, Idempotency: config.HTTP.Idempotency,
-		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout,
-	}
-	runtimeGraph.Handler, err = gateway.NewHTTPHandler(httpConfig)
+	adminHandler, err := admin.NewHandler(admin.Config{
+		Tenants: config.Tenants, Apps: config.Apps, Models: config.Models,
+		Backends: config.Backends, Bindings: bindingRepository,
+		Authenticator: config.AdminAuthenticator,
+		ModelCatalog:  config.ModelCatalog, BackendCatalog: config.BackendCatalog,
+	})
 	if err != nil {
 		_ = registry.Close()
-		return nil, ErrInvalidConfig
+		return ErrInvalidConfig
 	}
-	if runtimeGraph.OutboxWorker != nil {
-		if err := runtimeGraph.OutboxWorker.Start(context.Background(), config.OutboxPollInterval); err != nil {
-			_ = runtimeGraph.Handler.Close()
-			_ = registry.Close()
-			return nil, ErrInvalidConfig
-		}
+	config.AdminHandler = adminHandler
+	return nil
+}
+
+func configureHandler(runtimeGraph *Runtime, config Config) error {
+	handler, err := gateway.NewHTTPHandler(gateway.HTTPConfig{
+		Dispatcher: runtimeGraph.Dispatcher, Authenticator: config.Authenticator, Admin: config.AdminHandler,
+		Ready: runtimeGraph.Ready, Limiter: config.HTTP.Limiter, Idempotency: config.HTTP.Idempotency,
+		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout,
+	})
+	if err != nil {
+		_ = runtimeGraph.Registry.Close()
+		return ErrInvalidConfig
 	}
-	return runtimeGraph, nil
+	runtimeGraph.Handler = handler
+	return nil
+}
+
+func startOutboxWorker(runtimeGraph *Runtime, pollInterval time.Duration) error {
+	if runtimeGraph.OutboxWorker == nil {
+		return nil
+	}
+	if err := runtimeGraph.OutboxWorker.Start(context.Background(), pollInterval); err != nil {
+		_ = runtimeGraph.Handler.Close()
+		_ = runtimeGraph.Registry.Close()
+		return ErrInvalidConfig
+	}
+	return nil
 }
 
 // Ready is the single readiness gate used by HTTPHandler. It checks the

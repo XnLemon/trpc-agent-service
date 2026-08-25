@@ -26,9 +26,6 @@ linters:
       - path: ^trpcservice/agent/postgres/repository\.go$
         text: 'func .*Publish'
         linters: [gocyclo]
-      - path: ^trpcservice/bootstrap/bootstrap\.go$
-        text: 'cyclomatic complexity .* of func `New`'
-        linters: [gocyclo]
       - path: ^trpcservice/channels/channels\.go$
         text: 'func .*Validate'
         linters: [gocyclo]
