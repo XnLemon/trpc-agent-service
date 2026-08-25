@@ -107,7 +107,7 @@ func (h *Handler) recordMutation(ctx context.Context, principal Principal, reque
 		change = envelope["event"]
 	}
 	if change == nil {
-		return nil
+		return h.recordRawMutation(ctx, principal, requestID, value)
 	}
 	v := reflect.ValueOf(change)
 	if v.Kind() == reflect.Pointer {
@@ -154,6 +154,46 @@ func (h *Handler) recordMutation(ctx context.Context, principal Principal, reque
 		EventType: audit.EventControlPlaneChanged, TenantID: tenants,
 		ActorType: fieldString("ActorType"), ActorID: fieldString("ActorID"),
 		Reason: fieldString("Reason"), CorrelationID: fieldString("CorrelationID"),
+		PreviousVersion: &previous, NextVersion: &next,
+	})
+}
+
+func (h *Handler) recordRawMutation(ctx context.Context, principal Principal, requestID string, value any) error {
+	v := reflect.ValueOf(value)
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil
+	}
+	fieldString := func(name string) string {
+		field := v.FieldByName(name)
+		if field.IsValid() && field.Kind() == reflect.String {
+			return field.String()
+		}
+		return ""
+	}
+	fieldVersion := v.FieldByName("Version")
+	next := int64(1)
+	if fieldVersion.IsValid() && (fieldVersion.Kind() == reflect.Int64 || fieldVersion.Kind() == reflect.Int) && fieldVersion.Int() > 0 {
+		next = fieldVersion.Int()
+	}
+	previous := next - 1
+	tenantID := fieldString("TenantID")
+	if tenantID == "" {
+		return nil
+	}
+	actorID := principal.SubjectID
+	if actorID == "" {
+		actorID = "admin"
+	}
+	return (audit.Recorder{Writer: h.config.AuditWriter, TenantID: tenantID}).Record(ctx, audit.Event{
+		EventID:   audit.NewEventID(requestID, tenantID, fieldString("Version"), "raw"),
+		EventType: audit.EventControlPlaneChanged, TenantID: tenantID,
+		ActorType: "admin", ActorID: actorID, Reason: "admin mutation", CorrelationID: requestID,
 		PreviousVersion: &previous, NextVersion: &next,
 	})
 }
