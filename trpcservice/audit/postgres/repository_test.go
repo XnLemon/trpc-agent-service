@@ -220,6 +220,45 @@ func TestListBuildsTypeAndTimeFilters(t *testing.T) {
 	}
 }
 
+func TestRepositoryHelperBranches(t *testing.T) {
+	var total audit.UsageTotal
+	input, output, modelCost, toolCost, budgetTokens, budgetMinor := int64(1), int64(2), int64(3), int64(4), int64(5), int64(6)
+	addUsage(&total, &audit.Usage{InputTokens: &input, OutputTokens: &output, ModelCostMinor: &modelCost, ToolCostMinor: &toolCost, BudgetUsedTokens: &budgetTokens, BudgetUsedMinor: &budgetMinor})
+	if total.InputTokens != 1 || total.OutputTokens != 2 || total.ModelCostMinor != 3 || total.ToolCostMinor != 4 || total.BudgetUsedTokens != 5 || total.BudgetUsedMinor != 6 {
+		t.Fatalf("usage total=%+v", total)
+	}
+	if got := aggregateKey(testEvent("t"), []audit.GroupBy{audit.GroupTenant, audit.GroupApp, audit.GroupChannel, audit.GroupProvider, audit.GroupModel}); got == "" {
+		t.Fatal("aggregate key empty")
+	}
+	if got := aggregateTotalKey(total, []audit.GroupBy{audit.GroupTenant, audit.GroupApp, audit.GroupChannel, audit.GroupProvider, audit.GroupModel}); got == "" {
+		t.Fatal("aggregate total key empty")
+	}
+	if usageInt(nil, func(*audit.Usage) *int64 { return &input }) != nil || usageString(nil, func(*audit.Usage) string { return "x" }) != nil {
+		t.Fatal("nil usage should produce nil")
+	}
+	if usageInt(&audit.Usage{InputTokens: &input}, func(v *audit.Usage) *int64 { return v.InputTokens }) == nil || usageString(&audit.Usage{Provider: "p"}, func(v *audit.Usage) string { return v.Provider }) != "p" {
+		t.Fatal("usage helpers failed")
+	}
+}
+
+func TestRepositoryScopedTransactionFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store, _ := New(db, "tenant-a")
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT set_config").WithArgs("tenant-a").WillReturnError(errors.New("scope"))
+	mock.ExpectRollback()
+	if _, err := store.Get(context.Background(), "event"); err == nil {
+		t.Fatal("expected scope failure")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func testEventRow(event audit.Event) *sqlmock.Rows {
 	return sqlmock.NewRows([]string{
 		"tenant_id", "event_id", "schema_version", "event_type", "channel", "user_id", "session_id", "agent_app_id", "revision", "model_profile_id", "tool_name", "decision", "latency_ms", "error_type", "input_tokens", "output_tokens", "model_cost_minor", "tool_cost_minor", "currency", "budget_used_tokens", "budget_used_minor", "execution_result", "provider", "model", "request_id", "trace_id", "correlation_id", "actor_type", "actor_id", "reason", "previous_version", "next_version", "occurred_at", "digest",

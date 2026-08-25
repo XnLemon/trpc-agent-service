@@ -33,6 +33,12 @@ func (w *adminAuditWriter) Append(_ context.Context, event audit.Event) (audit.A
 	return audit.AppendResult{Event: event}, nil
 }
 
+type adminAuditFailWriter struct{}
+
+func (adminAuditFailWriter) Append(context.Context, audit.Event) (audit.AppendResult, error) {
+	return audit.AppendResult{}, errors.New("audit down")
+}
+
 func TestRecordMutationWritesControlPlaneAudit(t *testing.T) {
 	w := &adminAuditWriter{}
 	h := &Handler{config: Config{AuditWriter: w}}
@@ -67,6 +73,29 @@ func TestRecordMutationUsesDraftVersionForRawRevision(t *testing.T) {
 	}
 	if len(w.events) != 1 || *w.events[0].PreviousVersion != 2 || *w.events[0].NextVersion != 3 {
 		t.Fatalf("draft audit event = %#v", w.events)
+	}
+}
+
+func TestRecordMutationReflectionAndFailureBranches(t *testing.T) {
+	if err := (*Handler)(nil).recordMutation(context.Background(), Principal{}, "req", nil); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{config: Config{AuditWriter: &adminAuditWriter{}}}
+	for _, value := range []any{map[string]any{"event": nil}, map[string]any{"event": "not-struct"}, (*tenant.Tenant)(nil), 42} {
+		if err := h.recordMutation(context.Background(), Principal{}, "req", value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resource := struct {
+		TenantID string
+		Version  int
+	}{TenantID: "tenant-a", Version: 2}
+	if err := h.recordMutation(context.Background(), Principal{}, "req", resource); err != nil {
+		t.Fatal(err)
+	}
+	failed := &Handler{config: Config{AuditWriter: adminAuditFailWriter{}}}
+	if err := failed.recordMutation(context.Background(), Principal{}, "req", resource); !errors.Is(err, audit.ErrWriteFailed) {
+		t.Fatalf("err=%v", err)
 	}
 }
 
