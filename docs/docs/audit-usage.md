@@ -136,8 +136,10 @@ InMemory 与 PostgreSQL 必须运行同一 conformance suite，覆盖：
 
 有序 migration 新增 `audit_event`，主键为 `(tenant_id, event_id)`，所有索引以
 `tenant_id` 开头。事件字段使用类型/检查约束，`usage` 数值列使用 nullable non-negative
-整数；不保存自由 JSON payload。migration 另建 `execution_audit_handoff` 作为可恢复的投影
-outbox：它不是最终 AuditEvent，只有受 fence/状态约束的 reserve/finalize/repair 入口可以修改；
+整数；不保存自由 JSON payload。当前 0006 migration 先提供 append-only `audit_event`；
+`execution_audit_handoff` 作为可恢复的投影 outbox 仍是下一阶段 migration，不能把当前
+直接 append 误称为 handoff。handoff 不是最终 AuditEvent，只有受 fence/状态约束的
+reserve/finalize/repair 入口可以修改；
 一旦 projected 就不能改变 terminal payload。索引至少支持：
 
 - `(tenant_id, occurred_at, event_id)` 审计时间线；
@@ -149,7 +151,8 @@ outbox：它不是最终 AuditEvent，只有受 fence/状态约束的 reserve/fi
 或等价数据库策略将当前 trusted scope 与行 `tenant_id` 比较；Repository 仍在调用 SQL 前比较
 `Event.TenantID` 与自己的绑定 scope。写入入口只允许 `INSERT`，读取入口只返回绑定 tenant，
 没有运行时 `UPDATE`、`DELETE`、`TRUNCATE` 路径。Repository 使用参数化 SQL，并将重复键后的
-digest 比较放在同一事务/连接中。数据库集成测试必须用 tenant A scope 尝试写入和读取 tenant B，
+digest 比较放在同一事务/连接中；SECURITY DEFINER 入口也重复 canonical、长度和敏感字段约束，
+防止绕过 Go Repository 直接写入凭据或 provider 原文。数据库集成测试必须用 tenant A scope 尝试写入和读取 tenant B，
 证明即使绕过 Go 的 event mismatch 检查也会被数据库拒绝。migration owner 负责保留清理：线上
 writer 不获得删除权限。未来 WORM/hash-chain 归档是可选增强，不能被描述为当前数据库已提供
 外部不可篡改证明。
@@ -244,7 +247,7 @@ retention lag 和聚合查询失败。指标只使用 component/operation/status
 - [x] 文档：schema、版本、事件目录、失败策略、幂等、保留、脱敏、访问控制和运维边界。
 - [x] 契约：AuditEvent/Usage/Writer/Reader/Aggregator 与兼容性、redaction 测试。
 - [x] InMemory：append-only writer、租户隔离、defensive copy、并发/重复 conformance。
-- [ ] PostgreSQL：有序 migration、Repository、权限、租户索引、并发/重启 conformance。
+- [x] PostgreSQL：有序 migration、Repository、权限、租户索引、RLS scope 和 sqlmock conformance；真实数据库并发/重启测试仍待补齐。
 - [ ] Admin/control-plane producer 与 durable change-outbox projector。
 - [ ] Gateway/Runner durable execution handoff、terminal outcome、budget、redaction/fallback 和 Tool policy hook。
 - [ ] IM authorization/ingress 与 reply delivery/retry/dead-letter producer。

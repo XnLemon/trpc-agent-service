@@ -127,7 +127,8 @@ func TestStoreGuardsAndQueryValidation(t *testing.T) {
 	if _, err := store.AggregateUsage(context.Background(), audit.UsageQuery{GroupBy: []audit.GroupBy{"unknown"}}); !errors.Is(err, audit.ErrInvalid) {
 		t.Fatalf("unknown group error = %v", err)
 	}
-	if _, err := store.Get(nil, "evt"); !errors.Is(err, audit.ErrInvalid) {
+	var nilContext context.Context
+	if _, err := store.Get(nilContext, "evt"); !errors.Is(err, audit.ErrInvalid) {
 		t.Fatalf("nil context error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

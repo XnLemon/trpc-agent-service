@@ -435,6 +435,9 @@ func TestHTTPStreamWriterAndErrorMappingEdges(t *testing.T) {
 			t.Fatalf("mapped %v = %d %q", test.err, status, message)
 		}
 	}
+	if status, message := mapHTTPError(auditWriteFailure()); status != http.StatusBadGateway || message != ErrAuditWriteFailed.Error() {
+		t.Fatalf("mapped audit write failure = %d %q", status, message)
+	}
 	if !isJSONContentType("application/json; charset=utf-8") || isJSONContentType("text/plain") || isJSONContentType("") {
 		t.Fatal("JSON content type validation is incorrect")
 	}

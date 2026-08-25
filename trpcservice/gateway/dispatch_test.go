@@ -32,6 +32,19 @@ type durableOutboxProvider struct {
 	deliveries []runtimestorage.ReplyOutbox
 }
 
+type auditWriterFailure struct {
+	calls     int
+	failAfter int
+}
+
+func (w *auditWriterFailure) Append(_ context.Context, event audit.Event) (audit.AppendResult, error) {
+	w.calls++
+	if w.calls > w.failAfter {
+		return audit.AppendResult{}, errors.New("audit unavailable")
+	}
+	return audit.AppendResult{Event: event}, nil
+}
+
 func (p *durableOutboxProvider) Deliver(_ context.Context, value runtimestorage.ReplyOutbox) (string, error) {
 	p.deliveries = append(p.deliveries, value)
 	return "provider-" + value.ReplyID, nil
@@ -162,6 +175,52 @@ func TestDispatcherWritesExecutionAuditLifecycle(t *testing.T) {
 	}
 	if len(events) != 2 || !hasAuditEventTypes(events, audit.EventExecutionStarted, audit.EventExecutionCompleted) {
 		t.Fatalf("audit lifecycle = %#v", events)
+	}
+}
+
+func TestDispatcherAuditFailureIsRedactedAndCorrelated(t *testing.T) {
+	runner := &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		return nil, errors.New("provider secret should not escape")
+	}}
+	dispatcher, principal := newTestDispatcher(t, runner)
+	dispatcher.auditWriter = &auditWriterFailure{failAfter: 1}
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if !errors.Is(err, ErrExecution) {
+		t.Fatalf("dispatch error = %v", err)
+	}
+	if stream != nil {
+		t.Fatal("failed pre-stream audit should not return a stream")
+	}
+
+	runner = &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		events := make(chan *trpcevent.Event, 1)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
+		close(events)
+		return events, nil
+	}}
+	dispatcher, principal = newTestDispatcher(t, runner)
+	dispatcher.auditWriter = &auditWriterFailure{failAfter: 1}
+	stream, err = dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collectDispatchEvents(stream)
+	if len(events) != 2 || events[0].Error != ErrAuditWriteFailed.Error() || events[0].RequestID == "" || events[1].Status != "error" || events[1].RequestID != events[0].RequestID {
+		t.Fatalf("audit failure events = %#v", events)
+	}
+}
+
+func TestAuditHelpers(t *testing.T) {
+	if terminalAuditError(nil) != "" || terminalAuditError(context.Canceled) != string(audit.ErrorCanceled) || terminalAuditError(ErrExecution) != string(audit.ErrorUnavailable) {
+		t.Fatal("unexpected terminal audit error mapping")
+	}
+	dispatcher, _ := newTestDispatcher(t, &testRunner{})
+	output := make(chan DispatchEvent, 2)
+	dispatcher.finishAuditFailure("request-1", "trace-1", nil, output)
+	close(output)
+	events := collectDispatchEvents(output)
+	if len(events) != 2 || events[0].RequestID != "request-1" || events[0].TraceID != "trace-1" || events[1].RequestID != "request-1" {
+		t.Fatalf("helper events = %#v", events)
 	}
 }
 

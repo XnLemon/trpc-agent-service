@@ -68,8 +68,10 @@ CREATE TABLE public.audit_event (
     FOREIGN KEY (tenant_id) REFERENCES public.tenant(tenant_id),
     CHECK ((model_cost_minor IS NULL AND tool_cost_minor IS NULL AND budget_used_minor IS NULL)
         OR (currency IS NOT NULL AND currency ~ '^[A-Z]{3}$')),
-    CHECK ((previous_version IS NULL AND next_version IS NULL)
-        OR (previous_version >= 0 AND next_version = previous_version + 1))
+    CHECK ((previous_version IS NULL) = (next_version IS NULL)
+        AND (previous_version IS NULL
+             OR (previous_version >= 0 AND previous_version < 9223372036854775807
+                 AND next_version = previous_version + 1)))
 );
 
 CREATE INDEX audit_event_timeline_idx
@@ -111,6 +113,29 @@ BEGIN
     IF current_setting('app.tenant_id', true) IS NULL
        OR current_setting('app.tenant_id', true) <> p_tenant_id THEN
         RAISE EXCEPTION 'audit tenant scope denied' USING ERRCODE = '42501';
+    END IF;
+    IF p_tenant_id <> btrim(p_tenant_id)
+       OR p_event_id <> btrim(p_event_id)
+       OR p_tenant_id ~ '[[:cntrl:]]'
+       OR p_event_id ~ '[[:cntrl:]]'
+       OR length(coalesce(p_reason, '')) > 1000
+       OR concat_ws('|', p_channel, p_user_id, p_session_id, p_agent_app_id,
+                    p_model_profile_id, p_tool_name, p_error_type, p_request_id,
+                    p_trace_id, p_correlation_id, p_actor_type, p_actor_id,
+                    p_reason, p_provider, p_model) ~ '[[:cntrl:]]'
+       OR concat_ws('|', p_channel, p_user_id, p_session_id, p_agent_app_id,
+                    p_model_profile_id, p_tool_name, p_error_type, p_request_id,
+                    p_trace_id, p_correlation_id, p_actor_type, p_actor_id,
+                    p_reason, p_provider, p_model) ~* '(://|authorization|bearer[[:space:]]|api([_-]|[[:space:]])key|token[=[:space:]]|secret([=:_[:space:]]|ref)|password[=[:space:]]|dsn[=[:space:]]|provider[[:space:]]+error)'
+       OR ((p_model_cost_minor IS NOT NULL OR p_tool_cost_minor IS NOT NULL OR p_budget_used_minor IS NOT NULL)
+           AND (p_currency IS NULL OR p_currency <> ALL(ARRAY['AED','AFN','ALL','AMD','ANG','AOA','ARS','AUD','AWG','AZN','BAM','BBD','BDT','BGN','BHD','BIF','BMD','BND','BOB','BOV','BRL','BSD','BTN','BWP','BYN','BZD','CAD','CDF','CHE','CHF','CHW','CLF','CLP','CNY','COP','COU','CRC','CUC','CUP','CVE','CZK','DJF','DKK','DOP','DZD','EGP','ERN','ETB','EUR','FJD','FKP','GBP','GEL','GHS','GIP','GMD','GNF','GTQ','GYD','HKD','HNL','HTG','HUF','IDR','ILS','INR','IQD','IRR','ISK','JMD','JOD','JPY','KES','KGS','KHR','KMF','KPW','KRW','KWD','KYD','KZT','LAK','LBP','LKR','LRD','LSL','LYD','MAD','MDL','MGA','MKD','MMK','MNT','MOP','MRU','MUR','MVR','MWK','MXN','MXV','MYR','MZN','NAD','NGN','NIO','NOK','NPR','NZD','OMR','PAB','PEN','PGK','PHP','PKR','PLN','PYG','QAR','RON','RSD','RUB','RWF','SAR','SBD','SCR','SDG','SEK','SGD','SHP','SLE','SLL','SOS','SRD','SSP','STN','SVC','SYP','SZL','THB','TJS','TMT','TND','TOP','TRY','TTD','TWD','TZS','UAH','UGX','USD','USN','UYI','UYU','UYW','UZS','VED','VES','VND','VUV','WST','XAF','XAG','XAU','XBA','XBB','XBC','XBD','XCD','XDR','XOF','XPD','XPF','XPT','XSU','XTS','XUA','XXX','YER','ZAR','ZMW','ZWG'])))
+       OR ((p_previous_version IS NULL) <> (p_next_version IS NULL))
+       OR (p_event_type = 'control_plane.changed' AND
+           (nullif(p_actor_type, '') IS NULL OR nullif(p_actor_id, '') IS NULL OR
+            nullif(p_reason, '') IS NULL OR nullif(p_correlation_id, '') IS NULL OR
+            p_previous_version IS NULL OR p_previous_version = 9223372036854775807 OR
+            p_next_version <> p_previous_version + 1)) THEN
+        RAISE EXCEPTION 'audit payload rejected' USING ERRCODE = '22023';
     END IF;
     INSERT INTO public.audit_event (
         tenant_id, event_id, schema_version, event_type, channel, user_id, session_id,

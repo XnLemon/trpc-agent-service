@@ -28,6 +28,9 @@ var (
 	// ErrExecutionCanceled is the stable cancellation result for a Dispatch
 	// stream after its Runner events have been drained.
 	ErrExecutionCanceled = errors.New("execution canceled")
+	// ErrAuditWriteFailed is the stable redacted failure when a mandatory audit
+	// lifecycle fact cannot be durably written.
+	ErrAuditWriteFailed = errors.New("audit_write_failed")
 )
 
 const defaultDispatchDrainTimeout = 250 * time.Millisecond
@@ -194,7 +197,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	if err := dispatcher.writeExecutionAudit(ctx, request.Principal, message, identity, requestID, traceID, audit.EventExecutionStarted, ""); err != nil {
 		dispatcher.failDurable(durable, err)
 		finishWithError(err)
-		return nil, ErrExecution
+		return nil, auditWriteFailure()
 	}
 	lease, err := dispatcher.registry.Acquire(ctx, plan)
 	if err != nil {
@@ -202,7 +205,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
 			dispatcher.failDurable(durable, auditErr)
 			finishWithError(auditErr)
-			return nil, ErrExecution
+			return nil, auditWriteFailure()
 		}
 		finishWithError(err)
 		return nil, err
@@ -214,7 +217,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
 			dispatcher.failDurable(durable, auditErr)
 			finishWithError(auditErr)
-			return nil, ErrExecution
+			return nil, auditWriteFailure()
 		}
 		finishWithError(ErrRunnerUnavailable)
 		return nil, ErrRunnerUnavailable
@@ -230,7 +233,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, eventType, errorType); auditErr != nil {
 			dispatcher.failDurable(durable, auditErr)
 			finishWithError(auditErr)
-			return nil, ErrExecution
+			return nil, auditWriteFailure()
 		}
 		if IsContextCancellation(err) {
 			finishWithError(err)
@@ -245,7 +248,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
 			dispatcher.failDurable(durable, auditErr)
 			finishWithError(auditErr)
-			return nil, ErrExecution
+			return nil, auditWriteFailure()
 		}
 		finishWithError(ErrExecution)
 		return nil, ErrExecution
@@ -356,6 +359,8 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 	defer func() { _ = lease.Release() }()
 	var terminalErr error
 	var reply strings.Builder
+	var terminalEventType audit.EventType
+	var terminalErrorType string
 	auditFinalized := false
 	finalizeAudit := func(eventType audit.EventType, errorType string) error {
 		if auditFinalized {
@@ -368,14 +373,21 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		return err
 	}
 	defer func() {
-		eventType := audit.EventExecutionCompleted
-		if terminalErr != nil {
-			eventType = audit.EventExecutionFailed
-			if IsContextCancellation(terminalErr) {
-				eventType = audit.EventExecutionCanceled
+		eventType := terminalEventType
+		errorType := terminalErrorType
+		if eventType == "" {
+			eventType = audit.EventExecutionCompleted
+			if terminalErr != nil {
+				eventType = audit.EventExecutionFailed
+				if IsContextCancellation(terminalErr) {
+					eventType = audit.EventExecutionCanceled
+				}
 			}
 		}
-		if err := finalizeAudit(eventType, terminalAuditError(terminalErr)); err != nil && terminalErr == nil {
+		if errorType == "" {
+			errorType = terminalAuditError(terminalErr)
+		}
+		if err := finalizeAudit(eventType, errorType); err != nil && terminalErr == nil {
 			terminalErr = ErrExecution
 		}
 		dispatcher.finishDurable(durable, terminalErr, reply.String())
@@ -396,9 +408,10 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 	for {
 		if ctx.Err() != nil {
 			terminalErr = ctx.Err()
+			terminalEventType, terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
 			if err := finalizeAudit(audit.EventExecutionCanceled, string(audit.ErrorCanceled)); err != nil {
-				terminalErr = ErrExecution
-				dispatcher.finishAuditFailure(runnerEvents, output)
+				terminalErr = auditWriteFailure()
+				dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
 				return
 			}
 			dispatcher.finishCanceled(ctx, requestID, traceID, runnerEvents, output)
@@ -407,10 +420,10 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		select {
 		case event, ok := <-runnerEvents:
 			if !ok {
+				terminalEventType, terminalErrorType = audit.EventExecutionCompleted, ""
 				if err := finalizeAudit(audit.EventExecutionCompleted, ""); err != nil {
-					terminalErr = ErrExecution
-					trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventError, RequestID: requestID, TraceID: traceID, Error: ErrExecution.Error()})
-					trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "error", Done: true})
+					terminalErr = auditWriteFailure()
+					dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
 					return
 				}
 				trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "complete", Done: true})
@@ -428,10 +441,10 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 				if terminalErr != nil {
 					eventType, errorType = audit.EventExecutionFailed, string(audit.ErrorUnavailable)
 				}
+				terminalEventType, terminalErrorType = eventType, errorType
 				if err := finalizeAudit(eventType, errorType); err != nil {
 					terminalErr = ErrExecution
-					trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventError, RequestID: requestID, TraceID: traceID, Error: ErrExecution.Error()})
-					trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "error", Done: true})
+					dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
 					return
 				}
 			}
@@ -454,9 +467,10 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 			}
 		case <-ctx.Done():
 			terminalErr = ctx.Err()
+			terminalEventType, terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
 			if err := finalizeAudit(audit.EventExecutionCanceled, string(audit.ErrorCanceled)); err != nil {
-				terminalErr = ErrExecution
-				dispatcher.finishAuditFailure(runnerEvents, output)
+				terminalErr = auditWriteFailure()
+				dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
 				return
 			}
 			dispatcher.finishCanceled(ctx, requestID, traceID, runnerEvents, output)
@@ -465,10 +479,14 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 	}
 }
 
-func (dispatcher *Dispatcher) finishAuditFailure(runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent) {
+func (dispatcher *Dispatcher) finishAuditFailure(requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent) {
 	drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
-	trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventError, Error: ErrExecution.Error()})
-	trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, Status: "error", Done: true})
+	trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventError, RequestID: requestID, TraceID: traceID, Error: ErrAuditWriteFailed.Error()})
+	trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "error", Done: true})
+}
+
+func auditWriteFailure() error {
+	return errors.Join(ErrExecution, ErrAuditWriteFailed)
 }
 
 func terminalAuditError(err error) string {
