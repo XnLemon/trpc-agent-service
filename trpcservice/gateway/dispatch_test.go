@@ -402,6 +402,29 @@ func TestDispatcherAcquireFailureWritesTerminalAudit(t *testing.T) {
 	}
 }
 
+func TestDispatcherAcquireFailureWithSuccessfulTerminalAudit(t *testing.T) {
+	dispatcher, principal := newTestDispatcher(t, &testRunner{})
+	dispatcher.registry.factory = func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+		return nil, errors.New("factory unavailable")
+	}
+	writer, err := audit.NewInMemory(principal.TenantID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.auditWriter = writer
+	_, err = dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "acquire-success-audit", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if err == nil || errors.Is(err, ErrAuditWriteFailed) {
+		t.Fatalf("unexpected acquire error=%v", err)
+	}
+	entries, err := writer.List(context.Background(), audit.Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasAuditEventTypes(entries, audit.EventExecutionStarted, audit.EventExecutionFailed) {
+		t.Fatalf("audit entries=%+v", entries)
+	}
+}
+
 func TestDispatcherRunnerRunFailureAuditWriteIsRedacted(t *testing.T) {
 	dispatcher, principal := newTestDispatcher(t, &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
 		return nil, errors.New("provider secret")

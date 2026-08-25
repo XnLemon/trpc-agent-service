@@ -118,3 +118,18 @@ func TestHandoffStoreRemainingErrorBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestHandoffScanConvertersRejectInvalidValues(t *testing.T) {
+	if err := (scanState{out: &audit.ExecutionHandoff{}}).Scan(struct{}{}); err == nil {
+		t.Fatal("scan state accepted invalid value")
+	}
+	if err := (scanResult{out: &audit.ExecutionHandoff{}}).Scan(struct{}{}); err == nil {
+		t.Fatal("scan result accepted invalid value")
+	}
+	if err := (scanError{out: &audit.ExecutionHandoff{}}).Scan(struct{}{}); err == nil {
+		t.Fatal("scan error accepted invalid value")
+	}
+	if err := (scanLatency{out: &audit.ExecutionHandoff{}}).Scan(struct{}{}); err == nil {
+		t.Fatal("scan latency accepted invalid value")
+	}
+}

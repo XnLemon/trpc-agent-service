@@ -99,6 +99,13 @@ func TestRecordMutationReflectionAndFailureBranches(t *testing.T) {
 	}
 }
 
+func TestAdminMapsAuditFailureToServiceUnavailable(t *testing.T) {
+	status, code := mapError(audit.ErrWriteFailed)
+	if status != http.StatusServiceUnavailable || code != "audit_unavailable" {
+		t.Fatalf("status=%d code=%q", status, code)
+	}
+}
+
 func testHandler(t *testing.T) (*Handler, *StaticAuthenticator) {
 	t.Helper()
 	modelCatalog, err := modelprofile.NewProviderCatalog(modelprofile.ProviderSpec{Provider: "openai", Models: []string{"gpt-4o-mini"}, EndpointPolicy: modelprofile.FieldOptional, EndpointSchemes: []string{"https"}, EndpointHosts: []string{"api.openai.com"}, SecretRefPolicy: modelprofile.FieldRequired})
