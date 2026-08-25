@@ -209,7 +209,8 @@ func TestAuditValidationAndQueryBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Append(nil, base); !errors.Is(err, ErrInvalid) {
+	var nilContext context.Context
+	if _, err := store.Append(nilContext, base); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("nil context append = %v", err)
 	}
 	if _, err := store.Get(context.Background(), " "); !errors.Is(err, ErrTenantScope) {
