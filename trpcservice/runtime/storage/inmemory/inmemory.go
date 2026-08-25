@@ -204,6 +204,9 @@ func validateMessageTransition(transition runtimestorage.MessageTransition) erro
 }
 
 func validateMessageLease(value runtimestorage.MessageEvent, transition runtimestorage.MessageTransition) error {
+	if transition.To == runtimestorage.EventRunning && transition.LeaseDuration <= 0 {
+		return runtimestorage.ErrInvalid
+	}
 	if transition.From != runtimestorage.EventRunning {
 		return nil
 	}
