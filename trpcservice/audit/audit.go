@@ -335,7 +335,7 @@ func (s *Store) Get(ctx context.Context, eventID string) (Event, error) {
 	if err := check(ctx); err != nil {
 		return Event{}, err
 	}
-	if err := s.scope(s.tenantID); err != nil || clean(eventID) == "" {
+	if s == nil || s.scope(s.tenantID) != nil || clean(eventID) == "" {
 		return Event{}, ErrTenantScope
 	}
 	s.backend.mu.RLock()
@@ -351,8 +351,8 @@ func (s *Store) List(ctx context.Context, query Query) ([]Event, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
 	}
-	if err := s.scope(s.tenantID); err != nil {
-		return nil, err
+	if s == nil || s.scope(s.tenantID) != nil {
+		return nil, ErrTenantScope
 	}
 	types := map[EventType]struct{}{}
 	for _, typ := range query.EventTypes {

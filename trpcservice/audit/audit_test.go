@@ -234,4 +234,110 @@ func TestAuditValidationAndQueryBoundaries(t *testing.T) {
 	}
 }
 
+func TestAuditValidationBranches(t *testing.T) {
+	base := testEvent("tenant-a", "event-1")
+	base.Cost = nil
+	if err := base.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := base.Digest(); err != nil {
+		t.Fatal(err)
+	}
+
+	invalidEvents := []func(*Event){
+		func(e *Event) { e.EventID = "event-1\x00bad" },
+		func(e *Event) { e.TenantID = "tenant-a\x00bad" },
+		func(e *Event) { e.Channel = "bad\x00channel" },
+		func(e *Event) { e.Reason = string(make([]rune, 1001)) },
+		func(e *Event) { e.EventType = EventControlPlaneChanged },
+	}
+	for i, mutate := range invalidEvents {
+		event := base
+		mutate(&event)
+		if !errors.Is(event.Validate(), ErrInvalid) {
+			t.Fatalf("invalid event accepted at %d", i)
+		}
+	}
+	validControlPlane := base
+	validControlPlane.EventType = EventControlPlaneChanged
+	validControlPlane.ActorType, validControlPlane.ActorID, validControlPlane.Reason, validControlPlane.CorrelationID = "user", "actor", "changed", "corr"
+	validControlPlane.PreviousVersion, validControlPlane.NextVersion = ptr(1), ptr(2)
+	if err := validControlPlane.Validate(); err != nil {
+		t.Fatalf("valid control-plane event rejected: %v", err)
+	}
+	validError := base
+	validError.ErrorType = string(ErrorTimeout)
+	if err := validError.Validate(); err != nil {
+		t.Fatalf("valid error type rejected: %v", err)
+	}
+
+	for _, usage := range []Usage{
+		{InputTokens: ptr(1), OutputTokens: ptr(2), ModelCostMinor: ptr(3), ToolCostMinor: ptr(4), BudgetUsedTokens: ptr(5), BudgetUsedMinor: ptr(6), Currency: "USD", Provider: "provider", Model: "model", ExecutionResult: ResultFailure},
+		{Provider: "provider", Model: "model"},
+	} {
+		if err := usage.Validate(); err != nil {
+			t.Fatalf("valid usage rejected: %v", err)
+		}
+	}
+	for _, value := range []string{"bad\x00value", "https://secret", "authorization secret", "secret=abc", "token=abc"} {
+		usage := Usage{Provider: value}
+		if !errors.Is(usage.Validate(), ErrInvalid) {
+			t.Fatalf("invalid provider accepted: %q", value)
+		}
+	}
+
+	cloned := testEvent("tenant-a", "event-1")
+	cloned.Revision, cloned.LatencyMS, cloned.PreviousVersion, cloned.NextVersion = ptr(1), ptr(2), ptr(3), ptr(4)
+	copy := cloned.Clone()
+	*copy.Revision, *copy.LatencyMS, *copy.PreviousVersion, *copy.NextVersion = 9, 9, 9, 10
+	if *cloned.Revision != 1 || *cloned.LatencyMS != 2 || *cloned.PreviousVersion != 3 || *cloned.NextVersion != 4 {
+		t.Fatal("event clone was aliased")
+	}
+}
+
+func TestStoreQueryAndContextBranches(t *testing.T) {
+	store, err := NewInMemory("tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	early := testEvent("tenant-a", "early")
+	early.EventType = EventExecutionStarted
+	early.OccurredAt = time.Unix(1, 0).UTC()
+	late := testEvent("tenant-a", "late")
+	late.OccurredAt = time.Unix(3, 0).UTC()
+	if _, err := store.Append(context.Background(), early); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(context.Background(), late); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.List(context.Background(), Query{EventTypes: []EventType{EventExecutionStarted}, Since: time.Unix(0, 0).UTC(), Until: time.Unix(2, 0).UTC()}); err != nil || len(got) != 1 || got[0].EventID != "early" {
+		t.Fatalf("filtered list = %#v, %v", got, err)
+	}
+	if _, err := store.Get(context.Background(), "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing get = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.Get(canceled, "early"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled get = %v", err)
+	}
+	if _, err := store.List(canceled, Query{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled list = %v", err)
+	}
+	if _, err := store.AggregateUsage(canceled, UsageQuery{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled aggregate = %v", err)
+	}
+	var nilStore *Store
+	if _, err := nilStore.Get(context.Background(), "event"); !errors.Is(err, ErrTenantScope) {
+		t.Fatalf("nil get = %v", err)
+	}
+	if _, err := nilStore.List(context.Background(), Query{}); !errors.Is(err, ErrTenantScope) {
+		t.Fatalf("nil list = %v", err)
+	}
+	if _, err := nilStore.AggregateUsage(context.Background(), UsageQuery{}); !errors.Is(err, ErrTenantScope) {
+		t.Fatalf("nil aggregate = %v", err)
+	}
+}
+
 func ptr(value int64) *int64 { return &value }
