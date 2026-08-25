@@ -199,6 +199,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	lease, err := dispatcher.registry.Acquire(ctx, plan)
 	if err != nil {
 		dispatcher.failDurable(durable, err)
+		_ = dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable))
 		finishWithError(err)
 		return nil, err
 	}
@@ -206,6 +207,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	if runnerValue == nil {
 		_ = lease.Release()
 		dispatcher.failDurable(durable, ErrRunnerUnavailable)
+		_ = dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable))
 		finishWithError(ErrRunnerUnavailable)
 		return nil, ErrRunnerUnavailable
 	}
@@ -213,6 +215,11 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	if err != nil {
 		_ = lease.Release()
 		dispatcher.failDurable(durable, err)
+		eventType, errorType := audit.EventExecutionFailed, string(audit.ErrorUnavailable)
+		if IsContextCancellation(err) {
+			eventType, errorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
+		}
+		_ = dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, eventType, errorType)
 		if IsContextCancellation(err) {
 			finishWithError(err)
 			return nil, err
@@ -223,6 +230,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	if runnerEvents == nil {
 		_ = lease.Release()
 		dispatcher.failDurable(durable, ErrExecution)
+		_ = dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable))
 		finishWithError(ErrExecution)
 		return nil, ErrExecution
 	}
@@ -332,8 +340,18 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 	defer func() { _ = lease.Release() }()
 	var terminalErr error
 	var reply strings.Builder
+	auditFinalized := false
+	finalizeAudit := func(eventType audit.EventType, errorType string) error {
+		if auditFinalized {
+			return nil
+		}
+		err := dispatcher.writeExecutionAudit(context.Background(), principal, message, identity, requestID, traceID, eventType, errorType)
+		if err == nil {
+			auditFinalized = true
+		}
+		return err
+	}
 	defer func() {
-		dispatcher.finishDurable(durable, terminalErr, reply.String())
 		eventType := audit.EventExecutionCompleted
 		if terminalErr != nil {
 			eventType = audit.EventExecutionFailed
@@ -341,7 +359,10 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 				eventType = audit.EventExecutionCanceled
 			}
 		}
-		_ = dispatcher.writeExecutionAudit(context.Background(), principal, message, identity, requestID, traceID, eventType, terminalAuditError(terminalErr))
+		if err := finalizeAudit(eventType, terminalAuditError(terminalErr)); err != nil && terminalErr == nil {
+			terminalErr = ErrExecution
+		}
+		dispatcher.finishDurable(durable, terminalErr, reply.String())
 		_ = dispatcher.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
 		status := "complete"
 		if terminalErr != nil {
@@ -359,16 +380,41 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 	for {
 		if ctx.Err() != nil {
 			terminalErr = ctx.Err()
+			_ = finalizeAudit(audit.EventExecutionCanceled, string(audit.ErrorCanceled))
 			dispatcher.finishCanceled(ctx, requestID, traceID, runnerEvents, output)
 			return
 		}
 		select {
 		case event, ok := <-runnerEvents:
 			if !ok {
+				if err := finalizeAudit(audit.EventExecutionCompleted, ""); err != nil {
+					terminalErr = ErrExecution
+					trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventError, RequestID: requestID, TraceID: traceID, Error: ErrExecution.Error()})
+					trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "error", Done: true})
+					return
+				}
 				trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "complete", Done: true})
 				return
 			}
 			mapped, done := mapRunnerEvent(event, requestID, traceID)
+			if done {
+				terminalErr = nil
+				for _, item := range mapped {
+					if item.Type == DispatchEventError {
+						terminalErr = ErrExecution
+					}
+				}
+				eventType, errorType := audit.EventExecutionCompleted, ""
+				if terminalErr != nil {
+					eventType, errorType = audit.EventExecutionFailed, string(audit.ErrorUnavailable)
+				}
+				if err := finalizeAudit(eventType, errorType); err != nil {
+					terminalErr = ErrExecution
+					trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventError, RequestID: requestID, TraceID: traceID, Error: ErrExecution.Error()})
+					trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "error", Done: true})
+					return
+				}
+			}
 			for _, item := range mapped {
 				if item.Type == DispatchEventMessage {
 					reply.WriteString(item.Text)
@@ -388,6 +434,7 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 			}
 		case <-ctx.Done():
 			terminalErr = ctx.Err()
+			_ = finalizeAudit(audit.EventExecutionCanceled, string(audit.ErrorCanceled))
 			dispatcher.finishCanceled(ctx, requestID, traceID, runnerEvents, output)
 			return
 		}
@@ -409,6 +456,9 @@ func (dispatcher *Dispatcher) writeExecutionAudit(ctx context.Context, principal
 		return nil
 	}
 	channel := string(principal.Kind())
+	if target, ok := principal.RoutingTarget(); ok {
+		channel = string(target.Channel)
+	}
 	event := audit.Event{SchemaVersion: audit.SchemaVersion, EventID: requestID + ":" + string(eventType), EventType: eventType, TenantID: principal.TenantID(), Channel: channel, UserID: message.ExternalUserID, SessionID: identity.SessionID, AgentAppID: principal.AppID(), ErrorType: errorType, RequestID: requestID, TraceID: traceID, ActorType: string(principal.Kind()), ActorID: principal.SubjectID(), OccurredAt: time.Now().UTC()}
 	if _, err := dispatcher.auditWriter.Append(ctx, event); err != nil {
 		return err
