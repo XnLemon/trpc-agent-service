@@ -96,6 +96,10 @@ type MessageTransition struct {
 	Owner         string
 	FencingToken  int64
 	LeaseDuration time.Duration
+	// ReplyID and SegmentCount bind a completed Runner execution to the
+	// materialized outbox identity. They are only set for a successful reply.
+	ReplyID      string
+	SegmentCount int
 }
 
 type ReplyOutbox struct {

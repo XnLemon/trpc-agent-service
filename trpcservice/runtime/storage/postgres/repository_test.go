@@ -207,6 +207,72 @@ func TestRuntimeStoreCoversEventHistoryAndMessageLifecycle(t *testing.T) {
 	}
 }
 
+func TestTransitionMessagePersistsReplyMetadata(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mock.ExpectQuery("UPDATE public.message_event SET status=\\$4.*reply_id=COALESCE").
+		WithArgs("tenant-a", "event-1", runtimestorage.EventRunning, runtimestorage.EventCompleted, "worker-a", int64(0), int64(3), "reply-1", 2).
+		WillReturnRows(sqlmock.NewRows(eventColumns).AddRow("tenant-a", "event-1", "session-1", "binding-1", "external-1", "idem-1", int64(2), runtimestorage.EventCompleted, int64(4), "", nil, "reply-1", 2, when, when))
+	value, err := runtimepostgres.New(db).TransitionMessage(context.Background(), runtimestorage.MessageTransition{
+		TenantID: "tenant-a", EventID: "event-1", From: runtimestorage.EventRunning, To: runtimestorage.EventCompleted, Owner: "worker-a", FencingToken: 3, ReplyID: "reply-1", SegmentCount: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.ReplyID != "reply-1" || value.SegmentCount != 2 {
+		t.Fatalf("reply metadata = %+v", value)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTransitionMessageWithReplyMapsErrorAndConflict(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(sqlmock.Sqlmock, time.Time)
+		want    error
+	}{
+		{
+			name: "storage error",
+			prepare: func(mock sqlmock.Sqlmock, _ time.Time) {
+				mock.ExpectQuery("UPDATE public.message_event SET status=\\$4.*reply_id=COALESCE").WillReturnError(errors.New("database unavailable"))
+			},
+			want: runtimestorage.ErrStorage,
+		},
+		{
+			name: "stale fence conflict",
+			prepare: func(mock sqlmock.Sqlmock, when time.Time) {
+				mock.ExpectQuery("UPDATE public.message_event SET status=\\$4.*reply_id=COALESCE").WillReturnError(sql.ErrNoRows)
+				mock.ExpectQuery("SELECT tenant_id,event_id,session_id,binding_id,external_message_id").WithArgs("tenant-a", "event-1").WillReturnRows(eventRow(when))
+			},
+			want: runtimestorage.ErrConflict,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			tc.prepare(mock, time.Now().UTC())
+			_, err = runtimepostgres.New(db).TransitionMessage(context.Background(), runtimestorage.MessageTransition{
+				TenantID: "tenant-a", EventID: "event-1", From: runtimestorage.EventRunning, To: runtimestorage.EventCompleted, Owner: "worker-a", FencingToken: 3, ReplyID: "reply-1", SegmentCount: 2,
+			})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("TransitionMessage error = %v, want %v", err, tc.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestRuntimeStoreListReplyCandidates(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

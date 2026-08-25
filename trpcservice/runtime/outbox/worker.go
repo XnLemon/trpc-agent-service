@@ -179,22 +179,44 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 			return processed, claimErr
 		}
 		processed++
+		started := time.Now()
+		operationCtx := ctx
+		var finishOperation func(error)
 		if w.telemetry != nil {
-			_ = w.metrics.Request(ctx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "started"})
+			operationCtx, _, finishOperation = observability.StartOperation(ctx, w.telemetry, observability.OperationChannelSend, "channel")
+		}
+		if w.telemetry != nil {
+			_ = w.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "started"})
 		}
 		if candidate.Status == runtimestorage.ReplySending {
 			// A sending lease means the previous worker may have reached the
 			// provider before losing its lease. Reconcile is the only safe
 			// resolution path; an unknown/error result must not redeliver.
-			if w.reconcile(ctx, claimed) {
+			if w.reconcile(operationCtx, claimed) {
 				w.advanceEvent(ctx, claimed.EventID)
+			}
+			if w.telemetry != nil {
+				_ = w.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "retry"})
+			}
+			if finishOperation != nil {
+				finishOperation(nil)
 			}
 			continue
 		}
-		providerID, deliveryErr := w.provider.Deliver(ctx, claimed)
+		providerID, deliveryErr := w.provider.Deliver(operationCtx, claimed)
+		if finishOperation != nil {
+			finishOperation(deliveryErr)
+		}
+		if w.telemetry != nil {
+			status := "success"
+			if deliveryErr != nil {
+				status = "error"
+			}
+			_ = w.metrics.Duration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": status})
+		}
 		if deliveryErr == nil {
 			if w.telemetry != nil {
-				_ = w.metrics.Request(ctx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "success"})
+				_ = w.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "success"})
 			}
 			_, err = w.store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: runtimestorage.ReplySent, Owner: w.owner, FencingToken: claimed.FencingToken, ProviderID: providerID})
 			if err == nil {
@@ -202,6 +224,9 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 			}
 		} else {
 			class, retryable := classify(deliveryErr)
+			if w.telemetry != nil {
+				_ = w.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "error", "error_class": metricErrorClass(class)})
+			}
 			to := runtimestorage.ReplyRetryable
 			if !retryable || claimed.Attempts >= w.maxAttempts {
 				to = runtimestorage.ReplyDeadLetter
@@ -209,8 +234,11 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 			_, err = w.store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: to, Owner: w.owner, FencingToken: claimed.FencingToken, ErrorClass: class})
 			if retryable && to == runtimestorage.ReplyRetryable {
 				if w.telemetry != nil {
-					_ = w.metrics.Retry(ctx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "retry", "error_class": metricErrorClass(class)})
+					_ = w.metrics.Retry(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "retry", "error_class": metricErrorClass(class)})
 				}
+			}
+			if w.telemetry != nil && to == runtimestorage.ReplyDeadLetter {
+				_ = w.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "failure", "error_class": metricErrorClass(class)})
 			}
 		}
 		if err != nil && !errors.Is(err, runtimestorage.ErrConflict) {

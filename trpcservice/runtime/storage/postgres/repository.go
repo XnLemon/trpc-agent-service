@@ -200,7 +200,25 @@ func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage
 		}
 	}
 	var value runtimestorage.MessageEvent
+	if transition.ReplyID != "" || transition.SegmentCount > 0 {
+		return s.transitionMessageWithReply(ctx, transition, leaseSeconds)
+	}
 	err := s.db.QueryRowContext(ctx, "UPDATE public.message_event SET status=$4,fencing_token=fencing_token+1,lease_owner=CASE WHEN $4='running' THEN $5 ELSE '' END,lease_expires_at=CASE WHEN $6>0 THEN now()+($6 * interval '1 second') ELSE NULL END,updated_at=now() WHERE tenant_id=$1 AND event_id=$2 AND status=$3 AND ($3 <> 'running' OR ($4='execution_reconciling' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()) OR ($4<>'execution_reconciling' AND lease_owner=$5 AND fencing_token=$7 AND lease_expires_at IS NOT NULL AND lease_expires_at > now())) RETURNING tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,fencing_token,lease_owner,lease_expires_at,reply_id,segment_count,created_at,updated_at", transition.TenantID, transition.EventID, transition.From, transition.To, transition.Owner, leaseSeconds, transition.FencingToken).Scan(eventArgs(&value)...)
+	if err == nil {
+		return cloneEvent(value), nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return runtimestorage.MessageEvent{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	if _, lookupErr := s.GetMessage(ctx, transition.TenantID, transition.EventID); lookupErr != nil {
+		return runtimestorage.MessageEvent{}, lookupErr
+	}
+	return runtimestorage.MessageEvent{}, runtimestorage.ErrConflict
+}
+
+func (s *Store) transitionMessageWithReply(ctx context.Context, transition runtimestorage.MessageTransition, leaseSeconds int64) (runtimestorage.MessageEvent, error) {
+	var value runtimestorage.MessageEvent
+	err := s.db.QueryRowContext(ctx, "UPDATE public.message_event SET status=$4,fencing_token=fencing_token+1,lease_owner=CASE WHEN $4='running' THEN $5 ELSE '' END,lease_expires_at=CASE WHEN $6>0 THEN now()+($6 * interval '1 second') ELSE NULL END,reply_id=COALESCE(NULLIF($8,''),reply_id),segment_count=CASE WHEN $9>0 THEN $9 ELSE segment_count END,updated_at=now() WHERE tenant_id=$1 AND event_id=$2 AND status=$3 AND ($3 <> 'running' OR ($4='execution_reconciling' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()) OR ($4<>'execution_reconciling' AND lease_owner=$5 AND fencing_token=$7 AND lease_expires_at IS NOT NULL AND lease_expires_at > now())) RETURNING tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,fencing_token,lease_owner,lease_expires_at,reply_id,segment_count,created_at,updated_at", transition.TenantID, transition.EventID, transition.From, transition.To, transition.Owner, leaseSeconds, transition.FencingToken, transition.ReplyID, transition.SegmentCount).Scan(eventArgs(&value)...)
 	if err == nil {
 		return cloneEvent(value), nil
 	}

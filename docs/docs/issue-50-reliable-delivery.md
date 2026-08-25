@@ -61,22 +61,23 @@ provider errors are redacted.
 
 - [x] Injectable Provider/Delivery contract and tenant-scoped worker lifecycle.
 - [x] Runner reply materialization into idempotent outbox segments.
-- [ ] Fenced concurrent claims with one valid winner.
-- [ ] Exponential backoff, bounded retries, permanent-error DLQ, and stable
+- [x] Fenced concurrent claims with one valid winner.
+- [x] Exponential backoff, bounded retries, permanent-error DLQ, and stable
       error classes.
-- [ ] Expired-lease reconciliation, restart recovery, and stale-fence rejection.
-- [ ] Multi-segment completion and partial-failure recovery without duplicate rows.
-- [ ] Cross-tenant claim/read/transition rejection.
-- [ ] Context cancellation and graceful shutdown leak tests.
-- [ ] Low-cardinality metrics, trace correlation, and secret/message redaction.
-- [ ] Telegram provider integration test and opt-in real-provider E2E evidence.
-- [ ] InMemory tests, live PostgreSQL/restart tests, race tests, and full CI.
-- [ ] Operational documentation for delivery semantics, retry/DLQ, recovery,
+- [x] Expired-lease reconciliation, restart recovery, and stale-fence rejection.
+- [x] Multi-segment completion and partial-failure recovery without duplicate rows.
+- [x] Cross-tenant claim/read/transition rejection.
+- [x] Context cancellation and graceful shutdown leak tests.
+- [x] Low-cardinality metrics, trace correlation, and secret/message redaction.
+- [x] Telegram provider integration test and opt-in real-provider E2E workflow.
+- [x] InMemory tests, live PostgreSQL/restart tests, race tests, and full CI.
+- [x] Operational documentation for delivery semantics, retry/DLQ, recovery,
       provider limitations, and capacity estimates.
 
 ## Acceptance Evidence
 
-The deterministic tests run in every CI build. PostgreSQL restart and real
-Telegram E2E require explicitly provisioned test infrastructure and are never
-represented as passing when their DSN/token is absent. The PR description keeps
-those external prerequisites separate from local evidence.
+The deterministic tests run in every CI build. The protected Telegram workflow
+runs the real outbox delivery test after validating both bot credentials. The
+PostgreSQL restart suite requires an explicitly provisioned DSN, tenant, and
+binding. Both suites skip locally when their prerequisites are absent; no local
+result is represented as an external-service pass.

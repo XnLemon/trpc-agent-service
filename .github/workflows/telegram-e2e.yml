@@ -60,3 +60,9 @@ jobs:
           TELEGRAM_TEST_MESSAGE: telegram-e2e-${{ github.run_id }}-${{ github.run_attempt }}
           TELEGRAM_TIMEOUT: 90s
           TELEGRAM_POLL_TIMEOUT: 5s
+
+      - name: Run durable outbox Telegram E2E
+        run: go test ./trpcservice/channels/telegram -run TestTelegramProviderOutboxE2E -count=1
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_SENDER_BOT_TOKEN: ${{ secrets.TELEGRAM_SENDER_BOT_TOKEN }}

@@ -296,9 +296,15 @@ func (dispatcher *Dispatcher) finishDurable(durable *durableExecution, terminalE
 	if len(replies) > 0 {
 		reply = replies[0]
 	}
+	segments := 0
+	replyID := ""
 	if terminalErr == nil && dispatcher.materializer != nil && strings.TrimSpace(reply) != "" {
-		if _, err := dispatcher.materializer.Materialize(context.Background(), outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, Payload: reply}); err != nil {
+		var err error
+		segments, err = dispatcher.materializer.Materialize(context.Background(), outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, Payload: reply})
+		if err != nil {
 			terminalErr = err
+		} else {
+			replyID = durable.eventID
 		}
 	}
 	to := runtimestorage.EventCompleted
@@ -307,7 +313,7 @@ func (dispatcher *Dispatcher) finishDurable(durable *durableExecution, terminalE
 	}
 	_, _ = durable.store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{
 		TenantID: durable.tenantID, EventID: durable.eventID, From: runtimestorage.EventRunning,
-		To: to, Owner: durable.owner, FencingToken: durable.fencingToken,
+		To: to, Owner: durable.owner, FencingToken: durable.fencingToken, ReplyID: replyID, SegmentCount: segments,
 	})
 }
 

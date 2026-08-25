@@ -198,6 +198,12 @@ func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage
 		value.LeaseExpiresAt = nil
 	}
 	value.Status = transition.To
+	if transition.ReplyID != "" {
+		value.ReplyID = transition.ReplyID
+	}
+	if transition.SegmentCount > 0 {
+		value.SegmentCount = transition.SegmentCount
+	}
 	value.FencingToken++
 	value.UpdatedAt = time.Now().UTC()
 	s.events[k] = value
