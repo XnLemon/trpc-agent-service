@@ -35,12 +35,6 @@ linters:
       - path: ^trpcservice/gateway/registry\.go$
         text: 'func .*Acquire'
         linters: [gocyclo]
-      - path: ^trpcservice/runtime/storage/inmemory/inmemory\.go$
-        text: 'func .*TransitionMessage|func .*EnqueueReplies'
-        linters: [gocyclo]
-      - path: ^trpcservice/runtime/storage/postgres/repository\.go$
-        text: 'func .*EnqueueReplies'
-        linters: [gocyclo]
       - path: ^examples/telegram-e2e/outbox_runner_e2e_test\.go$
         text: 'cyclomatic complexity .* of func `runTelegramOutboxScenario`'
         linters: [gocyclo]
