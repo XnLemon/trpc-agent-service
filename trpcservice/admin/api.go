@@ -1,3 +1,4 @@
+// Package admin exposes the tenant-scoped control-plane HTTP API.
 package admin
 
 import (

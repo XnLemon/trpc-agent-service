@@ -1,3 +1,4 @@
+// Package main starts the tRPC Agent service.
 package main
 
 import (

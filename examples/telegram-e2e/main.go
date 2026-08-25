@@ -1,3 +1,4 @@
+// Package main runs the Telegram end-to-end example.
 package main
 
 import (

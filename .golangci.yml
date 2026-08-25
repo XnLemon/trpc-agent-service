@@ -1,0 +1,40 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - govet
+    - revive
+    - gocyclo
+    - gosec
+    - ineffassign
+  settings:
+    gocyclo:
+      min-complexity: 20
+    revive:
+      rules:
+        - name: package-comments
+  exclusions:
+    rules:
+      # Incremental baseline for functions that predate this lint policy.
+      - path: ^(?:examples/telegram-e2e/main\.go|trpcservice/(?:admin/api|agent/(?:app|revision)|agent/postgres/repository|audit/audit|backend/backend|bootstrap/bootstrap|channels/(?:channels|fake)|channels/telegram/telegram|gateway/(?:dispatch|registry|resolver)|model/model|runtime/outbox/worker|runtime/storage/inmemory/inmemory|runtime/storage/postgres/repository|tenant/tenant)\.go)$
+        linters:
+          - gocyclo
+      # These constants are identifiers/default test secrets, not credentials.
+      - path: ^(?:examples/telegram-e2e/main|trpcservice/bootstrap/environment)\.go$
+        linters:
+          - gosec
+    paths:
+      - .*\.pb\.go$
+      - .*_mock\.go$
+      - .*_test\.go$
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    paths:
+      - .*\.pb\.go$
+      - .*_mock\.go$
+      - .*_test\.go$
