@@ -62,7 +62,7 @@ jobs:
           TELEGRAM_POLL_TIMEOUT: 5s
 
       - name: Run durable outbox Telegram E2E
-        run: go test ./trpcservice/channels/telegram -run TestTelegramProviderOutboxE2E -count=1
+        run: go test ./examples/telegram-e2e -run TestTelegramProviderOutboxRunnerE2E -count=1
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_SENDER_BOT_TOKEN: ${{ secrets.TELEGRAM_SENDER_BOT_TOKEN }}
