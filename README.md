@@ -205,10 +205,10 @@
 - [x] 覆盖 Agent App/Revision 边界、租户隔离、发布回滚、并发冲突、Context 取消和执行快照测试
 - [x] 对 Agent App 和 InMemory Repository 运行 race 与重复稳定性测试
 - [ ] 实现模型、工具、数据库和 IM 故障的超时、重试、熔断及降级策略
-- [ ] 实现 IM 异步重试队列、指数退避和死信处理
+- [x] 实现 IM 异步重试队列、指数退避和死信处理（Issue #50）
 - [ ] 完成容量模型，并对并发 Session、Redis/SQL QPS 和 IM 峰值进行压测
 - [ ] 完成备份恢复、故障演练和租户级发布回滚流程
-- [ ] 增加 Storage Adapter 契约测试和端到端消息链路测试
+- [x] 增加 Storage Adapter 契约测试和端到端消息链路测试（Issue #50）
 - [ ] 增加多租户越权、密钥泄漏、并发一致性和故障注入测试
 - [x] 在 CI 中运行 `go test -race ./...`（Issue #39）；Codecov project/patch 的 85% 目标仍待分支保护或 ruleset 设为合并门禁
 - [ ] 增加依赖漏洞、镜像和提交密钥扫描
