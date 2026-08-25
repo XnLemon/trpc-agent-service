@@ -87,6 +87,8 @@ type DispatchConfig struct {
 	// AuditWriter receives mandatory execution lifecycle facts. It is optional
 	// for compatibility with deployments that have not enabled audit storage.
 	AuditWriter audit.Writer
+	// HandoffStore durably reserves and finalizes execution audit facts.
+	HandoffStore audit.HandoffStore
 }
 
 // Dispatcher resolves a fixed plan, acquires a Runner lease, and translates
@@ -100,6 +102,7 @@ type Dispatcher struct {
 	runtimeStore runtimestorage.RuntimeStore
 	materializer *outbox.Materializer
 	auditWriter  audit.Writer
+	handoffStore audit.HandoffStore
 }
 
 type durableExecution struct {
@@ -131,7 +134,7 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 		}
 		config.Materializer = materializer
 	}
-	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore, materializer: config.Materializer, auditWriter: config.AuditWriter}, nil
+	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore, materializer: config.Materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.
@@ -198,6 +201,12 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		dispatcher.failDurable(durable, err)
 		finishWithError(err)
 		return nil, auditWriteFailure()
+	}
+	if dispatcher.handoffStore != nil {
+		if _, err := dispatcher.handoffStore.Reserve(ctx, audit.ExecutionHandoff{TenantID: request.Principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), RequestID: requestID, TraceID: traceID, EventID: audit.NewEventID(requestID, string(audit.EventExecutionStarted)), State: audit.HandoffPending}); err != nil {
+			finishWithError(err)
+			return nil, auditWriteFailure()
+		}
 	}
 	lease, err := dispatcher.registry.Acquire(ctx, plan)
 	if err != nil {
@@ -386,6 +395,18 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		}
 		if errorType == "" {
 			errorType = terminalAuditError(terminalErr)
+		}
+		if dispatcher.handoffStore != nil {
+			result := audit.ResultSuccess
+			if terminalErr != nil {
+				result = audit.ResultFailure
+				if IsContextCancellation(terminalErr) {
+					result = audit.ResultCanceled
+				}
+			}
+			if _, err := dispatcher.handoffStore.Finalize(context.Background(), audit.ExecutionHandoff{TenantID: principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType}); err != nil && terminalErr == nil {
+				terminalErr = auditWriteFailure()
+			}
 		}
 		if err := finalizeAudit(eventType, errorType); err != nil && terminalErr == nil {
 			terminalErr = ErrExecution
