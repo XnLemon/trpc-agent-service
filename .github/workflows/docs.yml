@@ -6,7 +6,7 @@ on:
     paths:
       - "docs/**"
   pull_request:
-    branches: [main]
+    branches: [main, codex/48-tenant-runtime-storage]
     paths:
       - "docs/**"
   workflow_dispatch:
