@@ -17,7 +17,7 @@ func TestHandoffStoreScopeAndReserve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	mock.ExpectBegin()
 	now := time.Now().UTC()
 	handoffRows := sqlmock.NewRows([]string{"tenant_id", "handoff_id", "request_id", "trace_id", "event_id", "state", "result", "error_type", "latency_ms", "created_at", "updated_at"})

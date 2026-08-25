@@ -49,9 +49,10 @@ func (p Policy) Decide(ctx context.Context, requestID, traceID, toolName string)
 		err = ErrDenied
 	}
 	eventType := audit.EventToolDenied
-	if decision == Allow {
+	switch decision {
+	case Allow:
 		eventType = audit.EventToolAllowed
-	} else if decision == ApprovalRequired {
+	case ApprovalRequired:
 		eventType = audit.EventToolApprovalRequired
 	}
 	if auditErr := p.Recorder.ToolDecision(ctx, eventType, requestID, traceID, toolName, audit.Decision(decision), ""); auditErr != nil {
