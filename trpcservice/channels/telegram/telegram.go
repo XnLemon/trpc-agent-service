@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/go-telegram/bot"
@@ -150,6 +151,8 @@ type Config struct {
 	Workers int
 	// ErrorHook observes stable, redacted adapter failures.
 	ErrorHook ErrorHook
+	// AuditWriter receives mandatory ingress and delivery outcome facts.
+	AuditWriter audit.Writer
 	// Factory optionally replaces the public SDK factory for tests.
 	Factory BotFactory
 }
@@ -164,6 +167,7 @@ type Adapter struct {
 	idempotency    *gateway.IdempotencyStore
 	ownIdempotency bool
 	errorHook      ErrorHook
+	audit          audit.Recorder
 
 	mu        sync.RWMutex
 	closed    bool
@@ -229,6 +233,7 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 	adapter := &Adapter{
 		dispatcher: config.Dispatcher, principal: principal, target: config.Target,
 		idempotency: idempotency, ownIdempotency: ownIdempotency, errorHook: config.ErrorHook,
+		audit: audit.Recorder{Writer: config.AuditWriter, TenantID: config.Target.TenantID},
 	}
 	client, err := factory.New(token, BotFactoryConfig{
 		Handler:        adapter.sdkHandler(),
@@ -353,6 +358,10 @@ func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update)
 	claim, replay, err := adapter.idempotency.Begin(ctx, adapter.principal, message)
 	if err != nil {
 		if errors.Is(err, gateway.ErrDuplicateMessage) {
+			if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressDuplicate, message.ExternalMessageID, "", message.ExternalUserID, "", audit.DecisionDuplicate, string(audit.ErrorDuplicate)); auditErr != nil {
+				adapter.report(ErrorOperationUpdate, ErrDispatch)
+				return ErrDispatch
+			}
 			return ErrDuplicateUpdate
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -364,6 +373,9 @@ func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update)
 		return ErrInvalid
 	}
 	if claim == nil {
+		if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressAccepted, message.ExternalMessageID, "", message.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
+			return ErrDispatch
+		}
 		if err := adapter.sendEvents(ctx, update.Message, replay); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return err
@@ -372,6 +384,10 @@ func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update)
 			return err
 		}
 		return nil
+	}
+	if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressAccepted, message.ExternalMessageID, "", message.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
+		_ = claim.Fail()
+		return ErrDispatch
 	}
 
 	events, dispatchErr := adapter.dispatch(ctx, message)
@@ -397,6 +413,9 @@ func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update)
 		}
 		adapter.report(ErrorOperationSend, ErrSendMessage)
 		return err
+	}
+	if auditErr := adapter.audit.IM(ctx, audit.EventIMDeliverySent, message.ExternalMessageID, "", message.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
+		return ErrDispatch
 	}
 	return nil
 }

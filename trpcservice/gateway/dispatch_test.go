@@ -224,6 +224,12 @@ func TestAuditHelpers(t *testing.T) {
 	}
 }
 
+func TestExecutionAuditEventIDIsBoundedForMaximumRequestID(t *testing.T) {
+	if got := audit.NewEventID(strings.Repeat("r", 256), string(audit.EventExecutionStarted)); len(got) > 256 {
+		t.Fatalf("audit event id length = %d", len(got))
+	}
+}
+
 func hasAuditEventTypes(events []audit.Event, want ...audit.EventType) bool {
 	seen := map[audit.EventType]bool{}
 	for _, event := range events {

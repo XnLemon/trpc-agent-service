@@ -507,7 +507,7 @@ func (dispatcher *Dispatcher) writeExecutionAudit(ctx context.Context, principal
 	if target, ok := principal.RoutingTarget(); ok {
 		channel = string(target.Channel)
 	}
-	event := audit.Event{SchemaVersion: audit.SchemaVersion, EventID: requestID + ":" + string(eventType), EventType: eventType, TenantID: principal.TenantID(), Channel: channel, UserID: message.ExternalUserID, SessionID: identity.SessionID, AgentAppID: principal.AppID(), ErrorType: errorType, RequestID: requestID, TraceID: traceID, ActorType: string(principal.Kind()), ActorID: principal.SubjectID(), OccurredAt: time.Now().UTC()}
+	event := audit.Event{SchemaVersion: audit.SchemaVersion, EventID: audit.NewEventID(requestID, string(eventType)), EventType: eventType, TenantID: principal.TenantID(), Channel: channel, UserID: message.ExternalUserID, SessionID: identity.SessionID, AgentAppID: principal.AppID(), ErrorType: errorType, RequestID: requestID, TraceID: traceID, ActorType: string(principal.Kind()), ActorID: principal.SubjectID(), OccurredAt: time.Now().UTC()}
 	if _, err := dispatcher.auditWriter.Append(ctx, event); err != nil {
 		return err
 	}
