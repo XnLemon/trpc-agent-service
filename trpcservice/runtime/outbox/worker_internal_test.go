@@ -149,8 +149,11 @@ func TestClassifyTypedDeliveryErrors(t *testing.T) {
 	if class, retryable := classify(&DeliveryError{Class: "", Retryable: false}); class != "provider_error" || !retryable {
 		t.Fatalf("empty class = %s/%v", class, retryable)
 	}
-	if class, retryable := classify(&DeliveryError{Class: "permanent", Retryable: false}); class != "permanent" || retryable {
+	if class, retryable := classify(&DeliveryError{Class: "permanent token=secret", Retryable: false}); class != "provider_error" || retryable {
 		t.Fatalf("typed class = %s/%v", class, retryable)
+	}
+	if metricErrorClass("provider_rejected") != "error" || metricErrorClass("rate_limited") != "rate_limited" {
+		t.Fatal("provider classes were not reduced to low-cardinality metric classes")
 	}
 }
 

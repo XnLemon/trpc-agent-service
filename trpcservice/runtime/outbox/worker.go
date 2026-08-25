@@ -209,7 +209,7 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 			_, err = w.store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: to, Owner: w.owner, FencingToken: claimed.FencingToken, ErrorClass: class})
 			if retryable && to == runtimestorage.ReplyRetryable {
 				if w.telemetry != nil {
-					_ = w.metrics.Retry(ctx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "retry", "error_class": class})
+					_ = w.metrics.Retry(ctx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "retry", "error_class": metricErrorClass(class)})
 				}
 			}
 		}
@@ -308,7 +308,26 @@ func classify(err error) (string, bool) {
 	}
 	var deliveryErr *DeliveryError
 	if errors.As(err, &deliveryErr) && deliveryErr.Class != "" {
-		return deliveryErr.Class, deliveryErr.Retryable
+		class := normalizeErrorClass(deliveryErr.Class)
+		return class, deliveryErr.Retryable
 	}
 	return "provider_error", true
+}
+
+func normalizeErrorClass(class string) string {
+	switch class {
+	case "rate_limited", "timeout", "canceled", "invalid", "unauthenticated", "not_ready", "unavailable", "provider_rejected", "provider_error":
+		return class
+	default:
+		return "provider_error"
+	}
+}
+
+func metricErrorClass(class string) string {
+	switch normalizeErrorClass(class) {
+	case "rate_limited", "timeout", "canceled", "invalid", "unauthenticated", "not_ready", "unavailable":
+		return normalizeErrorClass(class)
+	default:
+		return "error"
+	}
 }
