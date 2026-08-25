@@ -133,3 +133,26 @@ func TestHandoffScanConvertersRejectInvalidValues(t *testing.T) {
 		t.Fatal("scan latency accepted invalid value")
 	}
 }
+
+func TestHandoffGetQueryErrorBranches(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store, _ := NewHandoffStore(db, "t")
+	if _, err := store.Get(context.Background(), "t", ""); !errors.Is(err, audit.ErrInvalid) {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery("SELECT tenant_id,handoff_id,request_id").WillReturnError(sql.ErrNoRows)
+	if _, err := store.Get(context.Background(), "t", "missing"); !errors.Is(err, audit.ErrHandoffNotFound) {
+		t.Fatal(err)
+	}
+	mock.ExpectQuery("SELECT tenant_id,handoff_id,request_id").WillReturnError(errors.New("query failed"))
+	if _, err := store.Get(context.Background(), "t", "broken"); err == nil {
+		t.Fatal("expected query failure")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

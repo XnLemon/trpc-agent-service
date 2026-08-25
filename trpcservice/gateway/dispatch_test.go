@@ -15,6 +15,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -422,6 +423,32 @@ func TestDispatcherAcquireFailureWithSuccessfulTerminalAudit(t *testing.T) {
 	}
 	if !hasAuditEventTypes(entries, audit.EventExecutionStarted, audit.EventExecutionFailed) {
 		t.Fatalf("audit entries=%+v", entries)
+	}
+}
+
+func TestWriteExecutionAuditUsesVerifiedChannelRoute(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, _ := newTestDispatcher(t, &testRunner{})
+	writer, err := audit.NewInMemory(principal.TenantID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.auditWriter = writer
+	identity := tenant.RunnerIdentity{SessionID: "session"}
+	if err := dispatcher.writeExecutionAudit(context.Background(), principal, InboundMessage{Content: "hello", ExternalUserID: "user"}, identity, "request", "trace", audit.EventExecutionStarted, ""); err != nil {
+		t.Fatal(err)
+	}
+	events, err := writer.List(context.Background(), audit.Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Channel != string(target.Channel) {
+		t.Fatalf("events=%+v", events)
 	}
 }
 
