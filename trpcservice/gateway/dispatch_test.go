@@ -267,6 +267,90 @@ func TestDispatcherHandoffFinalizeFailureIsRedacted(t *testing.T) {
 	}
 }
 
+func TestDispatcherCancellationFinalizesAuditAndHandoff(t *testing.T) {
+	runnerEvents := make(chan *trpcevent.Event)
+	dispatcher, principal := newTestDispatcher(t, &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		return runnerEvents, nil
+	}})
+	writer, err := audit.NewInMemory(principal.TenantID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoffs := audit.NewInMemoryHandoffStore()
+	dispatcher.auditWriter, dispatcher.handoffStore = writer, handoffs
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := dispatcher.Dispatch(ctx, DispatchRequest{Principal: principal, RequestID: "cancel-request", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	close(runnerEvents)
+	events := collectDispatchEvents(stream)
+	if len(events) != 2 || events[0].Error != ErrExecutionCanceled.Error() {
+		t.Fatalf("events=%+v", events)
+	}
+	handoff, err := handoffs.Get(context.Background(), principal.TenantID(), audit.NewEventID("cancel-request", "handoff"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handoff.State != audit.HandoffFinalized || handoff.Result != audit.ResultCanceled {
+		t.Fatalf("handoff=%+v", handoff)
+	}
+	auditEvents, err := writer.List(context.Background(), audit.Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasAuditEventTypes(auditEvents, audit.EventExecutionStarted, audit.EventExecutionCanceled) {
+		t.Fatalf("audit=%+v", auditEvents)
+	}
+}
+
+func TestDispatcherTerminalErrorFinalizesFailureHandoff(t *testing.T) {
+	dispatcher, principal := newTestDispatcher(t, &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		events := make(chan *trpcevent.Event, 1)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Error: &trpcmodel.ResponseError{Message: "provider secret"}}}
+		close(events)
+		return events, nil
+	}})
+	handoffs := audit.NewInMemoryHandoffStore()
+	dispatcher.handoffStore = handoffs
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "failure-request", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collectDispatchEvents(stream)
+	if len(events) != 2 || events[0].Error != ErrExecution.Error() || events[1].Status != "error" {
+		t.Fatalf("events=%+v", events)
+	}
+	handoff, err := handoffs.Get(context.Background(), principal.TenantID(), audit.NewEventID("failure-request", "handoff"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handoff.Result != audit.ResultFailure || handoff.ErrorType != string(audit.ErrorUnavailable) {
+		t.Fatalf("handoff=%+v", handoff)
+	}
+}
+
+func TestDispatcherRunnerBoundaryAuditFailures(t *testing.T) {
+	for name, runFn := range map[string]func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error){
+		"run error": func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+			return nil, errors.New("provider error")
+		},
+		"nil stream": func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+			return nil, nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dispatcher, principal := newTestDispatcher(t, &testRunner{runFn: runFn})
+			dispatcher.auditWriter = &auditWriterFailure{failAfter: 1}
+			stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+			if stream != nil || !errors.Is(err, ErrAuditWriteFailed) {
+				t.Fatalf("stream=%v err=%v", stream, err)
+			}
+		})
+	}
+}
+
 func TestAuditHelpers(t *testing.T) {
 	if terminalAuditError(nil) != "" || terminalAuditError(context.Canceled) != string(audit.ErrorCanceled) || terminalAuditError(ErrExecution) != string(audit.ErrorUnavailable) {
 		t.Fatal("unexpected terminal audit error mapping")
