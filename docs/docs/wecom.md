@@ -61,6 +61,12 @@ type WeComProtocolConfiguration struct {
 的两个自建应用会发生 active Binding 冲突。实现使用规范、无歧义的编码组合 `CorpID`
 和 `AgentID`，不接受昵称或 payload 覆盖。自建应用的 `ReceiveID` 为 `CorpID`。
 
+历史 `wecom` Binding 仍可由 Admin API 读取和更新，但旧的 CorpID-only
+`ProviderAccountID` 与缺少 `AgentID` 的 protocol 不会被自动推断或改写。Issue #60 的
+迁移保留这些记录；它们在 ingress 中不可用，直到管理员以当前 `ExpectedVersion` 显式
+更新 `AgentID`、组合 `ProviderAccountID` 和必要凭据，再重新激活。这样不会把一个企业
+中的旧 Binding 错误绑定到任意自建应用。
+
 `SecretRef` 指向一份短路径解析的凭据包：
 
 ```text
@@ -168,6 +174,8 @@ duplicate ingress、delivery 成功/重试/dead-letter，以及 channel/error cl
 - duplicate、并发、乱序和跨 Tenant/Binding identity；
 - Context cancellation、retry/dead-letter、stale fence 和 restart recovery；
 - Telegram Adapter 仍维持现有 long-polling、直接回复和 lifecycle 行为；
+- 历史 CorpID-only `wecom` Binding 通过读取/更新迁移保持可管理，但在补齐
+  `AgentID` 与组合 `ProviderAccountID` 前拒绝 ingress；
 - InMemory/PostgreSQL conformance、migration、`go test ./...`、race、vet、lint、build 和
   MkDocs strict；
 - 可选 live E2E 使用本地忽略的 `data/wecom-e2e.env`，不把实际凭据或 live pass
