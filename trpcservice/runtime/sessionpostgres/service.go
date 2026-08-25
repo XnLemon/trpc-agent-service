@@ -34,6 +34,7 @@ func New(tenantID string, delegate session.Service, store runtimestorage.Runtime
 	return &Service{tenantID: tenantID, delegate: delegate, store: store, versions: map[string]int64{}}, nil
 }
 
+// CreateSession creates and durably records a tenant-scoped session.
 func (s *Service) CreateSession(ctx context.Context, key session.Key, state session.StateMap, options ...session.Option) (*session.Session, error) {
 	if err := validateKey(key); err != nil {
 		return nil, err
@@ -50,6 +51,7 @@ func (s *Service) CreateSession(ctx context.Context, key session.Key, state sess
 	return created, nil
 }
 
+// GetSession restores a tenant-scoped session and its durable event history.
 func (s *Service) GetSession(ctx context.Context, key session.Key, options ...session.Option) (*session.Session, error) {
 	if err := validateKey(key); err != nil {
 		return nil, err
@@ -114,6 +116,7 @@ func (s *Service) restoreHistory(ctx context.Context, value *session.Session, se
 	return nil
 }
 
+// UpdateSessionState persists a session state change before updating the delegate.
 func (s *Service) UpdateSessionState(ctx context.Context, key session.Key, state session.StateMap) error {
 	if err := validateKey(key); err != nil {
 		return err
@@ -130,6 +133,7 @@ func (s *Service) UpdateSessionState(ctx context.Context, key session.Key, state
 	return s.delegate.UpdateSessionState(ctx, key, state)
 }
 
+// AppendEvent durably records an event before forwarding it to the delegate.
 func (s *Service) AppendEvent(ctx context.Context, sess *session.Session, value *trpcevent.Event, options ...session.Option) error {
 	if sess == nil || value == nil {
 		return session.ErrNilSession
@@ -152,11 +156,12 @@ func (s *Service) AppendEvent(ctx context.Context, sess *session.Session, value 
 	return s.delegate.AppendEvent(ctx, sess, value, options...)
 }
 
-// The remaining methods preserve the complete upstream Service contract while
-// keeping their existing delegate semantics.
+// ListSessions preserves the upstream delegate's session listing semantics.
 func (s *Service) ListSessions(ctx context.Context, key session.UserKey, options ...session.Option) ([]*session.Session, error) {
 	return s.delegate.ListSessions(ctx, key, options...)
 }
+
+// DeleteSession removes durable state and then deletes the delegate session.
 func (s *Service) DeleteSession(ctx context.Context, key session.Key, options ...session.Option) error {
 	if err := validateKey(key); err != nil {
 		return err
@@ -172,33 +177,53 @@ func (s *Service) DeleteSession(ctx context.Context, key session.Key, options ..
 	s.mu.Unlock()
 	return nil
 }
+
+// UpdateAppState delegates application state persistence.
 func (s *Service) UpdateAppState(ctx context.Context, app string, state session.StateMap) error {
 	return s.delegate.UpdateAppState(ctx, app, state)
 }
+
+// DeleteAppState delegates application state deletion.
 func (s *Service) DeleteAppState(ctx context.Context, app, key string) error {
 	return s.delegate.DeleteAppState(ctx, app, key)
 }
+
+// ListAppStates delegates application state listing.
 func (s *Service) ListAppStates(ctx context.Context, app string) (session.StateMap, error) {
 	return s.delegate.ListAppStates(ctx, app)
 }
+
+// UpdateUserState delegates user state persistence.
 func (s *Service) UpdateUserState(ctx context.Context, key session.UserKey, state session.StateMap) error {
 	return s.delegate.UpdateUserState(ctx, key, state)
 }
+
+// ListUserStates delegates user state listing.
 func (s *Service) ListUserStates(ctx context.Context, key session.UserKey) (session.StateMap, error) {
 	return s.delegate.ListUserStates(ctx, key)
 }
+
+// DeleteUserState delegates user state deletion.
 func (s *Service) DeleteUserState(ctx context.Context, key session.UserKey, field string) error {
 	return s.delegate.DeleteUserState(ctx, key, field)
 }
+
+// CreateSessionSummary delegates summary creation.
 func (s *Service) CreateSessionSummary(ctx context.Context, value *session.Session, filter string, force bool) error {
 	return s.delegate.CreateSessionSummary(ctx, value, filter, force)
 }
+
+// EnqueueSummaryJob delegates asynchronous summary creation.
 func (s *Service) EnqueueSummaryJob(ctx context.Context, value *session.Session, filter string, force bool) error {
 	return s.delegate.EnqueueSummaryJob(ctx, value, filter, force)
 }
+
+// GetSessionSummaryText delegates summary retrieval.
 func (s *Service) GetSessionSummaryText(ctx context.Context, value *session.Session, options ...session.SummaryOption) (string, bool) {
 	return s.delegate.GetSessionSummaryText(ctx, value, options...)
 }
+
+// Close delegates shutdown to the borrowed session service.
 func (s *Service) Close() error { return s.delegate.Close() }
 
 func validateKey(key session.Key) error {

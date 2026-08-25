@@ -65,11 +65,16 @@ type ChangeMetadata struct {
 type ChangeEventType string
 
 const (
-	ChangePublished  ChangeEventType = "published"
+	// ChangePublished records a revision publication.
+	ChangePublished ChangeEventType = "published"
+	// ChangeRolledBack records a rollback to an earlier revision.
 	ChangeRolledBack ChangeEventType = "rolled_back"
-	ChangeSuspended  ChangeEventType = "suspended"
-	ChangeResumed    ChangeEventType = "resumed"
-	ChangeDisabled   ChangeEventType = "disabled"
+	// ChangeSuspended records an application suspension.
+	ChangeSuspended ChangeEventType = "suspended"
+	// ChangeResumed records an application resume.
+	ChangeResumed ChangeEventType = "resumed"
+	// ChangeDisabled records an application disablement.
+	ChangeDisabled ChangeEventType = "disabled"
 )
 
 // ChangeEvent is the complete immutable audit handoff returned atomically with

@@ -24,34 +24,50 @@ import (
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
+// Attribute is a sanitized key-value annotation attached to telemetry.
 type Attribute struct{ Key, Value string }
 
+// Span records a single operation and its outcome.
 type Span interface {
 	End()
 	SetAttributes(...Attribute)
 	SetStatus(Status, string)
 	RecordError(error)
 }
+
+// Tracer starts spans for named operations.
 type Tracer interface {
 	Start(context.Context, string, ...Attribute) (context.Context, Span)
 }
+
+// Counter records an integer measurement.
 type Counter interface {
 	Add(context.Context, int64, ...Attribute)
 }
+
+// Histogram records a floating-point measurement.
 type Histogram interface {
 	Record(context.Context, float64, ...Attribute)
 }
+
+// UpDownCounter records a signed integer measurement that may increase or decrease.
 type UpDownCounter interface {
 	Add(context.Context, int64, ...Attribute)
 }
+
+// Meter creates instruments for named measurements.
 type Meter interface {
 	Counter(string) Counter
 	Histogram(string) Histogram
 	UpDownCounter(string) UpDownCounter
 }
+
+// Logger emits structured, redacted diagnostic records.
 type Logger interface {
 	Log(context.Context, Level, string, ...Attribute)
 }
+
+// Provider supplies tracing, metrics, logging, and shutdown lifecycle hooks.
 type Provider interface {
 	Tracer(string) Tracer
 	Meter(string) Meter
@@ -59,34 +75,52 @@ type Provider interface {
 	Shutdown(context.Context) error
 }
 
+// Status is the outcome code recorded on a span.
 type Status string
 
 const (
+	// StatusUnset leaves the span outcome unspecified.
 	StatusUnset Status = "unset"
-	StatusOK    Status = "ok"
+	// StatusOK marks a successful operation.
+	StatusOK Status = "ok"
+	// StatusError marks a failed operation.
 	StatusError Status = "error"
 )
 
+// Level controls structured log severity.
 type Level int
 
 const (
+	// LevelDebug is verbose diagnostic output.
 	LevelDebug Level = iota
+	// LevelInfo is normal operational output.
 	LevelInfo
+	// LevelWarn is a recoverable operational condition.
 	LevelWarn
+	// LevelError is an operation failure.
 	LevelError
 )
 
 const (
-	OperationHTTPRequest      = "http.request"
-	OperationGatewayDispatch  = "gateway.dispatch"
-	OperationRunnerExecution  = "runner.execution"
-	OperationModelCall        = "model.call"
-	OperationToolCall         = "tool.call"
+	// OperationHTTPRequest identifies HTTP request work.
+	OperationHTTPRequest = "http.request"
+	// OperationGatewayDispatch identifies gateway dispatch work.
+	OperationGatewayDispatch = "gateway.dispatch"
+	// OperationRunnerExecution identifies model runner work.
+	OperationRunnerExecution = "runner.execution"
+	// OperationModelCall identifies model provider work.
+	OperationModelCall = "model.call"
+	// OperationToolCall identifies tool provider work.
+	OperationToolCall = "tool.call"
+	// OperationStorageOperation identifies persistence work.
 	OperationStorageOperation = "storage.operation"
-	OperationChannelReceive   = "channel.receive"
-	OperationChannelSend      = "channel.send"
+	// OperationChannelReceive identifies inbound channel work.
+	OperationChannelReceive = "channel.receive"
+	// OperationChannelSend identifies outbound channel work.
+	OperationChannelSend = "channel.send"
 )
 
+// Config supplies provider names and optional telemetry implementations.
 type Config struct {
 	ServiceName    string
 	TracerProvider trace.TracerProvider
@@ -151,6 +185,7 @@ type provider struct {
 	closeErr error
 }
 
+// NewProvider creates a provider using configured or process-default SDKs.
 func NewProvider(config Config) Provider {
 	if config.ServiceName == "" {
 		config.ServiceName = "trpc-agent-service"
@@ -176,6 +211,7 @@ func NewProvider(config Config) Provider {
 	return p
 }
 
+// NewNoopProvider creates a provider that discards telemetry.
 func NewNoopProvider() Provider {
 	return NewProvider(Config{TracerProvider: tracenoop.NewTracerProvider(), MeterProvider: metricnoop.NewMeterProvider(), Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil))})
 }
@@ -320,12 +356,15 @@ func sanitizeAttributes(attrs []Attribute) []Attribute {
 	return out
 }
 
+// RedactString removes credentials and connection secrets from text.
 func RedactString(value string) string {
 	value = bearerPattern.ReplaceAllString(value, "Bearer <redacted>")
 	value = dsnPattern.ReplaceAllString(value, `${1}<redacted>@`)
 	value = sensitivePattern.ReplaceAllString(value, `${1}<redacted>`)
 	return value
 }
+
+// RedactFields copies fields while masking sensitive keys and values.
 func RedactFields(fields map[string]string) map[string]string {
 	out := make(map[string]string, len(fields))
 	for key, value := range fields {
@@ -346,6 +385,7 @@ const (
 	traceIDKey   contextKey = "trpcservice.observability.trace_id"
 )
 
+// WithCorrelation adds request and trace identifiers to ctx.
 func WithCorrelation(ctx context.Context, requestID, traceID string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -353,6 +393,8 @@ func WithCorrelation(ctx context.Context, requestID, traceID string) context.Con
 	ctx = context.WithValue(ctx, requestIDKey, requestID)
 	return context.WithValue(ctx, traceIDKey, traceID)
 }
+
+// RequestID returns the request identifier stored in ctx.
 func RequestID(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -360,6 +402,8 @@ func RequestID(ctx context.Context) string {
 	value, _ := ctx.Value(requestIDKey).(string)
 	return value
 }
+
+// TraceID returns the trace identifier stored in ctx.
 func TraceID(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -367,6 +411,8 @@ func TraceID(ctx context.Context) string {
 	value, _ := ctx.Value(traceIDKey).(string)
 	return value
 }
+
+// ErrorClass maps an error to a stable telemetry class.
 func ErrorClass(err error) string {
 	if err == nil {
 		return ""
@@ -379,6 +425,8 @@ func ErrorClass(err error) string {
 	}
 	return "error"
 }
+
+// DurationMilliseconds returns elapsed time since start in milliseconds.
 func DurationMilliseconds(start time.Time) float64 {
 	return float64(time.Since(start).Microseconds()) / 1000
 }

@@ -248,7 +248,7 @@ func newDurableTelegramFixture(t *testing.T, providerAccountID string) durableTe
 	if err != nil {
 		t.Fatal(err)
 	}
-	secret := "offline-verifier-secret"
+	secret := "offline-verifier-secret" // #nosec G101 -- deterministic fixture secret for an offline test.
 	channelResolver := channelsinmemory.NewFakeCandidateResolver(channelRepo, map[channels.SecretScope]string{{TenantID: binding.TenantID, SecretRef: binding.SecretRef}: secret})
 	candidates, err := channelRepo.LookupCandidates(ctx, channels.ChannelTelegram, routeDigest)
 	if err != nil || len(candidates) != 1 {

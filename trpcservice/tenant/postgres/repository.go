@@ -22,6 +22,7 @@ var _ tenant.Repository = (*TenantRepository)(nil)
 // NewRepository creates a Tenant repository over an owned or borrowed pool.
 func NewRepository(db *sql.DB) *TenantRepository { return &TenantRepository{db: db} }
 
+// Create persists a tenant root after validating its configuration.
 func (r *TenantRepository) Create(ctx context.Context, input tenant.CreateInput) (*tenant.Tenant, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -114,6 +115,7 @@ func (r *TenantRepository) CreateFirst(ctx context.Context, input tenant.CreateI
 	return stored, true, nil
 }
 
+// Get loads a tenant by its stable identifier.
 func (r *TenantRepository) Get(ctx context.Context, tenantID string) (*tenant.Tenant, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -147,6 +149,7 @@ func (r *TenantRepository) Count(ctx context.Context) (int, error) {
 	return count, nil
 }
 
+// UpdateConfiguration applies an expected-version tenant configuration update.
 func (r *TenantRepository) UpdateConfiguration(ctx context.Context, input tenant.UpdateConfigurationInput) (*tenant.Tenant, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -202,6 +205,7 @@ func (r *TenantRepository) UpdateConfiguration(ctx context.Context, input tenant
 	return updated, nil
 }
 
+// TransitionStatus changes a tenant status with optimistic concurrency.
 func (r *TenantRepository) TransitionStatus(ctx context.Context, input tenant.TransitionStatusInput) (*tenant.Tenant, tenant.StatusChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, tenant.StatusChangeEvent{}, err

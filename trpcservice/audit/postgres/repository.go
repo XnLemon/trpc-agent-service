@@ -62,6 +62,7 @@ func (s *Store) scopedTx(ctx context.Context) (*sql.Tx, error) {
 	return tx, nil
 }
 
+// Append persists an audit event.
 func (s *Store) Append(ctx context.Context, event audit.Event) (audit.AppendResult, error) {
 	if err := s.check(ctx); err != nil {
 		return audit.AppendResult{}, err
@@ -92,6 +93,7 @@ func (s *Store) Append(ctx context.Context, event audit.Event) (audit.AppendResu
 	return audit.AppendResult{Event: event.Clone(), Duplicate: duplicate, Digest: storedDigest}, nil
 }
 
+// Get retrieves an audit event by ID.
 func (s *Store) Get(ctx context.Context, eventID string) (audit.Event, error) {
 	if err := s.check(ctx); err != nil {
 		return audit.Event{}, err
@@ -114,6 +116,7 @@ func (s *Store) Get(ctx context.Context, eventID string) (audit.Event, error) {
 	return value, nil
 }
 
+// List retrieves audit events matching query.
 func (s *Store) List(ctx context.Context, query audit.Query) ([]audit.Event, error) {
 	if err := s.check(ctx); err != nil {
 		return nil, err
@@ -169,6 +172,7 @@ func (s *Store) List(ctx context.Context, query audit.Query) ([]audit.Event, err
 	return values, nil
 }
 
+// AggregateUsage computes bounded usage totals.
 func (s *Store) AggregateUsage(ctx context.Context, query audit.UsageQuery) ([]audit.UsageTotal, error) {
 	for _, group := range query.GroupBy {
 		if !validGroup(group) {

@@ -11,11 +11,16 @@ import (
 type EventType string
 
 const (
-	EventCreated              EventType = "created"
+	// EventCreated records initial profile creation.
+	EventCreated EventType = "created"
+	// EventConfigurationUpdated records a profile configuration change.
 	EventConfigurationUpdated EventType = "configuration_updated"
-	EventSuspended            EventType = "suspended"
-	EventResumed              EventType = "resumed"
-	EventDisabled             EventType = "disabled"
+	// EventSuspended records a profile suspension.
+	EventSuspended EventType = "suspended"
+	// EventResumed records a profile resume.
+	EventResumed EventType = "resumed"
+	// EventDisabled records a profile disablement.
+	EventDisabled EventType = "disabled"
 )
 
 // ChangeMetadata is the trusted audit context required for every mutation.

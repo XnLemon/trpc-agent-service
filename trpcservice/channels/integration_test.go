@@ -23,7 +23,7 @@ func TestFakeTrustedInboundRouteAndBindingAwareIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding := createActiveBinding(t, repo, root.TenantID, app.AppID, "wecom", channels.ChannelWeCom, "corp-trusted", routeDigest, "secret/wecom")
-	secret := "offline-fake-secret"
+	secret := "offline-fake-secret" // #nosec G101 -- deterministic fixture secret for an offline test.
 	resolver := inmemory.NewFakeCandidateResolver(repo, map[channels.SecretScope]string{{TenantID: root.TenantID, SecretRef: binding.SecretRef}: secret})
 	candidates, err := repo.LookupCandidates(context.Background(), channels.ChannelWeCom, routeDigest)
 	if err != nil || len(candidates) != 1 {

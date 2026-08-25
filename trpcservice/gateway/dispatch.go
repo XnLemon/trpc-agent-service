@@ -42,10 +42,14 @@ const maxDurableExternalMessageIDRunes = 512
 type DispatchEventType string
 
 const (
+	// DispatchEventMessage identifies an inbound message dispatch event.
 	DispatchEventMessage DispatchEventType = "message"
-	DispatchEventStatus  DispatchEventType = "status"
-	DispatchEventError   DispatchEventType = "error"
-	DispatchEventDone    DispatchEventType = "done"
+	// DispatchEventStatus identifies a dispatch status event.
+	DispatchEventStatus DispatchEventType = "status"
+	// DispatchEventError identifies a dispatch failure event.
+	DispatchEventError DispatchEventType = "error"
+	// DispatchEventDone identifies a completed dispatch event.
+	DispatchEventDone DispatchEventType = "done"
 )
 
 // DispatchRequest is the trusted input to the protocol-neutral execution

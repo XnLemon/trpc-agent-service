@@ -24,6 +24,33 @@ func seedEvent(t *testing.T, store *inmemory.Store, tenantID, sessionID, eventID
 	}
 }
 
+func TestStoreReplyKeysSupportLargeSegmentsAndSharedPrefixes(t *testing.T) {
+	store := inmemory.New()
+	seedEvent(t, store, "tenant-a", "session-reply-key", "event-reply-key")
+	for _, value := range []runtimestorage.ReplyOutbox{
+		{TenantID: "tenant-a", ReplyID: "reply", EventID: "event-reply-key", SegmentIndex: 0, SegmentCount: 2, Payload: "first"},
+		{TenantID: "tenant-a", ReplyID: "reply", EventID: "event-reply-key", SegmentIndex: 1, SegmentCount: 2, Payload: "second"},
+	} {
+		if _, err := store.EnqueueReply(context.Background(), value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	large := runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "large", EventID: "event-reply-key", SegmentIndex: 1 << 30, SegmentCount: 1<<30 + 1, Payload: "large"}
+	if _, err := store.EnqueueReply(context.Background(), large); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []runtimestorage.ReplyOutbox{
+		{TenantID: "tenant-a", ReplyID: "reply", SegmentIndex: 0},
+		{TenantID: "tenant-a", ReplyID: "reply", SegmentIndex: 1},
+		{TenantID: "tenant-a", ReplyID: "large", SegmentIndex: 1 << 30},
+	} {
+		got, err := store.GetReply(context.Background(), want.TenantID, want.ReplyID, want.SegmentIndex)
+		if err != nil || got.Payload == "" {
+			t.Fatalf("GetReply(%+v) = %+v, %v", want, got, err)
+		}
+	}
+}
+
 func TestStoreTenantIsolationAndCAS(t *testing.T) {
 	store := inmemory.New()
 	first, err := store.CreateSession(context.Background(), "tenant-a", "session-1", map[string]any{"nested": map[string]any{"n": 1}})
@@ -183,7 +210,8 @@ func TestStoreEnqueueRepliesValidatesAndCommitsAtomically(t *testing.T) {
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("valid batch = %d err=%v", len(rows), err)
 	}
-	if _, err := store.EnqueueReplies(ctx, []runtimestorage.ReplyOutbox{valid[0], {TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event-batch", SegmentIndex: 1, SegmentCount: 2, Payload: "changed"}}); !errors.Is(err, runtimestorage.ErrConflict) {
+	first := runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event-batch", SegmentIndex: 0, SegmentCount: 2, Payload: "one"}
+	if _, err := store.EnqueueReplies(ctx, []runtimestorage.ReplyOutbox{first, {TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event-batch", SegmentIndex: 1, SegmentCount: 2, Payload: "changed"}}); !errors.Is(err, runtimestorage.ErrConflict) {
 		t.Fatalf("conflicting batch = %v", err)
 	}
 	if _, err := store.EnqueueReplies(ctx, []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "missing", EventID: "missing", SegmentIndex: 0, SegmentCount: 1}}); !errors.Is(err, runtimestorage.ErrNotFound) {

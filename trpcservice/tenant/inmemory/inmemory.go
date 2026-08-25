@@ -28,6 +28,7 @@ func NewRepository() *InMemoryRepository { return NewInMemoryRepository() }
 
 var _ tenant.Repository = (*InMemoryRepository)(nil)
 
+// Create stores a new tenant in memory.
 func (r *InMemoryRepository) Create(ctx context.Context, input tenant.CreateInput) (*tenant.Tenant, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
@@ -55,6 +56,7 @@ func (r *InMemoryRepository) Create(ctx context.Context, input tenant.CreateInpu
 	return cloneTenant(t), nil
 }
 
+// Get loads a tenant by its stable identifier.
 func (r *InMemoryRepository) Get(ctx context.Context, tenantID string) (*tenant.Tenant, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
@@ -83,6 +85,7 @@ func (r *InMemoryRepository) Count(ctx context.Context) (int, error) {
 	return len(r.byID), nil
 }
 
+// UpdateConfiguration applies an expected-version tenant configuration update.
 func (r *InMemoryRepository) UpdateConfiguration(ctx context.Context, input tenant.UpdateConfigurationInput) (*tenant.Tenant, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
@@ -131,6 +134,7 @@ func (r *InMemoryRepository) UpdateConfiguration(ctx context.Context, input tena
 	return cloneTenant(&updated), nil
 }
 
+// TransitionStatus changes a tenant status with optimistic concurrency.
 func (r *InMemoryRepository) TransitionStatus(ctx context.Context, input tenant.TransitionStatusInput) (*tenant.Tenant, tenant.StatusChangeEvent, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, tenant.StatusChangeEvent{}, err

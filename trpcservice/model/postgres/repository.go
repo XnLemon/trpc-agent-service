@@ -26,6 +26,7 @@ func NewRepository(db *sql.DB, catalog *model.ProviderCatalog) *ModelRepository 
 	return &ModelRepository{db: db, catalog: catalog}
 }
 
+// Create persists a model profile and returns its creation event.
 func (r *ModelRepository) Create(ctx context.Context, input model.CreateInput) (*model.Profile, model.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, model.ChangeEvent{}, err
@@ -79,6 +80,7 @@ func (r *ModelRepository) Create(ctx context.Context, input model.CreateInput) (
 	return stored, committed, nil
 }
 
+// Get loads a model profile within a tenant.
 func (r *ModelRepository) Get(ctx context.Context, tenantID, profileID string) (*model.Profile, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -96,6 +98,7 @@ func (r *ModelRepository) Get(ctx context.Context, tenantID, profileID string) (
 	return value, nil
 }
 
+// UpdateConfiguration applies an expected-version model configuration update.
 func (r *ModelRepository) UpdateConfiguration(ctx context.Context, input model.UpdateConfigurationInput) (*model.Profile, model.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, model.ChangeEvent{}, err
@@ -152,6 +155,7 @@ func (r *ModelRepository) UpdateConfiguration(ctx context.Context, input model.U
 	return stored, committed, nil
 }
 
+// TransitionStatus changes a model profile status with optimistic concurrency.
 func (r *ModelRepository) TransitionStatus(ctx context.Context, input model.TransitionStatusInput) (*model.Profile, model.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, model.ChangeEvent{}, err

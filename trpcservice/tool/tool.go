@@ -10,15 +10,21 @@ import (
 )
 
 var (
-	ErrDenied           = errors.New("tool denied")
+	// ErrDenied reports a denied tool request.
+	ErrDenied = errors.New("tool denied")
+	// ErrApprovalRequired reports a tool request requiring approval.
 	ErrApprovalRequired = errors.New("tool approval required")
 )
 
+// Decision records the tool admission result.
 type Decision string
 
 const (
-	Allow            Decision = "allow"
-	Deny             Decision = "deny"
+	// Allow permits tool execution.
+	Allow Decision = "allow"
+	// Deny rejects tool execution.
+	Deny Decision = "deny"
+	// ApprovalRequired requires explicit tool approval.
 	ApprovalRequired Decision = "approval_required"
 )
 
@@ -29,6 +35,7 @@ type Policy struct {
 	Allowed  map[string]Decision
 }
 
+// Decide evaluates and audits a tool request.
 func (p Policy) Decide(ctx context.Context, requestID, traceID, toolName string) (Decision, error) {
 	toolName = strings.TrimSpace(toolName)
 	if toolName == "" || len([]rune(toolName)) > 256 {

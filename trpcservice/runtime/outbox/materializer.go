@@ -8,6 +8,7 @@ import (
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 )
 
+// ErrMaterialization wraps failures while creating durable reply segments.
 var ErrMaterialization = errors.New("reply materialization failed")
 
 const defaultSegmentRunes = 4096
@@ -19,11 +20,13 @@ type Materializer struct {
 	segmentSize int
 }
 
+// MaterializerConfig controls durable reply segmentation.
 type MaterializerConfig struct {
 	Store       runtimestorage.RuntimeStore
 	SegmentSize int
 }
 
+// MaterializeInput identifies the completed reply to segment.
 type MaterializeInput struct {
 	TenantID string
 	EventID  string
@@ -31,6 +34,7 @@ type MaterializeInput struct {
 	Payload  string
 }
 
+// NewMaterializer creates a reply materializer with a default segment size.
 func NewMaterializer(config MaterializerConfig) (*Materializer, error) {
 	if config.Store == nil {
 		return nil, ErrInvalid

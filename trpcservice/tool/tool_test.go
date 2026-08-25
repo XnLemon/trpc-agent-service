@@ -3,9 +3,10 @@ package tool
 import (
 	"context"
 	"errors"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"strings"
 	"testing"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 )
 
 type writer struct{ events []audit.Event }

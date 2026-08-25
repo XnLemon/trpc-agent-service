@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 )
 
+// Store is a concurrency-safe in-memory implementation of the runtime store.
 type Store struct {
 	mu        sync.RWMutex
 	sessions  map[string]runtimestorage.Session
@@ -20,10 +23,12 @@ type Store struct {
 	replies   map[string]runtimestorage.ReplyOutbox
 }
 
+// New creates an empty runtime store.
 func New() *Store {
 	return &Store{sessions: map[string]runtimestorage.Session{}, events: map[string]runtimestorage.MessageEvent{}, histories: map[string][]runtimestorage.EventPayload{}, messages: map[string]string{}, replies: map[string]runtimestorage.ReplyOutbox{}}
 }
 
+// GetSession returns a tenant-scoped session snapshot.
 func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (runtimestorage.Session, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.Session{}, err
@@ -40,6 +45,7 @@ func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (run
 	return cloneSession(value), nil
 }
 
+// CreateSession creates a tenant-scoped session with an initial state.
 func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (runtimestorage.Session, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.Session{}, err
@@ -58,6 +64,7 @@ func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, s
 	return cloneSession(value), nil
 }
 
+// UpdateSessionState applies an expected-version state update.
 func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (runtimestorage.Session, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.Session{}, err
@@ -82,6 +89,7 @@ func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID stri
 	return cloneSession(value), nil
 }
 
+// DeleteSession removes a tenant-scoped session and its related history.
 func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) error {
 	if err := check(ctx); err != nil {
 		return err
@@ -111,6 +119,7 @@ func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) e
 	return nil
 }
 
+// RecordMessage stores an idempotent inbound message event.
 func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageEventInput) (runtimestorage.MessageEvent, bool, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.MessageEvent{}, false, err
@@ -141,6 +150,7 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 	return cloneEvent(event), false, nil
 }
 
+// GetMessage returns a tenant-scoped message event.
 func (s *Store) GetMessage(ctx context.Context, tenantID, eventID string) (runtimestorage.MessageEvent, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.MessageEvent{}, err
@@ -157,6 +167,7 @@ func (s *Store) GetMessage(ctx context.Context, tenantID, eventID string) (runti
 	return cloneEvent(value), nil
 }
 
+// TransitionMessage applies a validated message lifecycle transition.
 func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage.MessageTransition) (runtimestorage.MessageEvent, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.MessageEvent{}, err
@@ -210,6 +221,7 @@ func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage
 	return cloneEvent(value), nil
 }
 
+// AppendEventPayload adds an ordered payload to a tenant session history.
 func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.EventPayload) (runtimestorage.EventPayload, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.EventPayload{}, err
@@ -240,6 +252,7 @@ func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.E
 	return clonePayload(payload), nil
 }
 
+// ListEventPayloads returns ordered payloads for a tenant session.
 func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]runtimestorage.EventPayload, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
@@ -261,6 +274,7 @@ func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID strin
 	return result, nil
 }
 
+// EnqueueReply stores one durable reply segment idempotently.
 func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutbox) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
@@ -348,6 +362,7 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 	return result, nil
 }
 
+// GetReply returns one tenant-scoped durable reply segment.
 func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment int) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
@@ -364,6 +379,7 @@ func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment 
 	return cloneReply(value), nil
 }
 
+// ListReplyCandidates returns pending or reclaimable reply segments.
 func (s *Store) ListReplyCandidates(ctx context.Context, tenantID string) ([]runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
@@ -383,6 +399,7 @@ func (s *Store) ListReplyCandidates(ctx context.Context, tenantID string) ([]run
 	return result, nil
 }
 
+// ClaimReply leases a pending reply segment to a delivery worker.
 func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segment int, owner string, leaseDuration time.Duration) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
@@ -412,6 +429,7 @@ func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segmen
 	return cloneReply(value), nil
 }
 
+// TransitionReply applies a fenced reply delivery transition.
 func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.ReplyTransition) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
@@ -452,6 +470,7 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 	return cloneReply(value), nil
 }
 
+// Close releases store resources; the in-memory store has none to release.
 func (s *Store) Close() error { return nil }
 func check(ctx context.Context) error {
 	if ctx == nil {
@@ -460,14 +479,16 @@ func check(ctx context.Context) error {
 	return ctx.Err()
 }
 func key(parts ...string) string {
-	var out string
+	var out strings.Builder
 	for _, p := range parts {
-		out += string(rune(len(p))) + p
+		out.WriteString(strconv.Itoa(len(p)))
+		out.WriteByte(':')
+		out.WriteString(p)
 	}
-	return out
+	return out.String()
 }
 func replyKey(tenant, reply string, segment int) string {
-	return key(tenant, reply, string(rune(segment)))
+	return key(tenant, reply, strconv.Itoa(segment))
 }
 func cloneMap(input map[string]any) map[string]any {
 	if input == nil {

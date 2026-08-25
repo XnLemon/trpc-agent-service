@@ -25,6 +25,7 @@ func NewRepository(db *sql.DB, catalog *backend.ProviderCatalog) *BackendReposit
 	return &BackendRepository{db: db, catalog: catalog}
 }
 
+// Create persists a backend profile and returns its creation event.
 func (r *BackendRepository) Create(ctx context.Context, input backend.CreateInput) (*backend.Profile, backend.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, backend.ChangeEvent{}, err
@@ -78,6 +79,7 @@ func (r *BackendRepository) Create(ctx context.Context, input backend.CreateInpu
 	return stored, committed, nil
 }
 
+// Get loads a backend profile within the requested tenant.
 func (r *BackendRepository) Get(ctx context.Context, tenantID, profileID string) (*backend.Profile, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -95,6 +97,7 @@ func (r *BackendRepository) Get(ctx context.Context, tenantID, profileID string)
 	return value, nil
 }
 
+// UpdateConfiguration applies an expected-version configuration update.
 func (r *BackendRepository) UpdateConfiguration(ctx context.Context, input backend.UpdateConfigurationInput) (*backend.Profile, backend.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, backend.ChangeEvent{}, err
@@ -148,6 +151,7 @@ func (r *BackendRepository) UpdateConfiguration(ctx context.Context, input backe
 	return stored, committed, nil
 }
 
+// TransitionStatus changes a backend profile status with optimistic concurrency.
 func (r *BackendRepository) TransitionStatus(ctx context.Context, input backend.TransitionStatusInput) (*backend.Profile, backend.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, backend.ChangeEvent{}, err
