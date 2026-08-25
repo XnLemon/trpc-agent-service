@@ -305,6 +305,44 @@ func TestDispatcherCancellationFinalizesAuditAndHandoff(t *testing.T) {
 	}
 }
 
+func TestDispatcherSelectCancellationBranchFinalizesCanceledOutcome(t *testing.T) {
+	runnerStarted := make(chan struct{})
+	runnerEvents := make(chan *trpcevent.Event)
+	dispatcher, principal := newTestDispatcher(t, &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		close(runnerStarted)
+		return runnerEvents, nil
+	}})
+	writer, err := audit.NewInMemory(principal.TenantID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoffs := audit.NewInMemoryHandoffStore()
+	dispatcher.auditWriter, dispatcher.handoffStore = writer, handoffs
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := dispatcher.Dispatch(ctx, DispatchRequest{Principal: principal, RequestID: "select-cancel", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-runnerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not start")
+	}
+	cancel()
+	events := collectDispatchEvents(stream)
+	close(runnerEvents)
+	if len(events) != 2 || events[0].Error != ErrExecutionCanceled.Error() || !events[1].Done {
+		t.Fatalf("events=%+v", events)
+	}
+	handoff, err := handoffs.Get(context.Background(), principal.TenantID(), audit.NewEventID("select-cancel", "handoff"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handoff.Result != audit.ResultCanceled || handoff.State != audit.HandoffFinalized {
+		t.Fatalf("handoff=%+v", handoff)
+	}
+}
+
 func TestDispatcherTerminalErrorFinalizesFailureHandoff(t *testing.T) {
 	dispatcher, principal := newTestDispatcher(t, &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
 		events := make(chan *trpcevent.Event, 1)
