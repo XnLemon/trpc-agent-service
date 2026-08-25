@@ -108,4 +108,122 @@ func TestEventValidationAndCancellation(t *testing.T) {
 	}
 }
 
+func TestEventRejectsSensitiveValuesAndUnknownErrorTypes(t *testing.T) {
+	for _, value := range []string{"Authorization: Bearer secret", "token=secret", "dsn=postgres://user:pass@db", "provider error: secret"} {
+		event := testEvent("tenant-a", "event-1")
+		event.ErrorType = value
+		if !errors.Is(event.Validate(), ErrInvalid) {
+			t.Fatalf("sensitive error type accepted: %q", value)
+		}
+	}
+	event := testEvent("tenant-a", "event-1")
+	event.Reason = "password=secret"
+	if !errors.Is(event.Validate(), ErrInvalid) {
+		t.Fatal("sensitive reason accepted")
+	}
+	event = testEvent("tenant-a", "event-1")
+	event.ErrorType = "made_up"
+	if !errors.Is(event.Validate(), ErrInvalid) {
+		t.Fatal("unknown error type accepted")
+	}
+	usage := Usage{BudgetUsedMinor: ptr(1), Currency: "ZZZ"}
+	if !errors.Is(usage.Validate(), ErrInvalid) {
+		t.Fatal("unknown currency accepted")
+	}
+}
+
+func TestAggregationSeparatesCurrenciesAndIDsCannotCollide(t *testing.T) {
+	store, err := NewInMemory("tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	usd := testEvent("tenant-a", "event-a")
+	eur := testEvent("tenant-a", "event-b")
+	eur.Cost.Currency = "EUR"
+	if _, err := store.Append(context.Background(), usd); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(context.Background(), eur); err != nil {
+		t.Fatal(err)
+	}
+	totals, err := store.AggregateUsage(context.Background(), UsageQuery{GroupBy: []GroupBy{GroupApp}})
+	if err != nil || len(totals) != 2 {
+		t.Fatalf("currency totals = %#v, %v", totals, err)
+	}
+	backend := &Backend{}
+	one, err := NewInMemoryWithBackend("tenant", backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := NewInMemoryWithBackend("tenant\\x00event", backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := one.Append(context.Background(), testEvent("tenant", "event\\x00b")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := two.Append(context.Background(), testEvent("tenant\\x00event", "b")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAuditValidationAndQueryBoundaries(t *testing.T) {
+	base := testEvent("tenant-a", "event-1")
+	for _, mutate := range []func(*Event){
+		func(e *Event) { e.Decision = DecisionAllow },
+		func(e *Event) { e.Decision = Decision("unknown") },
+		func(e *Event) { e.EventType = EventType("unknown") },
+		func(e *Event) { e.EventID = " event-1" },
+		func(e *Event) { e.OccurredAt = time.Time{} },
+		func(e *Event) { e.OccurredAt = time.Now() },
+		func(e *Event) { e.PreviousVersion = ptr(2) },
+		func(e *Event) { e.PreviousVersion, e.NextVersion = ptr(2), ptr(2) },
+		func(e *Event) { e.LatencyMS = ptr(-1) },
+		func(e *Event) { e.Revision = ptr(-1) },
+	} {
+		event := base
+		mutate(&event)
+		if event.Decision == DecisionAllow {
+			if err := event.Validate(); err != nil {
+				t.Fatalf("valid decision rejected: %v", err)
+			}
+		} else if !errors.Is(event.Validate(), ErrInvalid) {
+			t.Fatalf("invalid event accepted: %#v", event)
+		}
+	}
+	for _, usage := range []Usage{
+		{InputTokens: ptr(-1)}, {ModelCostMinor: ptr(1)}, {ToolCostMinor: ptr(1), Currency: "usd"},
+		{ExecutionResult: ExecutionResult("unknown")}, {Provider: "https://provider"}, {BudgetUsedMinor: ptr(1)},
+	} {
+		if usage.Validate() == nil {
+			t.Fatalf("invalid usage accepted: %#v", usage)
+		}
+	}
+	if _, err := NewInMemory(""); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty tenant error = %v", err)
+	}
+	if _, err := NewInMemoryWithBackend("tenant", nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil backend error = %v", err)
+	}
+	store, err := NewInMemory("tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(nil, base); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil context append = %v", err)
+	}
+	if _, err := store.Get(context.Background(), " "); !errors.Is(err, ErrTenantScope) {
+		t.Fatalf("empty get = %v", err)
+	}
+	if _, err := store.List(context.Background(), Query{EventTypes: []EventType{"unknown"}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid query type = %v", err)
+	}
+	if _, err := store.AggregateUsage(context.Background(), UsageQuery{GroupBy: []GroupBy{"unknown"}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid group = %v", err)
+	}
+	if _, err := store.AggregateUsage(context.Background(), UsageQuery{GroupBy: []GroupBy{GroupTenant}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func ptr(value int64) *int64 { return &value }

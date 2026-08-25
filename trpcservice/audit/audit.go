@@ -71,6 +71,25 @@ const (
 	ResultRejected ExecutionResult = "rejected"
 )
 
+type ErrorType string
+
+const (
+	ErrorCanceled        ErrorType = "canceled"
+	ErrorTimeout         ErrorType = "timeout"
+	ErrorInvalid         ErrorType = "invalid"
+	ErrorUnauthenticated ErrorType = "unauthenticated"
+	ErrorRateLimited     ErrorType = "rate_limited"
+	ErrorDuplicate       ErrorType = "duplicate"
+	ErrorUnavailable     ErrorType = "unavailable"
+	ErrorStorage         ErrorType = "storage"
+	ErrorModel           ErrorType = "model"
+	ErrorTool            ErrorType = "tool"
+	ErrorProvider        ErrorType = "provider_error"
+	ErrorBudget          ErrorType = "budget"
+	ErrorRedacted        ErrorType = "redacted"
+	ErrorConflict        ErrorType = "conflict"
+)
+
 type Usage struct {
 	InputTokens      *int64
 	OutputTokens     *int64
@@ -135,7 +154,7 @@ func (e Event) Clone() Event {
 }
 
 func (e Event) Validate() error {
-	if e.SchemaVersion != SchemaVersion || clean(e.EventID) == "" || clean(e.TenantID) == "" || !validEventType(e.EventType) || e.OccurredAt.IsZero() || e.OccurredAt.Location() != time.UTC {
+	if e.SchemaVersion != SchemaVersion || e.EventID != clean(e.EventID) || e.TenantID != clean(e.TenantID) || clean(e.EventID) == "" || clean(e.TenantID) == "" || !validEventType(e.EventType) || e.OccurredAt.IsZero() || e.OccurredAt.Location() != time.UTC {
 		return ErrInvalid
 	}
 	for _, value := range []string{e.EventID, e.TenantID, e.Channel, e.UserID, e.SessionID, e.AgentAppID, e.ModelProfileID, e.ToolName, e.ErrorType, e.RequestID, e.TraceID, e.CorrelationID, e.ActorType, e.ActorID, e.Reason} {
@@ -155,7 +174,7 @@ func (e Event) Validate() error {
 	if e.EventType == EventControlPlaneChanged && (clean(e.ActorType) == "" || clean(e.ActorID) == "" || clean(e.Reason) == "" || clean(e.CorrelationID) == "" || e.PreviousVersion == nil) {
 		return ErrInvalid
 	}
-	if len([]rune(strings.TrimSpace(e.Reason))) > 1000 || e.Decision != "" && !validDecision(e.Decision) || e.Cost != nil && e.Cost.Validate() != nil {
+	if len([]rune(strings.TrimSpace(e.Reason))) > 1000 || e.Decision != "" && !validDecision(e.Decision) || e.ErrorType != "" && !validErrorType(e.ErrorType) || containsSensitive(e.EventID, e.TenantID, e.Channel, e.UserID, e.SessionID, e.AgentAppID, e.ModelProfileID, e.ToolName, e.ErrorType, e.RequestID, e.TraceID, e.CorrelationID, e.ActorType, e.ActorID, e.Reason) || e.Cost != nil && e.Cost.Validate() != nil {
 		return ErrInvalid
 	}
 	return nil
@@ -167,11 +186,11 @@ func (u Usage) Validate() error {
 			return ErrInvalid
 		}
 	}
-	if (u.ModelCostMinor != nil || u.ToolCostMinor != nil) && !validCurrency(u.Currency) || u.ExecutionResult != "" && !validResult(u.ExecutionResult) {
+	if (u.ModelCostMinor != nil || u.ToolCostMinor != nil || u.BudgetUsedMinor != nil) && !validCurrency(u.Currency) || u.ExecutionResult != "" && !validResult(u.ExecutionResult) {
 		return ErrInvalid
 	}
 	for _, value := range []string{u.Currency, u.Provider, u.Model} {
-		if hasControl(value) || strings.Contains(value, "://") {
+		if hasControl(value) || strings.Contains(value, "://") || containsSensitive(value) {
 			return ErrInvalid
 		}
 	}
@@ -243,11 +262,15 @@ type Aggregator interface {
 
 type Backend struct {
 	mu     sync.RWMutex
-	events map[string]record
+	events map[eventKey]record
 }
 type record struct {
 	event  Event
 	digest string
+}
+type eventKey struct {
+	tenantID string
+	eventID  string
 }
 type Store struct {
 	tenantID string
@@ -264,7 +287,7 @@ func NewInMemoryWithBackend(tenantID string, backend *Backend) (*Store, error) {
 	}
 	backend.mu.Lock()
 	if backend.events == nil {
-		backend.events = map[string]record{}
+		backend.events = map[eventKey]record{}
 	}
 	backend.mu.Unlock()
 	return &Store{tenantID: tenantID, backend: backend}, nil
@@ -296,7 +319,7 @@ func (s *Store) Append(ctx context.Context, event Event) (AppendResult, error) {
 	event = event.Clone()
 	s.backend.mu.Lock()
 	defer s.backend.mu.Unlock()
-	key := eventKey(event.TenantID, event.EventID)
+	key := eventKey{tenantID: event.TenantID, eventID: event.EventID}
 	if existing, ok := s.backend.events[key]; ok {
 		if existing.digest != digest {
 			return AppendResult{}, ErrConflict
@@ -316,7 +339,7 @@ func (s *Store) Get(ctx context.Context, eventID string) (Event, error) {
 	}
 	s.backend.mu.RLock()
 	defer s.backend.mu.RUnlock()
-	value, ok := s.backend.events[eventKey(s.tenantID, clean(eventID))]
+	value, ok := s.backend.events[eventKey{tenantID: s.tenantID, eventID: clean(eventID)}]
 	if !ok {
 		return Event{}, ErrNotFound
 	}
@@ -424,7 +447,8 @@ func addUsage(total *UsageTotal, usage *Usage) {
 	}
 }
 func aggregateKey(event Event, groups []GroupBy) string {
-	parts := make([]string, 0, len(groups))
+	parts := make([]string, 0, len(groups)+1)
+	parts = append(parts, event.Cost.Currency)
 	for _, group := range groups {
 		switch group {
 		case GroupTenant:
@@ -439,10 +463,11 @@ func aggregateKey(event Event, groups []GroupBy) string {
 			parts = append(parts, event.Cost.Model)
 		}
 	}
-	return strings.Join(parts, "\\x00")
+	return strings.Join(parts, "\x00")
 }
 func aggregateKeyTotal(total UsageTotal, groups []GroupBy) string {
-	parts := make([]string, 0, len(groups))
+	parts := make([]string, 0, len(groups)+1)
+	parts = append(parts, total.Currency)
 	for _, group := range groups {
 		switch group {
 		case GroupTenant:
@@ -457,10 +482,9 @@ func aggregateKeyTotal(total UsageTotal, groups []GroupBy) string {
 			parts = append(parts, total.Model)
 		}
 	}
-	return strings.Join(parts, "\\x00")
+	return strings.Join(parts, "\x00")
 }
-func eventKey(tenantID, eventID string) string { return tenantID + "\\x00" + eventID }
-func clean(value string) string                { return strings.TrimSpace(value) }
+func clean(value string) string { return strings.TrimSpace(value) }
 func hasControl(value string) bool {
 	for _, r := range value {
 		if unicode.IsControl(r) {
@@ -490,16 +514,32 @@ func validResult(value ExecutionResult) bool {
 	}
 	return false
 }
-func validCurrency(value string) bool {
-	if len(value) != 3 {
+
+func validErrorType(value string) bool {
+	switch ErrorType(value) {
+	case ErrorCanceled, ErrorTimeout, ErrorInvalid, ErrorUnauthenticated, ErrorRateLimited, ErrorDuplicate, ErrorUnavailable, ErrorStorage, ErrorModel, ErrorTool, ErrorProvider, ErrorBudget, ErrorRedacted, ErrorConflict:
+		return true
+	default:
 		return false
 	}
-	for _, r := range value {
-		if r < 'A' || r > 'Z' {
-			return false
+}
+
+func containsSensitive(values ...string) bool {
+	for _, value := range values {
+		lower := strings.ToLower(value)
+		if strings.Contains(lower, "://") || strings.Contains(lower, "authorization") || strings.Contains(lower, "bearer ") || strings.Contains(lower, "api_key") || strings.Contains(lower, "api-key") || strings.Contains(lower, "token=") || strings.Contains(lower, "secret=") || strings.Contains(lower, "secret_ref") || strings.Contains(lower, "password=") || strings.Contains(lower, "dsn=") || strings.Contains(lower, "provider error") {
+			return true
 		}
 	}
-	return true
+	return false
+}
+func validCurrency(value string) bool {
+	switch value {
+	case "AUD", "CAD", "CHF", "CNY", "DKK", "EUR", "GBP", "HKD", "INR", "JPY", "KRW", "NOK", "NZD", "SEK", "SGD", "USD":
+		return true
+	default:
+		return false
+	}
 }
 
 func validGroup(value GroupBy) bool {

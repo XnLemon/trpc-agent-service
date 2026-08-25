@@ -242,8 +242,8 @@ retention lag 和聚合查询失败。指标只使用 component/operation/status
 ## Issue #54 ledger
 
 - [x] 文档：schema、版本、事件目录、失败策略、幂等、保留、脱敏、访问控制和运维边界。
-- [ ] 契约：AuditEvent/Usage/Writer/Reader/Aggregator 与兼容性、redaction 测试。
-- [ ] InMemory：append-only writer、租户隔离、defensive copy、并发/重复 conformance。
+- [x] 契约：AuditEvent/Usage/Writer/Reader/Aggregator 与兼容性、redaction 测试。
+- [x] InMemory：append-only writer、租户隔离、defensive copy、并发/重复 conformance。
 - [ ] PostgreSQL：有序 migration、Repository、权限、租户索引、并发/重启 conformance。
 - [ ] Admin/control-plane producer 与 durable change-outbox projector。
 - [ ] Gateway/Runner durable execution handoff、terminal outcome、budget、redaction/fallback 和 Tool policy hook。
