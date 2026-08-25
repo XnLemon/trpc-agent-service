@@ -151,7 +151,7 @@ func (s *Store) List(ctx context.Context, query audit.Query) ([]audit.Event, err
 	if err != nil {
 		return nil, mapDBError(ctx, err, audit.ErrNotFound, audit.ErrConflict, audit.ErrConflict, audit.ErrInvalid)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	values := make([]audit.Event, 0)
 	for rows.Next() {
 		value, scanErr := scanEvent(rows)
