@@ -137,9 +137,8 @@ InMemory 与 PostgreSQL 必须运行同一 conformance suite，覆盖：
 有序 migration 新增 `audit_event`，主键为 `(tenant_id, event_id)`，所有索引以
 `tenant_id` 开头。事件字段使用类型/检查约束，`usage` 数值列使用 nullable non-negative
 整数；不保存自由 JSON payload。当前 0006 migration 先提供 append-only `audit_event`；
-`execution_audit_handoff` 作为可恢复的投影 outbox 仍是下一阶段 migration，不能把当前
-直接 append 误称为 handoff。handoff 不是最终 AuditEvent，只有受 fence/状态约束的
-reserve/finalize/repair 入口可以修改；
+`execution_audit_handoff` 作为可恢复的投影 outbox 已由 0007 migration 提供。handoff 不是
+最终 AuditEvent，只有受 fence/状态约束的 SECURITY DEFINER reserve/finalize/repair 入口可以修改；
 一旦 projected 就不能改变 terminal payload。索引至少支持：
 
 - `(tenant_id, occurred_at, event_id)` 审计时间线；
@@ -212,9 +211,9 @@ reconcile 规则。
 | redaction/fallback | redacted/fallback | 只保存策略类别，不保存被删内容或 provider error |
 | reply outbox | sent/retry/dead-letter/reconciled | event/reply/segment 派生确定性 ID；保持 fence 语义 |
 
-现有代码没有完整 Tool policy/approval、模型 fallback 或按 provider 返回 token/cost 的生产路径。
-Issue #54 为已存在的稳定路径接入 producer，并提供这些决策可调用的审计 hook；不得为了制造
-事件而伪造尚未发生的 Tool、fallback 或 usage 事实。对应路径未来调用 hook 时沿用本契约。
+现有代码没有完整模型 fallback 或按 provider 返回 token/cost 的生产路径；本 Issue 提供
+provider-neutral Tool policy、fallback、redaction、IM authorization/reconciliation 与 usage
+metric hooks。调用方必须只在事实已发生后调用 hook，不得伪造事件。
 
 ## 脱敏与访问控制
 
@@ -249,8 +248,8 @@ retention lag 和聚合查询失败。指标只使用 component/operation/status
 - [x] InMemory：append-only writer、租户隔离、defensive copy、并发/重复 conformance。
 - [x] PostgreSQL：有序 migration、Repository、权限、租户索引、RLS scope 和 sqlmock conformance；真实数据库并发/重启测试仍待补齐。
 - [ ] Admin/control-plane producer 与 durable change-outbox projector。
-- [ ] Gateway/Runner durable execution handoff、terminal outcome、budget、redaction/fallback 和 Tool policy hook。
-- [ ] IM authorization/ingress 与 reply delivery/retry/dead-letter producer。
-- [ ] tenant/app/channel/provider/model usage/cost 聚合和低基数指标边界。
+- [x] Gateway/Runner durable execution handoff、terminal outcome、budget、redaction/fallback 和 Tool policy hook。
+- [x] IM authorization/ingress 与 reply delivery/retry/dead-letter producer。
+- [x] tenant/app/channel/provider/model usage/cost 聚合和低基数指标边界。
 - [ ] writer failure、retry、cancel、duplicate、secret/provider-error 负向测试。
 - [ ] 全仓 test/race/vet/build、MkDocs strict、GitHub CI 与最终最新 HEAD LGTM。

@@ -82,6 +82,26 @@ func (r Recorder) Redacted(ctx context.Context, requestID, traceID string) error
 	return r.Record(ctx, Event{EventType: EventContentRedacted, RequestID: requestID, TraceID: traceID, Decision: DecisionAccepted, ErrorType: string(ErrorRedacted)})
 }
 
+func (r Recorder) Fallback(ctx context.Context, requestID, traceID string) error {
+	return r.Record(ctx, Event{EventType: EventExecutionFallback, RequestID: requestID, TraceID: traceID, Decision: DecisionAccepted})
+}
+
+func (r Recorder) IMAuthorization(ctx context.Context, requestID, traceID, userID, sessionID string, allowed bool) error {
+	eventType, decision := EventIMAuthorizationDenied, DecisionRejected
+	if allowed {
+		eventType, decision = EventIMAuthorizationAllowed, DecisionAccepted
+	}
+	return r.IM(ctx, eventType, requestID, traceID, userID, sessionID, decision, "")
+}
+
+func (r Recorder) IMReconciled(ctx context.Context, requestID, traceID, errorType string) error {
+	decision := DecisionAccepted
+	if errorType != "" {
+		decision = DecisionRejected
+	}
+	return r.IM(ctx, EventIMDeliveryReconciled, requestID, traceID, "", "", decision, errorType)
+}
+
 func (r Recorder) IM(ctx context.Context, eventType EventType, requestID, traceID, userID, sessionID string, decision Decision, errorType string) error {
 	return r.Record(ctx, Event{EventType: eventType, RequestID: requestID, TraceID: traceID, UserID: userID, SessionID: sessionID, Decision: decision, ErrorType: errorType})
 }

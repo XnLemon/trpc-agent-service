@@ -1,0 +1,35 @@
+package tool
+
+import (
+	"context"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
+	"testing"
+)
+
+type writer struct{ events []audit.Event }
+
+func (w *writer) Append(_ context.Context, e audit.Event) (audit.AppendResult, error) {
+	w.events = append(w.events, e)
+	return audit.AppendResult{Event: e}, nil
+}
+
+func TestPolicyDecisionAuditsWithoutPayload(t *testing.T) {
+	w := &writer{}
+	p := Policy{Recorder: audit.Recorder{Writer: w, TenantID: "tenant"}, Allowed: map[string]Decision{"search": Allow, "admin": ApprovalRequired}}
+	if _, err := p.Decide(context.Background(), "req", "trace", "search"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Decide(context.Background(), "req2", "trace2", "admin"); err != ErrApprovalRequired {
+		t.Fatalf("approval err = %v", err)
+	}
+	if len(w.events) != 2 || w.events[0].EventType != audit.EventToolAllowed || w.events[1].EventType != audit.EventToolApprovalRequired {
+		t.Fatalf("events = %+v", w.events)
+	}
+}
+
+func TestPolicyDeniesByDefault(t *testing.T) {
+	p := Policy{}
+	if _, err := p.Decide(context.Background(), "req", "trace", "unknown"); err != ErrDenied {
+		t.Fatalf("err = %v", err)
+	}
+}

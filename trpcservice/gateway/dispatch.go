@@ -381,6 +381,13 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		}
 		return err
 	}
+	finalizeHandoff := func(result audit.ExecutionResult, errorType string) error {
+		if dispatcher.handoffStore == nil {
+			return nil
+		}
+		_, err := dispatcher.handoffStore.Finalize(context.Background(), audit.ExecutionHandoff{TenantID: principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType})
+		return err
+	}
 	defer func() {
 		eventType := terminalEventType
 		errorType := terminalErrorType
@@ -435,6 +442,11 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 				dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
 				return
 			}
+			if err := finalizeHandoff(audit.ResultCanceled, string(audit.ErrorCanceled)); err != nil {
+				terminalErr = auditWriteFailure()
+				dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+				return
+			}
 			dispatcher.finishCanceled(ctx, requestID, traceID, runnerEvents, output)
 			return
 		}
@@ -443,6 +455,11 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 			if !ok {
 				terminalEventType, terminalErrorType = audit.EventExecutionCompleted, ""
 				if err := finalizeAudit(audit.EventExecutionCompleted, ""); err != nil {
+					terminalErr = auditWriteFailure()
+					dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+					return
+				}
+				if err := finalizeHandoff(audit.ResultSuccess, ""); err != nil {
 					terminalErr = auditWriteFailure()
 					dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
 					return
@@ -483,6 +500,15 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 				}
 			}
 			if done {
+				result := audit.ResultSuccess
+				if terminalErr != nil {
+					result = audit.ResultFailure
+				}
+				if err := finalizeHandoff(result, terminalErrorType); err != nil {
+					terminalErr = auditWriteFailure()
+					dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+					return
+				}
 				drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
 				return
 			}
@@ -490,6 +516,11 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 			terminalErr = ctx.Err()
 			terminalEventType, terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
 			if err := finalizeAudit(audit.EventExecutionCanceled, string(audit.ErrorCanceled)); err != nil {
+				terminalErr = auditWriteFailure()
+				dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+				return
+			}
+			if err := finalizeHandoff(audit.ResultCanceled, string(audit.ErrorCanceled)); err != nil {
 				terminalErr = auditWriteFailure()
 				dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
 				return

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 )
 
@@ -16,6 +17,7 @@ const (
 	ActiveExecutions  = "trpcservice_active_executions"
 	RunnerLeases      = "trpcservice_runner_leases"
 	OperationRetries  = "trpcservice_operation_retries_total"
+	UsageCostTotal    = "trpcservice_usage_cost_minor_total"
 	Readiness         = "trpcservice_readiness"
 	Shutdown          = "trpcservice_shutdown"
 )
@@ -65,13 +67,44 @@ type Catalog struct {
 	active    observability.UpDownCounter
 	leases    observability.UpDownCounter
 	retries   observability.Counter
+	usage     observability.Counter
 	readiness observability.UpDownCounter
 	shutdown  observability.UpDownCounter
 }
 
 func New(provider observability.Provider) Catalog {
 	meter := provider.Meter("trpcservice.metrics")
-	return Catalog{requests: meter.Counter(RequestsTotal), duration: meter.Histogram(OperationDuration), active: meter.UpDownCounter(ActiveExecutions), leases: meter.UpDownCounter(RunnerLeases), retries: meter.Counter(OperationRetries), readiness: meter.UpDownCounter(Readiness), shutdown: meter.UpDownCounter(Shutdown)}
+	return Catalog{requests: meter.Counter(RequestsTotal), duration: meter.Histogram(OperationDuration), active: meter.UpDownCounter(ActiveExecutions), leases: meter.UpDownCounter(RunnerLeases), retries: meter.Counter(OperationRetries), usage: meter.Counter(UsageCostTotal), readiness: meter.UpDownCounter(Readiness), shutdown: meter.UpDownCounter(Shutdown)}
+}
+
+// Usage records aggregated cost with only bounded dimensions. Tenant and app
+// are intentionally represented by coarse configured labels supplied by the
+// caller; session/user/request identifiers are never accepted here.
+func (c Catalog) Usage(ctx context.Context, total audit.UsageTotal, labels map[string]string) error {
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	if total.Channel != "" {
+		labels["channel"] = total.Channel
+	}
+	if total.Provider != "" {
+		labels["provider"] = total.Provider
+	}
+	if err := ValidateLabels(labels); err != nil {
+		return err
+	}
+	if total.ModelCostMinor != 0 {
+		c.usage.Add(ctx, total.ModelCostMinor, mustAttributes(labels)...)
+	}
+	if total.ToolCostMinor != 0 {
+		c.usage.Add(ctx, total.ToolCostMinor, mustAttributes(labels)...)
+	}
+	return nil
+}
+
+func mustAttributes(labels map[string]string) []observability.Attribute {
+	attrs, _ := Attributes(labels)
+	return attrs
 }
 func (c Catalog) Request(ctx context.Context, labels map[string]string) error {
 	attrs, err := Attributes(labels)
