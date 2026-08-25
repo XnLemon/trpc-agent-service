@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -54,6 +55,7 @@ type Worker struct {
 	jitter        float64
 	telemetry     observability.Provider
 	metrics       metrics.Catalog
+	audit         audit.Recorder
 	mu            sync.Mutex
 	runCancel     context.CancelFunc
 	runDone       chan struct{}
@@ -70,6 +72,8 @@ type Config struct {
 	BackoffMax    time.Duration
 	Jitter        float64
 	Observability observability.Provider
+	// AuditWriter receives durable delivery, retry, and dead-letter facts.
+	AuditWriter audit.Writer
 }
 
 func New(config Config) (*Worker, error) {
@@ -94,7 +98,7 @@ func New(config Config) (*Worker, error) {
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
 	}
-	return &Worker{store: config.Store, provider: config.Provider, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, jitter: config.Jitter, telemetry: config.Observability, metrics: metrics.New(config.Observability)}, nil
+	return &Worker{store: config.Store, provider: config.Provider, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, jitter: config.Jitter, telemetry: config.Observability, metrics: metrics.New(config.Observability), audit: audit.Recorder{Writer: config.AuditWriter, TenantID: config.TenantID}}, nil
 }
 
 // Run polls until ctx is canceled. It owns no goroutine after returning.
@@ -250,6 +254,9 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 			}
 			_, err = w.store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: runtimestorage.ReplySent, Owner: w.owner, FencingToken: claimed.FencingToken, ProviderID: providerID})
 			if err == nil {
+				err = w.recordDelivery(operationCtx, audit.EventIMDeliverySent, claimed, "")
+			}
+			if err == nil {
 				w.advanceEvent(ctx, claimed.EventID)
 			}
 		} else {
@@ -262,6 +269,13 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 				to = runtimestorage.ReplyDeadLetter
 			}
 			_, err = w.store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: to, Owner: w.owner, FencingToken: claimed.FencingToken, ErrorClass: class})
+			if err == nil {
+				eventType := audit.EventIMDeliveryRetryScheduled
+				if to == runtimestorage.ReplyDeadLetter {
+					eventType = audit.EventIMDeliveryDeadLettered
+				}
+				err = w.recordDelivery(operationCtx, eventType, claimed, class)
+			}
 			if retryable && to == runtimestorage.ReplyRetryable {
 				if w.telemetry != nil {
 					_ = w.metrics.Retry(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "retry", "error_class": metricErrorClass(class)})
@@ -276,6 +290,14 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 		}
 	}
 	return processed, nil
+}
+
+func (w *Worker) recordDelivery(ctx context.Context, eventType audit.EventType, value runtimestorage.ReplyOutbox, class string) error {
+	decision := audit.DecisionAccepted
+	if eventType != audit.EventIMDeliverySent {
+		decision = audit.DecisionRejected
+	}
+	return w.audit.IM(ctx, eventType, value.ReplyID, "", "", "", decision, class)
 }
 
 func (w *Worker) retryDue(value runtimestorage.ReplyOutbox, now time.Time) bool {

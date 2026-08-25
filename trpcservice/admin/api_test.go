@@ -10,9 +10,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -23,6 +25,86 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
 )
+
+type adminAuditWriter struct{ events []audit.Event }
+
+func (w *adminAuditWriter) Append(_ context.Context, event audit.Event) (audit.AppendResult, error) {
+	w.events = append(w.events, event)
+	return audit.AppendResult{Event: event}, nil
+}
+
+type adminAuditFailWriter struct{}
+
+func (adminAuditFailWriter) Append(context.Context, audit.Event) (audit.AppendResult, error) {
+	return audit.AppendResult{}, errors.New("audit down")
+}
+
+func TestRecordMutationWritesControlPlaneAudit(t *testing.T) {
+	w := &adminAuditWriter{}
+	h := &Handler{config: Config{AuditWriter: w}}
+	previous, next := int64(1), int64(2)
+	value := map[string]any{"event": channels.ChangeEvent{EventType: channels.EventConfigurationUpdated, TenantID: "tenant-a", ActorType: "admin", ActorID: "actor", Reason: "change", CorrelationID: "corr", PreviousVersion: previous, NextVersion: next, OccurredAt: time.Now().UTC()}}
+	if err := h.recordMutation(context.Background(), Principal{}, "request", value); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.events) != 1 || w.events[0].EventType != audit.EventControlPlaneChanged || w.events[0].TenantID != "tenant-a" {
+		t.Fatalf("events = %#v", w.events)
+	}
+}
+
+func TestRecordMutationAuditsRawResourceMutation(t *testing.T) {
+	w := &adminAuditWriter{}
+	h := &Handler{config: Config{AuditWriter: w}}
+	resource := tenant.Tenant{TenantID: "tenant-a", Version: 1}
+	if err := h.recordMutation(context.Background(), Principal{SubjectID: "admin-1"}, "request-raw", &resource); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.events) != 1 || w.events[0].CorrelationID != "request-raw" || w.events[0].PreviousVersion == nil || *w.events[0].PreviousVersion != 0 || *w.events[0].NextVersion != 1 {
+		t.Fatalf("raw audit event = %#v", w.events)
+	}
+}
+
+func TestRecordMutationUsesDraftVersionForRawRevision(t *testing.T) {
+	w := &adminAuditWriter{}
+	h := &Handler{config: Config{AuditWriter: w}}
+	revision := agent.Revision{TenantID: "tenant-a", DraftVersion: 3, Revision: 7}
+	if err := h.recordMutation(context.Background(), Principal{SubjectID: "admin-1"}, "request-draft", &revision); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.events) != 1 || *w.events[0].PreviousVersion != 2 || *w.events[0].NextVersion != 3 {
+		t.Fatalf("draft audit event = %#v", w.events)
+	}
+}
+
+func TestRecordMutationReflectionAndFailureBranches(t *testing.T) {
+	if err := (*Handler)(nil).recordMutation(context.Background(), Principal{}, "req", nil); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{config: Config{AuditWriter: &adminAuditWriter{}}}
+	for _, value := range []any{map[string]any{"event": nil}, map[string]any{"event": "not-struct"}, (*tenant.Tenant)(nil), 42} {
+		if err := h.recordMutation(context.Background(), Principal{}, "req", value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resource := struct {
+		TenantID string
+		Version  int
+	}{TenantID: "tenant-a", Version: 2}
+	if err := h.recordMutation(context.Background(), Principal{}, "req", resource); err != nil {
+		t.Fatal(err)
+	}
+	failed := &Handler{config: Config{AuditWriter: adminAuditFailWriter{}}}
+	if err := failed.recordMutation(context.Background(), Principal{}, "req", resource); !errors.Is(err, audit.ErrWriteFailed) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestAdminMapsAuditFailureToServiceUnavailable(t *testing.T) {
+	status, code := mapError(audit.ErrWriteFailed)
+	if status != http.StatusServiceUnavailable || code != "audit_unavailable" {
+		t.Fatalf("status=%d code=%q", status, code)
+	}
+}
 
 func testHandler(t *testing.T) (*Handler, *StaticAuthenticator) {
 	t.Helper()

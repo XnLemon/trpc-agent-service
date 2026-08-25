@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 )
 
@@ -43,5 +44,16 @@ func TestCatalogNoopAcceptsAllowedLabels(t *testing.T) {
 	}
 	if err := catalog.State(ctx, 1, 0, labels); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCatalogUsageUsesBoundedDimensions(t *testing.T) {
+	catalog := New(observability.NewNoopProvider())
+	total := audit.UsageTotal{TenantID: "tenant-a", AppID: "app-a", Channel: "telegram", Provider: "openai", Model: "gpt-family", ModelCostMinor: 3, ToolCostMinor: 2}
+	if err := catalog.Usage(context.Background(), total, map[string]string{"component": "model"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Usage(context.Background(), total, map[string]string{"session_id": "sensitive"}); err == nil {
+		t.Fatal("high-cardinality labels must be rejected")
 	}
 }

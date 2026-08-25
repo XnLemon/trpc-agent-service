@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
@@ -27,6 +28,9 @@ var (
 	// ErrExecutionCanceled is the stable cancellation result for a Dispatch
 	// stream after its Runner events have been drained.
 	ErrExecutionCanceled = errors.New("execution canceled")
+	// ErrAuditWriteFailed is the stable redacted failure when a mandatory audit
+	// lifecycle fact cannot be durably written.
+	ErrAuditWriteFailed = errors.New("audit_write_failed")
 )
 
 const defaultDispatchDrainTimeout = 250 * time.Millisecond
@@ -80,6 +84,11 @@ type DispatchConfig struct {
 	// API principals remain protected by the HTTP IdempotencyStore.
 	RuntimeStore runtimestorage.RuntimeStore
 	Materializer *outbox.Materializer
+	// AuditWriter receives mandatory execution lifecycle facts. It is optional
+	// for compatibility with deployments that have not enabled audit storage.
+	AuditWriter audit.Writer
+	// HandoffStore durably reserves and finalizes execution audit facts.
+	HandoffStore audit.HandoffStore
 }
 
 // Dispatcher resolves a fixed plan, acquires a Runner lease, and translates
@@ -92,6 +101,8 @@ type Dispatcher struct {
 	metrics      metrics.Catalog
 	runtimeStore runtimestorage.RuntimeStore
 	materializer *outbox.Materializer
+	auditWriter  audit.Writer
+	handoffStore audit.HandoffStore
 }
 
 type durableExecution struct {
@@ -123,7 +134,7 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 		}
 		config.Materializer = materializer
 	}
-	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore, materializer: config.Materializer}, nil
+	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore, materializer: config.Materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.
@@ -186,9 +197,25 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		finishWithError(err)
 		return nil, err
 	}
+	if err := dispatcher.writeExecutionAudit(ctx, request.Principal, message, identity, requestID, traceID, audit.EventExecutionStarted, ""); err != nil {
+		dispatcher.failDurable(durable, err)
+		finishWithError(err)
+		return nil, auditWriteFailure()
+	}
+	if dispatcher.handoffStore != nil {
+		if _, err := dispatcher.handoffStore.Reserve(ctx, audit.ExecutionHandoff{TenantID: request.Principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), RequestID: requestID, TraceID: traceID, EventID: audit.NewEventID(requestID, string(audit.EventExecutionStarted)), State: audit.HandoffPending}); err != nil {
+			finishWithError(err)
+			return nil, auditWriteFailure()
+		}
+	}
 	lease, err := dispatcher.registry.Acquire(ctx, plan)
 	if err != nil {
 		dispatcher.failDurable(durable, err)
+		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
+			dispatcher.failDurable(durable, auditErr)
+			finishWithError(auditErr)
+			return nil, auditWriteFailure()
+		}
 		finishWithError(err)
 		return nil, err
 	}
@@ -196,6 +223,11 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	if runnerValue == nil {
 		_ = lease.Release()
 		dispatcher.failDurable(durable, ErrRunnerUnavailable)
+		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
+			dispatcher.failDurable(durable, auditErr)
+			finishWithError(auditErr)
+			return nil, auditWriteFailure()
+		}
 		finishWithError(ErrRunnerUnavailable)
 		return nil, ErrRunnerUnavailable
 	}
@@ -203,6 +235,15 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	if err != nil {
 		_ = lease.Release()
 		dispatcher.failDurable(durable, err)
+		eventType, errorType := audit.EventExecutionFailed, string(audit.ErrorUnavailable)
+		if IsContextCancellation(err) {
+			eventType, errorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
+		}
+		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, eventType, errorType); auditErr != nil {
+			dispatcher.failDurable(durable, auditErr)
+			finishWithError(auditErr)
+			return nil, auditWriteFailure()
+		}
 		if IsContextCancellation(err) {
 			finishWithError(err)
 			return nil, err
@@ -213,13 +254,18 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	if runnerEvents == nil {
 		_ = lease.Release()
 		dispatcher.failDurable(durable, ErrExecution)
+		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
+			dispatcher.failDurable(durable, auditErr)
+			finishWithError(auditErr)
+			return nil, auditWriteFailure()
+		}
 		finishWithError(ErrExecution)
 		return nil, ErrExecution
 	}
 
 	output := make(chan DispatchEvent, 32)
 	_ = dispatcher.metrics.Active(ctx, 1, map[string]string{"component": "runner"})
-	go dispatcher.forward(ctx, requestID, traceID, runnerEvents, lease, durable, output, span, started)
+	go dispatcher.forward(ctx, requestID, traceID, runnerEvents, lease, durable, output, span, started, request.Principal, message, identity)
 	return output, nil
 }
 
@@ -317,12 +363,61 @@ func (dispatcher *Dispatcher) finishDurable(durable *durableExecution, terminalE
 	})
 }
 
-func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time) {
+func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time, principal Principal, message InboundMessage, identity tenant.RunnerIdentity) {
 	defer close(output)
 	defer func() { _ = lease.Release() }()
 	var terminalErr error
 	var reply strings.Builder
+	var terminalEventType audit.EventType
+	var terminalErrorType string
+	auditFinalized := false
+	finalizeAudit := func(eventType audit.EventType, errorType string) error {
+		if auditFinalized {
+			return nil
+		}
+		err := dispatcher.writeExecutionAudit(context.Background(), principal, message, identity, requestID, traceID, eventType, errorType)
+		if err == nil {
+			auditFinalized = true
+		}
+		return err
+	}
+	finalizeHandoff := func(result audit.ExecutionResult, errorType string) error {
+		if dispatcher.handoffStore == nil {
+			return nil
+		}
+		_, err := dispatcher.handoffStore.Finalize(context.Background(), audit.ExecutionHandoff{TenantID: principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType})
+		return err
+	}
 	defer func() {
+		eventType := terminalEventType
+		errorType := terminalErrorType
+		if eventType == "" {
+			eventType = audit.EventExecutionCompleted
+			if terminalErr != nil {
+				eventType = audit.EventExecutionFailed
+				if IsContextCancellation(terminalErr) {
+					eventType = audit.EventExecutionCanceled
+				}
+			}
+		}
+		if errorType == "" {
+			errorType = terminalAuditError(terminalErr)
+		}
+		if dispatcher.handoffStore != nil {
+			result := audit.ResultSuccess
+			if terminalErr != nil {
+				result = audit.ResultFailure
+				if IsContextCancellation(terminalErr) {
+					result = audit.ResultCanceled
+				}
+			}
+			if _, err := dispatcher.handoffStore.Finalize(context.Background(), audit.ExecutionHandoff{TenantID: principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType}); err != nil && terminalErr == nil {
+				terminalErr = auditWriteFailure()
+			}
+		}
+		if err := finalizeAudit(eventType, errorType); err != nil && terminalErr == nil {
+			terminalErr = ErrExecution
+		}
 		dispatcher.finishDurable(durable, terminalErr, reply.String())
 		_ = dispatcher.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
 		status := "complete"
@@ -341,17 +436,60 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 	for {
 		if ctx.Err() != nil {
 			terminalErr = ctx.Err()
+			terminalEventType, terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
+			if err := finalizeAudit(audit.EventExecutionCanceled, string(audit.ErrorCanceled)); err != nil {
+				terminalErr = auditWriteFailure()
+				dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+				return
+			}
+			if err := finalizeHandoff(audit.ResultCanceled, string(audit.ErrorCanceled)); err != nil {
+				terminalErr = auditWriteFailure()
+				dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+				return
+			}
 			dispatcher.finishCanceled(ctx, requestID, traceID, runnerEvents, output)
 			return
 		}
 		select {
 		case event, ok := <-runnerEvents:
 			if !ok {
+				terminalEventType, terminalErrorType = audit.EventExecutionCompleted, ""
+				if err := finalizeAudit(audit.EventExecutionCompleted, ""); err != nil {
+					terminalErr = auditWriteFailure()
+					dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+					return
+				}
+				if err := finalizeHandoff(audit.ResultSuccess, ""); err != nil {
+					terminalErr = auditWriteFailure()
+					dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+					return
+				}
 				trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "complete", Done: true})
 				return
 			}
 			mapped, done := mapRunnerEvent(event, requestID, traceID)
+			if done {
+				terminalErr = nil
+				for _, item := range mapped {
+					if item.Type == DispatchEventError {
+						terminalErr = ErrExecution
+					}
+				}
+				eventType, errorType := audit.EventExecutionCompleted, ""
+				if terminalErr != nil {
+					eventType, errorType = audit.EventExecutionFailed, string(audit.ErrorUnavailable)
+				}
+				terminalEventType, terminalErrorType = eventType, errorType
+				if err := finalizeAudit(eventType, errorType); err != nil {
+					terminalErr = ErrExecution
+					dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+					return
+				}
+			}
 			for _, item := range mapped {
+				if done && item.Type == DispatchEventDone {
+					continue
+				}
 				if item.Type == DispatchEventMessage {
 					reply.WriteString(item.Text)
 				}
@@ -365,15 +503,75 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 				}
 			}
 			if done {
+				result := audit.ResultSuccess
+				if terminalErr != nil {
+					result = audit.ResultFailure
+				}
+				if err := finalizeHandoff(result, terminalErrorType); err != nil {
+					terminalErr = auditWriteFailure()
+					dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+					return
+				}
+				for _, item := range mapped {
+					if item.Type == DispatchEventDone {
+						_ = sendDispatchEvent(ctx, output, item)
+					}
+				}
 				drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
 				return
 			}
 		case <-ctx.Done():
 			terminalErr = ctx.Err()
+			terminalEventType, terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
+			if err := finalizeAudit(audit.EventExecutionCanceled, string(audit.ErrorCanceled)); err != nil {
+				terminalErr = auditWriteFailure()
+				dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+				return
+			}
+			if err := finalizeHandoff(audit.ResultCanceled, string(audit.ErrorCanceled)); err != nil {
+				terminalErr = auditWriteFailure()
+				dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+				return
+			}
 			dispatcher.finishCanceled(ctx, requestID, traceID, runnerEvents, output)
 			return
 		}
 	}
+}
+
+func (dispatcher *Dispatcher) finishAuditFailure(requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent) {
+	drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
+	trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventError, RequestID: requestID, TraceID: traceID, Error: ErrAuditWriteFailed.Error()})
+	trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "error", Done: true})
+}
+
+func auditWriteFailure() error {
+	return errors.Join(ErrExecution, ErrAuditWriteFailed)
+}
+
+func terminalAuditError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if IsContextCancellation(err) {
+		return string(audit.ErrorCanceled)
+	}
+	return string(audit.ErrorUnavailable)
+}
+
+func (dispatcher *Dispatcher) writeExecutionAudit(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, requestID, traceID string, eventType audit.EventType, errorType string) error {
+	if dispatcher.auditWriter == nil {
+		return nil
+	}
+	channel := string(principal.Kind())
+	if target, ok := principal.RoutingTarget(); ok {
+		channel = string(target.Channel)
+	}
+	event := audit.Event{SchemaVersion: audit.SchemaVersion, EventID: audit.NewEventID(requestID, string(eventType)), EventType: eventType, TenantID: principal.TenantID(), Channel: channel, UserID: message.ExternalUserID, SessionID: identity.SessionID, AgentAppID: principal.AppID(), ErrorType: errorType, RequestID: requestID, TraceID: traceID, ActorType: string(principal.Kind()), ActorID: principal.SubjectID(), OccurredAt: time.Now().UTC()}
+	if _, err := dispatcher.auditWriter.Append(ctx, event); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (dispatcher *Dispatcher) finishCanceled(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent) {

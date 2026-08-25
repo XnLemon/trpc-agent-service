@@ -487,6 +487,8 @@ func mapHTTPError(err error) (int, string) {
 		return http.StatusServiceUnavailable, "not ready"
 	case errors.Is(err, ErrIdempotencyCapacity):
 		return http.StatusServiceUnavailable, "gateway capacity unavailable"
+	case errors.Is(err, ErrAuditWriteFailed):
+		return http.StatusBadGateway, ErrAuditWriteFailed.Error()
 	case errors.Is(err, ErrExecution), errors.Is(err, ErrPlanUnavailable), errors.Is(err, ErrRunnerUnavailable):
 		return http.StatusBadGateway, "execution failed"
 	default:

@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -30,6 +32,8 @@ type Config struct {
 	Authenticator  Authenticator
 	ModelCatalog   *modelprofile.ProviderCatalog
 	BackendCatalog *backend.ProviderCatalog
+	// AuditWriter receives control-plane mutation facts returned by repositories.
+	AuditWriter audit.Writer
 }
 
 type Handler struct {
@@ -85,7 +89,116 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeMappedError(w, requestID, err)
 		return
 	}
+	if r.Method != http.MethodGet {
+		if err := h.recordMutation(r.Context(), principal, requestID, value); err != nil {
+			writeMappedError(w, requestID, err)
+			return
+		}
+	}
 	writeJSON(w, requestID, status, value)
+}
+
+func (h *Handler) recordMutation(ctx context.Context, principal Principal, requestID string, value any) error {
+	if h == nil || h.config.AuditWriter == nil || value == nil {
+		return nil
+	}
+	var change any
+	if envelope, ok := value.(map[string]any); ok {
+		change = envelope["event"]
+	}
+	if change == nil {
+		return h.recordRawMutation(ctx, principal, requestID, value)
+	}
+	v := reflect.ValueOf(change)
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil
+	}
+	fieldString := func(name string) string {
+		field := v.FieldByName(name)
+		if !field.IsValid() || field.Kind() != reflect.String {
+			return ""
+		}
+		return field.String()
+	}
+	fieldInt := func(name string) (int64, bool) {
+		field := v.FieldByName(name)
+		if !field.IsValid() {
+			return 0, false
+		}
+		if field.Kind() == reflect.Pointer {
+			if field.IsNil() {
+				return 0, false
+			}
+			field = field.Elem()
+		}
+		if field.Kind() != reflect.Int64 && field.Kind() != reflect.Int {
+			return 0, false
+		}
+		return field.Int(), true
+	}
+	previous, previousOK := fieldInt("PreviousVersion")
+	next, nextOK := fieldInt("NextVersion")
+	if !previousOK || !nextOK {
+		return nil
+	}
+	tenants := fieldString("TenantID")
+	_ = principal
+	return (audit.Recorder{Writer: h.config.AuditWriter, TenantID: tenants}).Record(ctx, audit.Event{
+		EventID:   audit.NewEventID(requestID, tenants, fieldString("CorrelationID"), fieldString("EventType")),
+		EventType: audit.EventControlPlaneChanged, TenantID: tenants,
+		ActorType: fieldString("ActorType"), ActorID: fieldString("ActorID"),
+		Reason: fieldString("Reason"), CorrelationID: fieldString("CorrelationID"),
+		PreviousVersion: &previous, NextVersion: &next,
+	})
+}
+
+func (h *Handler) recordRawMutation(ctx context.Context, principal Principal, requestID string, value any) error {
+	v := reflect.ValueOf(value)
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil
+	}
+	fieldString := func(name string) string {
+		field := v.FieldByName(name)
+		if field.IsValid() && field.Kind() == reflect.String {
+			return field.String()
+		}
+		return ""
+	}
+	next := int64(1)
+	for _, name := range []string{"Version", "DraftVersion", "Revision"} {
+		fieldVersion := v.FieldByName(name)
+		if fieldVersion.IsValid() && (fieldVersion.Kind() == reflect.Int64 || fieldVersion.Kind() == reflect.Int) && fieldVersion.Int() > 0 {
+			next = fieldVersion.Int()
+			break
+		}
+	}
+	previous := next - 1
+	tenantID := fieldString("TenantID")
+	if tenantID == "" {
+		return nil
+	}
+	actorID := principal.SubjectID
+	if actorID == "" {
+		actorID = "admin"
+	}
+	return (audit.Recorder{Writer: h.config.AuditWriter, TenantID: tenantID}).Record(ctx, audit.Event{
+		EventID:   audit.NewEventID(requestID, tenantID, fieldString("Version"), "raw"),
+		EventType: audit.EventControlPlaneChanged, TenantID: tenantID,
+		ActorType: "admin", ActorID: actorID, Reason: "admin mutation", CorrelationID: requestID,
+		PreviousVersion: &previous, NextVersion: &next,
+	})
 }
 
 var errNotFound = errors.New("admin route not found")
@@ -557,6 +670,9 @@ func mapError(err error) (int, string) {
 	}
 	if errors.Is(err, ErrForbidden) {
 		return http.StatusForbidden, "forbidden"
+	}
+	if errors.Is(err, audit.ErrWriteFailed) {
+		return http.StatusServiceUnavailable, "audit_unavailable"
 	}
 	if errors.Is(err, errNotFound) || errors.Is(err, tenant.ErrNotFound) || errors.Is(err, agent.ErrNotFound) || errors.Is(err, modelprofile.ErrNotFound) || errors.Is(err, backend.ErrNotFound) || errors.Is(err, channels.ErrNotFound) {
 		return http.StatusNotFound, "not_found"

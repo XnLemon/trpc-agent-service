@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
@@ -20,6 +21,122 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 )
+
+type telegramAuditWriter struct {
+	events     []audit.Event
+	failAfter  int
+	alwaysFail bool
+}
+
+func (w *telegramAuditWriter) Append(_ context.Context, event audit.Event) (audit.AppendResult, error) {
+	if w.alwaysFail || (w.failAfter > 0 && len(w.events) >= w.failAfter) {
+		return audit.AppendResult{}, errors.New("audit unavailable")
+	}
+	w.events = append(w.events, event)
+	return audit.AppendResult{Event: event}, nil
+}
+
+func TestAuditWriterFailureAfterDeliveryIsRedacted(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "audit-failure", "12345")
+	writer := &telegramAuditWriter{failAfter: 1}
+	dispatcher := &dispatchStub{events: []gateway.DispatchEvent{{Type: gateway.DispatchEventMessage, Text: "reply"}, {Type: gateway.DispatchEventDone, Done: true}}}
+	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
+	adapter, err := New(context.Background(), Config{BotToken: "12345:runtime-secret", Target: target, Dispatcher: dispatcher, Factory: &fakeFactory{client: client}, AuditWriter: writer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = adapter.Close() }()
+	if err := adapter.HandleUpdate(context.Background(), textUpdate(40, models.ChatTypePrivate, 100, 42, "input", 0)); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestHandleUpdateAuditFailureBranches(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "audit-branches", "12345")
+	update := textUpdate(41, models.ChatTypePrivate, 100, 42, "input", 0)
+	admission := newTestAdapter(t, target, &dispatchStub{events: []gateway.DispatchEvent{{Type: gateway.DispatchEventDone, Done: true}}}, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
+	admission.audit.Writer = &telegramAuditWriter{alwaysFail: true}
+	if err := admission.HandleUpdate(context.Background(), update); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("admission audit err=%v", err)
+	}
+	replayWriter := &telegramAuditWriter{failAfter: 2}
+	replayDispatcher := &dispatchStub{events: []gateway.DispatchEvent{{Type: gateway.DispatchEventMessage, Text: "reply"}, {Type: gateway.DispatchEventDone, Done: true}}}
+	replay := newTestAdapter(t, target, replayDispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
+	replay.audit.Writer = replayWriter
+	if err := replay.HandleUpdate(context.Background(), textUpdate(42, models.ChatTypePrivate, 100, 42, "replay", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := replay.HandleUpdate(context.Background(), textUpdate(42, models.ChatTypePrivate, 100, 42, "replay", 0)); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("replay audit err=%v", err)
+	}
+}
+
+func TestHandleUpdateDuplicateAuditAndDispatchSendFailure(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "audit-duplicate", "12345")
+	entered, release := make(chan struct{}), make(chan struct{})
+	dispatcher := &dispatchStub{stream: func(ctx context.Context, _ gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+		close(entered)
+		<-release
+		return eventStream(gateway.DispatchEvent{Type: gateway.DispatchEventDone, Done: true}), nil
+	}}
+	adapter := newTestAdapter(t, target, dispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
+	adapter.audit.Writer = &telegramAuditWriter{failAfter: 1}
+	update := textUpdate(43, models.ChatTypePrivate, 100, 42, "pending", 0)
+	first := make(chan error, 1)
+	go func() { first <- adapter.HandleUpdate(context.Background(), update) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("dispatch did not start")
+	}
+	if err := adapter.HandleUpdate(context.Background(), update); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("duplicate audit err=%v", err)
+	}
+	close(release)
+	<-first
+	recorder := &errorRecorder{}
+	failing := newTestAdapterWithHook(t, target, &dispatchStub{err: errors.New("provider")}, &fakeBot{me: &models.User{ID: 12345, IsBot: true}, sendErr: errors.New("send")}, recorder.hook)
+	if err := failing.HandleUpdate(context.Background(), textUpdate(44, models.ChatTypePrivate, 100, 42, "failure", 0)); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("dispatch/send err=%v", err)
+	}
+	if len(recorder.snapshot()) != 2 {
+		t.Fatalf("error hooks=%+v", recorder.snapshot())
+	}
+}
+
+func TestHandleUpdatePreservesDispatchAndSendCancellation(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "cancel-branches", "12345")
+	entered := make(chan struct{})
+	dispatcher := &dispatchStub{stream: func(ctx context.Context, _ gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+		close(entered)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	adapter := newTestAdapter(t, target, dispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- adapter.HandleUpdate(ctx, textUpdate(45, models.ChatTypePrivate, 100, 42, "cancel", 0))
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("dispatch did not start")
+	}
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("dispatch cancellation err=%v", err)
+	}
+	sendCtx, sendCancel := context.WithCancel(context.Background())
+	sendDispatcher := &dispatchStub{stream: func(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+		sendCancel()
+		return eventStream(gateway.DispatchEvent{Type: gateway.DispatchEventMessage, Text: "reply"}, gateway.DispatchEvent{Type: gateway.DispatchEventDone, Done: true}), nil
+	}}
+	sendAdapter := newTestAdapter(t, target, sendDispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
+	if err := sendAdapter.HandleUpdate(sendCtx, textUpdate(46, models.ChatTypePrivate, 100, 42, "send-cancel", 0)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("send cancellation err=%v", err)
+	}
+}
 
 func TestNewInjectsFactoryAndRejectsBotIdentityMismatch(t *testing.T) {
 	target := newTrustedTarget(t, channels.ChannelTelegram, "constructor", "12345")
@@ -254,6 +371,8 @@ func TestHandleUpdateMapsPrivateTextAndAggregatesDispatchEvents(t *testing.T) {
 	}}
 	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
 	adapter := newTestAdapter(t, target, dispatcher, client)
+	aw := &telegramAuditWriter{}
+	adapter.audit.Writer = aw
 	key := contextKey("request-context")
 	ctx := context.WithValue(context.Background(), key, "preserved")
 	update := textUpdate(7, models.ChatTypePrivate, 100, 42, "  hello  ", 0)
@@ -282,6 +401,9 @@ func TestHandleUpdateMapsPrivateTextAndAggregatesDispatchEvents(t *testing.T) {
 	sent := client.sent()
 	if len(sent) != 1 || sent[0].Text != "hello world" || sent[0].ChatID != 100 || sent[0].ThreadID != 0 {
 		t.Fatalf("unexpected aggregated Telegram reply: %+v", sent)
+	}
+	if len(aw.events) != 2 || aw.events[0].EventType != audit.EventIMIngressAccepted || aw.events[1].EventType != audit.EventIMDeliverySent {
+		t.Fatalf("audit events = %#v", aw.events)
 	}
 }
 
@@ -428,6 +550,31 @@ func TestDispatchAndSendFailuresAreRedacted(t *testing.T) {
 	}
 	if events := sendRecorder.snapshot(); len(events) != 1 || events[0].Operation != ErrorOperationSend || !errors.Is(events[0].Err, ErrSendMessage) {
 		t.Fatalf("unexpected send failure hook: %+v", events)
+	}
+}
+
+func TestAuditWriterRecordsTelegramIngressAndDelivery(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "audit-hooks", "12345")
+	writer := &telegramAuditWriter{}
+	dispatcher := &dispatchStub{events: []gateway.DispatchEvent{{Type: gateway.DispatchEventMessage, Text: "reply"}, {Type: gateway.DispatchEventDone, Done: true}}}
+	adapter, err := New(context.Background(), Config{BotToken: "12345:runtime-secret", Target: target, Dispatcher: dispatcher, Factory: &fakeFactory{client: &fakeBot{me: &models.User{ID: 12345, IsBot: true}}}, AuditWriter: writer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = adapter.Close() }()
+	if err := adapter.HandleUpdate(context.Background(), textUpdate(30, models.ChatTypePrivate, 100, 42, "input", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.HandleUpdate(context.Background(), textUpdate(30, models.ChatTypePrivate, 100, 42, "input", 0)); err != nil {
+		t.Fatalf("replay err=%v", err)
+	}
+	events := writer.events
+	seen := map[audit.EventType]bool{}
+	for _, event := range events {
+		seen[event.EventType] = true
+	}
+	if !seen[audit.EventIMIngressAccepted] || !seen[audit.EventIMDeliverySent] {
+		t.Fatalf("audit events=%v", events)
 	}
 }
 
