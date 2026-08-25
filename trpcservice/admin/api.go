@@ -176,10 +176,13 @@ func (h *Handler) recordRawMutation(ctx context.Context, principal Principal, re
 		}
 		return ""
 	}
-	fieldVersion := v.FieldByName("Version")
 	next := int64(1)
-	if fieldVersion.IsValid() && (fieldVersion.Kind() == reflect.Int64 || fieldVersion.Kind() == reflect.Int) && fieldVersion.Int() > 0 {
-		next = fieldVersion.Int()
+	for _, name := range []string{"Version", "DraftVersion", "Revision"} {
+		fieldVersion := v.FieldByName(name)
+		if fieldVersion.IsValid() && (fieldVersion.Kind() == reflect.Int64 || fieldVersion.Kind() == reflect.Int) && fieldVersion.Int() > 0 {
+			next = fieldVersion.Int()
+			break
+		}
 	}
 	previous := next - 1
 	tenantID := fieldString("TenantID")

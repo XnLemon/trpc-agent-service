@@ -58,6 +58,18 @@ func TestRecordMutationAuditsRawResourceMutation(t *testing.T) {
 	}
 }
 
+func TestRecordMutationUsesDraftVersionForRawRevision(t *testing.T) {
+	w := &adminAuditWriter{}
+	h := &Handler{config: Config{AuditWriter: w}}
+	revision := agent.Revision{TenantID: "tenant-a", DraftVersion: 3, Revision: 7}
+	if err := h.recordMutation(context.Background(), Principal{SubjectID: "admin-1"}, "request-draft", &revision); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.events) != 1 || *w.events[0].PreviousVersion != 2 || *w.events[0].NextVersion != 3 {
+		t.Fatalf("draft audit event = %#v", w.events)
+	}
+}
+
 func testHandler(t *testing.T) (*Handler, *StaticAuthenticator) {
 	t.Helper()
 	modelCatalog, err := modelprofile.NewProviderCatalog(modelprofile.ProviderSpec{Provider: "openai", Models: []string{"gpt-4o-mini"}, EndpointPolicy: modelprofile.FieldOptional, EndpointSchemes: []string{"https"}, EndpointHosts: []string{"api.openai.com"}, SecretRefPolicy: modelprofile.FieldRequired})
