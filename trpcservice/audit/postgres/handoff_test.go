@@ -4,10 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 )
 
 func TestHandoffStoreScopeAndReserve(t *testing.T) {
