@@ -1,16 +1,26 @@
 # Telegram live E2E example
 
 This example exercises the real Telegram Bot API boundary around the
-tenant-scoped long-polling adapter:
+tenant-scoped long-polling adapter and durable reply delivery:
 
 ```text
 getMe -> getUpdates -> trusted Telegram Adapter -> DispatchService -> sendMessage
 ```
 
-It deliberately uses a deterministic `DispatchService`, so this example tests
-Telegram transport, trusted target construction, update normalization, reply
-delivery, cancellation, and secret handling without requiring a production
-LLM provider.
+The protected CI job also runs the durable reply path from a deterministic
+Runner through reply materialization, the Telegram Provider, and the fenced
+Outbox Worker:
+
+```text
+Runner reply -> reply_outbox -> Telegram sendMessage -> provider receipt
+  -> reply_outbox.sent -> message_event.replied
+```
+
+The interactive transport command deliberately uses a deterministic
+`DispatchService`, so it tests Telegram transport, trusted target construction,
+update normalization, reply delivery, cancellation, and secret handling without
+requiring a production LLM provider. The protected outbox test uses a
+deterministic Runner behind the real Gateway path.
 
 ## Local run
 
@@ -59,7 +69,8 @@ protected GitHub Environment named `telegram-e2e`:
 
 - `TELEGRAM_BOT_TOKEN`: required secret for the receiving test Bot.
 - `TELEGRAM_SENDER_BOT_TOKEN`: required secret for a second controlled test Bot
-  in CI; it sends the unique marker and receives the expected reply. This
+  in CI; it sends the unique marker and receives the expected reply. The same
+  controlled Bot is the durable outbox delivery target for the provider E2E. This
   sender secret is optional only for local human-driven runs.
 
 For a fully automatic message round trip, enable Telegram Bot-to-Bot

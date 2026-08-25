@@ -165,7 +165,7 @@
 - [ ] 补齐 channel binding、session、event、memory、summary、artifact 和 audit log 的可执行 DDL
 - [ ] 定义 Session、Memory、Summary、Knowledge、Artifact 和 Audit 的统一访问接口
 - [ ] 实现租户级 Backend Registry/Factory 和后端路由
-- [ ] 接入 InMemory、Redis 及 PostgreSQL/MySQL Session 后端
+- [x] 接入 InMemory 与 PostgreSQL Session/Event/Reply Outbox 运行时后端（Issue #49/#50）
 - [ ] 接入至少一种向量库和一种对象存储
 - [x] 实现同一 Session 并发写入的版本/CAS/事务控制和事件序号（Issue #49）
 - [ ] 明确并实现 event、state、summary 的更新顺序及冲突重放
@@ -186,7 +186,7 @@
 - [x] 使用 `tenant + channel + message_id` 实现幂等去重和缓存回复（Issue #49）
 - [x] 实现单聊/群聊 Session ID 规则及跨群、跨租户隔离
 - [x] Telegram 文本回复分段、重复投递和论坛线程路由
-- [ ] 处理频率限制、异步回复、图片/文件、撤回和失败重试
+- [x] 处理文本回复的异步 Outbox、重试、死信和失败恢复（Issue #50/#52；媒体/撤回仍未实现）
 - [ ] 增加重复投递、乱序、验签失败和跨租户访问测试
 
 ### 治理、安全与可观测性
@@ -208,7 +208,7 @@
 - [x] 实现 IM 异步重试队列、指数退避和死信处理（Issue #50）
 - [ ] 完成容量模型，并对并发 Session、Redis/SQL QPS 和 IM 峰值进行压测
 - [ ] 完成备份恢复、故障演练和租户级发布回滚流程
-- [x] 增加 Storage Adapter 契约测试和端到端消息链路测试（Issue #49/#50）
+- [x] 增加 Storage Adapter 契约测试和端到端消息链路测试（Issue #49/#50/#52）
 - [ ] 增加多租户越权、密钥泄漏、并发一致性和故障注入测试
 - [x] 在 CI 中运行 `go test -race ./...`（Issue #39）；Codecov project/patch 的 85% 目标仍待分支保护或 ruleset 设为合并门禁
 - [ ] 增加依赖漏洞、镜像和提交密钥扫描
@@ -228,8 +228,9 @@
 
 > Issue #24 只完成架构、数据模型和运维文档；当前仓库另外交付了 Issue #28 的 Gateway/API、
 > Issue #31 的 Telegram long polling 文本 Adapter、Issue #37/#41 的 PostgreSQL 控制面与 Admin/
-> Bootstrap，以及 Issue #45 的运行时 observability 阶段 A。完整 WeCom/Telegram webhook、
-> rich update、Session/Event 持久化、迁移工具、业务审计和生产告警仍未实现。
+> Bootstrap、Issue #45 的运行时 observability 阶段 A，以及 Issue #49/#50 的 Session/Event/
+> Reply Outbox 持久化和可靠投递。完整 WeCom/Telegram webhook、rich update、Memory/Knowledge/
+> Artifact 后端、迁移工具、业务审计和生产告警仍未实现。
 
 ## 当前 PR 实现记录（不改变原验收要求）
 
@@ -247,11 +248,14 @@
   `getMe -> getUpdates -> sendMessage`；live workflow 只手动触发并使用受保护 Environment，
   不替代完整模型供应商或生产控制面 E2E。
 - Issue #37/#41 的 PostgreSQL 控制面、可重启 Bootstrap、readiness 和最小 Admin API 已合并；
-  控制面持久化不等同于 Session/Event/Memory/Audit 的生产运行时存储。
+  控制面持久化不等同于 Memory/Knowledge/Artifact/Audit 的生产运行时存储。
 - Issue #45 的运行时 observability 阶段 A 已合并，提供 no-op/OTLP provider、低基数指标、
   trace context 和脱敏结构化日志；Issue #44 阶段 B 的 AuditEvent、usage/cost 和业务治理仍未实现。
+- Issue #52 的 examples/telegram-e2e 增加 Runner -> reply outbox -> Telegram Provider ->
+  provider_message_id -> sent -> message_event=replied 的受保护 live E2E；它不替代无凭证的
+  确定性单元测试，也不承诺外部 Telegram exactly-once 投递。
 - Issue #26 的 fake candidate resolver/verifier 与 proof-bearing routing 边界有独立测试，
-  但这不代表 WeCom/Telegram webhook、媒体能力、Session/Event 持久化或完整业务观测
+  但这不代表 WeCom/Telegram webhook、媒体能力或完整业务观测
   能力已满足 README 原验收要求。
 
 ## 代码目录
