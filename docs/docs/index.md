@@ -30,6 +30,8 @@
   固定真实 Bootstrap、readiness、最小 Admin API、重启恢复和验收矩阵。
 - [Issue #50：Reliable Reply Delivery](issue-50-reliable-delivery.md)：Outbox worker、Provider
   交付、重试/DLQ、lease recovery、telemetry 与验收 ledger。
+- [租户审计与用量成本](audit-usage.md)：Issue #54 的文档先行契约，固定 mandatory audit
+  与 telemetry 边界、事件 schema、append-only/重复语义、失败策略、聚合和运维 ledger。
 
 ## 快速开始
 
@@ -61,6 +63,8 @@ cd trpc-agent-service
   管理 API、重启恢复和测试矩阵
 - [Issue #50：Reliable Reply Delivery](issue-50-reliable-delivery.md) — 回复 Outbox 交付、Provider、
   重试/DLQ、恢复与运维证据
+- [租户审计与用量成本](audit-usage.md) — 版本化事件、append-only writer、用量成本聚合、
+  保留/脱敏/访问控制和 failure/repair 规则
 - [运维方案](ops.md) — 发布灰度、监控审计、故障恢复、容量模型和生产风险清单
 
 ## CI

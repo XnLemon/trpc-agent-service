@@ -33,6 +33,7 @@ nav:
   - Telegram 长轮询 Adapter: telegram.md
   - Gateway、Execution Plan 与 HTTP/SSE: gateway.md
   - Tenant 运行时持久化: runtime-storage.md
+  - 租户审计与用量成本: audit-usage.md
   - Tenant 运行时边界: tenant-runtime-boundary.md
   - Agent App 模型: agent-app-model.md
   - Backend Profile 模型: backend-profile.md

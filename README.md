@@ -225,6 +225,7 @@
 - [x] 完成 Issue #37 PostgreSQL 控制面 migration、Repository、bootstrap 和 readiness 的文档契约
 - [x] 完成 Issue #41 Bootstrap、readiness、Admin API 和重启恢复的文档先行契约
 - [x] 完成 Issue #45 运行时 observability、指标、脱敏日志和 OTLP 配置契约
+- [x] 完成 Issue #54 租户审计、用量成本、失败处理、保留与访问控制的文档先行契约
 
 > Issue #24 只完成架构、数据模型和运维文档；当前仓库另外交付了 Issue #28 的 Gateway/API、
 > Issue #31 的 Telegram long polling 文本 Adapter、Issue #37/#41 的 PostgreSQL 控制面与 Admin/
