@@ -136,7 +136,9 @@ InMemory 与 PostgreSQL 必须运行同一 conformance suite，覆盖：
 
 有序 migration 新增 `audit_event`，主键为 `(tenant_id, event_id)`，所有索引以
 `tenant_id` 开头。事件字段使用类型/检查约束，`usage` 数值列使用 nullable non-negative
-整数；不保存自由 JSON payload。索引至少支持：
+整数；不保存自由 JSON payload。migration 另建 `execution_audit_handoff` 作为可恢复的投影
+outbox：它不是最终 AuditEvent，只有受 fence/状态约束的 reserve/finalize/repair 入口可以修改；
+一旦 projected 就不能改变 terminal payload。索引至少支持：
 
 - `(tenant_id, occurred_at, event_id)` 审计时间线；
 - `(tenant_id, agent_app_id, occurred_at)`；
@@ -167,12 +169,29 @@ writer 不获得删除权限。未来 WORM/hash-chain 归档是可选增强，�
 2. InMemory 控制面没有 durable handoff。配置了 mandatory Audit writer 后，append 失败必须
    返回稳定 `audit_write_failed`；调用方不能收到成功。响应可能是“变更已提交但未确认”，
    因此重试依赖领域 expected-version/correlation ID，运维必须 repair 而不能盲目重放。
-3. Gateway/Runner/Tool/IM 决策在产生外部副作用或成功响应前追加 mandatory 事实。writer
-   失败时取消尚未发生的副作用并返回稳定失败；如果业务事实已经由 `message_event`、
-   `reply_outbox` 或 provider receipt 持久化，则从该 durable fact 幂等 repair，不能重跑模型、
-   Tool 或重新发送结果不明的消息。
-4. telemetry exporter 故障不影响上述判断；Audit writer 故障也不能把成功变成一个伪造的
+3. Gateway admission、Tool allow/deny/approval、IM authorization 和 budget rejection 等执行前
+   决策必须在产生被决策的外部副作用前 append。writer 失败时取消尚未发生的副作用并返回
+   稳定 `audit_write_failed`。
+4. Runner terminal outcome 和 usage/cost 只能在执行后确定，使用独立于 Channel
+   `message_event` 的 durable `execution_audit_handoff`；普通 API 和 SSE 也必须覆盖。Dispatcher
+   在调用 Runner 前以 request/event ID、tenant、channel、user/session、app/revision、model
+   profile 和 correlation 字段创建 `pending` handoff。Runner 终止后先把实际 result、稳定错误
+   类别、latency 和可获得的 usage/cost finalize 到该 handoff，再投影 append-only AuditEvent。
+   普通响应不得在 finalize 前返回成功；SSE 可以继续实时发送非终态 chunk，不能为了审计缓冲
+   整个 stream，但只有 finalize 成功后才能发送成功 terminal/done。finalize 经有界重试仍失败时，
+   stream 发送稳定 `audit_write_failed` terminal，handoff 保持 pending/repairable，不能把已经
+   发生的模型调用伪装成成功或重新执行。Channel execution commit、回复物化和 provider delivery
+   同样在 terminal handoff durable 后继续；已有 `message_event`、`reply_outbox` 或 receipt 仅作
+   关联事实，不能代替缺失的 usage 字段。修复器按稳定 ID finalize/project，不重跑模型、Tool 或
+   结果不明的发送；无法从 provider reconciliation 恢复的 usage 保持未知并追加
+   `audit_incomplete` repair 事实，不能猜测为零。
+5. telemetry exporter 故障不影响上述判断；Audit writer 故障也不能把成功变成一个伪造的
    deny/allow 事件。只记录实际发生的结果。
+
+执行 handoff 测试必须覆盖普通 API 与 SSE：reserve 失败时 Runner 不启动；terminal finalize
+失败时不出现成功 terminal/done 且 pending 可见；SSE 已发送的非终态 chunk 不被撤回或重复；
+取消/timeout 使用各自结果；相同稳定 ID 重试不重复；进程在 reserve 后、finalize 前重启时 repair
+能发现 incomplete execution，且任何 repair 都不会再次调用 Runner。
 
 每个生产者使用确定性 event ID，例如来源表/状态转换的稳定 ID 与目标状态的组合。retry、
 lease recovery 和 projector restart 因而不会创建重复事实。不存在外部 exactly-once 保证：
@@ -185,7 +204,7 @@ reconcile 规则。
 | --- | --- | --- |
 | Admin/control plane | `control_plane.changed`，领域 change outbox | actor/reason/correlation/前后版本必填 |
 | Gateway admission | budget reject、IM auth allow/deny、ingress accepted/duplicate | 身份来自可信 Principal/Binding，不从正文取值 |
-| Runner execution | started + 一个 terminal outcome | 固定 app revision/model profile；取消与 timeout 分开 |
+| Runner execution | durable execution handoff -> started + 一个 terminal outcome | 覆盖 API/SSE/IM；固定 app revision/model profile；成功 terminal 在 finalize 后发送 |
 | Tool policy | allow/deny/approval required | tool 名称和 decision；不保存参数/结果 |
 | redaction/fallback | redacted/fallback | 只保存策略类别，不保存被删内容或 provider error |
 | reply outbox | sent/retry/dead-letter/reconciled | event/reply/segment 派生确定性 ID；保持 fence 语义 |
@@ -227,7 +246,7 @@ retention lag 和聚合查询失败。指标只使用 component/operation/status
 - [ ] InMemory：append-only writer、租户隔离、defensive copy、并发/重复 conformance。
 - [ ] PostgreSQL：有序 migration、Repository、权限、租户索引、并发/重启 conformance。
 - [ ] Admin/control-plane producer 与 durable change-outbox projector。
-- [ ] Gateway/Runner terminal outcome、budget、redaction/fallback 和 Tool policy hook。
+- [ ] Gateway/Runner durable execution handoff、terminal outcome、budget、redaction/fallback 和 Tool policy hook。
 - [ ] IM authorization/ingress 与 reply delivery/retry/dead-letter producer。
 - [ ] tenant/app/channel/provider/model usage/cost 聚合和低基数指标边界。
 - [ ] writer failure、retry、cancel、duplicate、secret/provider-error 负向测试。
