@@ -144,3 +144,90 @@ func TestWorkerValidationAndCancellation(t *testing.T) {
 		t.Fatalf("canceled run = %v", err)
 	}
 }
+
+func TestMaterializerSegmentsIdempotently(t *testing.T) {
+	store := inmemory.New()
+	seedReply(t, store, "tenant-a", "event-materialize", "unused")
+	m, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: store, SegmentSize: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, err := m.Materialize(context.Background(), outbox.MaterializeInput{TenantID: "tenant-a", EventID: "event-materialize", ReplyID: "reply-materialize", Payload: "abcdef"})
+	if err != nil || count != 2 {
+		t.Fatalf("materialize = %d err=%v", count, err)
+	}
+	if count, err = m.Materialize(context.Background(), outbox.MaterializeInput{TenantID: "tenant-a", EventID: "event-materialize", ReplyID: "reply-materialize", Payload: "abcdef"}); err != nil || count != 2 {
+		t.Fatalf("idempotent materialize = %d err=%v", count, err)
+	}
+	if _, err := m.Materialize(context.Background(), outbox.MaterializeInput{TenantID: "tenant-a", EventID: "event-materialize", ReplyID: "reply-materialize", Payload: "xyz"}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("materialization conflict = %v", err)
+	}
+	values, err := store.ListReplyCandidates(context.Background(), "tenant-a")
+	if err != nil || len(values) != 3 {
+		t.Fatalf("materialized rows = %d err=%v", len(values), err)
+	}
+}
+
+func TestMaterializerDoesNotExposePrefixWhenAnySegmentConflicts(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session", EventID: "event", BindingID: "binding", ExternalMessageID: "external"}); err != nil {
+		t.Fatal(err)
+	}
+	// Segment one represents an incompatible prior attempt. A sequential write
+	// would persist segment zero before discovering this conflict.
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", EventID: "event", ReplyID: "reply", SegmentIndex: 1, SegmentCount: 2, Payload: "other"}); err != nil {
+		t.Fatal(err)
+	}
+	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: store, SegmentSize: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := materializer.Materialize(context.Background(), outbox.MaterializeInput{TenantID: "tenant-a", EventID: "event", ReplyID: "reply", Payload: "abcdef"}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("materialization conflict = %v", err)
+	}
+	if _, err := store.GetReply(context.Background(), "tenant-a", "reply", 0); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("partial prefix was exposed: %v", err)
+	}
+}
+
+func TestWorkerRunStopsOnCancellationAndRejectsConcurrentRun(t *testing.T) {
+	store := inmemory.New()
+	provider := &providerStub{}
+	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, BackoffBase: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx, time.Millisecond) }()
+	time.Sleep(2 * time.Millisecond)
+	if err := worker.Run(ctx, time.Millisecond); !errors.Is(err, outbox.ErrAlreadyRunning) {
+		t.Fatalf("concurrent run = %v", err)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("run cancellation = %v", err)
+	}
+	if err := worker.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkerStartReservesLifecycleBeforeReturning(t *testing.T) {
+	worker, err := outbox.New(outbox.Config{Store: inmemory.New(), Provider: &providerStub{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Start(context.Background(), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Run(context.Background(), time.Hour); !errors.Is(err, outbox.ErrAlreadyRunning) {
+		t.Fatalf("concurrent run = %v", err)
+	}
+	if err := worker.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -26,6 +26,7 @@ import (
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
@@ -71,7 +72,11 @@ type Config struct {
 	RuntimeStore runtimestorage.RuntimeStore
 	// RuntimeTenantID fixes the tenant scope when Bootstrap wraps Sessions with
 	// the RuntimeStore-backed capability. It must come from trusted config.
-	RuntimeTenantID    string
+	RuntimeTenantID string
+	// OutboxWorker is constructed from trusted provider routing configuration.
+	// Bootstrap owns its lifecycle but never derives a recipient from HTTP.
+	OutboxWorker       *outbox.Worker
+	OutboxPollInterval time.Duration
 	Authenticator      gateway.APIAuthenticator
 	AdminAuthenticator admin.Authenticator
 	AdminHandler       http.Handler
@@ -90,10 +95,11 @@ type Config struct {
 // before the HTTP server is drained; Close then closes the Runner Registry and
 // only after that resources explicitly owned by this graph.
 type Runtime struct {
-	Handler    *gateway.HTTPHandler
-	Resolver   *gateway.PlanResolver
-	Registry   *gateway.RunnerRegistry
-	Dispatcher *gateway.Dispatcher
+	Handler      *gateway.HTTPHandler
+	Resolver     *gateway.PlanResolver
+	Registry     *gateway.RunnerRegistry
+	Dispatcher   *gateway.Dispatcher
+	OutboxWorker *outbox.Worker
 
 	db               *sql.DB
 	ownDB            bool
@@ -192,7 +198,8 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	}
 	runtimeGraph := &Runtime{
 		Resolver: resolver, Registry: registry, Dispatcher: dispatcher,
-		db: config.DB, ownDB: config.OwnDB, readyGate: readyGate,
+		OutboxWorker: config.OutboxWorker,
+		db:           config.DB, ownDB: config.OwnDB, readyGate: readyGate,
 		ping: ping, verifyMigrations: config.VerifyMigrations, closeDeps: config.CloseDependencies,
 	}
 	if config.AdminAuthenticator != nil {
@@ -223,6 +230,13 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	if err != nil {
 		_ = registry.Close()
 		return nil, ErrInvalidConfig
+	}
+	if runtimeGraph.OutboxWorker != nil {
+		if err := runtimeGraph.OutboxWorker.Start(context.Background(), config.OutboxPollInterval); err != nil {
+			_ = runtimeGraph.Handler.Close()
+			_ = registry.Close()
+			return nil, ErrInvalidConfig
+		}
 	}
 	return runtimeGraph, nil
 }
@@ -279,6 +293,9 @@ func (graph *Runtime) Close() error {
 		}
 		if graph.Registry != nil {
 			closeErr = errors.Join(closeErr, graph.Registry.Close())
+		}
+		if graph.OutboxWorker != nil {
+			closeErr = errors.Join(closeErr, graph.OutboxWorker.Close())
 		}
 		if graph.closeDeps != nil {
 			closeErr = errors.Join(closeErr, graph.closeDeps())

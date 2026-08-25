@@ -3,9 +3,11 @@ package outbox
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 )
@@ -146,11 +148,140 @@ func TestReconcileBranchCoverage(t *testing.T) {
 }
 
 func TestClassifyTypedDeliveryErrors(t *testing.T) {
+	if got := (&DeliveryError{}).Error(); got != ErrProvider.Error() {
+		t.Fatalf("delivery error text = %q", got)
+	}
 	if class, retryable := classify(&DeliveryError{Class: "", Retryable: false}); class != "provider_error" || !retryable {
 		t.Fatalf("empty class = %s/%v", class, retryable)
 	}
-	if class, retryable := classify(&DeliveryError{Class: "permanent", Retryable: false}); class != "permanent" || retryable {
+	if class, retryable := classify(&DeliveryError{Class: "permanent token=secret", Retryable: false}); class != "provider_error" || retryable {
 		t.Fatalf("typed class = %s/%v", class, retryable)
+	}
+	if metricErrorClass("provider_rejected") != "error" || metricErrorClass("rate_limited") != "rate_limited" {
+		t.Fatal("provider classes were not reduced to low-cardinality metric classes")
+	}
+}
+
+func TestWorkerRunAndRetryDueBoundaryBranches(t *testing.T) {
+	var nilWorker *Worker
+	if err := nilWorker.Run(context.Background(), time.Second); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil worker run = %v", err)
+	}
+	worker, err := New(Config{Store: inmemory.New(), Provider: branchProvider{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.retryDue(runtimestorage.ReplyOutbox{Status: runtimestorage.ReplyRetryable, UpdatedAt: time.Time{}}, time.Now()) != true {
+		t.Fatal("zero updated_at should be immediately due")
+	}
+	if worker.retryDue(runtimestorage.ReplyOutbox{Status: runtimestorage.ReplyRetryable, Attempts: 9, UpdatedAt: time.Now().Add(-time.Hour)}, time.Now()) != true {
+		t.Fatal("max backoff should eventually become due")
+	}
+	if !worker.retryDue(runtimestorage.ReplyOutbox{Status: runtimestorage.ReplySent}, time.Now()) {
+		t.Fatal("non-retry status should not be delayed by retryDue")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := worker.Run(ctx, 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("default poll interval cancellation = %v", err)
+	}
+}
+
+func TestRunOnceProviderAndTransitionErrorBranches(t *testing.T) {
+	ctx := context.Background()
+	base := runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", Status: runtimestorage.ReplyPending}
+	cases := []struct {
+		name     string
+		provider branchProvider
+		store    *branchStore
+		wantErr  bool
+		wantTo   string
+	}{
+		{name: "success", provider: branchProvider{id: "provider"}, store: &branchStore{candidates: []runtimestorage.ReplyOutbox{base}}, wantTo: runtimestorage.ReplySent},
+		{name: "retryable", provider: branchProvider{err: &DeliveryError{Class: "unavailable", Retryable: true}}, store: &branchStore{candidates: []runtimestorage.ReplyOutbox{base}}, wantTo: runtimestorage.ReplyRetryable},
+		{name: "transition error", provider: branchProvider{id: "provider"}, store: &branchStore{candidates: []runtimestorage.ReplyOutbox{base}, transitionErr: errors.New("transition")}, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			worker := &Worker{store: tc.store, provider: tc.provider, tenantID: "tenant-a", owner: "worker", leaseDuration: time.Second, maxAttempts: 3, backoffBase: time.Millisecond, backoffMax: time.Second}
+			processed, err := worker.RunOnce(ctx)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected transition error")
+				}
+			} else if err != nil || processed != 1 {
+				t.Fatalf("run = %d/%v", processed, err)
+			}
+			if tc.wantTo != "" && (len(tc.store.replyTransitions) != 1 || tc.store.replyTransitions[0].To != tc.wantTo) {
+				t.Fatalf("reply transition = %+v, want %s", tc.store.replyTransitions, tc.wantTo)
+			}
+		})
+	}
+}
+
+func TestWorkerRetryBackoffAndValidationBranches(t *testing.T) {
+	if _, err := New(Config{Store: inmemory.New(), Provider: branchProvider{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, BackoffBase: -time.Second}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("negative backoff = %v", err)
+	}
+	if _, err := New(Config{Store: inmemory.New(), Provider: branchProvider{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, BackoffBase: time.Second, BackoffMax: time.Millisecond}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("inverted backoff = %v", err)
+	}
+	worker, err := New(Config{Store: inmemory.New(), Provider: branchProvider{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, BackoffBase: time.Second, BackoffMax: 2 * time.Second, Jitter: .2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !worker.retryDue(runtimestorage.ReplyOutbox{Status: runtimestorage.ReplyPending}, time.Now()) {
+		t.Fatal("pending reply should be due")
+	}
+	if worker.retryDue(runtimestorage.ReplyOutbox{Status: runtimestorage.ReplyRetryable, Attempts: 1, UpdatedAt: time.Now()}, time.Now()) {
+		t.Fatal("fresh retry should not be due")
+	}
+	old := time.Now().Add(-time.Hour)
+	if !worker.retryDue(runtimestorage.ReplyOutbox{Status: runtimestorage.ReplyRetryable, Attempts: 3, UpdatedAt: old}, time.Now()) {
+		t.Fatal("old retry should be due")
+	}
+	if err := (*Worker)(nil).Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMaterializerValidationBranches(t *testing.T) {
+	if _, err := NewMaterializer(MaterializerConfig{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil materializer = %v", err)
+	}
+	m, err := NewMaterializer(MaterializerConfig{Store: inmemory.New(), SegmentSize: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []MaterializeInput{{}, {TenantID: "tenant-a", EventID: "event", ReplyID: "reply", Payload: " "}} {
+		if _, err := m.Materialize(context.Background(), input); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid materialization %#v = %v", input, err)
+		}
+	}
+}
+
+func TestMaterializerDefaultSegmentSizeAndUnicodeSplit(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-default", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", EventID: "event-default", SessionID: "session-default", BindingID: "binding", ExternalMessageID: "external-default"}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewMaterializer(MaterializerConfig{Store: store, SegmentSize: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, err := m.Materialize(context.Background(), MaterializeInput{TenantID: "tenant-a", EventID: "event-default", ReplyID: "reply-default", Payload: "你好"})
+	if err != nil || count != 1 {
+		t.Fatalf("default materialization = %d/%v", count, err)
+	}
+	rows, err := store.ListReplyCandidates(context.Background(), "tenant-a")
+	if err != nil || len(rows) != 1 || rows[0].Payload != "你好" {
+		t.Fatalf("unicode row = %+v/%v", rows, err)
+	}
+	if got := splitRunes("  ", 2); got != nil {
+		t.Fatalf("blank split = %#v", got)
 	}
 }
 
@@ -172,11 +303,168 @@ func (p *countingProvider) Reconcile(context.Context, runtimestorage.ReplyOutbox
 func TestRunOnceDoesNotRedeliverUnknownSendingLease(t *testing.T) {
 	provider := &countingProvider{status: DeliveryUnknown}
 	store := &branchStore{candidates: []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", Status: runtimestorage.ReplySending, LeaseExpiresAt: ptrTime(time.Now().Add(-time.Second))}}}
-	worker := &Worker{store: store, provider: provider, tenantID: "tenant-a", owner: "worker", leaseDuration: time.Second}
+	telemetry := &recordingTelemetry{}
+	worker, err := New(Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, Observability: telemetry})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if processed, err := worker.RunOnce(context.Background()); err != nil || processed != 1 {
 		t.Fatalf("run = %d/%v", processed, err)
 	}
 	if provider.deliveries != 0 {
 		t.Fatalf("unknown reconciliation redelivered %d times", provider.deliveries)
+	}
+	if len(telemetry.operations) != 1 || len(telemetry.metrics) < 2 {
+		t.Fatalf("missing lease-recovery telemetry: operations=%d metrics=%d", len(telemetry.operations), len(telemetry.metrics))
+	}
+}
+
+type telemetryRecord struct {
+	requestID string
+	traceID   string
+	name      string
+	attrs     []observability.Attribute
+}
+
+type recordingTelemetry struct {
+	operations []telemetryRecord
+	metrics    []telemetryRecord
+}
+
+func (p *recordingTelemetry) Tracer(string) observability.Tracer { return recordingTracer{p} }
+func (p *recordingTelemetry) Meter(string) observability.Meter   { return recordingMeter{p} }
+func (p *recordingTelemetry) Logger() observability.Logger       { return recordingLogger{} }
+func (p *recordingTelemetry) Shutdown(context.Context) error     { return nil }
+
+type recordingTracer struct{ provider *recordingTelemetry }
+
+func (t recordingTracer) Start(ctx context.Context, name string, attrs ...observability.Attribute) (context.Context, observability.Span) {
+	t.provider.operations = append(t.provider.operations, telemetryRecord{requestID: observability.RequestID(ctx), traceID: observability.TraceID(ctx), name: name, attrs: attrs})
+	return ctx, recordingSpan{}
+}
+
+type recordingSpan struct{}
+
+func (recordingSpan) End()                                     {}
+func (recordingSpan) SetAttributes(...observability.Attribute) {}
+func (recordingSpan) SetStatus(observability.Status, string)   {}
+func (recordingSpan) RecordError(error)                        {}
+
+type recordingMeter struct{ provider *recordingTelemetry }
+
+func (m recordingMeter) Counter(name string) observability.Counter {
+	return recordingCounter{m.provider, name}
+}
+func (m recordingMeter) Histogram(name string) observability.Histogram {
+	return recordingHistogram{m.provider, name}
+}
+func (m recordingMeter) UpDownCounter(string) observability.UpDownCounter {
+	return recordingUpDownCounter{}
+}
+
+type recordingCounter struct {
+	provider *recordingTelemetry
+	name     string
+}
+
+func (c recordingCounter) Add(ctx context.Context, _ int64, attrs ...observability.Attribute) {
+	c.provider.metrics = append(c.provider.metrics, telemetryRecord{requestID: observability.RequestID(ctx), traceID: observability.TraceID(ctx), name: c.name, attrs: attrs})
+}
+
+type recordingHistogram struct {
+	provider *recordingTelemetry
+	name     string
+}
+
+func (h recordingHistogram) Record(ctx context.Context, _ float64, attrs ...observability.Attribute) {
+	h.provider.metrics = append(h.provider.metrics, telemetryRecord{requestID: observability.RequestID(ctx), traceID: observability.TraceID(ctx), name: h.name, attrs: attrs})
+}
+
+type recordingUpDownCounter struct{}
+
+func (recordingUpDownCounter) Add(context.Context, int64, ...observability.Attribute) {}
+
+type recordingLogger struct{}
+
+func (recordingLogger) Log(context.Context, observability.Level, string, ...observability.Attribute) {
+}
+
+type correlatedProvider struct {
+	requestID string
+	traceID   string
+}
+
+func (p *correlatedProvider) Deliver(ctx context.Context, _ runtimestorage.ReplyOutbox) (string, error) {
+	p.requestID = observability.RequestID(ctx)
+	p.traceID = observability.TraceID(ctx)
+	return "", &DeliveryError{Class: "token=top-secret", Retryable: false}
+}
+
+func (*correlatedProvider) Reconcile(context.Context, runtimestorage.ReplyOutbox) (DeliveryStatus, string, error) {
+	return DeliveryUnknown, "", nil
+}
+
+func TestWorkerTelemetryPropagatesCorrelationAndRedactsProviderClasses(t *testing.T) {
+	ctx := observability.WithCorrelation(context.Background(), "request-1", "trace-1")
+	store := inmemory.New()
+	if _, err := store.CreateSession(ctx, "tenant-a", "session-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-a", EventID: "event-1", SessionID: "session-1", BindingID: "binding-1", ExternalMessageID: "external-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-1", EventID: "event-1", SegmentCount: 1, Payload: "payload"}); err != nil {
+		t.Fatal(err)
+	}
+	telemetry := &recordingTelemetry{}
+	provider := &correlatedProvider{}
+	worker, err := New(Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, MaxAttempts: 1, Observability: telemetry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := worker.RunOnce(ctx); err != nil || processed != 1 {
+		t.Fatalf("RunOnce = %d, %v", processed, err)
+	}
+	if provider.requestID != "request-1" || provider.traceID != "trace-1" {
+		t.Fatalf("provider correlation = %q/%q", provider.requestID, provider.traceID)
+	}
+	if len(telemetry.operations) != 1 || telemetry.operations[0].requestID != "request-1" || telemetry.operations[0].traceID != "trace-1" {
+		t.Fatalf("operation correlation = %+v", telemetry.operations)
+	}
+	for _, record := range telemetry.metrics {
+		labels := make(map[string]string, len(record.attrs))
+		for _, attr := range record.attrs {
+			labels[attr.Key] = attr.Value
+			if strings.Contains(attr.Value, "top-secret") {
+				t.Fatalf("sensitive provider class leaked into telemetry: %+v", record)
+			}
+		}
+		if labels["error_class"] == "provider_error" {
+			t.Fatalf("unbounded provider class leaked into metric labels: %+v", labels)
+		}
+	}
+}
+
+func TestWorkerTelemetryRecordsSuccessfulDelivery(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-success", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", EventID: "event-success", SessionID: "session-success", BindingID: "binding-success", ExternalMessageID: "external-success"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-success", EventID: "event-success", SegmentCount: 1, Payload: "payload"}); err != nil {
+		t.Fatal(err)
+	}
+	telemetry := &recordingTelemetry{}
+	worker, err := New(Config{Store: store, Provider: branchProvider{id: "provider-success"}, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, Observability: telemetry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := worker.RunOnce(context.Background()); err != nil || processed != 1 {
+		t.Fatalf("RunOnce = %d, %v", processed, err)
+	}
+	if len(telemetry.operations) != 1 || len(telemetry.metrics) < 3 {
+		t.Fatalf("missing successful delivery telemetry: operations=%d metrics=%d", len(telemetry.operations), len(telemetry.metrics))
 	}
 }

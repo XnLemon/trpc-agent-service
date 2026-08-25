@@ -11,6 +11,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	"github.com/google/uuid"
@@ -78,6 +79,7 @@ type DispatchConfig struct {
 	// RuntimeStore enables durable inbound claims for verified Channel principals.
 	// API principals remain protected by the HTTP IdempotencyStore.
 	RuntimeStore runtimestorage.RuntimeStore
+	Materializer *outbox.Materializer
 }
 
 // Dispatcher resolves a fixed plan, acquires a Runner lease, and translates
@@ -89,6 +91,7 @@ type Dispatcher struct {
 	telemetry    observability.Provider
 	metrics      metrics.Catalog
 	runtimeStore runtimestorage.RuntimeStore
+	materializer *outbox.Materializer
 }
 
 type durableExecution struct {
@@ -113,7 +116,14 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
 	}
-	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore}, nil
+	if config.Materializer == nil && config.RuntimeStore != nil {
+		materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: config.RuntimeStore})
+		if err != nil {
+			return nil, err
+		}
+		config.Materializer = materializer
+	}
+	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore, materializer: config.Materializer}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.
@@ -278,9 +288,24 @@ func (dispatcher *Dispatcher) failDurable(durable *durableExecution, cause error
 	})
 }
 
-func (dispatcher *Dispatcher) finishDurable(durable *durableExecution, terminalErr error) {
+func (dispatcher *Dispatcher) finishDurable(durable *durableExecution, terminalErr error, replies ...string) {
 	if durable == nil {
 		return
+	}
+	reply := ""
+	if len(replies) > 0 {
+		reply = replies[0]
+	}
+	segments := 0
+	replyID := ""
+	if terminalErr == nil && dispatcher.materializer != nil && strings.TrimSpace(reply) != "" {
+		var err error
+		segments, err = dispatcher.materializer.Materialize(context.Background(), outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, Payload: reply})
+		if err != nil {
+			terminalErr = err
+		} else {
+			replyID = durable.eventID
+		}
 	}
 	to := runtimestorage.EventCompleted
 	if terminalErr != nil {
@@ -288,7 +313,7 @@ func (dispatcher *Dispatcher) finishDurable(durable *durableExecution, terminalE
 	}
 	_, _ = durable.store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{
 		TenantID: durable.tenantID, EventID: durable.eventID, From: runtimestorage.EventRunning,
-		To: to, Owner: durable.owner, FencingToken: durable.fencingToken,
+		To: to, Owner: durable.owner, FencingToken: durable.fencingToken, ReplyID: replyID, SegmentCount: segments,
 	})
 }
 
@@ -296,8 +321,9 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 	defer close(output)
 	defer func() { _ = lease.Release() }()
 	var terminalErr error
+	var reply strings.Builder
 	defer func() {
-		dispatcher.finishDurable(durable, terminalErr)
+		dispatcher.finishDurable(durable, terminalErr, reply.String())
 		_ = dispatcher.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
 		status := "complete"
 		if terminalErr != nil {
@@ -326,6 +352,9 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 			}
 			mapped, done := mapRunnerEvent(event, requestID, traceID)
 			for _, item := range mapped {
+				if item.Type == DispatchEventMessage {
+					reply.WriteString(item.Text)
+				}
 				if item.Type == DispatchEventError {
 					terminalErr = ErrExecution
 				}

@@ -207,6 +207,72 @@ func TestRuntimeStoreCoversEventHistoryAndMessageLifecycle(t *testing.T) {
 	}
 }
 
+func TestTransitionMessagePersistsReplyMetadata(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mock.ExpectQuery("UPDATE public.message_event SET status=\\$4.*reply_id=COALESCE").
+		WithArgs("tenant-a", "event-1", runtimestorage.EventRunning, runtimestorage.EventCompleted, "worker-a", int64(0), int64(3), "reply-1", 2).
+		WillReturnRows(sqlmock.NewRows(eventColumns).AddRow("tenant-a", "event-1", "session-1", "binding-1", "external-1", "idem-1", int64(2), runtimestorage.EventCompleted, int64(4), "", nil, "reply-1", 2, when, when))
+	value, err := runtimepostgres.New(db).TransitionMessage(context.Background(), runtimestorage.MessageTransition{
+		TenantID: "tenant-a", EventID: "event-1", From: runtimestorage.EventRunning, To: runtimestorage.EventCompleted, Owner: "worker-a", FencingToken: 3, ReplyID: "reply-1", SegmentCount: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.ReplyID != "reply-1" || value.SegmentCount != 2 {
+		t.Fatalf("reply metadata = %+v", value)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTransitionMessageWithReplyMapsErrorAndConflict(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(sqlmock.Sqlmock, time.Time)
+		want    error
+	}{
+		{
+			name: "storage error",
+			prepare: func(mock sqlmock.Sqlmock, _ time.Time) {
+				mock.ExpectQuery("UPDATE public.message_event SET status=\\$4.*reply_id=COALESCE").WillReturnError(errors.New("database unavailable"))
+			},
+			want: runtimestorage.ErrStorage,
+		},
+		{
+			name: "stale fence conflict",
+			prepare: func(mock sqlmock.Sqlmock, when time.Time) {
+				mock.ExpectQuery("UPDATE public.message_event SET status=\\$4.*reply_id=COALESCE").WillReturnError(sql.ErrNoRows)
+				mock.ExpectQuery("SELECT tenant_id,event_id,session_id,binding_id,external_message_id").WithArgs("tenant-a", "event-1").WillReturnRows(eventRow(when))
+			},
+			want: runtimestorage.ErrConflict,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			tc.prepare(mock, time.Now().UTC())
+			_, err = runtimepostgres.New(db).TransitionMessage(context.Background(), runtimestorage.MessageTransition{
+				TenantID: "tenant-a", EventID: "event-1", From: runtimestorage.EventRunning, To: runtimestorage.EventCompleted, Owner: "worker-a", FencingToken: 3, ReplyID: "reply-1", SegmentCount: 2,
+			})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("TransitionMessage error = %v, want %v", err, tc.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestRuntimeStoreListReplyCandidates(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -467,6 +533,75 @@ func TestRuntimeStoreTransitionValidationAndLease(t *testing.T) {
 	mock.ExpectQuery("UPDATE public.reply_outbox SET status=\\$5").WithArgs("tenant-a", "reply-lease", 0, "pending", "sending", "worker", int64(2), "", "", int64(0)).WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-lease", "event", 0, 1, "payload", "sending", 1, int64(1), "worker", when.Add(time.Minute), "", "", when, when))
 	if _, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply-lease", SegmentIndex: 0, From: "pending", To: "sending", Owner: "worker", LeaseDuration: 2 * time.Second}); err != nil {
 		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeStoreEnqueueRepliesRollsBackPartialMaterialization(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := runtimepostgres.New(db)
+	when := time.Now().UTC()
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-batch", "event", 0, 2, "first").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-batch", "event", 0, 2, "first", "pending", 0, int64(0), "", nil, "", "", when, when))
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-batch", "event", 1, 2, "second").WillReturnError(errors.New("second insert failed"))
+	mock.ExpectRollback()
+	_, err = store.EnqueueReplies(context.Background(), []runtimestorage.ReplyOutbox{
+		{TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event", SegmentIndex: 0, SegmentCount: 2, Payload: "first"},
+		{TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event", SegmentIndex: 1, SegmentCount: 2, Payload: "second"},
+	})
+	if !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("batch error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeStoreEnqueueRepliesCommitsCompleteBatch(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := runtimepostgres.New(db)
+	when := time.Now().UTC()
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-batch", "event", 0, 2, "first").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-batch", "event", 0, 2, "first", "pending", 0, int64(0), "", nil, "", "", when, when))
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-batch", "event", 1, 2, "second").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-batch", "event", 1, 2, "second", "pending", 0, int64(0), "", nil, "", "", when, when))
+	mock.ExpectCommit()
+	rows, err := store.EnqueueReplies(context.Background(), []runtimestorage.ReplyOutbox{
+		{TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event", SegmentIndex: 0, SegmentCount: 2, Payload: "first"},
+		{TenantID: "tenant-a", ReplyID: "reply-batch", EventID: "event", SegmentIndex: 1, SegmentCount: 2, Payload: "second"},
+	})
+	if err != nil || len(rows) != 2 || rows[1].SegmentIndex != 1 {
+		t.Fatalf("committed batch = %+v err=%v", rows, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeStoreEnqueueRepliesRejectsInvalidBatchBeforeDatabase(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := runtimepostgres.New(db)
+	invalid := [][]runtimestorage.ReplyOutbox{
+		{{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 2}},
+		{{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 1}, {TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 1}},
+	}
+	for i, values := range invalid {
+		if _, err := store.EnqueueReplies(context.Background(), values); !errors.Is(err, runtimestorage.ErrInvalid) {
+			t.Errorf("invalid batch %d = %v", i, err)
+		}
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

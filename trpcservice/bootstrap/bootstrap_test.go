@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
@@ -21,6 +22,9 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
@@ -62,6 +66,66 @@ func TestNewBuildsRealGraphAndGatesReadiness(t *testing.T) {
 	}
 	if err := graph.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRuntimeStartsAndStopsConfiguredOutboxWorker(t *testing.T) {
+	store := runtimestorageinmemory.New()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session", EventID: "event", BindingID: "binding", ExternalMessageID: "external"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", EventID: "event", ReplyID: "reply", SegmentCount: 1, Payload: "payload"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &bootstrapBlockingProvider{started: make(chan struct{}), canceled: make(chan struct{})}
+	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "bootstrap-worker", LeaseDuration: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	config.RuntimeStore = store
+	config.OutboxWorker = worker
+	config.OutboxPollInterval = time.Hour
+	graph, err := New(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("bootstrap did not start the configured outbox worker")
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-provider.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("runtime close did not cancel and join the outbox worker")
+	}
+}
+
+func TestNewRejectsAlreadyRunningOutboxWorker(t *testing.T) {
+	worker, err := outbox.New(outbox.Config{
+		Store: runtimestorageinmemory.New(), Provider: &bootstrapBlockingProvider{started: make(chan struct{}), canceled: make(chan struct{})},
+		TenantID: "tenant-a", Owner: "already-running", LeaseDuration: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Start(context.Background(), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = worker.Close() })
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	config.OutboxWorker = worker
+	if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("already-running worker error = %v", err)
 	}
 }
 
@@ -493,6 +557,23 @@ type testModelFactory struct{}
 
 func (testModelFactory) New(context.Context, modelprofile.ModelFactoryInput, modelprofile.SecretValue) (trpcmodel.Model, error) {
 	return nil, errors.New("test factory failure")
+}
+
+type bootstrapBlockingProvider struct {
+	started  chan struct{}
+	canceled chan struct{}
+	once     sync.Once
+}
+
+func (p *bootstrapBlockingProvider) Deliver(ctx context.Context, _ runtimestorage.ReplyOutbox) (string, error) {
+	p.once.Do(func() { close(p.started) })
+	<-ctx.Done()
+	close(p.canceled)
+	return "", ctx.Err()
+}
+
+func (*bootstrapBlockingProvider) Reconcile(context.Context, runtimestorage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
+	return outbox.DeliveryUnknown, "", nil
 }
 
 var (

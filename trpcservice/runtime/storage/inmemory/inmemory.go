@@ -198,6 +198,12 @@ func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage
 		value.LeaseExpiresAt = nil
 	}
 	value.Status = transition.To
+	if transition.ReplyID != "" {
+		value.ReplyID = transition.ReplyID
+	}
+	if transition.SegmentCount > 0 {
+		value.SegmentCount = transition.SegmentCount
+	}
 	value.FencingToken++
 	value.UpdatedAt = time.Now().UTC()
 	s.events[k] = value
@@ -278,10 +284,68 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 	}
 	k := replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)
 	if existing, ok := s.replies[k]; ok {
+		if existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload {
+			return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
+		}
 		return cloneReply(existing), nil
 	}
 	s.replies[k] = value
 	return cloneReply(value), nil
+}
+
+// EnqueueReplies validates a complete reply before committing any new segment.
+// This prevents a failed multi-segment materialization from exposing a
+// deliverable prefix to a worker.
+func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	if err := check(ctx); err != nil {
+		return nil, err
+	}
+	if len(values) == 0 {
+		return nil, runtimestorage.ErrInvalid
+	}
+	first := values[0]
+	seen := make(map[int]struct{}, len(values))
+	for _, value := range values {
+		if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || value.Status != "" && value.Status != runtimestorage.ReplyPending || value.TenantID != first.TenantID || value.ReplyID != first.ReplyID || value.EventID != first.EventID || value.SegmentCount != first.SegmentCount {
+			return nil, runtimestorage.ErrInvalid
+		}
+		if _, duplicate := seen[value.SegmentIndex]; duplicate {
+			return nil, runtimestorage.ErrInvalid
+		}
+		seen[value.SegmentIndex] = struct{}{}
+	}
+	if len(seen) != first.SegmentCount {
+		return nil, runtimestorage.ErrInvalid
+	}
+	for index := 0; index < first.SegmentCount; index++ {
+		if _, present := seen[index]; !present {
+			return nil, runtimestorage.ErrInvalid
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.events[key(first.TenantID, first.EventID)]; !ok {
+		return nil, runtimestorage.ErrNotFound
+	}
+	for _, value := range values {
+		if existing, ok := s.replies[replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)]; ok && (existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload) {
+			return nil, runtimestorage.ErrConflict
+		}
+	}
+	now := time.Now().UTC()
+	result := make([]runtimestorage.ReplyOutbox, 0, len(values))
+	for _, value := range values {
+		k := replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)
+		if existing, ok := s.replies[k]; ok {
+			result = append(result, cloneReply(existing))
+			continue
+		}
+		value.Status = runtimestorage.ReplyPending
+		value.CreatedAt, value.UpdatedAt = now, now
+		s.replies[k] = value
+		result = append(result, cloneReply(value))
+	}
+	return result, nil
 }
 
 func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment int) (runtimestorage.ReplyOutbox, error) {

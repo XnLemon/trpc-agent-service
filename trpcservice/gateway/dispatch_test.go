@@ -11,6 +11,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
@@ -24,6 +25,19 @@ type capturedRun struct {
 	sessionID string
 	message   trpcmodel.Message
 	requestID string
+}
+
+type durableOutboxProvider struct {
+	deliveries []runtimestorage.ReplyOutbox
+}
+
+func (p *durableOutboxProvider) Deliver(_ context.Context, value runtimestorage.ReplyOutbox) (string, error) {
+	p.deliveries = append(p.deliveries, value)
+	return "provider-" + value.ReplyID, nil
+}
+
+func (*durableOutboxProvider) Reconcile(context.Context, runtimestorage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
+	return outbox.DeliveryUnknown, "", nil
 }
 
 type claimStoreStub struct {
@@ -242,6 +256,84 @@ func TestDispatcherDurableChannelClaimSuppressesDuplicateRunner(t *testing.T) {
 	close(release)
 	if err := <-firstDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPlanResolver(PlanResolverConfig{
+		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
+		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerValue := &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		events := make(chan *trpcevent.Event, 3)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "abc"}}}}}
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "def"}}}}}
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
+		close(events)
+		return events, nil
+	}}
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	store := inmemory.New()
+	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: store, SegmentSize: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, Materializer: materializer, DrainTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{
+		Principal: principal, RequestID: "durable-reply",
+		Message: InboundMessage{Content: "inbound", ExternalMessageID: "durable-reply", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collectDispatchEvents(stream)
+	if len(events) != 3 || !events[2].Done {
+		t.Fatalf("dispatch events = %+v", events)
+	}
+	rows, err := store.ListReplyCandidates(context.Background(), principal.TenantID())
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("outbox rows = %+v / %v", rows, err)
+	}
+	segments := make(map[int]runtimestorage.ReplyOutbox, len(rows))
+	for _, row := range rows {
+		segments[row.SegmentIndex] = row
+	}
+	first, second := segments[0], segments[1]
+	if first.Payload != "abc" || second.Payload != "def" || first.SegmentCount != 2 || second.SegmentCount != 2 || first.ReplyID != second.ReplyID {
+		t.Fatalf("materialized rows = %+v", rows)
+	}
+	message, err := store.GetMessage(context.Background(), principal.TenantID(), first.EventID)
+	if err != nil || message.Status != runtimestorage.EventCompleted || message.ReplyID != first.ReplyID || message.SegmentCount != 2 {
+		t.Fatalf("materialized message = %+v / %v", message, err)
+	}
+	provider := &durableOutboxProvider{}
+	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: principal.TenantID(), Owner: "worker", LeaseDuration: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := worker.RunOnce(context.Background())
+	if err != nil || processed != 2 || len(provider.deliveries) != 2 {
+		t.Fatalf("worker = processed %d deliveries %d err %v", processed, len(provider.deliveries), err)
+	}
+	message, err = store.GetMessage(context.Background(), principal.TenantID(), message.EventID)
+	if err != nil || message.Status != runtimestorage.EventReplied {
+		t.Fatalf("final message = %+v / %v", message, err)
 	}
 }
 

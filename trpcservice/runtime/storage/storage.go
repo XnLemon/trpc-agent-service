@@ -96,6 +96,10 @@ type MessageTransition struct {
 	Owner         string
 	FencingToken  int64
 	LeaseDuration time.Duration
+	// ReplyID and SegmentCount bind a completed Runner execution to the
+	// materialized outbox identity. They are only set for a successful reply.
+	ReplyID      string
+	SegmentCount int
 }
 
 type ReplyOutbox struct {
@@ -145,6 +149,14 @@ type RuntimeStore interface {
 	ClaimReply(context.Context, string, string, int, string, time.Duration) (ReplyOutbox, error)
 	TransitionReply(context.Context, ReplyTransition) (ReplyOutbox, error)
 	Close() error
+}
+
+// ReplyBatchEnqueuer is the atomic reply-materialization capability. A batch
+// either makes every segment durable or makes none of its new segments visible
+// to a delivery worker. It remains separate from RuntimeStore so existing
+// readers can keep a narrow dependency surface.
+type ReplyBatchEnqueuer interface {
+	EnqueueReplies(context.Context, []ReplyOutbox) ([]ReplyOutbox, error)
 }
 
 func ValidateTenant(tenantID string) error {
