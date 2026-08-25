@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
@@ -80,6 +81,9 @@ type DispatchConfig struct {
 	// API principals remain protected by the HTTP IdempotencyStore.
 	RuntimeStore runtimestorage.RuntimeStore
 	Materializer *outbox.Materializer
+	// AuditWriter receives mandatory execution lifecycle facts. It is optional
+	// for compatibility with deployments that have not enabled audit storage.
+	AuditWriter audit.Writer
 }
 
 // Dispatcher resolves a fixed plan, acquires a Runner lease, and translates
@@ -92,6 +96,7 @@ type Dispatcher struct {
 	metrics      metrics.Catalog
 	runtimeStore runtimestorage.RuntimeStore
 	materializer *outbox.Materializer
+	auditWriter  audit.Writer
 }
 
 type durableExecution struct {
@@ -123,7 +128,7 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 		}
 		config.Materializer = materializer
 	}
-	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore, materializer: config.Materializer}, nil
+	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore, materializer: config.Materializer, auditWriter: config.AuditWriter}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.
@@ -186,6 +191,11 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		finishWithError(err)
 		return nil, err
 	}
+	if err := dispatcher.writeExecutionAudit(ctx, request.Principal, message, identity, requestID, traceID, audit.EventExecutionStarted, ""); err != nil {
+		dispatcher.failDurable(durable, err)
+		finishWithError(err)
+		return nil, ErrExecution
+	}
 	lease, err := dispatcher.registry.Acquire(ctx, plan)
 	if err != nil {
 		dispatcher.failDurable(durable, err)
@@ -219,7 +229,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 
 	output := make(chan DispatchEvent, 32)
 	_ = dispatcher.metrics.Active(ctx, 1, map[string]string{"component": "runner"})
-	go dispatcher.forward(ctx, requestID, traceID, runnerEvents, lease, durable, output, span, started)
+	go dispatcher.forward(ctx, requestID, traceID, runnerEvents, lease, durable, output, span, started, request.Principal, message, identity)
 	return output, nil
 }
 
@@ -317,13 +327,21 @@ func (dispatcher *Dispatcher) finishDurable(durable *durableExecution, terminalE
 	})
 }
 
-func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time) {
+func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time, principal Principal, message InboundMessage, identity tenant.RunnerIdentity) {
 	defer close(output)
 	defer func() { _ = lease.Release() }()
 	var terminalErr error
 	var reply strings.Builder
 	defer func() {
 		dispatcher.finishDurable(durable, terminalErr, reply.String())
+		eventType := audit.EventExecutionCompleted
+		if terminalErr != nil {
+			eventType = audit.EventExecutionFailed
+			if IsContextCancellation(terminalErr) {
+				eventType = audit.EventExecutionCanceled
+			}
+		}
+		_ = dispatcher.writeExecutionAudit(context.Background(), principal, message, identity, requestID, traceID, eventType, terminalAuditError(terminalErr))
 		_ = dispatcher.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
 		status := "complete"
 		if terminalErr != nil {
@@ -374,6 +392,28 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 			return
 		}
 	}
+}
+
+func terminalAuditError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if IsContextCancellation(err) {
+		return string(audit.ErrorCanceled)
+	}
+	return string(audit.ErrorUnavailable)
+}
+
+func (dispatcher *Dispatcher) writeExecutionAudit(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, requestID, traceID string, eventType audit.EventType, errorType string) error {
+	if dispatcher.auditWriter == nil {
+		return nil
+	}
+	channel := string(principal.Kind())
+	event := audit.Event{SchemaVersion: audit.SchemaVersion, EventID: requestID + ":" + string(eventType), EventType: eventType, TenantID: principal.TenantID(), Channel: channel, UserID: message.ExternalUserID, SessionID: identity.SessionID, AgentAppID: principal.AppID(), ErrorType: errorType, RequestID: requestID, TraceID: traceID, ActorType: string(principal.Kind()), ActorID: principal.SubjectID(), OccurredAt: time.Now().UTC()}
+	if _, err := dispatcher.auditWriter.Append(ctx, event); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (dispatcher *Dispatcher) finishCanceled(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent) {

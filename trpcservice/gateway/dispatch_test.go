@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
@@ -136,6 +137,45 @@ func TestDispatcherMapsEventsAndPropagatesIdentityAndRequestID(t *testing.T) {
 	if captured.userID == "" || captured.sessionID == "" || captured.message.Content != "hello" || captured.requestID != requestID {
 		t.Fatalf("captured Runner call user=%q session=%q content=%q request=%q", captured.userID, captured.sessionID, captured.message.Content, captured.requestID)
 	}
+}
+
+func TestDispatcherWritesExecutionAuditLifecycle(t *testing.T) {
+	dispatcher, principal := newTestDispatcher(t, &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		events := make(chan *trpcevent.Event, 1)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
+		close(events)
+		return events, nil
+	}})
+	writer, err := audit.NewInMemory(principal.TenantID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.auditWriter = writer
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = collectDispatchEvents(stream)
+	events, err := writer.List(context.Background(), audit.Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || !hasAuditEventTypes(events, audit.EventExecutionStarted, audit.EventExecutionCompleted) {
+		t.Fatalf("audit lifecycle = %#v", events)
+	}
+}
+
+func hasAuditEventTypes(events []audit.Event, want ...audit.EventType) bool {
+	seen := map[audit.EventType]bool{}
+	for _, event := range events {
+		seen[event.EventType] = true
+	}
+	for _, eventType := range want {
+		if !seen[eventType] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestDispatcherUsesVerifiedChannelIdentity(t *testing.T) {
