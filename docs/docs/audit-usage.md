@@ -101,7 +101,7 @@ type Writer interface {
 }
 
 type Reader interface {
-    Get(context.Context, tenantID, eventID string) (Event, error)
+    Get(context.Context, eventID string) (Event, error)
     List(context.Context, Query) ([]Event, error)
 }
 
@@ -110,14 +110,22 @@ type Aggregator interface {
 }
 ```
 
-`Query` 和 `UsageQuery` 都显式携带 `tenant_id`；Repository 不提供省略 tenant 的单条查询或
-跨租户聚合。`UsageQuery` 允许选择 app/channel/provider/model 作为 group-by，但不接受
+这些接口实例在构造时绑定一个独立可信的 tenant scope；scope 来自已经验证的
+`gateway.Principal`、`admin.Principal` 或 trusted bootstrap configuration，不能从 `Event`、
+`Query` 或 HTTP/message payload 推导。`Reader`、`Query` 和 `UsageQuery` 不接受 tenant ID；
+Repository 始终注入绑定 scope。`Append` 保留 `Event.TenantID` 作为持久化事实，但它必须与绑定
+scope 相同，否则在访问存储前返回 tenant-scope error。业务代码不能获得可在调用时切换 tenant
+的通用 Store。
+
+`UsageQuery` 允许选择 app/channel/provider/model 作为 group-by，但不接受
 user/session/message/request/trace、任意 URL 或正文维度。Admin 跨租户报表必须在此接口之外
-逐租户授权和分页，不能给普通 Worker 一个全表读取方法。
+先逐租户授权，再分别构造 tenant-bound Reader 并分页；不能给普通 Worker 一个全表读取方法。
 
 InMemory 与 PostgreSQL 必须运行同一 conformance suite，覆盖：
 
-- 缺 tenant、跨 tenant 读写和不合法枚举被拒绝；
+- 缺 tenant 和不合法枚举被拒绝；两个 Store 共享同一 backing storage 时，通过 tenant A
+  Store append 一个 `TenantID=B` 的事件必须在访问 backing storage 前失败，tenant A Store
+  也不能 get/list/aggregate tenant B 的记录；
 - defensive copy，调用方不能修改已保存事实；
 - 相同重复写幂等，不同内容使用相同 ID 冲突；
 - 多 goroutine/连接同时写不同事件不丢失，同时写同一事件只有一个新记录；
@@ -135,19 +143,27 @@ InMemory 与 PostgreSQL 必须运行同一 conformance suite，覆盖：
 - `(tenant_id, channel, occurred_at)`；
 - `(tenant_id, model_profile_id, occurred_at)`。
 
-运行时角色只有 `INSERT` 和受租户限定的 `SELECT`；没有 `UPDATE`、`DELETE`、`TRUNCATE`。
-Repository 使用参数化 SQL，并将重复键后的 digest 比较放在同一事务/连接中。migration owner
-负责保留清理：线上 writer 不获得删除权限。未来 WORM/hash-chain 归档是可选增强，不能被描述
-为当前数据库已提供外部不可篡改证明。
+运行时角色没有 audit 表的直接 DML 权限。migration 提供 tenant-bound 写入/读取入口，并以 RLS
+或等价数据库策略将当前 trusted scope 与行 `tenant_id` 比较；Repository 仍在调用 SQL 前比较
+`Event.TenantID` 与自己的绑定 scope。写入入口只允许 `INSERT`，读取入口只返回绑定 tenant，
+没有运行时 `UPDATE`、`DELETE`、`TRUNCATE` 路径。Repository 使用参数化 SQL，并将重复键后的
+digest 比较放在同一事务/连接中。数据库集成测试必须用 tenant A scope 尝试写入和读取 tenant B，
+证明即使绕过 Go 的 event mismatch 检查也会被数据库拒绝。migration owner 负责保留清理：线上
+writer 不获得删除权限。未来 WORM/hash-chain 归档是可选增强，不能被描述为当前数据库已提供
+外部不可篡改证明。
 
 ## 提交与失败策略
 
 强制审计失败不能被吞掉或仅写 telemetry。策略按事实来源区分：
 
-1. 控制面 PostgreSQL mutation 已在同一事务写入各领域 `*_change_outbox`。这些 outbox 是
-   mutation 的 durable compliance handoff；audit projector 以其稳定身份幂等追加
-   `control_plane.changed`。直接 Audit writer 暂时不可用时，mutation 仍有不可丢的 durable
-   source，API/worker 必须暴露 backlog/repair 状态，不能宣称审计已投影。
+1. 当前 PostgreSQL 的 model/backend/app/binding 变更和 tenant status 变更已在同一事务写入
+   metadata-complete `*_change_outbox`，可作为 durable compliance handoff。当前 tenant create
+   没有 outbox，tenant configuration outbox 也缺少 actor/reason/correlation；它们尚不满足本
+   契约。PostgreSQL 实现阶段必须先扩展 Admin 输入、Repository 函数和 migration，使这两类
+   mutation 在同一事务写入 metadata-complete handoff，事务任一部分失败则整体回滚。不得用
+   mutation 提交后的 best-effort Audit append 填补该缺口。完成后 projector 才能按稳定 source
+   identity 幂等追加 `control_plane.changed`；Audit writer 暂时不可用时，API/worker 暴露
+   backlog/repair 状态，不能宣称审计已投影。
 2. InMemory 控制面没有 durable handoff。配置了 mandatory Audit writer 后，append 失败必须
    返回稳定 `audit_write_failed`；调用方不能收到成功。响应可能是“变更已提交但未确认”，
    因此重试依赖领域 expected-version/correlation ID，运维必须 repair 而不能盲目重放。
