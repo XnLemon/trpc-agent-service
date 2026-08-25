@@ -112,7 +112,8 @@ func TestProviderValidationAndReceiptFailureBranches(t *testing.T) {
 	if status, _, err := nilProvider.Reconcile(context.Background(), value); err != nil || status != outbox.DeliveryUnknown {
 		t.Fatalf("nil provider reconcile = %s/%v", status, err)
 	}
-	if _, err := provider.Deliver(nil, value); err == nil {
+	var nilContext context.Context
+	if _, err := provider.Deliver(nilContext, value); err == nil {
 		t.Fatal("nil context deliver unexpectedly succeeded")
 	}
 }
