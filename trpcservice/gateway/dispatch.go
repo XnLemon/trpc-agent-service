@@ -487,6 +487,9 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 				}
 			}
 			for _, item := range mapped {
+				if done && item.Type == DispatchEventDone {
+					continue
+				}
 				if item.Type == DispatchEventMessage {
 					reply.WriteString(item.Text)
 				}
@@ -508,6 +511,11 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 					terminalErr = auditWriteFailure()
 					dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
 					return
+				}
+				for _, item := range mapped {
+					if item.Type == DispatchEventDone {
+						_ = sendDispatchEvent(ctx, output, item)
+					}
 				}
 				drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
 				return

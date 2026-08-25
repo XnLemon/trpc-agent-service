@@ -65,7 +65,19 @@ func TestRecorderConvenienceProducersAndNoop(t *testing.T) {
 	if err := r.IM(context.Background(), EventIMDeliverySent, "req", "trace", "user", "session", DecisionAccepted, ""); err != nil {
 		t.Fatal(err)
 	}
-	if len(w.events) != 5 {
+	if err := r.Fallback(context.Background(), "req", "trace"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.IMAuthorization(context.Background(), "req", "trace", "user", "session", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.IMAuthorization(context.Background(), "req", "trace", "user", "session", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.IMReconciled(context.Background(), "req", "trace", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.events) != 9 {
 		t.Fatalf("events = %d", len(w.events))
 	}
 	if err := (Recorder{}).Record(context.Background(), Event{}); err != nil {

@@ -37,6 +37,29 @@ type auditWriterFailure struct {
 	failAfter int
 }
 
+type handoffStub struct {
+	reserveErr, finalizeErr error
+	reserved, finalized     int32
+}
+
+func (s *handoffStub) Reserve(context.Context, audit.ExecutionHandoff) (audit.ExecutionHandoff, error) {
+	atomic.AddInt32(&s.reserved, 1)
+	if s.reserveErr != nil {
+		return audit.ExecutionHandoff{}, s.reserveErr
+	}
+	return audit.ExecutionHandoff{State: audit.HandoffPending}, nil
+}
+func (s *handoffStub) Finalize(context.Context, audit.ExecutionHandoff) (audit.ExecutionHandoff, error) {
+	atomic.AddInt32(&s.finalized, 1)
+	if s.finalizeErr != nil {
+		return audit.ExecutionHandoff{}, s.finalizeErr
+	}
+	return audit.ExecutionHandoff{State: audit.HandoffFinalized}, nil
+}
+func (*handoffStub) Get(context.Context, string, string) (audit.ExecutionHandoff, error) {
+	return audit.ExecutionHandoff{}, audit.ErrHandoffNotFound
+}
+
 func (w *auditWriterFailure) Append(_ context.Context, event audit.Event) (audit.AppendResult, error) {
 	w.calls++
 	if w.calls > w.failAfter {
@@ -207,6 +230,40 @@ func TestDispatcherAuditFailureIsRedactedAndCorrelated(t *testing.T) {
 	events := collectDispatchEvents(stream)
 	if len(events) != 2 || events[0].Error != ErrAuditWriteFailed.Error() || events[0].RequestID == "" || events[1].Status != "error" || events[1].RequestID != events[0].RequestID {
 		t.Fatalf("audit failure events = %#v", events)
+	}
+}
+
+func TestDispatcherHandoffReserveFailurePreventsRunner(t *testing.T) {
+	var calls atomic.Int32
+	dispatcher, principal := newTestDispatcher(t, &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		calls.Add(1)
+		return nil, nil
+	}})
+	dispatcher.handoffStore = &handoffStub{reserveErr: errors.New("handoff unavailable")}
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if !errors.Is(err, ErrAuditWriteFailed) || stream != nil {
+		t.Fatalf("stream=%v err=%v", stream, err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("Runner started before handoff reserve")
+	}
+}
+
+func TestDispatcherHandoffFinalizeFailureIsRedacted(t *testing.T) {
+	dispatcher, principal := newTestDispatcher(t, &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		events := make(chan *trpcevent.Event, 1)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
+		close(events)
+		return events, nil
+	}})
+	dispatcher.handoffStore = &handoffStub{finalizeErr: errors.New("handoff finalize unavailable")}
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collectDispatchEvents(stream)
+	if len(events) != 2 || events[0].Error != ErrAuditWriteFailed.Error() || events[1].Status != "error" {
+		t.Fatalf("events=%+v", events)
 	}
 }
 

@@ -2,7 +2,9 @@ package tool
 
 import (
 	"context"
+	"errors"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
+	"strings"
 	"testing"
 )
 
@@ -32,4 +34,24 @@ func TestPolicyDeniesByDefault(t *testing.T) {
 	if _, err := p.Decide(context.Background(), "req", "trace", "unknown"); err != ErrDenied {
 		t.Fatalf("err = %v", err)
 	}
+}
+
+func TestPolicyRejectsInvalidNamesAndAuditFailures(t *testing.T) {
+	p := Policy{}
+	for _, name := range []string{"", strings.Repeat("x", 257)} {
+		if _, err := p.Decide(context.Background(), "req", "trace", name); !errors.Is(err, audit.ErrInvalid) {
+			t.Fatalf("name %q err=%v", name, err)
+		}
+	}
+	w := &failingWriter{}
+	p = Policy{Recorder: audit.Recorder{Writer: w, TenantID: "t"}, Allowed: map[string]Decision{"search": Allow}}
+	if _, err := p.Decide(context.Background(), "req", "trace", "search"); !errors.Is(err, audit.ErrWriteFailed) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Append(context.Context, audit.Event) (audit.AppendResult, error) {
+	return audit.AppendResult{}, errors.New("down")
 }
