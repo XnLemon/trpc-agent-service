@@ -32,14 +32,8 @@ linters:
       - path: ^trpcservice/channels/telegram/telegram\.go$
         text: 'cyclomatic complexity .* of func `New`'
         linters: [gocyclo]
-      - path: ^trpcservice/gateway/dispatch\.go$
-        text: 'func .*claimInbound'
-        linters: [gocyclo]
       - path: ^trpcservice/gateway/registry\.go$
         text: 'func .*Acquire'
-        linters: [gocyclo]
-      - path: ^trpcservice/gateway/resolver\.go$
-        text: 'func .*Resolve'
         linters: [gocyclo]
       - path: ^trpcservice/runtime/storage/inmemory/inmemory\.go$
         text: 'func .*TransitionMessage|func .*EnqueueReplies'

@@ -282,13 +282,8 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 		return nil, fmt.Errorf("%w: durable Channel messages require an external message ID", ErrInvalid)
 	}
 	store := dispatcher.runtimeStore
-	if _, err := store.GetSession(ctx, principal.TenantID(), identity.SessionID); err != nil {
-		if !errors.Is(err, runtimestorage.ErrNotFound) {
-			return nil, err
-		}
-		if _, createErr := store.CreateSession(ctx, principal.TenantID(), identity.SessionID, nil); createErr != nil && !errors.Is(createErr, runtimestorage.ErrDuplicate) {
-			return nil, createErr
-		}
+	if err := ensureInboundSession(ctx, store, principal.TenantID(), identity.SessionID); err != nil {
+		return nil, err
 	}
 	event, duplicate, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{
 		TenantID: principal.TenantID(), EventID: uuid.NewString(), SessionID: identity.SessionID,
@@ -299,19 +294,9 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 		return nil, err
 	}
 	owner := "gateway-" + uuid.NewString()
-	if duplicate {
-		if event.Status == runtimestorage.EventRunning && (event.LeaseExpiresAt == nil || event.LeaseExpiresAt.After(time.Now().UTC())) {
-			return nil, ErrDuplicateMessage
-		}
-		if event.Status == runtimestorage.EventRunning {
-			if _, recoverErr := store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: principal.TenantID(), EventID: event.EventID, From: runtimestorage.EventRunning, To: runtimestorage.EventExecutionReconciling, Owner: owner}); recoverErr != nil {
-				return nil, ErrDuplicateMessage
-			}
-			event.Status = runtimestorage.EventExecutionReconciling
-		}
-		if event.Status != runtimestorage.EventReceived && event.Status != runtimestorage.EventExecutionReconciling {
-			return nil, ErrDuplicateMessage
-		}
+	event, err = prepareInboundEvent(ctx, store, principal.TenantID(), event, duplicate, owner)
+	if err != nil {
+		return nil, err
 	}
 	from := event.Status
 	running, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{
@@ -325,6 +310,38 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 		return nil, err
 	}
 	return &durableExecution{store: store, tenantID: principal.TenantID(), eventID: event.EventID, owner: owner, fencingToken: running.FencingToken}, nil
+}
+
+func ensureInboundSession(ctx context.Context, store runtimestorage.RuntimeStore, tenantID, sessionID string) error {
+	if _, err := store.GetSession(ctx, tenantID, sessionID); err == nil {
+		return nil
+	} else if !errors.Is(err, runtimestorage.ErrNotFound) {
+		return err
+	}
+	_, err := store.CreateSession(ctx, tenantID, sessionID, nil)
+	if errors.Is(err, runtimestorage.ErrDuplicate) {
+		return nil
+	}
+	return err
+}
+
+func prepareInboundEvent(ctx context.Context, store runtimestorage.RuntimeStore, tenantID string, event runtimestorage.MessageEvent, duplicate bool, owner string) (runtimestorage.MessageEvent, error) {
+	if !duplicate {
+		return event, nil
+	}
+	if event.Status == runtimestorage.EventRunning && (event.LeaseExpiresAt == nil || event.LeaseExpiresAt.After(time.Now().UTC())) {
+		return runtimestorage.MessageEvent{}, ErrDuplicateMessage
+	}
+	if event.Status == runtimestorage.EventRunning {
+		if _, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: tenantID, EventID: event.EventID, From: runtimestorage.EventRunning, To: runtimestorage.EventExecutionReconciling, Owner: owner}); err != nil {
+			return runtimestorage.MessageEvent{}, ErrDuplicateMessage
+		}
+		event.Status = runtimestorage.EventExecutionReconciling
+	}
+	if event.Status != runtimestorage.EventReceived && event.Status != runtimestorage.EventExecutionReconciling {
+		return runtimestorage.MessageEvent{}, ErrDuplicateMessage
+	}
+	return event, nil
 }
 
 func (dispatcher *Dispatcher) failDurable(durable *durableExecution, cause error) {
