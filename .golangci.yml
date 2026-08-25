@@ -26,14 +26,8 @@ linters:
       - path: ^trpcservice/admin/api\.go$
         text: 'cyclomatic complexity .* of func `mapError`'
         linters: [gocyclo]
-      - path: ^trpcservice/agent/app\.go$
-        text: 'func .*Validate'
-        linters: [gocyclo]
       - path: ^trpcservice/agent/postgres/repository\.go$
         text: 'func .*Publish'
-        linters: [gocyclo]
-      - path: ^trpcservice/agent/revision\.go$
-        text: 'func .*Validate'
         linters: [gocyclo]
       - path: ^trpcservice/backend/backend\.go$
         text: 'cyclomatic complexity .* of func `(?:compileProviderSpec|compileOptionSpec|normalizeEndpoint|normalizeEndpointAuthority)`'
