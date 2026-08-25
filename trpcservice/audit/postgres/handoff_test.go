@@ -62,3 +62,30 @@ func TestHandoffStoreFinalizeAndGet(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestHandoffStoreValidationAndDatabaseErrors(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store, _ := NewHandoffStore(db, "t")
+	if _, err := store.Reserve(context.Background(), audit.ExecutionHandoff{TenantID: "t", HandoffID: "h", RequestID: "r", State: audit.HandoffFinalized}); !errors.Is(err, audit.ErrInvalid) {
+		t.Fatal(err)
+	}
+	if _, err := store.Finalize(context.Background(), audit.ExecutionHandoff{TenantID: "t", HandoffID: "h", State: audit.HandoffPending}); !errors.Is(err, audit.ErrInvalid) {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(context.Background(), "other", "h"); !errors.Is(err, audit.ErrTenantScope) {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.Get(ctx, "t", "h"); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	mock.ExpectBegin().WillReturnError(errors.New("begin"))
+	if _, err := store.Reserve(context.Background(), audit.ExecutionHandoff{TenantID: "t", HandoffID: "h", RequestID: "r", State: audit.HandoffPending}); err == nil {
+		t.Fatal("expected begin error")
+	}
+}
