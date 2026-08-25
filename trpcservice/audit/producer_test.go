@@ -31,7 +31,8 @@ func TestRecorderDerivesBoundedStableIDsAndTenantScope(t *testing.T) {
 	if len(w.events) != 1 || w.events[0].TenantID != "tenant-a" || len(w.events[0].EventID) > 256 || w.events[0].OccurredAt != now {
 		t.Fatalf("recorded event = %#v", w.events)
 	}
-	if NewEventID("a", "b") != NewEventID("a", "b") || NewEventID("a", "b") == NewEventID("ab") {
+	firstID := NewEventID("a", "b")
+	if firstID != NewEventID("a", "b") || firstID == NewEventID("ab") {
 		t.Fatal("event ID derivation is not stable and length-delimited")
 	}
 }
