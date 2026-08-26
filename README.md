@@ -177,7 +177,7 @@
 ### IM Channel Adapter
 
 - [x] 定义统一 Channel Adapter 生命周期、共享入站消息和持久化出站回复契约（Issue #60）
-- [ ] 实现外部消息到 `model.Message` / `runner.Runner.Run` 的转换
+- [x] 实现外部消息到 `model.Message` / `runner.Runner.Run` 的转换
 - [ ] 实现 Runner Event 到文本、流式消息和卡片消息的转换
 - [x] 接入企业微信自建应用文本 webhook（Issue #60；仅直聊文本）
 - [x] 接入 Telegram long polling 文本通道（Issue #31；单 Binding、Gateway Dispatch、进程内幂等）
