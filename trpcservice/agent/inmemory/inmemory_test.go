@@ -105,6 +105,13 @@ func TestPublishRollbackAndLifecycleReturnCompleteEvents(t *testing.T) {
 	r := NewRepository()
 	app := createApp(t, r, tenantOne, "lifecycle")
 	first := createDraft(t, r, app, draftConfiguration("first"))
+	app, first, event := assertInitialPublication(t, r, app, first)
+	app, first, second := assertSecondPublicationAndRollback(t, r, app, first)
+	assertLifecycleTransitions(t, r, app, first, second, event)
+}
+
+func assertInitialPublication(t *testing.T, r *InMemoryRepository, app *agent.App, first *agent.Revision) (*agent.App, *agent.Revision, agent.ChangeEvent) {
+	t.Helper()
 
 	inactive := publishInput(app, first)
 	inactive.TenantActive = false
@@ -131,9 +138,14 @@ func TestPublishRollbackAndLifecycleReturnCompleteEvents(t *testing.T) {
 	}); !errors.Is(err, agent.ErrImmutableRevision) {
 		t.Fatalf("published revision accepted draft update, got %v", err)
 	}
+	return publishedApp, publishedFirst, event
+}
 
-	second := createDraft(t, r, publishedApp, draftConfiguration("second"))
-	secondApp, publishedSecond, secondEvent, err := r.Publish(context.Background(), publishInput(publishedApp, second))
+func assertSecondPublicationAndRollback(t *testing.T, r *InMemoryRepository, app *agent.App, publishedFirst *agent.Revision) (*agent.App, *agent.Revision, *agent.Revision) {
+	t.Helper()
+
+	second := createDraft(t, r, app, draftConfiguration("second"))
+	secondApp, publishedSecond, secondEvent, err := r.Publish(context.Background(), publishInput(app, second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,16 +162,21 @@ func TestPublishRollbackAndLifecycleReturnCompleteEvents(t *testing.T) {
 	if storedFirst.ContentDigest != publishedFirst.ContentDigest || storedFirst.Revision != 1 {
 		t.Fatal("rollback copied or mutated immutable target revision")
 	}
+	return rolledBack, publishedFirst, publishedSecond
+}
+
+func assertLifecycleTransitions(t *testing.T, r *InMemoryRepository, rolledBack *agent.App, publishedFirst, publishedSecond *agent.Revision, event agent.ChangeEvent) {
+	t.Helper()
 
 	suspended, suspendEvent, err := r.TransitionStatus(context.Background(), agent.TransitionStatusInput{
-		TenantID: tenantOne, AppID: app.AppID, ExpectedVersion: rolledBack.Version, NextStatus: agent.StatusSuspended, Metadata: changeMetadata(),
+		TenantID: tenantOne, AppID: rolledBack.AppID, ExpectedVersion: rolledBack.Version, NextStatus: agent.StatusSuspended, Metadata: changeMetadata(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertEvent(t, suspendEvent, agent.ChangeSuspended, 4, 5, int64Pointer(1), int64Pointer(1), publishedFirst.ContentDigest)
 	resumed, resumeEvent, err := r.TransitionStatus(context.Background(), agent.TransitionStatusInput{
-		TenantID: tenantOne, AppID: app.AppID, ExpectedVersion: suspended.Version, NextStatus: agent.StatusActive, Metadata: changeMetadata(),
+		TenantID: tenantOne, AppID: rolledBack.AppID, ExpectedVersion: suspended.Version, NextStatus: agent.StatusActive, Metadata: changeMetadata(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +185,7 @@ func TestPublishRollbackAndLifecycleReturnCompleteEvents(t *testing.T) {
 		t.Fatalf("unexpected resume result: %+v %+v", resumed, resumeEvent)
 	}
 	disabled, disabledEvent, err := r.TransitionStatus(context.Background(), agent.TransitionStatusInput{
-		TenantID: tenantOne, AppID: app.AppID, ExpectedVersion: resumed.Version, NextStatus: agent.StatusDisabled, Metadata: changeMetadata(),
+		TenantID: tenantOne, AppID: rolledBack.AppID, ExpectedVersion: resumed.Version, NextStatus: agent.StatusDisabled, Metadata: changeMetadata(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -176,12 +193,12 @@ func TestPublishRollbackAndLifecycleReturnCompleteEvents(t *testing.T) {
 	if disabledEvent.EventType != agent.ChangeDisabled || disabled.Status != agent.StatusDisabled {
 		t.Fatalf("unexpected disable result: %+v %+v", disabled, disabledEvent)
 	}
-	if _, err := r.UpdateMetadata(context.Background(), agent.UpdateMetadataInput{TenantID: tenantOne, AppID: app.AppID, ExpectedVersion: disabled.Version, DisplayName: "No", Description: ""}); !errors.Is(err, agent.ErrDisabled) {
+	if _, err := r.UpdateMetadata(context.Background(), agent.UpdateMetadataInput{TenantID: tenantOne, AppID: rolledBack.AppID, ExpectedVersion: disabled.Version, DisplayName: "No", Description: ""}); !errors.Is(err, agent.ErrDisabled) {
 		t.Fatalf("terminal App accepted mutation, got %v", err)
 	}
 
 	event.CurrentRevision = int64Pointer(99)
-	if publishedApp.CurrentRevision == nil || *publishedApp.CurrentRevision != 1 {
+	if rolledBack.CurrentRevision == nil || *rolledBack.CurrentRevision != 1 {
 		t.Fatal("event pointer mutation leaked into returned App")
 	}
 }
