@@ -20,9 +20,6 @@ linters:
   exclusions:
     rules:
       # Function-scoped complexity baseline; remove entries as each function is split.
-      - path: ^trpcservice/agent/postgres/repository\.go$
-        text: 'func .*Publish'
-        linters: [gocyclo]
       - path: ^trpcservice/gateway/registry\.go$
         text: 'func .*Acquire'
         linters: [gocyclo]
