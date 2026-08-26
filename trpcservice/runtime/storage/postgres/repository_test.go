@@ -602,6 +602,28 @@ func TestRuntimeStoreEnqueueRepliesRollsBackPartialMaterialization(t *testing.T)
 	}
 }
 
+func TestRuntimeStoreEnqueueRepliesMapsMissingEvent(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := runtimepostgres.New(db)
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-missing-event", "event-missing", 0, 1, "payload", "", "", "", "").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT tenant_id,event_id,session_id,binding_id,external_message_id").WithArgs("tenant-a", "event-missing").WillReturnError(sql.ErrNoRows)
+	mock.ExpectRollback()
+	_, err = store.EnqueueReplies(context.Background(), []runtimestorage.ReplyOutbox{{
+		TenantID: "tenant-a", ReplyID: "reply-missing-event", EventID: "event-missing", SegmentIndex: 0, SegmentCount: 1, Payload: "payload",
+	}})
+	if !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing event error = %v, want not found", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimeStoreEnqueueRepliesCommitsCompleteBatch(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
