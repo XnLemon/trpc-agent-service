@@ -1,4 +1,4 @@
-name: CI
+name: WeCom Deterministic E2E
 
 on:
   push:
