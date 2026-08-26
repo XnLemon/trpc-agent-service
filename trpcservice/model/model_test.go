@@ -372,6 +372,13 @@ func TestOptionSecretGenerationAndPrimitiveValidation(t *testing.T) {
 		"with-default": {Kind: OptionString, DefaultValue: stringPointer("fallback")},
 		"required":     {Kind: OptionString, Required: true},
 	}
+	assertOptionNormalization(t, specs)
+	assertSecretAndGenerationNormalization(t)
+	assertModelPrimitiveValidation(t)
+}
+
+func assertOptionNormalization(t *testing.T, specs map[string]OptionSpec) {
+	t.Helper()
 	options, err := normalizeOptions(map[string]string{"text": " value ", "flag": " TRUE ", "count": "2", "mode": " FAST ", "required": "present"}, specs)
 	if err != nil || options["text"] != "value" || options["flag"] != "true" || options["count"] != "2" || options["mode"] != "fast" || options["with-default"] != "fallback" {
 		t.Fatalf("option normalization = %+v, %v", options, err)
@@ -391,6 +398,10 @@ func TestOptionSecretGenerationAndPrimitiveValidation(t *testing.T) {
 	if _, err := normalizeOptions(nil, map[string]OptionSpec{"required": {Kind: OptionString, Required: true}}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing required option error = %v", err)
 	}
+}
+
+func assertSecretAndGenerationNormalization(t *testing.T) {
+	t.Helper()
 	if _, err := normalizeSecretRef(" ", FieldRequired); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing required secret error = %v", err)
 	}
@@ -406,6 +417,18 @@ func TestOptionSecretGenerationAndPrimitiveValidation(t *testing.T) {
 	if _, err := normalizeSecretRef("secret://ref", FieldForbidden); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("forbidden secret error = %v", err)
 	}
+}
+
+func assertModelPrimitiveValidation(t *testing.T) {
+	t.Helper()
+	assertGenerationValidation(t)
+	assertMetadataAndProfileKeyValidation(t)
+	assertModelKeyClassification(t)
+	assertModelCloneAndIDValidation(t)
+}
+
+func assertGenerationValidation(t *testing.T) {
+	t.Helper()
 
 	validTemperature, validTopP, validTokens := 0.5, 0.8, 32
 	generation, err := normalizeGeneration(GenerationConfig{Temperature: &validTemperature, TopP: &validTopP, MaxOutputTokens: &validTokens})
@@ -422,6 +445,10 @@ func TestOptionSecretGenerationAndPrimitiveValidation(t *testing.T) {
 			t.Errorf("generation %+v error = %v", generation, err)
 		}
 	}
+}
+
+func assertMetadataAndProfileKeyValidation(t *testing.T) {
+	t.Helper()
 	if _, _, err := normalizeMetadata("", ""); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("empty metadata error = %v", err)
 	}
@@ -436,6 +463,10 @@ func TestOptionSecretGenerationAndPrimitiveValidation(t *testing.T) {
 	if normalized, err := normalizeProfileKey(" Primary-1 "); err != nil || normalized != "primary-1" {
 		t.Fatalf("profile key normalization = %q, %v", normalized, err)
 	}
+}
+
+func assertModelKeyClassification(t *testing.T) {
+	t.Helper()
 	if !validName("provider.v1") || validName("Provider") || validName("bad/name") {
 		t.Fatal("validName classification is wrong")
 	}
@@ -454,6 +485,10 @@ func TestOptionSecretGenerationAndPrimitiveValidation(t *testing.T) {
 		t.Fatal("control/space classification is wrong")
 	}
 
+}
+
+func assertModelCloneAndIDValidation(t *testing.T) {
+	t.Helper()
 	if cloneStringMap(nil) != nil || cloneString(nil) != nil || cloneInt64(nil) != nil {
 		t.Fatal("nil clone helpers changed nil semantics")
 	}
