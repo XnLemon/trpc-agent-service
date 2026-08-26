@@ -153,6 +153,8 @@ func (dispatcher *Dispatcher) Ready() bool {
 // Dispatch starts one execution and returns a redacted event stream. The
 // returned stream owns the Runner lease until it reaches terminal state or the
 // caller Context is canceled.
+//
+//nolint:gocyclo // Dispatch coordinates validation, durable state, audit, lease, and stream lifecycle.
 func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequest) (<-chan DispatchEvent, error) {
 	if dispatcher == nil || dispatcher.resolver == nil || dispatcher.registry == nil {
 		return nil, ErrNotReady

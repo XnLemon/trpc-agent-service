@@ -335,31 +335,11 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 // EnqueueReplies validates a complete reply before committing any new segment.
 // This prevents a failed multi-segment materialization from exposing a
 // deliverable prefix to a worker.
+//
+//nolint:gocyclo // The atomic in-memory write validates and materializes the complete batch.
 func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
-	}
-	if len(values) == 0 {
-		return nil, runtimestorage.ErrInvalid
-	}
-	first := values[0]
-	seen := make(map[int]struct{}, len(values))
-	for _, value := range values {
-		if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || value.Status != "" && value.Status != runtimestorage.ReplyPending || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil || value.TenantID != first.TenantID || value.ReplyID != first.ReplyID || value.EventID != first.EventID || value.SegmentCount != first.SegmentCount || value.ReplyTarget != first.ReplyTarget {
-			return nil, runtimestorage.ErrInvalid
-		}
-		if _, duplicate := seen[value.SegmentIndex]; duplicate {
-			return nil, runtimestorage.ErrInvalid
-		}
-		seen[value.SegmentIndex] = struct{}{}
-	}
-	if len(seen) != first.SegmentCount {
-		return nil, runtimestorage.ErrInvalid
-	}
-	for index := 0; index < first.SegmentCount; index++ {
-		if _, present := seen[index]; !present {
-			return nil, runtimestorage.ErrInvalid
-		}
 	}
 	first, _, err := validateReplyBatch(values)
 	if err != nil {
@@ -373,11 +353,6 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 	}
 	if event.ReplyTarget != first.ReplyTarget {
 		return nil, runtimestorage.ErrConflict
-	}
-	for _, value := range values {
-		if existing, ok := s.replies[replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)]; ok && (existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload || existing.ReplyTarget != value.ReplyTarget) {
-			return nil, runtimestorage.ErrConflict
-		}
 	}
 	if err := validateExistingReplies(s.replies, values); err != nil {
 		return nil, err
@@ -405,7 +380,7 @@ func validateReplyBatch(values []runtimestorage.ReplyOutbox) (runtimestorage.Rep
 	first := values[0]
 	seen := make(map[int]struct{}, len(values))
 	for _, value := range values {
-		if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || value.Status != "" && value.Status != runtimestorage.ReplyPending || value.TenantID != first.TenantID || value.ReplyID != first.ReplyID || value.EventID != first.EventID || value.SegmentCount != first.SegmentCount {
+		if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || value.Status != "" && value.Status != runtimestorage.ReplyPending || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil || value.TenantID != first.TenantID || value.ReplyID != first.ReplyID || value.EventID != first.EventID || value.SegmentCount != first.SegmentCount || value.ReplyTarget != first.ReplyTarget {
 			return runtimestorage.ReplyOutbox{}, nil, runtimestorage.ErrInvalid
 		}
 		if _, duplicate := seen[value.SegmentIndex]; duplicate {
@@ -426,7 +401,7 @@ func validateReplyBatch(values []runtimestorage.ReplyOutbox) (runtimestorage.Rep
 
 func validateExistingReplies(replies map[string]runtimestorage.ReplyOutbox, values []runtimestorage.ReplyOutbox) error {
 	for _, value := range values {
-		if existing, ok := replies[replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)]; ok && (existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload) {
+		if existing, ok := replies[replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)]; ok && (existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload || existing.ReplyTarget != value.ReplyTarget) {
 			return runtimestorage.ErrConflict
 		}
 	}

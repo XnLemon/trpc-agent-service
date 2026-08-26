@@ -333,35 +333,16 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 }
 
 // EnqueueReplies commits an entire reply's segment set in one transaction.
+//
+//nolint:gocyclo // The transaction validates and atomically persists the complete reply batch.
 func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
 	}
-	if len(values) == 0 {
-		return nil, runtimestorage.ErrInvalid
-	}
-	first := values[0]
-	seen := make(map[int]struct{}, len(values))
-	for _, value := range values {
-		if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || value.Status != "" && value.Status != runtimestorage.ReplyPending || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil || value.TenantID != first.TenantID || value.ReplyID != first.ReplyID || value.EventID != first.EventID || value.SegmentCount != first.SegmentCount || value.ReplyTarget != first.ReplyTarget {
-			return nil, runtimestorage.ErrInvalid
-		}
-		if _, duplicate := seen[value.SegmentIndex]; duplicate {
-			return nil, runtimestorage.ErrInvalid
-		}
-		seen[value.SegmentIndex] = struct{}{}
-	}
-	if len(seen) != first.SegmentCount {
-		return nil, runtimestorage.ErrInvalid
-	}
-	for index := 0; index < first.SegmentCount; index++ {
-		if _, present := seen[index]; !present {
-			return nil, runtimestorage.ErrInvalid
-		}
-	}
 	if err := validateReplyBatch(values); err != nil {
 		return nil, err
 	}
+	first := values[0]
 	if first.ReplyTarget != (runtimestorage.ReplyTarget{}) {
 		event, err := s.GetMessage(ctx, first.TenantID, first.EventID)
 		if err != nil {
@@ -393,7 +374,7 @@ func validateReplyBatch(values []runtimestorage.ReplyOutbox) error {
 	first := values[0]
 	seen := make(map[int]struct{}, len(values))
 	for _, value := range values {
-		if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || value.Status != "" && value.Status != runtimestorage.ReplyPending || value.TenantID != first.TenantID || value.ReplyID != first.ReplyID || value.EventID != first.EventID || value.SegmentCount != first.SegmentCount {
+		if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || value.Status != "" && value.Status != runtimestorage.ReplyPending || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil || value.TenantID != first.TenantID || value.ReplyID != first.ReplyID || value.EventID != first.EventID || value.SegmentCount != first.SegmentCount || value.ReplyTarget != first.ReplyTarget {
 			return runtimestorage.ErrInvalid
 		}
 		if _, duplicate := seen[value.SegmentIndex]; duplicate {

@@ -31,13 +31,16 @@ import (
 )
 
 const (
-	envPostgresDSN         = "TRPC_POSTGRES_DSN"
-	envAPIToken            = "TRPC_API_TOKEN"
-	envTenantID            = "TRPC_TENANT_ID"
-	envAppID               = "TRPC_APP_ID"
-	envAdminToken          = "TRPC_ADMIN_TOKEN"
-	envAdminTenants        = "TRPC_ADMIN_TENANTS"
-	envSubjectID           = "TRPC_SUBJECT_ID"
+	envPostgresDSN = "TRPC_POSTGRES_DSN"
+	// #nosec G101 -- environment variable name, not a credential.
+	envAPIToken = "TRPC_API_TOKEN"
+	envTenantID = "TRPC_TENANT_ID"
+	envAppID    = "TRPC_APP_ID"
+	// #nosec G101 -- environment variable name, not a credential.
+	envAdminToken   = "TRPC_ADMIN_TOKEN"
+	envAdminTenants = "TRPC_ADMIN_TENANTS"
+	envSubjectID    = "TRPC_SUBJECT_ID"
+	// #nosec G101 -- environment variable name, not a credential.
 	envModelAPIKey         = "TRPC_MODEL_API_KEY"
 	envModelProvider       = "TRPC_MODEL_PROVIDER"
 	envModelNames          = "TRPC_MODEL_NAMES"
