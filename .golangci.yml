@@ -66,7 +66,7 @@ linters:
         text: 'cyclomatic complexity .* of func `TestRepositoryTenantIsolationLifecycleAndDefensiveCopies`'
         linters: [gocyclo]
       - path: ^trpcservice/model/model_test\.go$
-        text: 'cyclomatic complexity .* of func `(?:TestProviderConfigurationBoundaryNormalization|TestOptionSecretGenerationAndPrimitiveValidation)`'
+        text: 'cyclomatic complexity .* of func `TestOptionSecretGenerationAndPrimitiveValidation`'
         linters: [gocyclo]
       - path: ^trpcservice/model/repository_test\.go$
         text: 'cyclomatic complexity .* of func `TestPrepareProfileChangesValidateAuditAndLifecycleEvents`'

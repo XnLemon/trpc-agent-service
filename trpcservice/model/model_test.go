@@ -286,6 +286,13 @@ func TestProviderConfigurationBoundaryNormalization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertProviderConfigurationNormalization(t, catalog)
+	assertProviderEndpointBoundaries(t, catalog)
+	assertProviderEndpointPrimitiveHelpers(t)
+}
+
+func assertProviderConfigurationNormalization(t *testing.T, catalog *ProviderCatalog) {
+	t.Helper()
 	normalized, err := catalog.NormalizeConfiguration(Configuration{Provider: " PUBLIC ", Model: " CHAT ", Endpoint: " HTTPS://Example.TEST/v1 "})
 	if err != nil || normalized.Provider != "public" || normalized.Model != "chat" || normalized.Endpoint != "https://example.test/v1" {
 		t.Fatalf("endpoint normalization = %+v, %v", normalized, err)
@@ -296,6 +303,10 @@ func TestProviderConfigurationBoundaryNormalization(t *testing.T) {
 	if _, err := catalog.NormalizeConfiguration(Configuration{Provider: "secured", Model: "chat"}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("required endpoint error = %v", err)
 	}
+}
+
+func assertProviderEndpointBoundaries(t *testing.T, catalog *ProviderCatalog) {
+	t.Helper()
 
 	invalidEndpoints := []string{
 		"://bad", "https://", "http://example.test", "https://user:password@example.test/v1",
@@ -314,6 +325,10 @@ func TestProviderConfigurationBoundaryNormalization(t *testing.T) {
 			t.Errorf("valid endpoint %q error = %v", endpoint, err)
 		}
 	}
+}
+
+func assertProviderEndpointPrimitiveHelpers(t *testing.T) {
+	t.Helper()
 	if _, err := normalizeEndpoint("https://example.test", FieldForbidden, nil, nil); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("forbidden endpoint error = %v", err)
 	}
