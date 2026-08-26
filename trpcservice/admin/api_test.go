@@ -429,62 +429,99 @@ func TestAdminRouteSurfaceDispatchesEveryControlPlaneOperation(t *testing.T) {
 }
 
 func TestAdminHappyPathCoversResourceMutations(t *testing.T) {
+	fixture := newAdminMutationFixture(t)
+	assertAdminModelMutation(t, fixture)
+	assertAdminBackendMutation(t, fixture)
+	app := createAndPublishAdminRevision(t, fixture)
+	assertAdminBindingMutation(t, fixture, app)
+}
+
+type adminMutationFixture struct {
+	handler   *Handler
+	root      *tenant.Tenant
+	principal Principal
+}
+
+func newAdminMutationFixture(t *testing.T) adminMutationFixture {
+	t.Helper()
 	handler, _ := testHandler(t)
 	root, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "happy", DisplayName: "Happy"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	principal := Principal{SubjectID: "admin", TenantScopes: map[string]struct{}{root.TenantID: {}}}
-	request := func(method, body string) *http.Request {
-		return httptest.NewRequest(method, "/admin/v1", strings.NewReader(body))
+	return adminMutationFixture{
+		handler:   handler,
+		root:      root,
+		principal: Principal{SubjectID: "admin", TenantScopes: map[string]struct{}{root.TenantID: {}}},
 	}
+}
+
+func (fixture adminMutationFixture) request(method, body string) *http.Request {
+	return httptest.NewRequest(method, "/admin/v1", strings.NewReader(body))
+}
+
+func assertAdminModelMutation(t *testing.T, fixture adminMutationFixture) {
+	t.Helper()
 	modelBody := "{\"profile_key\":\"primary\",\"display_name\":\"Primary\",\"reason\":\"create\",\"correlation_id\":\"happy-1\",\"configuration\":{\"provider\":\"openai\",\"model\":\"gpt-4o-mini\",\"secret_ref\":\"env/key\"}}"
 	var decodedModel modelprofile.CreateInput
-	if err := decodeBody(request(http.MethodPost, modelBody), &decodedModel); err != nil || decodedModel.Configuration.SecretRef == "" {
+	if err := decodeBody(fixture.request(http.MethodPost, modelBody), &decodedModel); err != nil || decodedModel.Configuration.SecretRef == "" {
 		t.Fatalf("decoded model input = %+v, normalized=%#v, err=%v", decodedModel, normalizeKeys(map[string]any{"configuration": map[string]any{"secret_ref": "env/key"}}), err)
 	}
-	status, modelValue, err := handler.models(context.Background(), request(http.MethodPost, modelBody), principal, root.TenantID, nil)
+	status, modelValue, err := fixture.handler.models(context.Background(), fixture.request(http.MethodPost, modelBody), fixture.principal, fixture.root.TenantID, nil)
 	if err != nil || status != http.StatusCreated {
 		t.Fatalf("model create = %d, %v", status, err)
 	}
 	modelID := modelValue.(map[string]any)["profile"].(*modelprofile.Profile).ProfileID
-	if status, _, err := handler.models(context.Background(), request(http.MethodGet, ""), principal, root.TenantID, []string{modelID}); err != nil || status != http.StatusOK {
+	if status, _, err := fixture.handler.models(context.Background(), fixture.request(http.MethodGet, ""), fixture.principal, fixture.root.TenantID, []string{modelID}); err != nil || status != http.StatusOK {
 		t.Fatalf("model get = %d, %v", status, err)
 	}
+}
+
+func assertAdminBackendMutation(t *testing.T, fixture adminMutationFixture) {
+	t.Helper()
 	backendBody := "{\"profile_key\":\"primary\",\"display_name\":\"Primary\",\"reason\":\"create\",\"correlation_id\":\"happy-2\",\"bindings\":[{\"capability\":\"session\",\"provider\":\"inmemory\"}]}"
-	status, backendValue, err := handler.backends(context.Background(), request(http.MethodPost, backendBody), principal, root.TenantID, nil)
+	status, backendValue, err := fixture.handler.backends(context.Background(), fixture.request(http.MethodPost, backendBody), fixture.principal, fixture.root.TenantID, nil)
 	if err != nil || status != http.StatusCreated {
 		t.Fatalf("backend create = %d, %v", status, err)
 	}
 	backendID := backendValue.(map[string]any)["profile"].(*backend.Profile).ProfileID
-	if status, _, err := handler.backends(context.Background(), request(http.MethodGet, ""), principal, root.TenantID, []string{backendID}); err != nil || status != http.StatusOK {
+	if status, _, err := fixture.handler.backends(context.Background(), fixture.request(http.MethodGet, ""), fixture.principal, fixture.root.TenantID, []string{backendID}); err != nil || status != http.StatusOK {
 		t.Fatalf("backend get = %d, %v", status, err)
 	}
-	app, err := handler.config.Apps.Create(context.Background(), agent.CreateInput{TenantID: root.TenantID, AppKey: "support", DisplayName: "Support"})
+}
+
+func createAndPublishAdminRevision(t *testing.T, fixture adminMutationFixture) *agent.App {
+	t.Helper()
+	app, err := fixture.handler.config.Apps.Create(context.Background(), agent.CreateInput{TenantID: fixture.root.TenantID, AppKey: "support", DisplayName: "Support"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	draftBody := "{\"expected_app_version\":1,\"kind\":\"llm\",\"schema_version\":1,\"configuration\":{\"instruction\":\"answer\",\"model_profile_id\":\"mp_01ARZ3NDEKTSV4RRFFQ69G5FAV\"}}"
-	status, draftValue, err := handler.revisions(context.Background(), request(http.MethodPost, draftBody), principal, root.TenantID, app.AppID, nil)
+	status, draftValue, err := fixture.handler.revisions(context.Background(), fixture.request(http.MethodPost, draftBody), fixture.principal, fixture.root.TenantID, app.AppID, nil)
 	if err != nil || status != http.StatusCreated {
 		t.Fatalf("draft create = %d, %v", status, err)
 	}
 	draft := draftValue.(*agent.Revision)
 	updateBody := "{\"expected_app_version\":1,\"expected_draft_version\":1,\"configuration\":{\"instruction\":\"answer updated\",\"model_profile_id\":\"mp_01ARZ3NDEKTSV4RRFFQ69G5FAV\"}}"
-	if status, _, err := handler.revisions(context.Background(), request(http.MethodPatch, updateBody), principal, root.TenantID, app.AppID, []string{strconv.FormatInt(draft.Revision, 10)}); err != nil || status != http.StatusOK {
+	if status, _, err := fixture.handler.revisions(context.Background(), fixture.request(http.MethodPatch, updateBody), fixture.principal, fixture.root.TenantID, app.AppID, []string{strconv.FormatInt(draft.Revision, 10)}); err != nil || status != http.StatusOK {
 		t.Fatalf("draft update = %d, %v", status, err)
 	}
 	publishBody := "{\"expected_app_version\":1,\"expected_draft_version\":2,\"reason\":\"publish\",\"correlation_id\":\"happy-publish\"}"
-	if status, _, err := handler.revisions(context.Background(), request(http.MethodPost, publishBody), principal, root.TenantID, app.AppID, []string{strconv.FormatInt(draft.Revision, 10), "publish"}); err != nil || status != http.StatusOK {
+	if status, _, err := fixture.handler.revisions(context.Background(), fixture.request(http.MethodPost, publishBody), fixture.principal, fixture.root.TenantID, app.AppID, []string{strconv.FormatInt(draft.Revision, 10), "publish"}); err != nil || status != http.StatusOK {
 		t.Fatalf("draft publish = %d, %v", status, err)
 	}
+	return app
+}
+
+func assertAdminBindingMutation(t *testing.T, fixture adminMutationFixture, app *agent.App) {
+	t.Helper()
 	bindingBody := "{\"binding_key\":\"primary\",\"channel\":\"wecom\",\"provider_account_id\":\"corp\",\"public_route_key_digest\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"app_id\":\"" + app.AppID + "\",\"secret_ref\":\"secret/corp\",\"reason\":\"create\",\"correlation_id\":\"happy-3\",\"protocol\":{\"wecom\":{\"corp_id\":\"corp\"}}}"
-	status, bindingValue, err := handler.bindings(context.Background(), request(http.MethodPost, bindingBody), principal, root.TenantID, nil)
+	status, bindingValue, err := fixture.handler.bindings(context.Background(), fixture.request(http.MethodPost, bindingBody), fixture.principal, fixture.root.TenantID, nil)
 	if err != nil || status != http.StatusCreated {
 		t.Fatalf("binding create = %d, %v", status, err)
 	}
 	bindingID := bindingValue.(map[string]any)["binding"].(*channels.Binding).BindingID
-	if status, _, err := handler.bindings(context.Background(), request(http.MethodGet, ""), principal, root.TenantID, []string{bindingID}); err != nil || status != http.StatusOK {
+	if status, _, err := fixture.handler.bindings(context.Background(), fixture.request(http.MethodGet, ""), fixture.principal, fixture.root.TenantID, []string{bindingID}); err != nil || status != http.StatusOK {
 		t.Fatalf("binding get = %d, %v", status, err)
 	}
 }

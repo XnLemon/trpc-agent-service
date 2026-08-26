@@ -20,9 +20,6 @@ linters:
   exclusions:
     rules:
       # Function-scoped complexity baseline; remove entries as each function is split.
-      - path: ^trpcservice/admin/api_test\.go$
-        text: 'cyclomatic complexity .* of func `TestAdminHappyPathCoversResourceMutations`'
-        linters: [gocyclo]
       - path: ^trpcservice/channels/telegram/provider_integration_test\.go$
         text: 'cyclomatic complexity .* of func `TestTelegramProviderOutboxE2E`'
         linters: [gocyclo]
