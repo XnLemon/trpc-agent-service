@@ -85,9 +85,6 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return "", &outbox.DeliveryError{Class: "unavailable", Retryable: true}
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", &outbox.DeliveryError{Class: "unavailable", Retryable: true}
-	}
 	var result struct {
 		ErrCode int    `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`
@@ -142,6 +139,9 @@ func (p *Provider) accessToken(ctx context.Context) (string, error) {
 		return "", &outbox.DeliveryError{Class: "unavailable", Retryable: true}
 	}
 	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", &outbox.DeliveryError{Class: "unavailable", Retryable: true}
+	}
 	var result struct {
 		ErrCode     int    `json:"errcode"`
 		AccessToken string `json:"access_token"`

@@ -4,6 +4,7 @@ package wecom
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha1" // #nosec G505 -- WeCom requires SHA-1 callback signatures.
@@ -17,6 +18,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
@@ -34,14 +36,15 @@ const wecomBlockSize = 32
 // Config contains one Binding's runtime-only callback credentials and trusted
 // routing target. Values must be resolved outside persisted Binding state.
 type Config struct {
-	Token          string
-	EncodingAESKey string
-	ReceiveID      string
-	AgentID        string
-	RouteKey       string
-	Target         channels.RoutingTarget
-	Dispatcher     gateway.DispatchService
-	MaxBodyBytes   int64
+	Token            string
+	EncodingAESKey   string
+	ReceiveID        string
+	AgentID          string
+	RouteKey         string
+	Target           channels.RoutingTarget
+	Dispatcher       gateway.DispatchService
+	MaxBodyBytes     int64
+	ExecutionTimeout time.Duration
 }
 
 // Handler owns no listener or goroutine; the process HTTP server owns both.
@@ -51,6 +54,7 @@ type Handler struct {
 	principal                           gateway.Principal
 	dispatcher                          gateway.DispatchService
 	maxBodyBytes                        int64
+	executionTimeout                    time.Duration
 }
 
 // New validates a text callback Handler. The complete trusted target is never
@@ -76,7 +80,13 @@ func New(config Config) (*Handler, error) {
 	if config.MaxBodyBytes < 1 {
 		return nil, ErrInvalid
 	}
-	return &Handler{token: config.Token, receiveID: config.ReceiveID, agentID: strings.TrimSpace(config.AgentID), routeKey: strings.Trim(config.RouteKey, "/"), key: key, principal: principal, dispatcher: config.Dispatcher, maxBodyBytes: config.MaxBodyBytes}, nil
+	if config.ExecutionTimeout == 0 {
+		config.ExecutionTimeout = 4 * time.Minute
+	}
+	if config.ExecutionTimeout < 1 {
+		return nil, ErrInvalid
+	}
+	return &Handler{token: config.Token, receiveID: config.ReceiveID, agentID: strings.TrimSpace(config.AgentID), routeKey: strings.Trim(config.RouteKey, "/"), key: key, principal: principal, dispatcher: config.Dispatcher, maxBodyBytes: config.MaxBodyBytes, executionTimeout: config.ExecutionTimeout}, nil
 }
 
 // ServeHTTP verifies the URL challenge or accepts one encrypted text message.
@@ -141,8 +151,14 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	stream, err := h.dispatcher.Dispatch(r.Context(), gateway.DispatchRequest{Principal: h.principal, Message: gateway.InboundMessage{Content: message.Content, ContentType: gateway.ContentTypeText, ExternalMessageID: message.MsgID, ExternalUserID: message.FromUserName, ConversationKind: channels.ConversationDirect, ExternalPeerID: message.FromUserName}})
+	executionCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), h.executionTimeout)
+	defer cancel()
+	stream, err := h.dispatcher.Dispatch(executionCtx, gateway.DispatchRequest{Principal: h.principal, Message: gateway.InboundMessage{Content: message.Content, ContentType: gateway.ContentTypeText, ExternalMessageID: message.MsgID, ExternalUserID: message.FromUserName, ConversationKind: channels.ConversationDirect, ExternalPeerID: message.FromUserName}})
 	if err != nil {
+		if errors.Is(err, gateway.ErrDuplicateMessage) {
+			h.writeSuccess(w)
+			return
+		}
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -150,11 +166,14 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	for range stream {
-		if err := r.Context().Err(); err != nil {
-			return
+	go func() {
+		for range stream {
 		}
-	}
+	}()
+	h.writeSuccess(w)
+}
+
+func (h *Handler) writeSuccess(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = io.WriteString(w, "success")
 }
