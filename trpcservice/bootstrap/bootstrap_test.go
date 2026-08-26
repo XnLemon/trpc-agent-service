@@ -1,9 +1,11 @@
 package bootstrap
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -537,6 +539,44 @@ func TestNewFromEnvironmentBuildsRealGraphWhenDatabaseOpens(t *testing.T) {
 	}
 	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("database open failure = %v", err)
+	}
+}
+
+func TestNewFromEnvironmentInstallsWeComCallbackAndOutboxWorker(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envWeComCallbackToken, "callback-token")
+	t.Setenv(envWeComEncodingAESKey, base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)))
+	t.Setenv(envWeComAppSecret, "app-secret")
+	t.Setenv(envWeComSecretRef, "env/wecom")
+
+	registerBootstrapPingDriver.Do(func() {
+		sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{})
+	})
+	db, err := sql.Open("trpc-service-bootstrap-ping", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousVerify := verifyEnvironmentMigrations
+	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	defer func() { openEnvironmentDatabase = previousOpen }()
+	defer func() { applyEnvironmentMigrations = previousApply }()
+	defer func() { verifyEnvironmentMigrations = previousVerify }()
+
+	graph, err := NewFromEnvironment(context.Background())
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if graph.OutboxWorker == nil || graph.wecomLifecycle == nil {
+		_ = graph.Close()
+		t.Fatal("WeCom environment did not install callback and outbox components")
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

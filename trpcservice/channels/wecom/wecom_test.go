@@ -221,6 +221,80 @@ func TestProviderDefaultsAndContextCancellation(t *testing.T) {
 	}
 }
 
+func TestProviderRejectsInvalidDeliveryInputs(t *testing.T) {
+	valid := storage.ReplyOutbox{Payload: "hello", ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user"}}
+	provider := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret", token: "token", tokenExpiry: time.Now().Add(time.Hour)}
+	for _, test := range []struct {
+		name     string
+		provider *Provider
+		context  context.Context
+		value    storage.ReplyOutbox
+	}{
+		{name: "nil provider", context: context.Background(), value: valid},
+		{name: "missing credentials", provider: &Provider{}, context: context.Background(), value: valid},
+		{name: "nil context", provider: provider, value: valid},
+		{name: "group target", provider: provider, context: context.Background(), value: storage.ReplyOutbox{Payload: "hello", ReplyTarget: storage.ReplyTarget{ConversationKind: "group", ReceiverID: "group"}}},
+		{name: "missing recipient", provider: provider, context: context.Background(), value: storage.ReplyOutbox{Payload: "hello", ReplyTarget: storage.ReplyTarget{ConversationKind: "direct"}}},
+		{name: "empty payload", provider: provider, context: context.Background(), value: storage.ReplyOutbox{ReplyTarget: valid.ReplyTarget}},
+		{name: "oversized payload", provider: provider, context: context.Background(), value: storage.ReplyOutbox{Payload: strings.Repeat("x", maximumTextBytes+1), ReplyTarget: valid.ReplyTarget}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := test.provider.Deliver(test.context, test.value)
+			assertDeliveryErrorClass(t, err, "invalid", false)
+		})
+	}
+}
+
+func TestProviderHandlesSendFailuresAndInvalidatesRejectedToken(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		status    int
+		response  string
+		class     string
+		retryable bool
+		clears    bool
+	}{
+		{name: "non successful status", status: http.StatusBadGateway, class: "unavailable", retryable: true},
+		{name: "malformed response", status: http.StatusOK, response: "not-json", class: "provider_error", retryable: true},
+		{name: "missing message id", status: http.StatusOK, response: `{"errcode":0}`, class: "provider_error", retryable: true},
+		{name: "expired token", status: http.StatusOK, response: `{"errcode":42001}`, class: "unauthenticated", retryable: true, clears: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.URL.Path != "/cgi-bin/message/send" {
+					t.Fatalf("unexpected endpoint %s", request.URL.Path)
+				}
+				writer.WriteHeader(test.status)
+				_, _ = io.WriteString(writer, test.response)
+			}))
+			defer server.Close()
+			provider := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret", BaseURL: server.URL, HTTPClient: server.Client(), token: "cached", tokenExpiry: time.Now().Add(time.Hour)}
+			_, err := provider.Deliver(context.Background(), storage.ReplyOutbox{Payload: "hello", ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user"}})
+			assertDeliveryErrorClass(t, err, test.class, test.retryable)
+			if test.clears && (!provider.tokenExpiry.IsZero() || provider.token != "") {
+				t.Fatal("rejected access token remained cached")
+			}
+		})
+	}
+}
+
+func TestProviderMapsCanceledAndTimedOutTransport(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		err   error
+		class string
+	}{
+		{name: "canceled", err: context.Canceled, class: "canceled"},
+		{name: "timeout", err: context.DeadlineExceeded, class: "timeout"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret", HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, test.err })}, token: "cached", tokenExpiry: time.Now().Add(time.Hour)}
+			_, err := provider.Deliver(context.Background(), storage.ReplyOutbox{Payload: "hello", ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user"}})
+			assertDeliveryErrorClass(t, err, test.class, true)
+		})
+	}
+}
+
 func TestHandlerAcceptsEncryptedTextWithRequestAndTraceIDs(t *testing.T) {
 	dispatcher := &callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)}
 	handler := newCallbackTestHandler(t, dispatcher)
@@ -277,6 +351,48 @@ func TestHandlerCloseCancelsAndJoinsAcceptedDrain(t *testing.T) {
 	handler.ServeHTTP(shutdownResponse, callbackTestRequest(t, "message-3", "user-2", "after shutdown"))
 	if shutdownResponse.Code != http.StatusServiceUnavailable {
 		t.Fatalf("post-shutdown response = %d", shutdownResponse.Code)
+	}
+}
+
+func TestHandlerAcknowledgesCompletedAndDuplicateDispatch(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		code int
+	}{
+		{name: "completed synchronously", code: http.StatusOK},
+		{name: "duplicate", err: gateway.ErrDuplicateMessage, code: http.StatusOK},
+		{name: "unavailable", err: errors.New("dispatcher unavailable"), code: http.StatusServiceUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler := newCallbackTestHandler(t, dispatchFunc(func(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+				return nil, test.err
+			}))
+			defer func() { _ = handler.Close() }()
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, callbackTestRequest(t, "message-"+test.name, "user", "hello"))
+			if response.Code != test.code {
+				t.Fatalf("callback response = %d", response.Code)
+			}
+		})
+	}
+}
+
+func TestHandlerRejectsInvalidChallengeAndMessageShape(t *testing.T) {
+	handler := newCallbackTestHandler(t, &callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)})
+	defer func() { _ = handler.Close() }()
+	challenge := httptest.NewRequest(http.MethodGet, "/?msg_signature=bad&timestamp=1&nonce=2&echostr=bad", nil)
+	challengeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(challengeResponse, challenge)
+	if challengeResponse.Code != http.StatusForbidden {
+		t.Fatalf("invalid challenge response = %d", challengeResponse.Code)
+	}
+	request := callbackTestRequest(t, "message", "user", "hello")
+	request.Body = io.NopCloser(strings.NewReader(requestBodyWithTrailingXML(t, request)))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("trailing XML response = %d", response.Code)
 	}
 }
 
@@ -423,6 +539,35 @@ func TestBindingProviderUsesActiveWeComBindingAndCachesProvider(t *testing.T) {
 type callbackDispatchStub struct {
 	requests chan gateway.DispatchRequest
 	canceled chan struct{}
+}
+
+type dispatchFunc func(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error)
+
+func (dispatch dispatchFunc) Dispatch(ctx context.Context, request gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+	return dispatch(ctx, request)
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (roundTrip roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
+}
+
+func assertDeliveryErrorClass(t *testing.T, err error, class string, retryable bool) {
+	t.Helper()
+	var deliveryErr *outbox.DeliveryError
+	if !errors.As(err, &deliveryErr) || deliveryErr.Class != class || deliveryErr.Retryable != retryable {
+		t.Fatalf("delivery error = %v, want class %q retryable %t", err, class, retryable)
+	}
+}
+
+func requestBodyWithTrailingXML(t *testing.T, request *http.Request) string {
+	t.Helper()
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body) + "<trailing/>"
 }
 
 func (stub *callbackDispatchStub) Dispatch(ctx context.Context, request gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
