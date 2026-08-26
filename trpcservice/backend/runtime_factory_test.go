@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
@@ -57,7 +58,8 @@ func TestRegistryStorageFactoryCancellationAndMissingSession(t *testing.T) {
 
 func TestRegistryStorageFactoryCancellationAfterProviderSuccess(t *testing.T) {
 	providers := NewProviderRegistry()
-	provider := &sessionCapabilityProvider{}
+	closed := make(chan struct{})
+	provider := &sessionCapabilityProvider{closed: closed}
 	const tenantID = "t_00000000000000000000000000"
 	if err := providers.Register(tenantID, CapabilitySession, "memory", provider); err != nil {
 		t.Fatal(err)
@@ -70,6 +72,11 @@ func TestRegistryStorageFactoryCancellationAfterProviderSuccess(t *testing.T) {
 	provider.cancel = cancel
 	if _, err := factory.New(ctx, StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("provider-success cancellation = %v", err)
+	}
+	select {
+	case <-closed:
+	default:
+		t.Fatal("provider capability was not closed after cancellation")
 	}
 }
 
@@ -128,13 +135,31 @@ func TestRegistryStorageFactoryBuildsTenantCapabilitiesConcurrently(t *testing.T
 	}
 }
 
-type sessionCapabilityProvider struct{ cancel context.CancelFunc }
+type sessionCapabilityProvider struct {
+	cancel context.CancelFunc
+	closed chan struct{}
+}
 
 func (provider *sessionCapabilityProvider) New(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
 	if provider.cancel != nil {
 		provider.cancel()
 	}
-	return inmemory.NewSessionService(), nil
+	service := inmemory.NewSessionService()
+	if provider.closed != nil {
+		return &closeTrackingSession{Service: service, closed: provider.closed}, nil
+	}
+	return service, nil
+}
+
+type closeTrackingSession struct {
+	session.Service
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (service *closeTrackingSession) Close() error {
+	service.once.Do(func() { close(service.closed) })
+	return nil
 }
 
 type recordingSessionCapabilityProvider struct {

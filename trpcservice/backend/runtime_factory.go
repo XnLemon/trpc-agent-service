@@ -173,6 +173,9 @@ func (factory *RegistryStorageFactory) materializeBinding(ctx context.Context, i
 		return nil, ErrStorageFactory
 	}
 	if err := ctx.Err(); err != nil {
+		if closer, ok := value.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
 		return nil, err
 	}
 	return value, nil
