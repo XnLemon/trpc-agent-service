@@ -29,6 +29,20 @@ Vault、消息去重/回复 Outbox、队列和生产审计持久化。Issue #37 
 Telegram long
 polling 运行时契约见 [Telegram 长轮询 Adapter](telegram.md)，不属于本 Binding 领域模型。
 
+## 运行时 Adapter 契约
+
+Issue #60 在控制面模型之上定义了窄的运行时边界：`channels.Adapter` 只拥有
+协议类型与关闭生命周期；`channels.PollingAdapter` 用于 Telegram 这类由通道拥有
+阻塞轮询循环的实现；`channels.WebhookAdapter` 用于 WeCom 这类由通道拥有 HTTP
+验签和入站处理的实现。两种实现都将已验证的协议消息规范化为同一个
+`gateway.InboundMessage`，再交给 Gateway 的可信 Principal 路由。
+
+该边界不把 Telegram long polling 和 WeCom HTTP callback 伪装成相同的传输协议。
+验签、解密、供应商 SDK、poll loop 和 HTTP 生命周期继续由具体 Adapter 负责；
+Gateway 的 `InboundMessage` 是共享入站契约，`runtime/outbox.Provider` 是共享的
+持久化出站回复契约。Telegram 与 WeCom Provider 都以稳定的 reply/segment identity
+实现该后者。
+
 ## 控制面模型
 
 ### 领域字段

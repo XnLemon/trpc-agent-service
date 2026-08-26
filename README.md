@@ -175,19 +175,19 @@
 
 ### IM Channel Adapter
 
-- [ ] 定义统一 Channel Adapter、入站消息和出站回复接口
+- [x] 定义统一 Channel Adapter 生命周期、共享入站消息和持久化出站回复契约（Issue #60）
 - [ ] 实现外部消息到 `model.Message` / `runner.Runner.Run` 的转换
 - [ ] 实现 Runner Event 到文本、流式消息和卡片消息的转换
-- [ ] 接入企业微信或微信相关通道
+- [x] 接入企业微信自建应用文本 webhook（Issue #60；仅直聊文本）
 - [x] 接入 Telegram long polling 文本通道（Issue #31；单 Binding、Gateway Dispatch、进程内幂等）
 - [x] 增加真实 Telegram live E2E 示例与 CI workflow（Issue #33；根目录 `examples/telegram-e2e`）
 - [ ] 接入 Telegram webhook、媒体/rich update 或其他 IM 通道
-- [ ] 实现 webhook 验签、账号与租户绑定、用户身份映射
+- [x] 实现企业微信 webhook 验签、账号与租户 Binding、用户身份映射（Issue #60）
 - [x] 使用 `tenant + channel + message_id` 实现幂等去重和缓存回复（Issue #49）
 - [x] 实现单聊/群聊 Session ID 规则及跨群、跨租户隔离
 - [x] Telegram 文本回复分段、重复投递和论坛线程路由
 - [x] 处理文本回复的异步 Outbox、重试、死信和失败恢复（Issue #50/#52；媒体/撤回仍未实现）
-- [ ] 增加重复投递、乱序、验签失败和跨租户访问测试
+- [x] 增加企业微信重复投递、乱序、验签失败和跨租户访问测试（Issue #60）
 
 ### 治理、安全与可观测性
 

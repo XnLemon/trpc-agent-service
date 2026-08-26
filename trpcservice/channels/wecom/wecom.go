@@ -103,6 +103,8 @@ type Handler struct {
 	drains  sync.WaitGroup
 }
 
+var _ channels.WebhookAdapter = (*Handler)(nil)
+
 // New validates a text callback Handler. Dynamic mode receives the complete
 // trusted target only after protocol verification.
 //
@@ -284,6 +286,9 @@ func (h *Handler) BeginShutdown() {
 	}
 	h.mu.Unlock()
 }
+
+// Channel identifies the protocol owned by this Handler.
+func (*Handler) Channel() channels.Channel { return channels.ChannelWeCom }
 
 // Close joins accepted execution drains after canceling their process context.
 func (h *Handler) Close() error {
