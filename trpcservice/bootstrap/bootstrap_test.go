@@ -593,6 +593,16 @@ func TestNewFromEnvironmentInstallsWeComCallbackAndOutboxWorker(t *testing.T) {
 		_ = graph.Close()
 		t.Fatal("WeCom environment did not install callback and outbox components")
 	}
+	callback := httptest.NewRecorder()
+	graph.HandlerValue().ServeHTTP(callback, httptest.NewRequest(http.MethodPost, "/wecom/callback/environment-route", nil))
+	if callback.Code != http.StatusForbidden {
+		_ = graph.Close()
+		t.Fatalf("WeCom environment callback status = %d", callback.Code)
+	}
+	if err := graph.OutboxWorker.Start(context.Background(), time.Second); !errors.Is(err, outbox.ErrAlreadyRunning) {
+		_ = graph.Close()
+		t.Fatalf("environment outbox worker was not started: %v", err)
+	}
 	if err := graph.Close(); err != nil {
 		t.Fatal(err)
 	}
