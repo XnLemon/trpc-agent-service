@@ -52,6 +52,22 @@ func TestDecodeAESKeyAndDecryptRoundTrip(t *testing.T) {
 	}
 }
 
+func TestNewRejectsInvalidConfiguration(t *testing.T) {
+	stub := &callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)}
+	for _, config := range []Config{
+		{},
+		{Dispatcher: stub, MaxBodyBytes: -1},
+		{Dispatcher: stub, ExecutionTimeout: -1},
+		{Dispatcher: stub, Token: "token", ReceiveID: "receive", AgentID: "1"},
+		{Dispatcher: stub, Token: "token", ReceiveID: "receive", AgentID: "1", EncodingAESKey: "bad", Target: channels.RoutingTarget{}},
+		{Dispatcher: stub, Token: "token", ReceiveID: "receive", AgentID: "1", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), Target: channels.RoutingTarget{}, Candidates: &dynamicCandidateConsumer{}},
+	} {
+		if handler, err := New(config); handler != nil || !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid config = handler %v, err %v", handler, err)
+		}
+	}
+}
+
 func TestSignatureAndInvalidPadding(t *testing.T) {
 	h := &Handler{token: "token"}
 	if h.validSignature("", "1", "2", "3") {
@@ -62,6 +78,28 @@ func TestSignatureAndInvalidPadding(t *testing.T) {
 	}
 	if _, err := unpad([]byte{1, 2}); err == nil {
 		t.Fatal("invalid padding accepted")
+	}
+	if _, err := decodeAESKey("bad"); err == nil {
+		t.Fatal("invalid AES key accepted")
+	}
+	if (&Handler{}).validSignature("a", "b", "c", "d") {
+		t.Fatal("unconfigured handler accepted signature")
+	}
+}
+
+func TestHandlerRejectsUnsupportedMethodsAndRoutes(t *testing.T) {
+	handler := newCallbackTestHandler(t, &callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)})
+	t.Cleanup(func() { _ = handler.Close() })
+	methodResponse := httptest.NewRecorder()
+	handler.ServeHTTP(methodResponse, httptest.NewRequest(http.MethodPut, "/", nil))
+	if methodResponse.Code != http.StatusMethodNotAllowed || methodResponse.Header().Get("Allow") != "GET, POST" {
+		t.Fatalf("method response = %d allow %q", methodResponse.Code, methodResponse.Header().Get("Allow"))
+	}
+	routeResponse := httptest.NewRecorder()
+	handler.routeKey = "expected"
+	handler.ServeHTTP(routeResponse, httptest.NewRequest(http.MethodGet, "/wecom/callback/other", nil))
+	if routeResponse.Code != http.StatusNotFound {
+		t.Fatalf("route response = %d", routeResponse.Code)
 	}
 }
 
@@ -103,6 +141,37 @@ func TestProviderRejectsOversizedText(t *testing.T) {
 	_, err := p.Deliver(context.Background(), storage.ReplyOutbox{Payload: strings.Repeat("界", 683), ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user-1"}})
 	if err == nil {
 		t.Fatal("oversized text was accepted")
+	}
+}
+
+func TestProviderMapsTransportAndPayloadErrors(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		response string
+		status   int
+		want     string
+	}{
+		{name: "malformed token", response: "not-json", status: http.StatusOK, want: "provider_error"},
+		{name: "token rejected", response: `{"errcode":40014}`, status: http.StatusOK, want: "unauthenticated"},
+		{name: "send malformed", response: `{"errcode":0,"access_token":"token","expires_in":3600}`, status: http.StatusOK, want: "provider_error"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.WriteHeader(test.status)
+				if request.URL.Path == "/cgi-bin/gettoken" && test.name == "send malformed" {
+					_, _ = io.WriteString(writer, `{"errcode":0,"access_token":"token","expires_in":3600}`)
+					return
+				}
+				_, _ = io.WriteString(writer, test.response)
+			}))
+			defer server.Close()
+			provider := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret", BaseURL: server.URL, HTTPClient: server.Client()}
+			_, err := provider.Deliver(context.Background(), storage.ReplyOutbox{Payload: "hello", ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user"}})
+			var deliveryErr *outbox.DeliveryError
+			if !errors.As(err, &deliveryErr) || deliveryErr.Class != test.want {
+				t.Fatalf("delivery error = %v", err)
+			}
+		})
 	}
 }
 
