@@ -16,6 +16,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
 	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/agent/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
@@ -77,6 +78,8 @@ type Config struct {
 	// Bootstrap owns its lifecycle but never derives a recipient from HTTP.
 	OutboxWorker       *outbox.Worker
 	OutboxPollInterval time.Duration
+	// AuditWriter receives execution and configured channel delivery facts.
+	AuditWriter        audit.Writer
 	Authenticator      gateway.APIAuthenticator
 	AdminAuthenticator admin.Authenticator
 	AdminHandler       http.Handler
@@ -240,7 +243,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 		return nil, ErrInvalidConfig
 	}
 	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{
-		Resolver: resolver, Registry: registry, RuntimeStore: config.RuntimeStore, DrainTimeout: config.DrainTimeout,
+		Resolver: resolver, Registry: registry, RuntimeStore: config.RuntimeStore, DrainTimeout: config.DrainTimeout, AuditWriter: config.AuditWriter,
 	})
 	if err != nil {
 		_ = registry.Close()

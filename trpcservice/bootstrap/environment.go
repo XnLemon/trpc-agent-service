@@ -13,6 +13,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/migrations"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
 	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/agent/postgres"
+	auditpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/audit/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
@@ -141,12 +142,19 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	tenantRepo := tenantpostgres.NewRepository(db)
 	appRepo := agentpostgres.NewRepository(db)
 	channelRepo := channelpostgres.NewRepository(db)
+	auditWriter, err := auditpostgres.New(db, config.tenantID)
+	if err != nil {
+		_ = delegateSessions.Close()
+		_ = runtimeStore.Close()
+		_ = db.Close()
+		return nil, ErrInvalidConfig
+	}
 	var wecomFactory func(gateway.DispatchService) (http.Handler, error)
 	var wecomWorker *outbox.Worker
 	if config.wecom != nil {
 		credentials := environmentWeComCredentialResolver{tenantID: config.tenantID, config: *config.wecom}
 		wecomFactory = func(dispatcher gateway.DispatchService) (http.Handler, error) {
-			return wecom.New(wecom.Config{Candidates: channelRepo, Tenants: tenantRepo, Apps: appRepo, Credentials: credentials, Dispatcher: dispatcher})
+			return wecom.New(wecom.Config{Candidates: channelRepo, Tenants: tenantRepo, Apps: appRepo, Credentials: credentials, Dispatcher: dispatcher, AuditWriter: auditWriter})
 		}
 		owner, ownerErr := environmentWeComOwnerFunc()
 		if ownerErr != nil {
@@ -155,7 +163,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 			_ = db.Close()
 			return nil, ErrInvalidConfig
 		}
-		wecomWorker, err = newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelRepo, Credentials: credentials}, TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second})
+		wecomWorker, err = newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelRepo, Credentials: credentials}, TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second, AuditWriter: auditWriter})
 		if err != nil {
 			_ = delegateSessions.Close()
 			_ = runtimeStore.Close()
@@ -180,6 +188,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		WeComHandlerFactory: wecomFactory,
 		OutboxWorker:        wecomWorker,
 		OutboxPollInterval:  time.Second,
+		AuditWriter:         auditWriter,
 		Ping: func(pingContext context.Context) error {
 			return postgres.Ping(pingContext, db)
 		},

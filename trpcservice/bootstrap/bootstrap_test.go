@@ -577,12 +577,19 @@ func TestNewFromEnvironmentInstallsWeComCallbackAndOutboxWorker(t *testing.T) {
 	previousOpen := openEnvironmentDatabase
 	previousApply := applyEnvironmentMigrations
 	previousVerify := verifyEnvironmentMigrations
+	previousWorker := newEnvironmentWeComWorker
+	var workerConfig outbox.Config
 	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
 	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
 	verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	newEnvironmentWeComWorker = func(config outbox.Config) (*outbox.Worker, error) {
+		workerConfig = config
+		return outbox.New(config)
+	}
 	defer func() { openEnvironmentDatabase = previousOpen }()
 	defer func() { applyEnvironmentMigrations = previousApply }()
 	defer func() { verifyEnvironmentMigrations = previousVerify }()
+	defer func() { newEnvironmentWeComWorker = previousWorker }()
 
 	graph, err := NewFromEnvironment(context.Background())
 	if err != nil {
@@ -592,6 +599,10 @@ func TestNewFromEnvironmentInstallsWeComCallbackAndOutboxWorker(t *testing.T) {
 	if graph.OutboxWorker == nil || graph.wecomLifecycle == nil {
 		_ = graph.Close()
 		t.Fatal("WeCom environment did not install callback and outbox components")
+	}
+	if workerConfig.AuditWriter == nil {
+		_ = graph.Close()
+		t.Fatal("WeCom environment outbox worker did not receive an audit writer")
 	}
 	callback := httptest.NewRecorder()
 	graph.HandlerValue().ServeHTTP(callback, httptest.NewRequest(http.MethodPost, "/wecom/callback/environment-route", nil))

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -67,6 +68,8 @@ type Config struct {
 	Tenants     tenant.Repository
 	Apps        agent.Repository
 	Credentials CredentialResolver
+	// AuditWriter receives mandatory accepted and duplicate ingress facts.
+	AuditWriter audit.Writer
 }
 
 type callbackState struct {
@@ -95,6 +98,7 @@ type Handler struct {
 	dispatcher       gateway.DispatchService
 	maxBodyBytes     int64
 	executionTimeout time.Duration
+	auditWriter      audit.Writer
 
 	mu      sync.Mutex
 	closing bool
@@ -126,7 +130,7 @@ func New(config Config) (*Handler, error) {
 		return nil, ErrInvalid
 	}
 	baseCtx, cancel := context.WithCancel(context.Background())
-	handler := &Handler{routeKey: strings.Trim(config.RouteKey, "/"), dispatcher: config.Dispatcher, maxBodyBytes: config.MaxBodyBytes, executionTimeout: config.ExecutionTimeout, baseCtx: baseCtx, cancel: cancel}
+	handler := &Handler{routeKey: strings.Trim(config.RouteKey, "/"), dispatcher: config.Dispatcher, maxBodyBytes: config.MaxBodyBytes, executionTimeout: config.ExecutionTimeout, auditWriter: config.AuditWriter, baseCtx: baseCtx, cancel: cancel}
 	if config.Candidates != nil || config.Tenants != nil || config.Apps != nil || config.Credentials != nil {
 		if config.Candidates == nil || config.Tenants == nil || config.Apps == nil || config.Credentials == nil || handler.routeKey != "" {
 			cancel()
@@ -236,10 +240,11 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	accepted := make(chan struct{}, 1)
 	result := make(chan error, 1)
+	requestID, traceID := uuid.NewString(), uuid.NewString()
 	go func() {
 		defer h.drains.Done()
 		defer cancel()
-		stream, dispatchErr := h.dispatcher.Dispatch(executionCtx, gateway.DispatchRequest{Accepted: accepted, Principal: state.principal, RequestID: uuid.NewString(), TraceID: uuid.NewString(), Message: gateway.InboundMessage{Content: message.Content, ContentType: gateway.ContentTypeText, ExternalMessageID: message.MsgID, ExternalUserID: message.FromUserName, ConversationKind: channels.ConversationDirect, ExternalPeerID: message.FromUserName}})
+		stream, dispatchErr := h.dispatcher.Dispatch(executionCtx, gateway.DispatchRequest{Accepted: accepted, Principal: state.principal, RequestID: requestID, TraceID: traceID, Message: gateway.InboundMessage{Content: message.Content, ContentType: gateway.ContentTypeText, ExternalMessageID: message.MsgID, ExternalUserID: message.FromUserName, ConversationKind: channels.ConversationDirect, ExternalPeerID: message.FromUserName}})
 		if dispatchErr == nil && stream != nil {
 			for range stream {
 			}
@@ -248,6 +253,10 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}()
 	select {
 	case <-accepted:
+		if h.recordIngress(r.Context(), state.principal, message, requestID, traceID, audit.EventIMIngressAccepted, audit.DecisionAccepted, "") != nil {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		h.writeSuccess(w)
 	case dispatchErr := <-result:
 		if dispatchErr == nil {
@@ -255,12 +264,25 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(dispatchErr, gateway.ErrDuplicateMessage) {
+			if h.recordIngress(r.Context(), state.principal, message, requestID, traceID, audit.EventIMIngressDuplicate, audit.DecisionDuplicate, string(audit.ErrorDuplicate)) != nil {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			h.writeSuccess(w)
 			return
 		}
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	case <-r.Context().Done():
 	}
+}
+
+func (h *Handler) recordIngress(ctx context.Context, principal gateway.Principal, message inboundXML, requestID, traceID string, eventType audit.EventType, decision audit.Decision, errorType string) error {
+	if h == nil || h.auditWriter == nil {
+		return nil
+	}
+	event := audit.Event{SchemaVersion: audit.SchemaVersion, EventID: audit.NewEventID(requestID, string(eventType)), EventType: eventType, TenantID: principal.TenantID(), Channel: string(channels.ChannelWeCom), UserID: message.FromUserName, AgentAppID: principal.AppID(), Decision: decision, ErrorType: errorType, RequestID: requestID, TraceID: traceID, ActorType: string(principal.Kind()), ActorID: principal.SubjectID(), OccurredAt: time.Now().UTC()}
+	_, err := h.auditWriter.Append(ctx, event)
+	return err
 }
 
 func (h *Handler) beginDrain() (context.Context, context.CancelFunc, bool) {

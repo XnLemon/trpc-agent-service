@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
@@ -469,12 +470,17 @@ func TestDynamicHandlerRoutesOnlyVerifiedBinding(t *testing.T) {
 	dispatcher := &callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)}
 	app := dynamicTestApp(t, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")
 	binding := dynamicTestBinding(t, "route-key", "env/wecom", app.AppID)
+	writer, err := audit.NewInMemory(binding.TenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	handler, err := New(Config{
 		Candidates:  &dynamicCandidateConsumer{binding: binding},
 		Tenants:     dynamicTenantRepository{value: dynamicTestTenant(t)},
 		Apps:        dynamicAppRepository{value: app},
 		Credentials: dynamicCredentials{values: map[string]Credentials{binding.SecretRef: {CallbackToken: "token", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), AppSecret: "app-secret"}}},
 		Dispatcher:  dispatcher,
+		AuditWriter: writer,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -487,6 +493,7 @@ func TestDynamicHandlerRoutesOnlyVerifiedBinding(t *testing.T) {
 		t.Fatalf("dynamic callback response = %d %q", recorder.Code, recorder.Body.String())
 	}
 	var target channels.RoutingTarget
+	var requestID, traceID string
 	select {
 	case request := <-dispatcher.requests:
 		var ok bool
@@ -494,6 +501,7 @@ func TestDynamicHandlerRoutesOnlyVerifiedBinding(t *testing.T) {
 		if !ok || request.Principal.TenantID() != binding.TenantID || target.BindingID != binding.BindingID || request.RequestID == "" || request.TraceID == "" {
 			t.Fatalf("dynamic dispatch request = %+v", request)
 		}
+		requestID, traceID = request.RequestID, request.TraceID
 	case <-time.After(time.Second):
 		t.Fatal("verified dynamic callback did not dispatch")
 	}
@@ -505,6 +513,27 @@ func TestDynamicHandlerRoutesOnlyVerifiedBinding(t *testing.T) {
 		t.Fatal("static handler is nil")
 	}
 	_ = staticHandler.Close()
+	events, err := writer.List(context.Background(), audit.Query{})
+	if err != nil || len(events) != 1 || events[0].EventType != audit.EventIMIngressAccepted || events[0].Decision != audit.DecisionAccepted || events[0].RequestID != requestID || events[0].TraceID != traceID {
+		t.Fatalf("accepted ingress audit = %+v, err=%v", events, err)
+	}
+
+	duplicateHandler, err := New(Config{Dispatcher: dispatchFunc(func(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+		return nil, gateway.ErrDuplicateMessage
+	}), Token: "token", ReceiveID: "receive", AgentID: "1", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), Target: target, AuditWriter: writer})
+	if err != nil {
+		t.Fatalf("duplicate handler = %v", err)
+	}
+	duplicateResponse := httptest.NewRecorder()
+	duplicateHandler.ServeHTTP(duplicateResponse, callbackTestRequest(t, "message-duplicate", "user-1", "hello"))
+	if duplicateResponse.Code != http.StatusOK || duplicateResponse.Body.String() != "success" {
+		t.Fatalf("duplicate callback response = %d %q", duplicateResponse.Code, duplicateResponse.Body.String())
+	}
+	_ = duplicateHandler.Close()
+	events, err = writer.List(context.Background(), audit.Query{})
+	if err != nil || len(events) != 2 || events[1].EventType != audit.EventIMIngressDuplicate || events[1].Decision != audit.DecisionDuplicate || events[1].ErrorType != string(audit.ErrorDuplicate) {
+		t.Fatalf("duplicate ingress audit = %+v, err=%v", events, err)
+	}
 
 	badSignature := callbackTestRequestAtPath(t, "/wecom/callback/route-key", "message-bad", "user-1", "hello")
 	badQuery := badSignature.URL.Query()
