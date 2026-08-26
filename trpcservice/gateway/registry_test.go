@@ -176,6 +176,46 @@ func TestRunnerRegistryInvalidationDefersCloseUntilRelease(t *testing.T) {
 	}
 }
 
+func TestRunnerRegistrySelectiveInvalidationPreservesUnrelatedTenant(t *testing.T) {
+	planOne := testExecutionPlan(t)
+	planTwo := testExecutionPlan(t)
+	var calls atomic.Int32
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+		calls.Add(1)
+		return &testRunner{}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = registry.Close() }()
+	first, err := registry.Acquire(context.Background(), planOne)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := registry.Acquire(context.Background(), planTwo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRunner := second.Runner()
+	if err := registry.InvalidateTenant(planOne.Tenant().TenantID); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Release(); err != nil {
+		t.Fatal(err)
+	}
+	reused, err := registry.Acquire(context.Background(), planTwo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reused.Release() }()
+	if reused.Runner() != secondRunner || calls.Load() != 2 {
+		t.Fatalf("unrelated tenant entry was evicted: runner=%p want=%p calls=%d", reused.Runner(), secondRunner, calls.Load())
+	}
+}
+
 func TestRunnerRegistryCapacityEvictsIdleButNotBorrowedEntries(t *testing.T) {
 	planOne := testExecutionPlan(t)
 	planTwo := testExecutionPlan(t)

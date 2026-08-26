@@ -67,6 +67,7 @@ type Config struct {
 	BackendCatalog *backend.ProviderCatalog
 	SecretResolver modelprofile.SecretResolver
 	ModelFactory   modelprofile.ModelFactory
+	StorageFactory backend.StorageFactory
 	Sessions       session.Service
 	// RuntimeStore is the tenant-scoped Session/Event/Outbox capability. It is
 	// separate from upstream session.Service while the runtime adapter evolves.
@@ -202,12 +203,15 @@ func validateConfig(config Config) error {
 	dependencies := []any{
 		config.Tenants, config.Apps, config.Models, config.Backends, config.Channels,
 		config.ModelCatalog, config.BackendCatalog, config.SecretResolver, config.ModelFactory,
-		config.Sessions, config.Authenticator,
+		config.Authenticator,
 	}
 	for _, dependency := range dependencies {
 		if dependency == nil {
 			return ErrInvalidConfig
 		}
+	}
+	if config.Sessions == nil && config.StorageFactory == nil {
+		return ErrInvalidConfig
 	}
 	return nil
 }
@@ -237,7 +241,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	}
 	registry, err := gateway.NewRuntimeRunnerRegistry(gateway.RuntimeRunnerRegistryConfig{
 		Registry: config.Registry, SecretResolver: config.SecretResolver,
-		ModelFactory: config.ModelFactory, Sessions: config.Sessions,
+		ModelFactory: config.ModelFactory, Sessions: config.Sessions, StorageFactory: config.StorageFactory,
 	})
 	if err != nil {
 		return nil, ErrInvalidConfig
