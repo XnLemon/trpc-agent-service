@@ -33,6 +33,11 @@ func TestNewProfileNormalizesConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProfile() error = %v", err)
 	}
+	assertNormalizedProfile(t, profile, inputOptions, catalog)
+}
+
+func assertNormalizedProfile(t *testing.T, profile *Profile, inputOptions map[string]string, catalog *ProviderCatalog) {
+	t.Helper()
 	if profile.ProfileKey != "primary-data" || profile.DisplayName != "Primary data" || profile.Description != "Shared stores" {
 		t.Fatalf("Profile metadata was not normalized: %#v", profile)
 	}
