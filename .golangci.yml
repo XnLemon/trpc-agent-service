@@ -20,9 +20,6 @@ linters:
   exclusions:
     rules:
       # Function-scoped complexity baseline; remove entries as each function is split.
-      - path: ^trpcservice/runtime/storage/postgres/integration_test\.go$
-        text: 'cyclomatic complexity .* of func `TestRuntimeStorePostgreSQLConformanceAndRestart`'
-        linters: [gocyclo]
     paths:
       - .*\.pb\.go$
       - .*_mock\.go$
