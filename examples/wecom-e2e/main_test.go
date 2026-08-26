@@ -39,7 +39,7 @@ import (
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
-	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
+	tenantinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -86,8 +86,6 @@ func TestWeComCallbackOutboxE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = handler.Close() }()
-	identity, identityErr := fixture.target.RunnerIdentity(channels.IdentityInput{ExternalUserID: "e2e-user", Kind: channels.ConversationDirect, ExternalPeerID: "e2e-user"})
-	t.Logf("target tenant=%q app=%q binding=%q identity=%+v err=%v", fixture.target.TenantID, fixture.target.AppID, fixture.target.BindingID, identity, identityErr)
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -148,9 +146,12 @@ func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	tenantRepo := tenantpostgres.NewRepository(db)
+	tenantRepo := tenantinmemory.NewRepository()
 	root, err := tenantRepo.Create(ctx, tenant.CreateInput{TenantKey: fmt.Sprintf("wecom-e2e-%d", time.Now().UnixNano()), DisplayName: "WeCom E2E", AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO public.tenant (tenant_id, tenant_key, display_name, status, audit_retention_days, log_masking_level, trace_sampling_rate, version, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, root.TenantID, root.TenantKey, root.DisplayName, string(root.Status), root.AuditRetentionDays, string(root.LogMaskingLevel), root.TraceSamplingRate, root.Version, root.CreatedAt, root.UpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 	modelRepo := modelinmemory.NewRepository(modelCatalog)
