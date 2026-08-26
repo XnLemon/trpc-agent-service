@@ -110,30 +110,46 @@ func runTelegramOutboxScenario(t *testing.T, ctx context.Context, provider outbo
 		t.Fatal(err)
 	}
 	dispatchEvents := collectTelegramE2EDispatchEvents(stream)
-	if len(dispatchEvents) != 2 || dispatchEvents[0].Type != gateway.DispatchEventMessage || dispatchEvents[0].Text != runner.reply || !dispatchEvents[1].Done {
-		t.Fatalf("dispatcher events = %+v", dispatchEvents)
-	}
-	if got := runner.calls.Load(); got != 1 {
-		t.Fatalf("Runner calls = %d, want 1", got)
-	}
+	assertTelegramOutboxDispatch(t, dispatchEvents, runner)
 	rows, err := store.ListReplyCandidates(ctx, fixture.target.TenantID)
-	if err != nil || len(rows) != 1 || rows[0].Payload != runner.reply {
-		t.Fatalf("materialized outbox rows = %+v, err=%v", rows, err)
-	}
+	assertTelegramOutboxRows(t, rows, err, runner.reply)
 	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: fixture.target.TenantID, Owner: "telegram-example-e2e", LeaseDuration: 30 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if processed, err := worker.RunOnce(ctx); err != nil || processed != 1 {
+	processed, err := worker.RunOnce(ctx)
+	if err != nil || processed != 1 {
 		t.Fatalf("outbox worker processed=%d err=%v", processed, err)
 	}
 	reply, err := store.GetReply(ctx, fixture.target.TenantID, rows[0].ReplyID, rows[0].SegmentIndex)
-	if err != nil || reply.Status != runtimestorage.ReplySent || reply.ProviderMessageID == "" {
-		t.Fatalf("reply outbox = %+v, err=%v", reply, err)
-	}
+	assertTelegramOutboxReply(t, reply, err)
 	event, err := store.GetMessage(ctx, fixture.target.TenantID, rows[0].EventID)
 	if err != nil || event.Status != runtimestorage.EventReplied {
 		t.Fatalf("message event = %+v, err=%v", event, err)
+	}
+}
+
+func assertTelegramOutboxDispatch(t *testing.T, events []gateway.DispatchEvent, runner *telegramE2ERunner) {
+	t.Helper()
+	if len(events) != 2 || events[0].Type != gateway.DispatchEventMessage || events[0].Text != runner.reply || !events[1].Done {
+		t.Fatalf("dispatcher events = %+v", events)
+	}
+	if got := runner.calls.Load(); got != 1 {
+		t.Fatalf("Runner calls = %d, want 1", got)
+	}
+}
+
+func assertTelegramOutboxRows(t *testing.T, rows []runtimestorage.ReplyOutbox, err error, reply string) {
+	t.Helper()
+	if err != nil || len(rows) != 1 || rows[0].Payload != reply {
+		t.Fatalf("materialized outbox rows = %+v, err=%v", rows, err)
+	}
+}
+
+func assertTelegramOutboxReply(t *testing.T, reply runtimestorage.ReplyOutbox, err error) {
+	t.Helper()
+	if err != nil || reply.Status != runtimestorage.ReplySent || reply.ProviderMessageID == "" {
+		t.Fatalf("reply outbox = %+v, err=%v", reply, err)
 	}
 }
 

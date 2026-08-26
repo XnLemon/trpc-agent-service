@@ -20,9 +20,6 @@ linters:
   exclusions:
     rules:
       # Function-scoped complexity baseline; remove entries as each function is split.
-      - path: ^examples/telegram-e2e/outbox_runner_e2e_test\.go$
-        text: 'cyclomatic complexity .* of func `runTelegramOutboxScenario`'
-        linters: [gocyclo]
       - path: ^migrations/migration_test\.go$
         text: 'cyclomatic complexity .* of func `TestPostgreSQLControlPlaneMigration`'
         linters: [gocyclo]
@@ -103,9 +100,6 @@ linters:
         linters: [gocyclo]
       - path: ^trpcservice/storage/postgres/postgres_unit_test\.go$
         text: 'cyclomatic complexity .* of func `(?:TestPostgreSQLStoragePrimitives|TestPostgreSQLStorageErrorAndTransactionPaths)`'
-        linters: [gocyclo]
-      - path: ^trpcservice/channels/telegram/telegram_test\.go$
-        text: 'cyclomatic complexity .* of func `TestHandleUpdateMapsPrivateTextAndAggregatesDispatchEvents`'
         linters: [gocyclo]
     paths:
       - .*\.pb\.go$
