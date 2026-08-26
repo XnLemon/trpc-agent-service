@@ -32,9 +32,6 @@ linters:
       - path: ^trpcservice/channels/fake_test\.go$
         text: 'cyclomatic complexity .* of func `(?:TestFakeCandidateResolverOwnsCandidateAndVerificationBoundaries|TestFakeCandidateResolverRejectsForgeryReplayAndLifecycleEdges)`'
         linters: [gocyclo]
-      - path: ^trpcservice/channels/inmemory/edge_test\.go$
-        text: 'cyclomatic complexity .* of func `TestInMemoryErrorAndClockBranches`'
-        linters: [gocyclo]
       - path: ^trpcservice/channels/inmemory/fake_test\.go$
         text: 'cyclomatic complexity .* of func `TestFakeResolverIsCoveredInsideItsOwningPackage`'
         linters: [gocyclo]
