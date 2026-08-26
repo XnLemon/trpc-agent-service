@@ -33,6 +33,8 @@ type Provider struct {
 
 var _ outbox.Provider = (*Provider)(nil)
 
+// Deliver sends one durable text segment through the WeCom application API.
+//
 //nolint:gocyclo
 func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (string, error) {
 	if p == nil || strings.TrimSpace(p.CorpID) == "" || strings.TrimSpace(p.AgentID) == "" || strings.TrimSpace(p.AppSecret) == "" || ctx == nil {
