@@ -261,9 +261,10 @@ func loadEnvironment() (environmentConfig, error) {
 		if err != nil {
 			return environmentConfig{}, err
 		}
-		for _, identity := range config.apiIdentities {
-			config.tenantID, config.appID = identity.TenantID, identity.AppID
-			break
+		if len(config.apiIdentities) == 1 {
+			for _, identity := range config.apiIdentities {
+				config.tenantID, config.appID = identity.TenantID, identity.AppID
+			}
 		}
 	} else {
 		if config.apiToken, err = requiredEnvironment(envAPIToken); err != nil {
@@ -321,6 +322,9 @@ func loadEnvironment() (environmentConfig, error) {
 	}
 	if configured == len(wecomValues) {
 		config.wecom = &environmentWeComConfig{callbackToken: wecomValues[0], encodingAESKey: wecomValues[1], appSecret: wecomValues[2], secretRef: wecomValues[3]}
+	}
+	if config.wecom != nil && len(config.apiIdentities) != 1 {
+		return environmentConfig{}, fmt.Errorf("%w: WeCom credentials require exactly one API identity", ErrInvalidConfig)
 	}
 	return config, nil
 }

@@ -34,10 +34,22 @@ func TestLoadEnvironmentSupportsIdentityListWithoutFixedTenantFields(t *testing.
 	if err != nil || len(config.apiIdentities) != 2 {
 		t.Fatalf("multi-tenant environment = %+v, %v", config, err)
 	}
-	if config.tenantID == "" || config.appID == "" {
-		t.Fatal("multi-tenant environment did not retain a compatibility identity")
+	if config.tenantID != "" || config.appID != "" {
+		t.Fatal("multi-tenant environment selected a process-fixed identity")
 	}
 	if _, err := gateway.NewStaticAPIAuthenticator(config.apiIdentities); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLoadEnvironmentRejectsSingleWeComCredentialSetForMultipleIdentities(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envAPIIdentities, "token-a|t_00000000000000000000000000|app_00000000000000000000000000|service-a,token-b|t_00000000000000000000000001|app_00000000000000000000000001|service-b")
+	t.Setenv(envWeComCallbackToken, "callback")
+	t.Setenv(envWeComEncodingAESKey, "aes")
+	t.Setenv(envWeComAppSecret, "secret")
+	t.Setenv(envWeComSecretRef, "env/wecom")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("multi-identity WeCom config error = %v", err)
 	}
 }
