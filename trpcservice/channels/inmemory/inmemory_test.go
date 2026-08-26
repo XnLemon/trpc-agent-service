@@ -19,6 +19,20 @@ type testClock struct {
 func (c *testClock) Now() time.Time { return c.now }
 
 func TestRepositoryIsTenantScopedAndCandidateLookupIsRedacted(t *testing.T) {
+	setup := setupTenantScopedBindings(t)
+	assertTenantScopedBindingRules(t, setup.repo, setup.first, setup.second, setup.routeDigest)
+	assertCandidateLookupIsOpaqueAndRedacted(t, setup.repo, setup.first, setup.second, setup.routeDigest)
+	assertRepositoryReturnsDefensiveBindingCopies(t, setup.repo, setup.first)
+}
+
+type tenantScopedSetup struct {
+	repo          *InMemoryRepository
+	first, second *channels.Binding
+	routeDigest   string
+}
+
+func setupTenantScopedBindings(t *testing.T) tenantScopedSetup {
+	t.Helper()
 	clock := &testClock{now: time.Now().UTC().Add(time.Hour)}
 	repo := NewInMemoryRepository(Options{Clock: clock.Now, CandidateTTL: time.Minute})
 	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeCom, "shared-route")
@@ -30,6 +44,11 @@ func TestRepositoryIsTenantScopedAndCandidateLookupIsRedacted(t *testing.T) {
 	if first.BindingKey != second.BindingKey {
 		t.Fatal("different tenants did not accept the same binding key")
 	}
+	return tenantScopedSetup{repo: repo, first: first, second: second, routeDigest: routeDigest}
+}
+
+func assertTenantScopedBindingRules(t *testing.T, repo *InMemoryRepository, first, second *channels.Binding, routeDigest string) {
+	t.Helper()
 	if _, err := repo.Get(context.Background(), second.TenantID, first.BindingID); !errors.Is(err, channels.ErrNotFound) {
 		t.Fatalf("cross-tenant Binding lookup was not isolated: %v", err)
 	}
@@ -39,10 +58,15 @@ func TestRepositoryIsTenantScopedAndCandidateLookupIsRedacted(t *testing.T) {
 	if _, _, err := repo.Create(context.Background(), bindingInput(second.TenantID, "other", "corp-one", routeDigest)); err != nil {
 		t.Fatal(err)
 	}
-	first, _, err = repo.Activate(context.Background(), channels.TransitionStatusInput{TenantID: first.TenantID, BindingID: first.BindingID, ExpectedVersion: first.Version, Metadata: validMetadata()})
+	activated, _, err := repo.Activate(context.Background(), channels.TransitionStatusInput{TenantID: first.TenantID, BindingID: first.BindingID, ExpectedVersion: first.Version, Metadata: validMetadata()})
 	if err != nil {
 		t.Fatal(err)
 	}
+	*first = *activated
+}
+
+func assertCandidateLookupIsOpaqueAndRedacted(t *testing.T, repo *InMemoryRepository, first, second *channels.Binding, routeDigest string) {
+	t.Helper()
 	third, _, err := repo.Create(context.Background(), bindingInput(second.TenantID, "other-active", "corp-one", routeDigest))
 	if err != nil {
 		t.Fatal(err)
@@ -83,6 +107,10 @@ func TestRepositoryIsTenantScopedAndCandidateLookupIsRedacted(t *testing.T) {
 	if _, err := repo.LookupCandidates(context.Background(), channels.Channel("unknown"), routeDigest); !errors.Is(err, channels.ErrCandidateUnavailable) {
 		t.Fatalf("invalid channel did not use generic unavailable error: %v", err)
 	}
+}
+
+func assertRepositoryReturnsDefensiveBindingCopies(t *testing.T, repo *InMemoryRepository, first *channels.Binding) {
+	t.Helper()
 
 	stored, err := repo.Get(context.Background(), first.TenantID, first.BindingID)
 	if err != nil {
