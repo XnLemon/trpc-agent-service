@@ -39,7 +39,7 @@ import (
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
-	tenantinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
+	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -148,7 +148,7 @@ func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	tenantRepo := tenantinmemory.NewRepository()
+	tenantRepo := tenantpostgres.NewRepository(db)
 	root, err := tenantRepo.Create(ctx, tenant.CreateInput{TenantKey: fmt.Sprintf("wecom-e2e-%d", time.Now().UnixNano()), DisplayName: "WeCom E2E", AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1})
 	if err != nil {
 		t.Fatal(err)
