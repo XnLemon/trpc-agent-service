@@ -449,56 +449,21 @@ func (c *ProviderCatalog) NormalizeBindings(bindings []CapabilityBinding) ([]Cap
 }
 
 func compileProviderSpec(spec ProviderSpec) (compiledProviderSpec, []Capability, error) {
-	provider := strings.ToLower(strings.TrimSpace(spec.Provider))
-	if provider != spec.Provider || !validProviderName(provider) {
-		return compiledProviderSpec{}, nil, fmt.Errorf("%w: provider schema name must be normalized", ErrInvalid)
+	provider, err := compileProviderName(spec.Provider)
+	if err != nil {
+		return compiledProviderSpec{}, nil, err
 	}
-	if len(spec.Capabilities) == 0 {
-		return compiledProviderSpec{}, nil, fmt.Errorf("%w: provider schema requires capabilities", ErrInvalid)
+	capabilities, err := compileCapabilities(spec.Capabilities)
+	if err != nil {
+		return compiledProviderSpec{}, nil, err
 	}
-	capabilities := make([]Capability, 0, len(spec.Capabilities))
-	seenCapabilities := make(map[Capability]struct{}, len(spec.Capabilities))
-	for _, capability := range spec.Capabilities {
-		if !validCapability(capability) {
-			return compiledProviderSpec{}, nil, fmt.Errorf("%w: provider schema has unknown capability", ErrInvalid)
-		}
-		if _, exists := seenCapabilities[capability]; exists {
-			return compiledProviderSpec{}, nil, fmt.Errorf("%w: provider schema repeats capability %q", ErrInvalid, capability)
-		}
-		seenCapabilities[capability] = struct{}{}
-		capabilities = append(capabilities, capability)
+	schemes, err := compileEndpointSchema(spec.EndpointPolicy, spec.SecretRefPolicy, spec.EndpointSchemes)
+	if err != nil {
+		return compiledProviderSpec{}, nil, err
 	}
-	if !validFieldPolicy(spec.EndpointPolicy) || !validFieldPolicy(spec.SecretRefPolicy) {
-		return compiledProviderSpec{}, nil, fmt.Errorf("%w: provider schema has invalid field policy", ErrInvalid)
-	}
-	schemes := make(map[string]struct{}, len(spec.EndpointSchemes))
-	for _, scheme := range spec.EndpointSchemes {
-		normalized := strings.ToLower(strings.TrimSpace(scheme))
-		if normalized != scheme || !validScheme(normalized) {
-			return compiledProviderSpec{}, nil, fmt.Errorf("%w: endpoint scheme must be normalized", ErrInvalid)
-		}
-		if _, exists := schemes[normalized]; exists {
-			return compiledProviderSpec{}, nil, fmt.Errorf("%w: duplicate endpoint scheme", ErrInvalid)
-		}
-		schemes[normalized] = struct{}{}
-	}
-	if spec.EndpointPolicy == FieldForbidden && len(schemes) != 0 {
-		return compiledProviderSpec{}, nil, fmt.Errorf("%w: forbidden endpoint cannot declare schemes", ErrInvalid)
-	}
-	if spec.EndpointPolicy != FieldForbidden && len(schemes) == 0 {
-		return compiledProviderSpec{}, nil, fmt.Errorf("%w: endpoint schema requires an allowed scheme", ErrInvalid)
-	}
-	options := make(map[string]OptionSpec, len(spec.Options))
-	for key, optionSpec := range spec.Options {
-		normalizedKey := strings.ToLower(strings.TrimSpace(key))
-		if normalizedKey != key || !validOptionKey(normalizedKey) || sensitiveOptionKey(normalizedKey) {
-			return compiledProviderSpec{}, nil, fmt.Errorf("%w: provider schema has invalid or sensitive option key", ErrInvalid)
-		}
-		compiledOption, err := compileOptionSpec(optionSpec)
-		if err != nil {
-			return compiledProviderSpec{}, nil, fmt.Errorf("%w: invalid schema for option %q", err, key)
-		}
-		options[key] = compiledOption
+	options, err := compileProviderOptions(spec.Options)
+	if err != nil {
+		return compiledProviderSpec{}, nil, err
 	}
 	return compiledProviderSpec{
 		provider: provider, endpointPolicy: spec.EndpointPolicy, endpointSchemes: schemes,
@@ -507,38 +472,20 @@ func compileProviderSpec(spec ProviderSpec) (compiledProviderSpec, []Capability,
 }
 
 func compileOptionSpec(spec OptionSpec) (OptionSpec, error) {
-	if spec.Kind != OptionString && spec.Kind != OptionBoolean && spec.Kind != OptionInteger && spec.Kind != OptionEnum {
-		return OptionSpec{}, fmt.Errorf("%w: unknown option kind", ErrInvalid)
-	}
-	if spec.Required && spec.DefaultValue != nil {
-		return OptionSpec{}, fmt.Errorf("%w: required option cannot have a default", ErrInvalid)
+	if err := validateOptionShape(spec); err != nil {
+		return OptionSpec{}, err
 	}
 	compiled := spec
 	compiled.DefaultValue = cloneString(spec.DefaultValue)
 	compiled.MinInteger = cloneInt64(spec.MinInteger)
 	compiled.MaxInteger = cloneInt64(spec.MaxInteger)
 	compiled.AllowedValues = append([]string(nil), spec.AllowedValues...)
-	if spec.Kind != OptionInteger && (spec.MinInteger != nil || spec.MaxInteger != nil) {
-		return OptionSpec{}, fmt.Errorf("%w: integer bounds require an integer option", ErrInvalid)
-	}
-	if spec.MinInteger != nil && spec.MaxInteger != nil && *spec.MinInteger > *spec.MaxInteger {
-		return OptionSpec{}, fmt.Errorf("%w: option minimum exceeds maximum", ErrInvalid)
+	if err := validateIntegerBounds(spec); err != nil {
+		return OptionSpec{}, err
 	}
 	if spec.Kind == OptionEnum {
-		if len(spec.AllowedValues) == 0 {
-			return OptionSpec{}, fmt.Errorf("%w: enum option requires allowed values", ErrInvalid)
-		}
-		seen := make(map[string]struct{}, len(spec.AllowedValues))
-		for i, value := range spec.AllowedValues {
-			value = strings.ToLower(strings.TrimSpace(value))
-			if value == "" || len(value) > maxOptionValueLength || hasControl(value) {
-				return OptionSpec{}, fmt.Errorf("%w: enum value is invalid", ErrInvalid)
-			}
-			if _, exists := seen[value]; exists {
-				return OptionSpec{}, fmt.Errorf("%w: duplicate enum value", ErrInvalid)
-			}
-			seen[value] = struct{}{}
-			compiled.AllowedValues[i] = value
+		if err := normalizeEnumValues(&compiled); err != nil {
+			return OptionSpec{}, err
 		}
 	} else if len(spec.AllowedValues) != 0 {
 		return OptionSpec{}, fmt.Errorf("%w: allowed values require an enum option", ErrInvalid)
@@ -551,6 +498,112 @@ func compileOptionSpec(spec OptionSpec) (OptionSpec, error) {
 		compiled.DefaultValue = &normalized
 	}
 	return compiled, nil
+}
+
+func validateOptionShape(spec OptionSpec) error {
+	if spec.Kind != OptionString && spec.Kind != OptionBoolean && spec.Kind != OptionInteger && spec.Kind != OptionEnum {
+		return fmt.Errorf("%w: unknown option kind", ErrInvalid)
+	}
+	if spec.Required && spec.DefaultValue != nil {
+		return fmt.Errorf("%w: required option cannot have a default", ErrInvalid)
+	}
+	return nil
+}
+
+func validateIntegerBounds(spec OptionSpec) error {
+	if spec.Kind != OptionInteger && (spec.MinInteger != nil || spec.MaxInteger != nil) {
+		return fmt.Errorf("%w: integer bounds require an integer option", ErrInvalid)
+	}
+	if spec.MinInteger != nil && spec.MaxInteger != nil && *spec.MinInteger > *spec.MaxInteger {
+		return fmt.Errorf("%w: option minimum exceeds maximum", ErrInvalid)
+	}
+	return nil
+}
+
+func normalizeEnumValues(compiled *OptionSpec) error {
+	if len(compiled.AllowedValues) == 0 {
+		return fmt.Errorf("%w: enum option requires allowed values", ErrInvalid)
+	}
+	seen := make(map[string]struct{}, len(compiled.AllowedValues))
+	for i, value := range compiled.AllowedValues {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" || len(value) > maxOptionValueLength || hasControl(value) {
+			return fmt.Errorf("%w: enum value is invalid", ErrInvalid)
+		}
+		if _, exists := seen[value]; exists {
+			return fmt.Errorf("%w: duplicate enum value", ErrInvalid)
+		}
+		seen[value] = struct{}{}
+		compiled.AllowedValues[i] = value
+	}
+	return nil
+}
+
+func compileProviderName(raw string) (string, error) {
+	provider := strings.ToLower(strings.TrimSpace(raw))
+	if provider != raw || !validProviderName(provider) {
+		return "", fmt.Errorf("%w: provider schema name must be normalized", ErrInvalid)
+	}
+	return provider, nil
+}
+
+func compileCapabilities(raw []Capability) ([]Capability, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("%w: provider schema requires capabilities", ErrInvalid)
+	}
+	capabilities := make([]Capability, 0, len(raw))
+	seen := make(map[Capability]struct{}, len(raw))
+	for _, capability := range raw {
+		if !validCapability(capability) {
+			return nil, fmt.Errorf("%w: provider schema has unknown capability", ErrInvalid)
+		}
+		if _, exists := seen[capability]; exists {
+			return nil, fmt.Errorf("%w: provider schema repeats capability %q", ErrInvalid, capability)
+		}
+		seen[capability] = struct{}{}
+		capabilities = append(capabilities, capability)
+	}
+	return capabilities, nil
+}
+
+func compileEndpointSchema(endpointPolicy, secretRefPolicy FieldPolicy, raw []string) (map[string]struct{}, error) {
+	if !validFieldPolicy(endpointPolicy) || !validFieldPolicy(secretRefPolicy) {
+		return nil, fmt.Errorf("%w: provider schema has invalid field policy", ErrInvalid)
+	}
+	schemes := make(map[string]struct{}, len(raw))
+	for _, scheme := range raw {
+		normalized := strings.ToLower(strings.TrimSpace(scheme))
+		if normalized != scheme || !validScheme(normalized) {
+			return nil, fmt.Errorf("%w: endpoint scheme must be normalized", ErrInvalid)
+		}
+		if _, exists := schemes[normalized]; exists {
+			return nil, fmt.Errorf("%w: duplicate endpoint scheme", ErrInvalid)
+		}
+		schemes[normalized] = struct{}{}
+	}
+	if endpointPolicy == FieldForbidden && len(schemes) != 0 {
+		return nil, fmt.Errorf("%w: forbidden endpoint cannot declare schemes", ErrInvalid)
+	}
+	if endpointPolicy != FieldForbidden && len(schemes) == 0 {
+		return nil, fmt.Errorf("%w: endpoint schema requires an allowed scheme", ErrInvalid)
+	}
+	return schemes, nil
+}
+
+func compileProviderOptions(raw map[string]OptionSpec) (map[string]OptionSpec, error) {
+	options := make(map[string]OptionSpec, len(raw))
+	for key, optionSpec := range raw {
+		normalizedKey := strings.ToLower(strings.TrimSpace(key))
+		if normalizedKey != key || !validOptionKey(normalizedKey) || sensitiveOptionKey(normalizedKey) {
+			return nil, fmt.Errorf("%w: provider schema has invalid or sensitive option key", ErrInvalid)
+		}
+		compiledOption, err := compileOptionSpec(optionSpec)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid schema for option %q", ErrInvalid, key)
+		}
+		options[key] = compiledOption
+	}
+	return options, nil
 }
 
 func (spec compiledProviderSpec) normalizeBinding(capability Capability, endpoint string, options map[string]string, secretRef string) (CapabilityBinding, error) {
@@ -614,11 +667,10 @@ func normalizeEndpoint(endpoint string, policy FieldPolicy, schemes map[string]s
 		return "", fmt.Errorf("%w: endpoint cannot contain a fragment", ErrInvalid)
 	}
 	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Hostname() == "" ||
-		parsed.Opaque != "" || strings.Contains(parsed.Host, ",") {
+	if err != nil || !validEndpointURL(parsed) {
 		return "", fmt.Errorf("%w: endpoint must be an absolute network URI", ErrInvalid)
 	}
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+	if endpointHasForbiddenParts(parsed) {
 		return "", fmt.Errorf("%w: endpoint cannot contain credentials, query, or fragment", ErrInvalid)
 	}
 	if hasControl(parsed.Path) {
@@ -638,6 +690,14 @@ func normalizeEndpoint(endpoint string, policy FieldPolicy, schemes map[string]s
 	return canonical, nil
 }
 
+func validEndpointURL(parsed *url.URL) bool {
+	return parsed != nil && parsed.Scheme != "" && parsed.Host != "" && parsed.Hostname() != "" && parsed.Opaque == "" && !strings.Contains(parsed.Host, ",")
+}
+
+func endpointHasForbiddenParts(parsed *url.URL) bool {
+	return parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != ""
+}
+
 func normalizeEndpointAuthority(parsed *url.URL) error {
 	authority := parsed.Host
 	hostname := parsed.Hostname()
@@ -650,57 +710,65 @@ func normalizeEndpointAuthority(parsed *url.URL) error {
 		port = strconv.FormatUint(portNumber, 10)
 	}
 	if strings.HasPrefix(authority, "[") {
-		closingBracket := strings.LastIndex(authority, "]")
-		if closingBracket < 0 {
-			return fmt.Errorf("%w: endpoint host is invalid", ErrInvalid)
-		}
-		suffix := authority[closingBracket+1:]
-		if suffix != "" && (!strings.HasPrefix(suffix, ":") || port == "") {
-			return fmt.Errorf("%w: endpoint port is invalid", ErrInvalid)
-		}
-		address, zone := hostname, ""
-		zoneIndex := strings.LastIndex(hostname, "%")
-		if zoneIndex >= 0 {
-			address, zone = hostname[:zoneIndex], hostname[zoneIndex+1:]
-		}
-		ip := net.ParseIP(address)
-		if ip == nil || !strings.Contains(address, ":") || (zoneIndex >= 0 && !validZone(zone)) {
-			return fmt.Errorf("%w: endpoint IPv6 host is invalid", ErrInvalid)
-		}
-		if mappedIPv4 := ip.To4(); mappedIPv4 != nil {
-			if zoneIndex >= 0 {
-				return fmt.Errorf("%w: IPv4-mapped endpoint cannot have a zone", ErrInvalid)
-			}
-			canonicalHostname := mappedIPv4.String()
-			if port != "" {
-				parsed.Host = net.JoinHostPort(canonicalHostname, port)
-			} else {
-				parsed.Host = canonicalHostname
-			}
-		} else {
-			canonicalHostname := ip.String()
-			if zoneIndex >= 0 {
-				canonicalHostname += "%" + zone
-			}
-			if port != "" {
-				parsed.Host = net.JoinHostPort(canonicalHostname, port)
-			} else {
-				parsed.Host = "[" + canonicalHostname + "]"
-			}
-		}
+		return normalizeIPv6Authority(parsed, authority, hostname, port)
 	} else {
-		if strings.Count(authority, ":") > 1 || (strings.Contains(authority, ":") && port == "") {
-			return fmt.Errorf("%w: endpoint host or port is invalid", ErrInvalid)
+		return normalizeHostAuthority(parsed, authority, hostname, port)
+	}
+}
+
+func normalizeIPv6Authority(parsed *url.URL, authority, hostname, port string) error {
+	closingBracket := strings.LastIndex(authority, "]")
+	if closingBracket < 0 {
+		return fmt.Errorf("%w: endpoint host is invalid", ErrInvalid)
+	}
+	suffix := authority[closingBracket+1:]
+	if suffix != "" && (!strings.HasPrefix(suffix, ":") || port == "") {
+		return fmt.Errorf("%w: endpoint port is invalid", ErrInvalid)
+	}
+	address, zone := hostname, ""
+	zoneIndex := strings.LastIndex(hostname, "%")
+	if zoneIndex >= 0 {
+		address, zone = hostname[:zoneIndex], hostname[zoneIndex+1:]
+	}
+	ip := net.ParseIP(address)
+	if ip == nil || !strings.Contains(address, ":") || (zoneIndex >= 0 && !validZone(zone)) {
+		return fmt.Errorf("%w: endpoint IPv6 host is invalid", ErrInvalid)
+	}
+	if mappedIPv4 := ip.To4(); mappedIPv4 != nil {
+		if zoneIndex >= 0 {
+			return fmt.Errorf("%w: IPv4-mapped endpoint cannot have a zone", ErrInvalid)
 		}
-		if net.ParseIP(hostname) == nil && !validDNSHostname(hostname) {
-			return fmt.Errorf("%w: endpoint hostname is invalid", ErrInvalid)
-		}
-		hostname = strings.ToLower(hostname)
 		if port != "" {
-			parsed.Host = net.JoinHostPort(hostname, port)
+			parsed.Host = net.JoinHostPort(mappedIPv4.String(), port)
 		} else {
-			parsed.Host = hostname
+			parsed.Host = mappedIPv4.String()
 		}
+		return nil
+	}
+	canonicalHostname := ip.String()
+	if zoneIndex >= 0 {
+		canonicalHostname += "%" + zone
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(canonicalHostname, port)
+	} else {
+		parsed.Host = "[" + canonicalHostname + "]"
+	}
+	return nil
+}
+
+func normalizeHostAuthority(parsed *url.URL, authority, hostname, port string) error {
+	if strings.Count(authority, ":") > 1 || (strings.Contains(authority, ":") && port == "") {
+		return fmt.Errorf("%w: endpoint host or port is invalid", ErrInvalid)
+	}
+	if net.ParseIP(hostname) == nil && !validDNSHostname(hostname) {
+		return fmt.Errorf("%w: endpoint hostname is invalid", ErrInvalid)
+	}
+	hostname = strings.ToLower(hostname)
+	if port != "" {
+		parsed.Host = net.JoinHostPort(hostname, port)
+	} else {
+		parsed.Host = hostname
 	}
 	return nil
 }

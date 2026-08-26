@@ -10,12 +10,25 @@ import (
 )
 
 func TestInMemoryErrorAndClockBranches(t *testing.T) {
-	if repository := NewInMemoryRepository(Options{CandidateTTL: 10 * time.Minute}); repository.candidateTTL != channels.MaxCandidateLifetime {
-		t.Fatalf("candidate TTL was not bounded: %s", repository.candidateTTL)
-	}
+	assertCandidateTTLCapped(t)
 	clock := &testClock{now: time.Now().UTC().Add(time.Hour)}
 	repo := NewInMemoryRepository(Options{Clock: clock.Now, CandidateTTL: time.Second})
 	routeDigest, _ := channels.DigestPublicRouteKey(channels.ChannelWeCom, "edge-route")
+	first := assertActiveBindingCollisionPaths(t, repo, routeDigest)
+	candidate := assertCandidateConsumptionBoundaries(t, repo, clock, routeDigest)
+	assertRepositoryMissingAndClockBoundaries(t, repo, first)
+	assertRepositoryCancellationBoundaries(t, repo, first, candidate, routeDigest)
+}
+
+func assertCandidateTTLCapped(t *testing.T) {
+	t.Helper()
+	if repository := NewInMemoryRepository(Options{CandidateTTL: 10 * time.Minute}); repository.candidateTTL != channels.MaxCandidateLifetime {
+		t.Fatalf("candidate TTL was not bounded: %s", repository.candidateTTL)
+	}
+}
+
+func assertActiveBindingCollisionPaths(t *testing.T, repo *InMemoryRepository, routeDigest string) *channels.Binding {
+	t.Helper()
 	first := mustCreate(t, repo, bindingInput("t_00000000000000000000000006", "edge-first", "corp-edge-first", routeDigest))
 	first, _, err := repo.Activate(context.Background(), channels.TransitionStatusInput{TenantID: first.TenantID, BindingID: first.BindingID, ExpectedVersion: first.Version, Metadata: validMetadata()})
 	if err != nil {
@@ -37,7 +50,11 @@ func TestInMemoryErrorAndClockBranches(t *testing.T) {
 	if _, _, err := repo.UpdateConfiguration(context.Background(), channels.UpdateConfigurationInput{TenantID: activeSecond.TenantID, BindingID: activeSecond.BindingID, ExpectedVersion: activeSecond.Version, ProviderAccountID: first.ProviderAccountID, PublicRouteKeyDigest: routeDigest, AppID: activeSecond.AppID, SecretRef: activeSecond.SecretRef, Protocol: activeSecond.Protocol, Metadata: validMetadata()}); !errors.Is(err, channels.ErrDuplicateKey) {
 		t.Fatalf("active account collision during update returned %v", err)
 	}
+	return first
+}
 
+func assertCandidateConsumptionBoundaries(t *testing.T, repo *InMemoryRepository, clock *testClock, routeDigest string) channels.CandidateBindingContext {
+	t.Helper()
 	candidates, err := repo.LookupCandidates(context.Background(), channels.ChannelWeCom, routeDigest)
 	if err != nil || len(candidates) != 2 {
 		t.Fatalf("expected two edge candidates, got %d: %v", len(candidates), err)
@@ -69,6 +86,11 @@ func TestInMemoryErrorAndClockBranches(t *testing.T) {
 	if _, err := repo.LookupCandidates(context.Background(), channels.ChannelWeCom, "bad"); !errors.Is(err, channels.ErrCandidateUnavailable) {
 		t.Fatalf("invalid candidate lookup returned %v", err)
 	}
+	return candidate
+}
+
+func assertRepositoryMissingAndClockBoundaries(t *testing.T, repo *InMemoryRepository, first *channels.Binding) {
+	t.Helper()
 	if _, err := repo.Get(context.Background(), first.TenantID, "cb_00000000000000000000000000"); !errors.Is(err, channels.ErrNotFound) {
 		t.Fatalf("unknown Binding lookup returned %v", err)
 	}
@@ -86,6 +108,10 @@ func TestInMemoryErrorAndClockBranches(t *testing.T) {
 	if zeroClockRepo.nowUTC().IsZero() {
 		t.Fatal("zero repository clock was not replaced by wall clock")
 	}
+}
+
+func assertRepositoryCancellationBoundaries(t *testing.T, repo *InMemoryRepository, first *channels.Binding, candidate channels.CandidateBindingContext, routeDigest string) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := repo.Get(ctx, first.TenantID, first.BindingID); !errors.Is(err, context.Canceled) {

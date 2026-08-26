@@ -228,9 +228,29 @@ func NewTenant(input CreateInput) (*Tenant, error) {
 func (t Tenant) CanAcceptExecution() bool { return t.Status == StatusActive }
 
 func validateConfiguration(displayName string, rate, concurrent, tokens, spend *int64, currency string, retention int, masking LogMaskingLevel, sampling float64) error {
+	if err := validateDisplayName(displayName); err != nil {
+		return err
+	}
+	if err := validateLimits(rate, concurrent, tokens, spend); err != nil {
+		return err
+	}
+	if err := validateCurrencyLimits(spend, currency); err != nil {
+		return err
+	}
+	if err := validateTelemetryConfiguration(retention, masking, sampling); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateDisplayName(displayName string) error {
 	if n := len([]rune(strings.TrimSpace(displayName))); n < 1 || n > 200 {
 		return fmt.Errorf("%w: display name must contain 1-200 characters", ErrInvalid)
 	}
+	return nil
+}
+
+func validateLimits(rate, concurrent, tokens, spend *int64) error {
 	if rate != nil && *rate < 0 {
 		return fmt.Errorf("%w: rate limit cannot be negative", ErrInvalid)
 	}
@@ -243,12 +263,20 @@ func validateConfiguration(displayName string, rate, concurrent, tokens, spend *
 	if spend != nil && *spend < 0 {
 		return fmt.Errorf("%w: spend limit cannot be negative", ErrInvalid)
 	}
+	return nil
+}
+
+func validateCurrencyLimits(spend *int64, currency string) error {
 	if spend != nil && !validCurrency(currency) {
 		return fmt.Errorf("%w: spend limit requires an uppercase ISO-4217 currency", ErrInvalid)
 	}
 	if currency != "" && !validCurrency(currency) {
 		return fmt.Errorf("%w: billing currency must be three uppercase letters", ErrInvalid)
 	}
+	return nil
+}
+
+func validateTelemetryConfiguration(retention int, masking LogMaskingLevel, sampling float64) error {
 	if retention <= 0 {
 		return fmt.Errorf("%w: audit retention must be positive", ErrInvalid)
 	}

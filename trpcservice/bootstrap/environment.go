@@ -23,23 +23,28 @@ import (
 )
 
 const (
-	envPostgresDSN       = "TRPC_POSTGRES_DSN"
-	envAPIToken          = "TRPC_API_TOKEN"
-	envTenantID          = "TRPC_TENANT_ID"
-	envAppID             = "TRPC_APP_ID"
-	envAdminToken        = "TRPC_ADMIN_TOKEN"
-	envAdminTenants      = "TRPC_ADMIN_TENANTS"
-	envSubjectID         = "TRPC_SUBJECT_ID"
+	envPostgresDSN = "TRPC_POSTGRES_DSN"
+	// #nosec G101 -- environment variable name, not a secret.
+	envAPIToken = "TRPC_API_TOKEN"
+	envTenantID = "TRPC_TENANT_ID"
+	envAppID    = "TRPC_APP_ID"
+	// #nosec G101 -- environment variable name, not a secret.
+	envAdminToken   = "TRPC_ADMIN_TOKEN"
+	envAdminTenants = "TRPC_ADMIN_TENANTS"
+	envSubjectID    = "TRPC_SUBJECT_ID"
+	// #nosec G101 -- environment variable name, not a secret.
 	envModelAPIKey       = "TRPC_MODEL_API_KEY"
 	envModelProvider     = "TRPC_MODEL_PROVIDER"
 	envModelNames        = "TRPC_MODEL_NAMES"
 	envModelEndpointHost = "TRPC_MODEL_ENDPOINT_HOSTS"
-	envModelSecretRef    = "TRPC_MODEL_SECRET_REF"
-	envSessionBackend    = "TRPC_SESSION_BACKEND"
+	// #nosec G101 -- environment variable name, not a secret.
+	envModelSecretRef = "TRPC_MODEL_SECRET_REF"
+	envSessionBackend = "TRPC_SESSION_BACKEND"
 
-	defaultModelProvider  = "openai"
-	defaultModelNames     = "gpt-4o-mini"
-	defaultEndpointHost   = "api.openai.com"
+	defaultModelProvider = "openai"
+	defaultModelNames    = "gpt-4o-mini"
+	defaultEndpointHost  = "api.openai.com"
+	// #nosec G101 -- symbolic secret reference, not secret material.
 	defaultModelSecretRef = "env/trpc-model-api-key"
 	defaultSubjectID      = "service"
 )

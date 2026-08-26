@@ -167,89 +167,107 @@ func (registry *RunnerRegistry) Acquire(ctx context.Context, plan runtime.Execut
 	}
 
 	for {
-		registry.mu.Lock()
-		if registry.closed {
-			registry.mu.Unlock()
-			return nil, ErrClosed
+		lease, retry, err := registry.acquireOnce(ctx, plan, key)
+		if err != nil {
+			return nil, err
 		}
-		if entry := registry.entries[key]; entry != nil && !entry.invalidated {
-			registry.retainLocked(entry)
-			registry.mu.Unlock()
-			return &RunnerLease{registry: registry, entry: entry}, nil
+		if !retry {
+			return lease, nil
 		}
-		if build := registry.pending[key]; build != nil {
-			done := build.done
-			registry.mu.Unlock()
-			select {
-			case <-done:
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
-				continue
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
+	}
+}
 
-		toClose := registry.evictIdleLocked(registry.now())
-		if registry.slotCountLocked() >= registry.maxEntries {
-			toClose = append(toClose, registry.evictCapacityLocked()...)
-		}
-		if registry.slotCountLocked() >= registry.maxEntries {
-			registry.mu.Unlock()
-			closeEntries(toClose)
-			return nil, ErrRunnerCapacity
-		}
-		build := &runnerBuild{done: make(chan struct{})}
-		registry.pending[key] = build
-		factory := registry.factory
+func (registry *RunnerRegistry) acquireOnce(ctx context.Context, plan runtime.ExecutionPlan, key runtime.CacheKey) (*RunnerLease, bool, error) {
+	registry.mu.Lock()
+	if registry.closed {
+		registry.mu.Unlock()
+		return nil, false, ErrClosed
+	}
+	if entry := registry.entries[key]; entry != nil && !entry.invalidated {
+		registry.retainLocked(entry)
+		registry.mu.Unlock()
+		return &RunnerLease{registry: registry, entry: entry}, false, nil
+	}
+	if build := registry.pending[key]; build != nil {
+		done := build.done
+		registry.mu.Unlock()
+		retry, err := waitForRunnerBuild(ctx, done)
+		return nil, retry, err
+	}
+
+	toClose := registry.evictIdleLocked(registry.now())
+	if registry.slotCountLocked() >= registry.maxEntries {
+		toClose = append(toClose, registry.evictCapacityLocked()...)
+	}
+	if registry.slotCountLocked() >= registry.maxEntries {
 		registry.mu.Unlock()
 		closeEntries(toClose)
-
-		runnerValue, factoryErr := factory(ctx, plan)
-		factoryErr = normalizeRunnerFactoryError(factoryErr)
-		if runnerValue == nil && factoryErr == nil {
-			factoryErr = ErrRunnerUnavailable
-		}
-
-		registry.mu.Lock()
-		delete(registry.pending, key)
-		invalidated := build.invalidated
-		closed := registry.closed
-		var entry *runnerEntry
-		if factoryErr == nil {
-			if err := ctx.Err(); err != nil {
-				factoryErr = err
-			}
-		}
-		if factoryErr == nil && (closed || invalidated) {
-			if closed {
-				factoryErr = ErrClosed
-			} else {
-				factoryErr = errRunnerInvalidated
-			}
-		}
-		if factoryErr == nil {
-			entry = &runnerEntry{runner: runnerValue, refs: 1, lastUsed: registry.now(), zero: make(chan struct{})}
-			registry.entries[key] = entry
-		}
-		close(build.done)
-		registry.mu.Unlock()
-
-		if factoryErr != nil {
-			if runnerValue != nil {
-				closeEntries([]*runnerEntry{{runner: runnerValue}})
-			}
-			if errors.Is(factoryErr, errRunnerInvalidated) {
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
-				continue
-			}
-			return nil, factoryErr
-		}
-		return &RunnerLease{registry: registry, entry: entry}, nil
+		return nil, false, ErrRunnerCapacity
 	}
+	build := &runnerBuild{done: make(chan struct{})}
+	registry.pending[key] = build
+	factory := registry.factory
+	registry.mu.Unlock()
+	closeEntries(toClose)
+	return registry.finishRunnerBuild(ctx, plan, key, build, factory)
+}
+
+func waitForRunnerBuild(ctx context.Context, done <-chan struct{}) (bool, error) {
+	select {
+	case <-done:
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return true, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+}
+
+func (registry *RunnerRegistry) finishRunnerBuild(ctx context.Context, plan runtime.ExecutionPlan, key runtime.CacheKey, build *runnerBuild, factory RunnerFactory) (*RunnerLease, bool, error) {
+	runnerValue, factoryErr := factory(ctx, plan)
+	factoryErr = normalizeRunnerFactoryError(factoryErr)
+	if runnerValue == nil && factoryErr == nil {
+		factoryErr = ErrRunnerUnavailable
+	}
+
+	registry.mu.Lock()
+	delete(registry.pending, key)
+	invalidated := build.invalidated
+	closed := registry.closed
+	var entry *runnerEntry
+	if factoryErr == nil {
+		if err := ctx.Err(); err != nil {
+			factoryErr = err
+		}
+	}
+	if factoryErr == nil && (closed || invalidated) {
+		if closed {
+			factoryErr = ErrClosed
+		} else {
+			factoryErr = errRunnerInvalidated
+		}
+	}
+	if factoryErr == nil {
+		entry = &runnerEntry{runner: runnerValue, refs: 1, lastUsed: registry.now(), zero: make(chan struct{})}
+		registry.entries[key] = entry
+	}
+	close(build.done)
+	registry.mu.Unlock()
+
+	if factoryErr != nil {
+		if runnerValue != nil {
+			closeEntries([]*runnerEntry{{runner: runnerValue}})
+		}
+		if errors.Is(factoryErr, errRunnerInvalidated) {
+			if err := ctx.Err(); err != nil {
+				return nil, false, err
+			}
+			return nil, true, nil
+		}
+		return nil, false, factoryErr
+	}
+	return &RunnerLease{registry: registry, entry: entry}, false, nil
 }
 
 // Invalidate prevents new leases from using key. A borrowed old Runner is

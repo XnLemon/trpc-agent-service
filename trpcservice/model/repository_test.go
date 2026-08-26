@@ -17,6 +17,13 @@ func TestPrepareProfileChangesValidateAuditAndLifecycleEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	metadata := ChangeMetadata{ActorType: " admin ", ActorID: " user-1 ", Reason: " test change ", CorrelationID: " corr-1 "}
+	assertPreparedCreatedChange(t, profile, catalog, metadata)
+	assertPreparedConfigurationChange(t, profile, catalog, metadata)
+	assertPreparedStatusChange(t, profile, catalog, metadata)
+}
+
+func assertPreparedCreatedChange(t *testing.T, profile *Profile, catalog *ProviderCatalog, metadata ChangeMetadata) {
+	t.Helper()
 	createdEvent, err := PrepareCreatedChange(*profile, catalog, metadata)
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +51,10 @@ func TestPrepareProfileChangesValidateAuditAndLifecycleEvents(t *testing.T) {
 	if _, err := PrepareCreatedChange(badCreated, catalog, metadata); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("uninitialized created profile error = %v", err)
 	}
+}
 
+func assertPreparedConfigurationChange(t *testing.T, profile *Profile, catalog *ProviderCatalog, metadata ChangeMetadata) {
+	t.Helper()
 	updateInput := UpdateConfigurationInput{
 		TenantID: profile.TenantID, ProfileID: profile.ProfileID, ExpectedVersion: profile.Version,
 		DisplayName: "Updated", Description: "Updated description", SchemaVersion: SchemaVersionV1,
@@ -100,7 +110,12 @@ func TestPrepareProfileChangesValidateAuditAndLifecycleEvents(t *testing.T) {
 	if _, _, err := PrepareConfigurationChange(disabled, updateInput, catalog, profile.UpdatedAt.Add(time.Second)); !errors.Is(err, ErrDisabled) {
 		t.Fatalf("disabled update error = %v", err)
 	}
+}
 
+func assertPreparedStatusChange(t *testing.T, profile *Profile, catalog *ProviderCatalog, metadata ChangeMetadata) {
+	t.Helper()
+	disabled := profile.Clone()
+	disabled.Status = StatusDisabled
 	transitionInput := TransitionStatusInput{
 		TenantID: profile.TenantID, ProfileID: profile.ProfileID, ExpectedVersion: profile.Version,
 		NextStatus: StatusSuspended, Metadata: metadata,

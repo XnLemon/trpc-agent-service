@@ -35,6 +35,14 @@ type PlanResolver struct {
 	backendCatalog *backend.ProviderCatalog
 }
 
+type resolvedPlanInputs struct {
+	tenantSnapshot tenant.ConfigurationSnapshot
+	app            *agent.App
+	revision       *agent.Revision
+	model          *model.Profile
+	backend        *backend.Profile
+}
+
 // NewPlanResolver validates the control-plane dependencies.
 func NewPlanResolver(config PlanResolverConfig) (*PlanResolver, error) {
 	if config.Tenants == nil || config.Apps == nil || config.Models == nil || config.Backends == nil || config.ModelCatalog == nil || config.BackendCatalog == nil {
@@ -78,46 +86,11 @@ func (resolver *PlanResolver) Resolve(ctx context.Context, principal Principal) 
 	if err := principal.Validate(); err != nil {
 		return runtime.ExecutionPlan{}, ErrUnauthenticated
 	}
-	tenantValue, err := resolver.tenants.Get(ctx, principal.TenantID())
-	if err != nil || tenantValue == nil {
-		return runtime.ExecutionPlan{}, resolver.planError(ctx)
-	}
-	if err := ctx.Err(); err != nil {
-		return runtime.ExecutionPlan{}, err
-	}
-	tenantSnapshot, err := tenant.NewConfigurationSnapshot(tenantValue)
+	inputs, err := resolver.resolveInputs(ctx, principal)
 	if err != nil {
-		return runtime.ExecutionPlan{}, ErrPlanUnavailable
-	}
-	appValue, err := resolver.apps.Get(ctx, principal.TenantID(), principal.AppID())
-	if err != nil || appValue == nil || appValue.CurrentRevision == nil {
-		return runtime.ExecutionPlan{}, resolver.planError(ctx)
-	}
-	if err := ctx.Err(); err != nil {
 		return runtime.ExecutionPlan{}, err
 	}
-	revisionValue, err := resolver.apps.GetRevision(ctx, principal.TenantID(), principal.AppID(), *appValue.CurrentRevision)
-	if err != nil || revisionValue == nil {
-		return runtime.ExecutionPlan{}, resolver.planError(ctx)
-	}
-	modelValue, err := resolver.models.Get(ctx, principal.TenantID(), revisionValue.ModelProfileID)
-	if err != nil || modelValue == nil {
-		return runtime.ExecutionPlan{}, resolver.planError(ctx)
-	}
-	if err := ctx.Err(); err != nil {
-		return runtime.ExecutionPlan{}, err
-	}
-	if tenantValue.DefaultBackendProfileID == nil {
-		return runtime.ExecutionPlan{}, ErrPlanUnavailable
-	}
-	backendValue, err := resolver.backends.Get(ctx, principal.TenantID(), *tenantValue.DefaultBackendProfileID)
-	if err != nil || backendValue == nil {
-		return runtime.ExecutionPlan{}, resolver.planError(ctx)
-	}
-	if err := ctx.Err(); err != nil {
-		return runtime.ExecutionPlan{}, err
-	}
-	plan, err := runtime.NewExecutionPlan(tenantSnapshot, appValue, revisionValue, modelValue, resolver.modelCatalog, backendValue, resolver.backendCatalog)
+	plan, err := runtime.NewExecutionPlan(inputs.tenantSnapshot, inputs.app, inputs.revision, inputs.model, resolver.modelCatalog, inputs.backend, resolver.backendCatalog)
 	if err != nil {
 		return runtime.ExecutionPlan{}, ErrPlanUnavailable
 	}
@@ -128,6 +101,49 @@ func (resolver *PlanResolver) Resolve(ctx context.Context, principal Principal) 
 		return runtime.ExecutionPlan{}, err
 	}
 	return plan, nil
+}
+
+func (resolver *PlanResolver) resolveInputs(ctx context.Context, principal Principal) (resolvedPlanInputs, error) {
+	tenantValue, err := resolver.tenants.Get(ctx, principal.TenantID())
+	if err != nil || tenantValue == nil {
+		return resolvedPlanInputs{}, resolver.planError(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return resolvedPlanInputs{}, err
+	}
+	tenantSnapshot, err := tenant.NewConfigurationSnapshot(tenantValue)
+	if err != nil {
+		return resolvedPlanInputs{}, ErrPlanUnavailable
+	}
+	appValue, err := resolver.apps.Get(ctx, principal.TenantID(), principal.AppID())
+	if err != nil || appValue == nil || appValue.CurrentRevision == nil {
+		return resolvedPlanInputs{}, resolver.planError(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return resolvedPlanInputs{}, err
+	}
+	revisionValue, err := resolver.apps.GetRevision(ctx, principal.TenantID(), principal.AppID(), *appValue.CurrentRevision)
+	if err != nil || revisionValue == nil {
+		return resolvedPlanInputs{}, resolver.planError(ctx)
+	}
+	modelValue, err := resolver.models.Get(ctx, principal.TenantID(), revisionValue.ModelProfileID)
+	if err != nil || modelValue == nil {
+		return resolvedPlanInputs{}, resolver.planError(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return resolvedPlanInputs{}, err
+	}
+	if tenantValue.DefaultBackendProfileID == nil {
+		return resolvedPlanInputs{}, ErrPlanUnavailable
+	}
+	backendValue, err := resolver.backends.Get(ctx, principal.TenantID(), *tenantValue.DefaultBackendProfileID)
+	if err != nil || backendValue == nil {
+		return resolvedPlanInputs{}, resolver.planError(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return resolvedPlanInputs{}, err
+	}
+	return resolvedPlanInputs{tenantSnapshot: tenantSnapshot, app: appValue, revision: revisionValue, model: modelValue, backend: backendValue}, nil
 }
 
 func (resolver *PlanResolver) planError(ctx context.Context) error {

@@ -152,12 +152,8 @@ func (r *FakeCandidateResolver) Verify(ctx context.Context, handle ScopedVerifie
 		return VerifiedBinding{}, ErrVerificationFailed
 	}
 	now := r.nowUTC()
-	r.mu.Lock()
-	r.pruneHandlesLocked(now)
-	state, exists := r.handles[handle.Token()]
-	delete(r.handles, handle.Token())
-	r.mu.Unlock()
-	if !exists || state.purpose != handle.Purpose || !state.expiresAt.Equal(handle.ExpiresAt) || handle.Purpose != request.Purpose || !now.Before(handle.ExpiresAt) {
+	state, exists := r.consumeHandle(handle.Token(), now)
+	if !validHandle(state, exists, handle, request, now) {
 		return VerifiedBinding{}, ErrVerificationFailed
 	}
 	if !validFakeVerificationRequest(request, now, r.maxClockSkew) {
@@ -170,32 +166,55 @@ func (r *FakeCandidateResolver) Verify(ctx context.Context, handle ScopedVerifie
 		}
 		return VerifiedBinding{}, ErrVerificationFailed
 	}
-	if current.Status != StatusActive || current.Version != state.binding.Version || current.ConfigDigest != state.binding.ConfigDigest || current.Channel != state.binding.Channel || current.ProviderAccountID != state.binding.ProviderAccountID {
+	if !matchesVerifiedBinding(*current, state.binding) {
 		return VerifiedBinding{}, ErrVerificationFailed
 	}
 	expected := SignFakeRequest(state.secret, request)
 	if !hmac.Equal([]byte(expected), []byte(request.Signature)) {
 		return VerifiedBinding{}, ErrVerificationFailed
 	}
-	nonceKey := state.binding.TenantID + "\x00" + state.binding.BindingID + "\x00" + request.Nonce
+	if !r.recordNonce(state.binding, request.Nonce, request.Timestamp, now) {
+		return VerifiedBinding{}, ErrVerificationFailed
+	}
+	return newVerifiedBinding(*current)
+}
+
+func (r *FakeCandidateResolver) consumeHandle(token string, now time.Time) (fakeVerifierState, bool) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pruneHandlesLocked(now)
+	state, exists := r.handles[token]
+	delete(r.handles, token)
+	return state, exists
+}
+
+func validHandle(state fakeVerifierState, exists bool, handle ScopedVerifierHandle, request VerificationRequest, now time.Time) bool {
+	return exists && state.purpose == handle.Purpose && state.expiresAt.Equal(handle.ExpiresAt) && handle.Purpose == request.Purpose && now.Before(handle.ExpiresAt)
+}
+
+func matchesVerifiedBinding(current, original Binding) bool {
+	return current.Status == StatusActive && current.Version == original.Version && current.ConfigDigest == original.ConfigDigest && current.Channel == original.Channel && current.ProviderAccountID == original.ProviderAccountID
+}
+
+func (r *FakeCandidateResolver) recordNonce(binding Binding, nonce string, timestamp, now time.Time) bool {
+	nonceKey := binding.TenantID + "\x00" + binding.BindingID + "\x00" + nonce
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for key, expiry := range r.usedNonces {
 		if now.After(expiry) {
 			delete(r.usedNonces, key)
 		}
 	}
 	if _, replayed := r.usedNonces[nonceKey]; replayed {
-		r.mu.Unlock()
-		return VerifiedBinding{}, ErrVerificationFailed
+		return false
 	}
-	nonceExpiry := request.Timestamp.Add(r.maxClockSkew)
+	nonceExpiry := timestamp.Add(r.maxClockSkew)
 	minimumExpiry := now.Add(r.maxClockSkew)
 	if minimumExpiry.After(nonceExpiry) {
 		nonceExpiry = minimumExpiry
 	}
 	r.usedNonces[nonceKey] = nonceExpiry
-	r.mu.Unlock()
-	return newVerifiedBinding(*current)
+	return true
 }
 
 // SignFakeRequest creates the deterministic HMAC proof accepted by the fake.

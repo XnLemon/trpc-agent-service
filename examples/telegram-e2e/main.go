@@ -383,13 +383,15 @@ func newTrustedTarget(providerAccountID string) (channels.RoutingTarget, error) 
 		return channels.RoutingTarget{}, errConfiguration
 	}
 	repository := channelsinmemory.NewRepository()
+	// #nosec G101 -- deterministic verifier fixture, not a credential.
 	secret := "telegram-e2e-verifier-secret"
 	binding, _, err := repository.Create(context.Background(), channels.CreateInput{
 		TenantID: root.TenantID, BindingKey: "telegram-e2e", Channel: channels.ChannelTelegram,
 		ProviderAccountID: providerAccountID, PublicRouteKeyDigest: routeDigest, AppID: app.AppID,
-		SecretRef: "examples/telegram-e2e", Status: channels.StatusActive,
-		Protocol: channels.ProtocolConfiguration{Telegram: &channels.TelegramProtocolConfiguration{}},
-		Metadata: exampleMetadata(),
+		SecretRef: "examples/telegram-e2e", // #nosec G101 -- symbolic fixture reference, not secret material.
+		Status:    channels.StatusActive,
+		Protocol:  channels.ProtocolConfiguration{Telegram: &channels.TelegramProtocolConfiguration{}},
+		Metadata:  exampleMetadata(),
 	})
 	if err != nil {
 		return channels.RoutingTarget{}, errConfiguration
@@ -477,13 +479,25 @@ func runAutomatedSender(ctx context.Context, token string, pollTimeout time.Dura
 	}
 	replyReceived := make(chan struct{}, 1)
 	pollingFailed := make(chan struct{}, 1)
-	sender, err := bot.New(token,
+	sender, err := newAutomatedSender(token, pollTimeout, receiver.ID, reply, replyReceived, pollingFailed)
+	if err != nil {
+		return errSender
+	}
+	senderUser, err := sender.GetMe(ctx)
+	if err != nil || senderUser == nil || !senderUser.IsBot || senderUser.ID <= 0 || senderUser.ID == receiver.ID {
+		return errSender
+	}
+	if err := prepareLongPolling(ctx, sender, deleteWebhook, dropPending); err != nil {
+		return errSender
+	}
+	return runSender(ctx, sender, receiver.Username, marker, replyReceived, pollingFailed)
+}
+
+func newAutomatedSender(token string, pollTimeout time.Duration, receiverID int64, reply string, replyReceived, pollingFailed chan<- struct{}) (*bot.Bot, error) {
+	return bot.New(token,
 		bot.WithSkipGetMe(),
 		bot.WithDefaultHandler(func(_ context.Context, _ *bot.Bot, update *models.Update) {
-			if update == nil || update.Message == nil || update.Message.From == nil {
-				return
-			}
-			if isExpectedAutomatedReply(update, receiver.ID, reply) {
+			if isExpectedAutomatedReply(update, receiverID, reply) {
 				select {
 				case replyReceived <- struct{}{}:
 				default:
@@ -499,24 +513,16 @@ func runAutomatedSender(ctx context.Context, token string, pollTimeout time.Dura
 		}),
 		bot.WithHTTPClient(pollTimeout, preflightHTTPClient(pollTimeout)),
 	)
-	if err != nil {
-		return errSender
-	}
-	senderUser, err := sender.GetMe(ctx)
-	if err != nil || senderUser == nil || !senderUser.IsBot || senderUser.ID <= 0 || senderUser.ID == receiver.ID {
-		return errSender
-	}
-	if err := prepareLongPolling(ctx, sender, deleteWebhook, dropPending); err != nil {
-		return errSender
-	}
+}
 
+func runSender(ctx context.Context, sender *bot.Bot, receiverUsername, marker string, replyReceived, pollingFailed <-chan struct{}) error {
 	senderContext, cancel := context.WithCancel(ctx)
 	senderDone := make(chan struct{})
 	go func() {
 		sender.Start(senderContext)
 		close(senderDone)
 	}()
-	if _, err := sender.SendMessage(ctx, &bot.SendMessageParams{ChatID: "@" + receiver.Username, Text: marker}); err != nil {
+	if _, err := sender.SendMessage(ctx, &bot.SendMessageParams{ChatID: "@" + receiverUsername, Text: marker}); err != nil {
 		cancel()
 		waitForSender(senderDone)
 		return errSender

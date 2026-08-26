@@ -23,20 +23,7 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	config, err := pgx.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse PostgreSQL DSN: %v", err)
-	}
-	config.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
-	conn, err := pgx.ConnectConfig(ctx, config)
-	if err != nil {
-		t.Fatalf("connect PostgreSQL: %v", err)
-	}
-	defer func() {
-		if err := conn.Close(context.Background()); err != nil {
-			t.Logf("close PostgreSQL connection: %v", err)
-		}
-	}()
+	conn := openMigrationConnection(t, ctx, dsn)
 
 	var alreadyMigrated bool
 	if err := conn.QueryRow(ctx, `
@@ -285,6 +272,25 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 		);
 	`)
 	resetRole(t, ctx, conn)
+}
+
+func openMigrationConnection(t *testing.T, ctx context.Context, dsn string) *pgx.Conn {
+	t.Helper()
+	config, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse PostgreSQL DSN: %v", err)
+	}
+	config.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	conn, err := pgx.ConnectConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("connect PostgreSQL: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := conn.Close(context.Background()); err != nil {
+			t.Logf("close PostgreSQL connection: %v", err)
+		}
+	})
+	return conn
 }
 
 func assertBoolean(t *testing.T, ctx context.Context, conn *pgx.Conn, query string, want bool) {
