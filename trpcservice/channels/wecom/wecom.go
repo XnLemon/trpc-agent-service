@@ -47,7 +47,8 @@ type Config struct {
 	ExecutionTimeout time.Duration
 }
 
-// Handler owns no listener or goroutine; the process HTTP server owns both.
+// Handler owns no listener; each accepted execution drain is bounded by its
+// dispatch context and the process HTTP server owns listener shutdown.
 type Handler struct {
 	token, receiveID, agentID, routeKey string
 	key                                 []byte
@@ -152,10 +153,10 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	executionCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), h.executionTimeout)
-	defer cancel()
 	accepted := make(chan struct{}, 1)
 	result := make(chan error, 1)
 	go func() {
+		defer cancel()
 		stream, err := h.dispatcher.Dispatch(executionCtx, gateway.DispatchRequest{Accepted: accepted, Principal: h.principal, Message: gateway.InboundMessage{Content: message.Content, ContentType: gateway.ContentTypeText, ExternalMessageID: message.MsgID, ExternalUserID: message.FromUserName, ConversationKind: channels.ConversationDirect, ExternalPeerID: message.FromUserName}})
 		if err == nil && stream != nil {
 			for range stream {
