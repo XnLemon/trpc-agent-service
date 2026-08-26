@@ -3,7 +3,9 @@ package wecom
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sync"
+	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
@@ -19,6 +21,9 @@ type bindingLookup interface {
 type BindingProvider struct {
 	Bindings    bindingLookup
 	Credentials CredentialResolver
+	HTTPClient  *http.Client
+	BaseURL     string
+	Now         func() time.Time
 
 	mu        sync.Mutex
 	providers map[string]*Provider
@@ -68,7 +73,7 @@ func (p *BindingProvider) provider(ctx context.Context, value storage.ReplyOutbo
 	if provider := p.providers[key]; provider != nil {
 		return provider, nil
 	}
-	provider := &Provider{CorpID: binding.Protocol.WeCom.CorpID, AgentID: binding.Protocol.WeCom.AgentID, AppSecret: credentials.AppSecret}
+	provider := &Provider{CorpID: binding.Protocol.WeCom.CorpID, AgentID: binding.Protocol.WeCom.AgentID, AppSecret: credentials.AppSecret, HTTPClient: p.HTTPClient, BaseURL: p.BaseURL, Now: p.Now}
 	p.providers[key] = provider
 	return provider, nil
 }
