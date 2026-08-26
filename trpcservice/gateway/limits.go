@@ -117,9 +117,11 @@ func (limiter *TenantLimiter) Acquire(ctx context.Context, tenantID string) (*Te
 	if entry == nil {
 		entry = &tenantLimitEntry{windowStart: now}
 		limiter.entries[tenantID] = entry
-	} else if now.Before(entry.windowStart) || !now.Before(entry.windowStart.Add(limiter.window)) {
+	} else if !now.Before(entry.windowStart.Add(limiter.window)) {
 		// Preserve active leases that crossed the fixed-window boundary. Only
-		// the admission counter belongs to the expiring window.
+		// the admission counter belongs to the expiring window. A timestamp
+		// that moves backwards can be observed when callers sample the clock
+		// before waiting for this lock, so it must not reset the request budget.
 		entry.windowStart = now
 		entry.requests = 0
 	}

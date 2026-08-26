@@ -105,6 +105,19 @@ func (a App) Clone() App {
 // Validate checks the complete App root invariants, including normalized
 // identity, lifecycle-to-publication consistency, version, and timestamps.
 func (a App) Validate() error {
+	if err := a.validateIdentity(); err != nil {
+		return err
+	}
+	if err := a.validateLifecycle(); err != nil {
+		return err
+	}
+	if a.Version < 1 || a.CreatedAt.IsZero() || a.UpdatedAt.IsZero() || a.UpdatedAt.Before(a.CreatedAt) {
+		return fmt.Errorf("%w: version and timestamps must be initialized and ordered", ErrInvalid)
+	}
+	return nil
+}
+
+func (a App) validateIdentity() error {
 	if err := validateTenantID(a.TenantID); err != nil {
 		return err
 	}
@@ -124,6 +137,10 @@ func (a App) Validate() error {
 	if a.DisplayName != strings.TrimSpace(a.DisplayName) || a.Description != strings.TrimSpace(a.Description) {
 		return fmt.Errorf("%w: app metadata must be normalized", ErrInvalid)
 	}
+	return nil
+}
+
+func (a App) validateLifecycle() error {
 	if !validStatus(a.Status) {
 		return fmt.Errorf("%w: unknown status %q", ErrInvalid, a.Status)
 	}
@@ -140,9 +157,6 @@ func (a App) Validate() error {
 		if a.CurrentRevision != nil && *a.CurrentRevision < 1 {
 			return fmt.Errorf("%w: current revision must be positive", ErrInvalid)
 		}
-	}
-	if a.Version < 1 || a.CreatedAt.IsZero() || a.UpdatedAt.IsZero() || a.UpdatedAt.Before(a.CreatedAt) {
-		return fmt.Errorf("%w: version and timestamps must be initialized and ordered", ErrInvalid)
 	}
 	return nil
 }

@@ -189,6 +189,20 @@ func (r Revision) Configuration() DraftConfiguration {
 // Validate checks identity, schema, configuration, publication state, digest,
 // version, and timestamp invariants.
 func (r Revision) Validate() error {
+	if err := r.validateIdentity(); err != nil {
+		return err
+	}
+	_, err := r.validateConfiguration()
+	if err != nil {
+		return err
+	}
+	if err := r.validateTimestamps(); err != nil {
+		return err
+	}
+	return r.validatePublication()
+}
+
+func (r Revision) validateIdentity() error {
 	if err := validateTenantID(r.TenantID); err != nil {
 		return err
 	}
@@ -198,20 +212,32 @@ func (r Revision) Validate() error {
 	if r.Revision < 1 || r.DraftVersion < 1 {
 		return fmt.Errorf("%w: revision and draft version must be positive", ErrInvalid)
 	}
+	return nil
+}
+
+func (r Revision) validateConfiguration() (DraftConfiguration, error) {
 	configuration := r.Configuration()
 	normalized, err := normalizeDraftConfiguration(configuration)
 	if err != nil {
-		return err
+		return DraftConfiguration{}, err
 	}
 	if !sameDraftConfiguration(configuration, normalized) {
-		return fmt.Errorf("%w: revision configuration must be normalized", ErrInvalid)
+		return DraftConfiguration{}, fmt.Errorf("%w: revision configuration must be normalized", ErrInvalid)
 	}
 	if err := validateRevisionDefinition(r.Kind, r.SchemaVersion, configuration); err != nil {
-		return err
+		return DraftConfiguration{}, err
 	}
+	return configuration, nil
+}
+
+func (r Revision) validateTimestamps() error {
 	if r.CreatedAt.IsZero() || r.UpdatedAt.IsZero() || r.UpdatedAt.Before(r.CreatedAt) {
 		return fmt.Errorf("%w: revision timestamps must be initialized and ordered", ErrInvalid)
 	}
+	return nil
+}
+
+func (r Revision) validatePublication() error {
 	switch r.State {
 	case RevisionStateDraft:
 		if r.ContentDigest != "" || r.PublishedAt != nil {
