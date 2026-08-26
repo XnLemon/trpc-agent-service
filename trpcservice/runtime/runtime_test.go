@@ -15,6 +15,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
+	trpcrunner "trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
@@ -241,30 +242,59 @@ func TestNewRunnerCarriesPublishedRuntimePolicy(t *testing.T) {
 
 func TestRunnerExecutesFakeModelAndPersistsTenantScopedSession(t *testing.T) {
 	fixture := runtimeFixture(t)
+	plan := newExecutionPlanForRunner(t, fixture)
+	sessions := inmemory.NewSessionService()
+	factory := &runtimeModelFactory{response: "deterministic reply"}
+	runner := newRunnerForExecution(t, plan, factory, sessions)
+	defer closeRunnerDependencies(t, runner, sessions)
+	identity := newRunnerIdentityForTest(t, fixture.root.TenantID, "external-user", "external-session")
+	eventCount, assistantReply := runAndCollectAssistantReply(t, runner, identity)
+	if eventCount == 0 || assistantReply != "deterministic reply" {
+		t.Fatalf("runner events=%d assistantReply=%q", eventCount, assistantReply)
+	}
+	assertPersistedRunnerSession(t, fixture, sessions, identity)
+	assertRunnerFactoryBoundary(t, fixture, factory)
+}
+
+func newExecutionPlanForRunner(t *testing.T, fixture runtimeFixtureData) ExecutionPlan {
+	t.Helper()
 	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessions := inmemory.NewSessionService()
-	factory := &runtimeModelFactory{response: "deterministic reply"}
+	return plan
+}
+
+func newRunnerForExecution(t *testing.T, plan ExecutionPlan, factory *runtimeModelFactory, sessions session.Service) trpcrunner.Runner {
+	t.Helper()
 	runner, err := NewRunner(context.Background(), plan, nil, factory, sessions)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		if err := runner.Close(); err != nil {
-			t.Errorf("runner.Close() error = %v", err)
-		}
-	}()
-	defer func() {
-		if err := sessions.Close(); err != nil {
-			t.Errorf("sessions.Close() error = %v", err)
-		}
-	}()
-	identity, err := tenant.NewRunnerIdentity(fixture.root.TenantID, "external-user", "external-session")
+	return runner
+}
+
+func closeRunnerDependencies(t *testing.T, runner trpcrunner.Runner, sessions session.Service) {
+	t.Helper()
+	if err := sessions.Close(); err != nil {
+		t.Errorf("sessions.Close() error = %v", err)
+	}
+	if err := runner.Close(); err != nil {
+		t.Errorf("runner.Close() error = %v", err)
+	}
+}
+
+func newRunnerIdentityForTest(t *testing.T, tenantID, userID, sessionID string) tenant.RunnerIdentity {
+	t.Helper()
+	identity, err := tenant.NewRunnerIdentity(tenantID, userID, sessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return identity
+}
+
+func runAndCollectAssistantReply(t *testing.T, runner trpcrunner.Runner, identity tenant.RunnerIdentity) (int, string) {
+	t.Helper()
 	events, err := runner.Run(context.Background(), identity.UserID, identity.SessionID, trpcmodel.NewUserMessage("hello"))
 	if err != nil {
 		t.Fatal(err)
@@ -273,17 +303,20 @@ func TestRunnerExecutesFakeModelAndPersistsTenantScopedSession(t *testing.T) {
 	eventCount := 0
 	for evt := range events {
 		eventCount++
-		if evt != nil && evt.Response != nil {
-			for _, choice := range evt.Choices {
-				if choice.Message.Role == trpcmodel.RoleAssistant && choice.Message.Content != "" {
-					assistantReply = choice.Message.Content
-				}
+		if evt == nil || evt.Response == nil {
+			continue
+		}
+		for _, choice := range evt.Choices {
+			if choice.Message.Role == trpcmodel.RoleAssistant && choice.Message.Content != "" {
+				assistantReply = choice.Message.Content
 			}
 		}
 	}
-	if eventCount == 0 || assistantReply != "deterministic reply" {
-		t.Fatalf("runner events=%d assistantReply=%q", eventCount, assistantReply)
-	}
+	return eventCount, assistantReply
+}
+
+func assertPersistedRunnerSession(t *testing.T, fixture runtimeFixtureData, sessions session.Service, identity tenant.RunnerIdentity) {
+	t.Helper()
 	inspector, err := NewTenantSessionService(*fixture.root, sessions)
 	if err != nil {
 		t.Fatal(err)
@@ -309,6 +342,10 @@ func TestRunnerExecutesFakeModelAndPersistsTenantScopedSession(t *testing.T) {
 	if !strings.Contains(storedReply, "deterministic reply") {
 		t.Fatalf("stored assistant events did not contain reply: %+v", stored.Events)
 	}
+}
+
+func assertRunnerFactoryBoundary(t *testing.T, fixture runtimeFixtureData, factory *runtimeModelFactory) {
+	t.Helper()
 	if factory.input.TenantID != fixture.root.TenantID || factory.secret.Value() != "" {
 		t.Fatalf("factory crossed secret or tenant boundary: input=%+v secret=%q", factory.input, factory.secret.Value())
 	}
