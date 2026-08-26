@@ -13,6 +13,14 @@ import (
 )
 
 func TestPostgreSQLStoragePrimitives(t *testing.T) {
+	assertPostgreSQLConnectionBoundaries(t)
+	assertPostgreSQLPingPaths(t)
+	assertPostgreSQLTransactionHappyPath(t)
+	assertPostgreSQLPrimitiveMappingsAndHelpers(t)
+}
+
+func assertPostgreSQLConnectionBoundaries(t *testing.T) {
+	t.Helper()
 	if got := normalizeDSN(" PostgreSQL+PSYCOPG://db.example/test "); got != "postgresql://db.example/test" {
 		t.Fatalf("normalized psycopg DSN = %q", got)
 	}
@@ -27,7 +35,10 @@ func TestPostgreSQLStoragePrimitives(t *testing.T) {
 	if err := Ping(context.Background(), nil); !errors.Is(err, ErrStorage) {
 		t.Fatalf("nil Ping error = %v", err)
 	}
+}
 
+func assertPostgreSQLPingPaths(t *testing.T) {
+	t.Helper()
 	pingDB, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +64,10 @@ func TestPostgreSQLStoragePrimitives(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
 
+func assertPostgreSQLTransactionHappyPath(t *testing.T) {
+	t.Helper()
 	transactionDB, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +85,10 @@ func TestPostgreSQLStoragePrimitives(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
+}
 
+func assertPostgreSQLPrimitiveMappingsAndHelpers(t *testing.T) {
+	t.Helper()
 	notFound := errors.New("not found")
 	duplicate := errors.New("duplicate")
 	conflict := errors.New("conflict")

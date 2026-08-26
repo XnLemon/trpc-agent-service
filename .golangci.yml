@@ -62,9 +62,6 @@ linters:
       - path: ^trpcservice/runtime/storage/postgres/integration_test\.go$
         text: 'cyclomatic complexity .* of func `TestRuntimeStorePostgreSQLConformanceAndRestart`'
         linters: [gocyclo]
-      - path: ^trpcservice/storage/postgres/postgres_unit_test\.go$
-        text: 'cyclomatic complexity .* of func `TestPostgreSQLStoragePrimitives`'
-        linters: [gocyclo]
     paths:
       - .*\.pb\.go$
       - .*_mock\.go$
