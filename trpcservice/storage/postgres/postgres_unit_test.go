@@ -140,10 +140,22 @@ func TestPostgreSQLStorageJSONBoundary(t *testing.T) {
 }
 
 func TestPostgreSQLStorageErrorAndTransactionPaths(t *testing.T) {
+	notFound, duplicate, conflict, invalid := storageErrorSentinels()
+	assertPostgreSQLDriverErrorMappings(t, notFound, duplicate, conflict, invalid)
+	assertPostgreSQLTransactionErrorPaths(t, notFound, duplicate, conflict, invalid)
+	assertPostgreSQLNullableAndTimeHelpers(t)
+}
+
+func storageErrorSentinels() (error, error, error, error) {
 	notFound := errors.New("not found")
 	duplicate := errors.New("duplicate")
 	conflict := errors.New("conflict")
 	invalid := errors.New("invalid")
+	return notFound, duplicate, conflict, invalid
+}
+
+func assertPostgreSQLDriverErrorMappings(t *testing.T, notFound, duplicate, conflict, invalid error) {
+	t.Helper()
 	for name, testCase := range map[string]struct {
 		err  error
 		want error
@@ -168,6 +180,12 @@ func TestPostgreSQLStorageErrorAndTransactionPaths(t *testing.T) {
 	if got := MapError(canceled, errors.New("driver error"), notFound, duplicate, conflict, invalid); !errors.Is(got, context.Canceled) {
 		t.Fatalf("canceled context mapping = %v", got)
 	}
+}
+
+func assertPostgreSQLTransactionErrorPaths(t *testing.T, notFound, duplicate, conflict, invalid error) {
+	t.Helper()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
 
 	if _, err := Begin(context.Background(), nil); !errors.Is(err, ErrStorage) {
 		t.Fatalf("nil Begin error = %v", err)
@@ -219,6 +237,10 @@ func TestPostgreSQLStorageErrorAndTransactionPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
+}
+
+func assertPostgreSQLNullableAndTimeHelpers(t *testing.T) {
+	t.Helper()
 	if got := AsUTC(time.Date(2026, 8, 24, 1, 2, 3, 0, time.FixedZone("test", 3600))); got.Location() != time.UTC {
 		t.Fatalf("UTC timestamp location = %s", got.Location())
 	}
