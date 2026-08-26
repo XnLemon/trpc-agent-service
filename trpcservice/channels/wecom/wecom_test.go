@@ -371,7 +371,7 @@ func callbackTestRequestAtPath(t *testing.T, path, messageID, userID, content st
 func encryptCallbackTestPayload(t *testing.T, key []byte, receiveID string, message []byte) string {
 	t.Helper()
 	plain := append(bytes.Repeat([]byte{2}, 16), make([]byte, 4)...)
-	binary.BigEndian.PutUint32(plain[16:20], uint32(len(message)))
+	binary.BigEndian.PutUint32(plain[16:20], uint32(len(message))) // #nosec G115 -- test payloads are bounded by the callback fixture.
 	plain = append(plain, message...)
 	plain = append(plain, receiveID...)
 	padding := wecomBlockSize - len(plain)%wecomBlockSize

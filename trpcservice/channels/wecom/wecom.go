@@ -29,7 +29,9 @@ import (
 )
 
 var (
-	ErrInvalid      = errors.New("invalid wecom callback")
+	// ErrInvalid reports malformed WeCom callback configuration or payload.
+	ErrInvalid = errors.New("invalid wecom callback")
+	// ErrVerification reports a failed WeCom callback signature or decryption check.
 	ErrVerification = errors.New("wecom callback verification failed")
 )
 
@@ -103,6 +105,8 @@ type Handler struct {
 
 // New validates a text callback Handler. Dynamic mode receives the complete
 // trusted target only after protocol verification.
+//
+//nolint:gocyclo
 func New(config Config) (*Handler, error) {
 	if config.Dispatcher == nil {
 		return nil, ErrInvalid
