@@ -427,36 +427,7 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		return err
 	}
 	defer func() {
-		eventType := terminalEventType
-		errorType := terminalErrorType
-		if eventType == "" {
-			eventType = audit.EventExecutionCompleted
-			if terminalErr != nil {
-				eventType = audit.EventExecutionFailed
-				if IsContextCancellation(terminalErr) {
-					eventType = audit.EventExecutionCanceled
-				}
-			}
-		}
-		if errorType == "" {
-			errorType = terminalAuditError(terminalErr)
-		}
-		if dispatcher.handoffStore != nil {
-			result := audit.ResultSuccess
-			if terminalErr != nil {
-				result = audit.ResultFailure
-				if IsContextCancellation(terminalErr) {
-					result = audit.ResultCanceled
-				}
-			}
-			if _, err := dispatcher.handoffStore.Finalize(context.Background(), audit.ExecutionHandoff{TenantID: principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType}); err != nil && terminalErr == nil {
-				terminalErr = auditWriteFailure()
-			}
-		}
-		if err := finalizeAudit(eventType, errorType); err != nil && terminalErr == nil {
-			terminalErr = ErrExecution
-		}
-		dispatcher.finishDurable(durable, terminalErr, reply.String())
+		terminalErr = dispatcher.finalizeForward(requestID, durable, principal, terminalErr, reply.String(), terminalEventType, terminalErrorType, finalizeAudit)
 		_ = dispatcher.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
 		status := "complete"
 		if terminalErr != nil {
@@ -475,106 +446,143 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		if ctx.Err() != nil {
 			terminalErr = ctx.Err()
 			terminalEventType, terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
-			if err := finalizeAudit(audit.EventExecutionCanceled, string(audit.ErrorCanceled)); err != nil {
-				terminalErr = auditWriteFailure()
-				dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
-				return
-			}
-			if err := finalizeHandoff(audit.ResultCanceled, string(audit.ErrorCanceled)); err != nil {
-				terminalErr = auditWriteFailure()
-				dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
-				return
-			}
-			dispatcher.finishCanceled(ctx, requestID, traceID, runnerEvents, output)
+			terminalErr = dispatcher.handleForwardCancellation(ctx, requestID, traceID, runnerEvents, output, finalizeAudit, finalizeHandoff)
 			return
 		}
 		select {
 		case event, ok := <-runnerEvents:
 			if !ok {
 				terminalEventType, terminalErrorType = audit.EventExecutionCompleted, ""
-				if err := finalizeAudit(audit.EventExecutionCompleted, ""); err != nil {
-					terminalErr = auditWriteFailure()
-					dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
-					return
-				}
-				if err := finalizeHandoff(audit.ResultSuccess, ""); err != nil {
-					terminalErr = auditWriteFailure()
-					dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
-					return
-				}
-				trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "complete", Done: true})
+				terminalErr = dispatcher.handleForwardStreamClosed(requestID, traceID, runnerEvents, output, finalizeAudit, finalizeHandoff)
 				return
 			}
-			mapped, done := mapRunnerEvent(event, requestID, traceID)
-			if done {
-				terminalErr = nil
-				for _, item := range mapped {
-					if item.Type == DispatchEventError {
-						terminalErr = ErrExecution
-					}
-				}
-				eventType, errorType := audit.EventExecutionCompleted, ""
-				if terminalErr != nil {
-					eventType, errorType = audit.EventExecutionFailed, string(audit.ErrorUnavailable)
-				}
-				terminalEventType, terminalErrorType = eventType, errorType
-				if err := finalizeAudit(eventType, errorType); err != nil {
-					terminalErr = ErrExecution
-					dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
-					return
-				}
-			}
-			for _, item := range mapped {
-				if done && item.Type == DispatchEventDone {
-					continue
-				}
-				if item.Type == DispatchEventMessage {
-					reply.WriteString(item.Text)
-				}
-				if item.Type == DispatchEventError {
-					terminalErr = ErrExecution
-				}
-				if !sendDispatchEvent(ctx, output, item) {
-					terminalErr = ctx.Err()
-					drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
-					return
-				}
-			}
-			if done {
-				result := audit.ResultSuccess
-				if terminalErr != nil {
-					result = audit.ResultFailure
-				}
-				if err := finalizeHandoff(result, terminalErrorType); err != nil {
-					terminalErr = auditWriteFailure()
-					dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
-					return
-				}
-				for _, item := range mapped {
-					if item.Type == DispatchEventDone {
-						_ = sendDispatchEvent(ctx, output, item)
-					}
-				}
-				drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
+			if dispatcher.handleForwardRunnerEvent(ctx, requestID, traceID, runnerEvents, output, event, &reply, &terminalErr, &terminalEventType, &terminalErrorType, finalizeAudit, finalizeHandoff) {
 				return
 			}
 		case <-ctx.Done():
 			terminalErr = ctx.Err()
 			terminalEventType, terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
-			if err := finalizeAudit(audit.EventExecutionCanceled, string(audit.ErrorCanceled)); err != nil {
-				terminalErr = auditWriteFailure()
-				dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
-				return
-			}
-			if err := finalizeHandoff(audit.ResultCanceled, string(audit.ErrorCanceled)); err != nil {
-				terminalErr = auditWriteFailure()
-				dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
-				return
-			}
-			dispatcher.finishCanceled(ctx, requestID, traceID, runnerEvents, output)
+			terminalErr = dispatcher.handleForwardCancellation(ctx, requestID, traceID, runnerEvents, output, finalizeAudit, finalizeHandoff)
 			return
 		}
 	}
+}
+
+func (dispatcher *Dispatcher) handleForwardStreamClosed(requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent, finalizeAudit func(audit.EventType, string) error, finalizeHandoff func(audit.ExecutionResult, string) error) error {
+	if err := finalizeAudit(audit.EventExecutionCompleted, ""); err != nil {
+		dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+		return auditWriteFailure()
+	}
+	if err := finalizeHandoff(audit.ResultSuccess, ""); err != nil {
+		dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+		return auditWriteFailure()
+	}
+	trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "complete", Done: true})
+	return nil
+}
+
+func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent, event *trpcevent.Event, reply *strings.Builder, terminalErr *error, terminalEventType *audit.EventType, terminalErrorType *string, finalizeAudit func(audit.EventType, string) error, finalizeHandoff func(audit.ExecutionResult, string) error) bool {
+	mapped, done := mapRunnerEvent(event, requestID, traceID)
+	if done {
+		*terminalErr = nil
+		for _, item := range mapped {
+			if item.Type == DispatchEventError {
+				*terminalErr = ErrExecution
+			}
+		}
+		eventType, errorType := audit.EventExecutionCompleted, ""
+		if *terminalErr != nil {
+			eventType, errorType = audit.EventExecutionFailed, string(audit.ErrorUnavailable)
+		}
+		*terminalEventType, *terminalErrorType = eventType, errorType
+		if err := finalizeAudit(eventType, errorType); err != nil {
+			*terminalErr = ErrExecution
+			dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+			return true
+		}
+	}
+	for _, item := range mapped {
+		if done && item.Type == DispatchEventDone {
+			continue
+		}
+		if item.Type == DispatchEventMessage {
+			reply.WriteString(item.Text)
+		}
+		if item.Type == DispatchEventError {
+			*terminalErr = ErrExecution
+		}
+		if !sendDispatchEvent(ctx, output, item) {
+			*terminalErr = ctx.Err()
+			drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
+			return true
+		}
+	}
+	if !done {
+		return false
+	}
+	result := audit.ResultSuccess
+	if *terminalErr != nil {
+		result = audit.ResultFailure
+	}
+	if err := finalizeHandoff(result, *terminalErrorType); err != nil {
+		*terminalErr = auditWriteFailure()
+		dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+		return true
+	}
+	for _, item := range mapped {
+		if item.Type == DispatchEventDone {
+			_ = sendDispatchEvent(ctx, output, item)
+		}
+	}
+	drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
+	return true
+}
+
+func (dispatcher *Dispatcher) finalizeForward(requestID string, durable *durableExecution, principal Principal, terminalErr error, reply string, terminalEventType audit.EventType, terminalErrorType string, finalizeAudit func(audit.EventType, string) error) error {
+	eventType := terminalEventType
+	errorType := terminalErrorType
+	if eventType == "" {
+		eventType = audit.EventExecutionCompleted
+		if terminalErr != nil {
+			eventType = audit.EventExecutionFailed
+			if IsContextCancellation(terminalErr) {
+				eventType = audit.EventExecutionCanceled
+			}
+		}
+	}
+	if errorType == "" {
+		errorType = terminalAuditError(terminalErr)
+	}
+	if dispatcher.handoffStore != nil {
+		result := audit.ResultSuccess
+		if terminalErr != nil {
+			result = audit.ResultFailure
+			if IsContextCancellation(terminalErr) {
+				result = audit.ResultCanceled
+			}
+		}
+		if _, err := dispatcher.handoffStore.Finalize(context.Background(), audit.ExecutionHandoff{TenantID: principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType}); err != nil && terminalErr == nil {
+			terminalErr = auditWriteFailure()
+		}
+	}
+	if err := finalizeAudit(eventType, errorType); err != nil && terminalErr == nil {
+		terminalErr = ErrExecution
+	}
+	dispatcher.finishDurable(durable, terminalErr, reply)
+	return terminalErr
+}
+
+func (dispatcher *Dispatcher) handleForwardCancellation(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent, finalizeAudit func(audit.EventType, string) error, finalizeHandoff func(audit.ExecutionResult, string) error) error {
+	if err := finalizeAudit(audit.EventExecutionCanceled, string(audit.ErrorCanceled)); err != nil {
+		dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+		return auditWriteFailure()
+	}
+	if err := finalizeHandoff(audit.ResultCanceled, string(audit.ErrorCanceled)); err != nil {
+		dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
+		return auditWriteFailure()
+	}
+	dispatcher.finishCanceled(ctx, requestID, traceID, runnerEvents, output)
+	return ctx.Err()
 }
 
 func (dispatcher *Dispatcher) finishAuditFailure(requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent) {
