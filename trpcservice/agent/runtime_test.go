@@ -15,6 +15,14 @@ func TestAgentExecutionSnapshotFreezesFactoryInputAndCacheIdentity(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertExecutionCacheIdentity(t, snapshot, tenantRoot, app, revision)
+	input := assertExecutionFactoryInput(t, snapshot, tenantRoot, app, revision)
+	assertExecutionSnapshotIsFrozen(t, snapshot, tenantRoot, app, revision)
+	assertExecutionFactoryInputIsDefensive(t, snapshot, input)
+}
+
+func assertExecutionCacheIdentity(t *testing.T, snapshot AgentExecutionSnapshot, tenantRoot *tenant.Tenant, app *App, revision *Revision) {
+	t.Helper()
 	key, err := snapshot.CacheKey()
 	if err != nil {
 		t.Fatal(err)
@@ -22,6 +30,10 @@ func TestAgentExecutionSnapshotFreezesFactoryInputAndCacheIdentity(t *testing.T)
 	if key.TenantID != tenantRoot.TenantID || key.TenantVersion != tenantRoot.Version || key.AppID != app.AppID || key.AppVersion != app.Version || key.Revision != revision.Revision || key.ContentDigest != revision.ContentDigest {
 		t.Fatalf("unexpected cache identity: %+v", key)
 	}
+}
+
+func assertExecutionFactoryInput(t *testing.T, snapshot AgentExecutionSnapshot, tenantRoot *tenant.Tenant, app *App, revision *Revision) LLMAgentFactoryInput {
+	t.Helper()
 	input, err := snapshot.FactoryInput()
 	if err != nil {
 		t.Fatal(err)
@@ -32,7 +44,11 @@ func TestAgentExecutionSnapshotFreezesFactoryInputAndCacheIdentity(t *testing.T)
 	if input.TenantVersion != tenantRoot.Version || input.AppVersion != app.Version || input.Kind != KindLLM || input.SchemaVersion != SchemaVersionV1 || len(input.Tools) != 2 {
 		t.Fatalf("Factory input lost fixed versions or executable configuration: %+v", input)
 	}
+	return input
+}
 
+func assertExecutionSnapshotIsFrozen(t *testing.T, snapshot AgentExecutionSnapshot, tenantRoot *tenant.Tenant, app *App, revision *Revision) {
+	t.Helper()
 	tenantRoot.DisplayName = "source tenant mutation"
 	app.DisplayName = "source App mutation"
 	revision.Tools[0].ToolID = "source-tool-mutation"
@@ -44,7 +60,10 @@ func TestAgentExecutionSnapshotFreezesFactoryInputAndCacheIdentity(t *testing.T)
 	if frozenRevision.Tools[0].ToolID == "source-tool-mutation" || *frozenRevision.Generation.Temperature == 1.9 {
 		t.Fatal("snapshot retained mutable Revision source")
 	}
+}
 
+func assertExecutionFactoryInputIsDefensive(t *testing.T, snapshot AgentExecutionSnapshot, input LLMAgentFactoryInput) {
+	t.Helper()
 	input.Tools[0].ToolID = "caller mutation"
 	*input.Generation.Temperature = 1.8
 	again, err := snapshot.FactoryInput()
