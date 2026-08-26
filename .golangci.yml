@@ -20,9 +20,6 @@ linters:
   exclusions:
     rules:
       # Function-scoped complexity baseline; remove entries as each function is split.
-      - path: ^trpcservice/controlplane/postgres/postgres_error_paths_test\.go$
-        text: 'cyclomatic complexity .* of func `TestPostgreSQLRepositoriesMapDriverFailures`'
-        linters: [gocyclo]
       - path: ^trpcservice/gateway/dispatch_test\.go$
         text: 'cyclomatic complexity .* of func `(?:TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle|TestDispatcherDurableClaimReclaimsReceivedAndExpiredRunning)`'
         linters: [gocyclo]
