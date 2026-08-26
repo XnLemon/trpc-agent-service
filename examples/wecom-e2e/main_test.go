@@ -95,7 +95,7 @@ func TestWeComCallbackOutboxE2E(t *testing.T) {
 	if response.StatusCode != http.StatusOK || response.Body != "success" {
 		t.Fatalf("callback response = %+v, dispatch error = %v", response, recording.lastError())
 	}
-	rows, err := fixture.store.ListReplyCandidates(ctx, fixture.tenant.TenantID)
+	rows, err := waitForReplyCandidates(ctx, fixture.store, fixture.tenant.TenantID, fixture.runner.reply)
 	if err != nil || len(rows) != 1 || rows[0].Payload != fixture.runner.reply {
 		t.Fatalf("reply candidates = %+v, err=%v", rows, err)
 	}
@@ -120,6 +120,27 @@ func TestWeComCallbackOutboxE2E(t *testing.T) {
 	}
 	if fixture.runner.calls.Load() != 1 {
 		t.Fatalf("duplicate callback executed runner %d times", fixture.runner.calls.Load())
+	}
+}
+
+func waitForReplyCandidates(ctx context.Context, store runtimestorage.RuntimeStore, tenantID, payload string) ([]runtimestorage.ReplyOutbox, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		rows, err := store.ListReplyCandidates(waitCtx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 1 && rows[0].Payload == payload {
+			return rows, nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return rows, waitCtx.Err()
+		case <-ticker.C:
+		}
 	}
 }
 
