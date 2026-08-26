@@ -119,6 +119,7 @@
 - [x] 提供构建、启动、停止、格式化、静态检查和覆盖率脚本
 - [x] 配置 Go CI、Codecov 和 MkDocs 文档 CI
 - [x] 将命令行入口改造成持续运行的服务，并支持优雅停机（Issue #41）
+- [x] 增加显式、幂等且并发安全的首次 Tenant/App 初始化命令（Issue #67）
 - [ ] 增加 Dockerfile、Docker Compose 最小部署和 Kubernetes 生产部署清单
 - [ ] 增加配置示例、环境变量说明和可验证的端到端快速开始
 
@@ -321,6 +322,8 @@ cd trpc-agent-service
 ./scripts/build.sh
 ./scripts/start.sh
 ```
+
+首次使用 PostgreSQL 时，先按 [Issue #67 首次运行初始化](https://xnlemon.github.io/trpc-agent-service/issue-67-first-run-init/) 生成 `TRPC_TENANT_ID` 和 `TRPC_APP_ID`，再启动服务。正常启动不会自动创建 Tenant 或 Agent App。
 
 停止服务：
 

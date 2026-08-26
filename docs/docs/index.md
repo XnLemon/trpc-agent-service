@@ -28,6 +28,8 @@
   复用既有表设计并统一 migration、Repository 事务边界、bootstrap、readiness 和 shutdown。
 - [Issue #41：可重启控制面与 Admin API](issue-41-runtime-bootstrap-admin-api.md)：已合并的实现契约，
   固定真实 Bootstrap、readiness、最小 Admin API、重启恢复和验收矩阵。
+- [Issue #67：首次运行初始化](issue-67-first-run-init.md)：显式 `trpc-service init`、数据库状态判定、
+  并发幂等和 local/staging/production 首次运行流程。
 - [Issue #50：Reliable Reply Delivery](issue-50-reliable-delivery.md)：Outbox worker、Provider
   交付、重试/DLQ、lease recovery、telemetry 与验收 ledger。
 - [租户审计与用量成本](audit-usage.md)：Issue #54/PR #55 的实现契约，固定 mandatory audit
@@ -61,6 +63,7 @@ cd trpc-agent-service
   SQL Repository 事务和真实运行时启动装配
 - [Issue #41：可重启控制面与 Admin API](issue-41-runtime-bootstrap-admin-api.md) — Bootstrap/readiness、
   管理 API、重启恢复和测试矩阵
+- [Issue #67：首次运行初始化](issue-67-first-run-init.md) — 显式首租户/App 初始化命令、幂等并发和部署流程
 - [Issue #50：Reliable Reply Delivery](issue-50-reliable-delivery.md) — 回复 Outbox 交付、Provider、
   重试/DLQ、恢复与运维证据
 - [租户审计与用量成本](audit-usage.md) — 版本化事件、append-only writer、用量成本聚合、
