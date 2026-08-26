@@ -536,6 +536,98 @@ func TestBindingProviderUsesActiveWeComBindingAndCachesProvider(t *testing.T) {
 	}
 }
 
+func TestProviderRejectsInvalidAgentAndMapsTokenFailures(t *testing.T) {
+	value := storage.ReplyOutbox{Payload: "hello", ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user"}}
+	invalidAgent := &Provider{CorpID: "corp", AgentID: "01", AppSecret: "secret", token: "cached", tokenExpiry: time.Now().Add(time.Hour)}
+	_, err := invalidAgent.Deliver(context.Background(), value)
+	assertDeliveryErrorClass(t, err, "invalid", false)
+
+	for _, test := range []struct {
+		name      string
+		status    int
+		body      string
+		class     string
+		retryable bool
+	}{
+		{name: "unavailable", status: http.StatusBadGateway, class: "unavailable", retryable: true},
+		{name: "malformed", status: http.StatusOK, body: "bad-json", class: "provider_error", retryable: true},
+		{name: "missing token", status: http.StatusOK, body: `{"errcode":0}`, class: "provider_error", retryable: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.URL.Path != "/cgi-bin/gettoken" {
+					t.Fatalf("path = %s", request.URL.Path)
+				}
+				writer.WriteHeader(test.status)
+				_, _ = io.WriteString(writer, test.body)
+			}))
+			defer server.Close()
+			provider := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret", BaseURL: server.URL, HTTPClient: server.Client()}
+			_, err := provider.accessToken(context.Background())
+			assertDeliveryErrorClass(t, err, test.class, test.retryable)
+		})
+	}
+
+	for _, test := range []struct {
+		name  string
+		err   error
+		class string
+	}{
+		{name: "deadline", err: context.DeadlineExceeded, class: "timeout"},
+		{name: "unavailable", err: errors.New("network unavailable"), class: "unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret", HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, test.err })}}
+			_, err := provider.accessToken(context.Background())
+			assertDeliveryErrorClass(t, err, test.class, true)
+		})
+	}
+
+	invalidURL := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret", BaseURL: "http://[::1", token: "cached", tokenExpiry: time.Now().Add(time.Hour)}
+	_, err = invalidURL.Deliver(context.Background(), value)
+	assertDeliveryErrorClass(t, err, "invalid", false)
+}
+
+func TestHandlerDrainsStreamAndRejectsCryptographicBoundaryFailures(t *testing.T) {
+	stream := make(chan gateway.DispatchEvent, 1)
+	stream <- gateway.DispatchEvent{}
+	close(stream)
+	handler := newCallbackTestHandler(t, dispatchFunc(func(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+		return stream, nil
+	}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, callbackTestRequest(t, "stream", "user", "hello"))
+	if response.Code != http.StatusOK {
+		t.Fatalf("stream response = %d", response.Code)
+	}
+	if err := handler.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := (*Handler)(nil).Close(); err != nil {
+		t.Fatalf("nil close = %v", err)
+	}
+	if (*Handler)(nil).validSignature("signature", "timestamp", "nonce", "ciphertext") {
+		t.Fatal("nil handler accepted a signature")
+	}
+	if _, err := (*Handler)(nil).decrypt("ciphertext"); !errors.Is(err, ErrVerification) {
+		t.Fatalf("nil decrypt error = %v", err)
+	}
+	if _, err := decrypt(nil, "receive", "not-base64"); !errors.Is(err, ErrVerification) {
+		t.Fatalf("invalid ciphertext error = %v", err)
+	}
+	if _, err := decrypt([]byte{1}, "receive", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, aes.BlockSize))); !errors.Is(err, ErrVerification) {
+		t.Fatalf("invalid AES key error = %v", err)
+	}
+	key := bytes.Repeat([]byte{1}, 32)
+	if _, err := decrypt(key, "receive", encryptCallbackTestPayload(t, key, "other", []byte("message"))); !errors.Is(err, ErrVerification) {
+		t.Fatalf("receive ID mismatch error = %v", err)
+	}
+	if _, err := unpad(nil); !errors.Is(err, ErrVerification) {
+		t.Fatalf("empty padding error = %v", err)
+	}
+}
+
 type callbackDispatchStub struct {
 	requests chan gateway.DispatchRequest
 	canceled chan struct{}
