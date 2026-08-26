@@ -195,6 +195,13 @@ func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO public.agent_app (tenant_id, app_id, app_key, display_name, description, status, version, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,'draft',$6,$7,$8)`, root.TenantID, published.AppID, "wecom-e2e", "WeCom E2E", "Deterministic WeCom callback", published.Version, published.CreatedAt, published.UpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+	protocolConfig := fmt.Sprintf(`{"wecom":{"corp_id":%q,"agent_id":%q,"receive_id":%q}}`, wecomReceive, wecomAgentID, wecomReceive)
+	if _, err := db.ExecContext(ctx, `INSERT INTO public.channel_binding (tenant_id, binding_id, binding_key, channel, provider_account_id, public_route_key_digest, app_id, secret_ref, protocol_config, status, version, config_digest, created_at, updated_at) VALUES ($1,$2,$3,'wecom',$4,$5,$6,$7,$8::jsonb,'active',$9,$10,$11,$12)`, root.TenantID, binding.BindingID, binding.BindingKey, binding.ProviderAccountID, routeDigest, published.AppID, binding.SecretRef, protocolConfig, binding.Version, binding.ConfigDigest, binding.CreatedAt, binding.UpdatedAt); err != nil {
+		t.Fatal(err)
+	}
 	key, secret := bytes.Repeat([]byte{1}, 32), "callback-secret"
 	resolver := channelsinmemory.NewFakeCandidateResolver(channelRepo, map[channels.SecretScope]string{{TenantID: binding.TenantID, SecretRef: binding.SecretRef}: secret})
 	candidates, err := channelRepo.LookupCandidates(ctx, channels.ChannelWeCom, routeDigest)
