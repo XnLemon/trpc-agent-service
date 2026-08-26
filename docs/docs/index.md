@@ -14,6 +14,8 @@
 ## 当前运行时设计
 
 - [Model Profile、Secret Resolver 与最小 Runner 链路](model-profile.md)：Issue #22 的文档先行设计，
+
+- [Issue #71：Tenant-scoped Provider Registries](issue-71-provider-registries.md)：Secret、Model、Backend、Channel 的租户隔离注册表契约。
   固定模型解析、密钥边界、Execution Plan 和 tRPC-Agent-Go Runner 的纵向契约。
 - [生产架构设计](architecture.md)：Issue #24 的控制面/数据面拓扑、可信 Channel Binding、
   企业微信全链路、幂等、迁移和能力边界设计。文档交付不等于对应生产代码已实现。
