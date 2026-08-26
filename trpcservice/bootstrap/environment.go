@@ -41,16 +41,19 @@ const (
 	envAdminTenants = "TRPC_ADMIN_TENANTS"
 	envSubjectID    = "TRPC_SUBJECT_ID"
 	// #nosec G101 -- environment variable name, not a credential.
-	envModelAPIKey         = "TRPC_MODEL_API_KEY"
-	envModelProvider       = "TRPC_MODEL_PROVIDER"
-	envModelNames          = "TRPC_MODEL_NAMES"
-	envModelEndpointHost   = "TRPC_MODEL_ENDPOINT_HOSTS"
-	envModelSecretRef      = "TRPC_MODEL_SECRET_REF"
-	envSessionBackend      = "TRPC_SESSION_BACKEND"
+	envModelAPIKey       = "TRPC_MODEL_API_KEY"
+	envModelProvider     = "TRPC_MODEL_PROVIDER"
+	envModelNames        = "TRPC_MODEL_NAMES"
+	envModelEndpointHost = "TRPC_MODEL_ENDPOINT_HOSTS"
+	// #nosec G101 -- environment variable name, not a secret.
+	envModelSecretRef = "TRPC_MODEL_SECRET_REF"
+	envSessionBackend = "TRPC_SESSION_BACKEND"
+	// #nosec G101 -- environment variable name, not a secret.
 	envWeComCallbackToken  = "WECOM_CALLBACK_TOKEN"
 	envWeComEncodingAESKey = "WECOM_ENCODING_AES_KEY"
-	envWeComAppSecret      = "WECOM_APP_SECRET"
-	envWeComSecretRef      = "WECOM_SECRET_REF"
+	// #nosec G101 -- environment variable name, not a secret.
+	envWeComAppSecret = "WECOM_APP_SECRET"
+	envWeComSecretRef = "WECOM_SECRET_REF"
 
 	defaultModelProvider = "openai"
 	defaultModelNames    = "gpt-4o-mini"
