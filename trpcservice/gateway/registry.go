@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
@@ -126,6 +127,7 @@ type RuntimeRunnerRegistryConfig struct {
 	SecretResolver model.SecretResolver
 	ModelFactory   model.ModelFactory
 	Sessions       session.Service
+	StorageFactory backend.StorageFactory
 }
 
 // NewRuntimeRunnerRegistry creates a registry backed by runtime.NewRunner.
@@ -134,6 +136,9 @@ func NewRuntimeRunnerRegistry(config RuntimeRunnerRegistryConfig) (*RunnerRegist
 		return nil, fmt.Errorf("%w: runtime Runner dependencies are required", ErrInvalid)
 	}
 	config.Registry.Factory = func(ctx context.Context, plan runtime.ExecutionPlan) (Runner, error) {
+		if config.StorageFactory != nil {
+			return runtime.NewRunner(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions, config.StorageFactory)
+		}
 		return runtime.NewRunner(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions)
 	}
 	return NewRunnerRegistry(config.Registry)

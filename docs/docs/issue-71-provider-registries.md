@@ -18,4 +18,10 @@
 
 `channels.ProviderRegistry` 使用 `(tenant_id, channel, provider_account_id)` 路由 `ProviderFactory`，共享层只依赖 `runtime/outbox.Provider`，因此 Telegram、WeCom 等具体 adapter 不会反向污染控制面模型。
 
+## Storage / Session materialization
+
+`backend.StorageFactory` 接收 `ExecutionPlan.StorageFactoryInput()` 的防御性副本，按 capability/provider 从注册表解析实现，并将临时 secret 只传给当前工厂调用。返回的 `CapabilitySet` 由创建它的 Runner 持有；Runner 关闭时释放所有实现了 `Close` 的 capability。Session capability 必须实现 tRPC-Agent-Go 的 `session.Service`，否则 materialization fail closed。
+
+旧版 `runtime.NewRunner` 仍接受借用的 Session service；提供 StorageFactory 时启用新路径，未提供时保持兼容。后续 bootstrap 阶段会把注册表和 StorageFactory 接到多租户生产装配。
+
 所有注册表都是进程内、线程安全、可关闭的实现。它们不提供跨进程一致性、轮换广播或持久化；这些属于后续 bootstrap/cache 工作。

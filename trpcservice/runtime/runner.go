@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
@@ -26,11 +27,12 @@ func NewRunner(
 	resolver modelprofile.SecretResolver,
 	factory modelprofile.ModelFactory,
 	sessions session.Service,
+	storageFactories ...backend.StorageFactory,
 ) (trpcrunner.Runner, error) {
 	if ctx == nil {
 		return nil, errors.New("invalid runner: context is required")
 	}
-	if sessions == nil {
+	if sessions == nil && len(storageFactories) == 0 {
 		return nil, errors.New("invalid runner: session service is required")
 	}
 	agentInput, err := plan.AgentFactoryInput()
@@ -43,6 +45,24 @@ func NewRunner(
 	}
 	if _, err := plan.StorageFactoryInput(); err != nil {
 		return nil, fmt.Errorf("build runner: storage input: %w", err)
+	}
+	var capabilities *backend.CapabilitySet
+	if len(storageFactories) > 1 {
+		return nil, errors.New("invalid runner: multiple storage factories")
+	}
+	if len(storageFactories) == 1 && storageFactories[0] == nil {
+		return nil, errors.New("invalid runner: storage factory is required")
+	}
+	if len(storageFactories) == 1 {
+		capabilities, err = storageFactories[0].New(ctx, mustStorageInput(plan))
+		if err != nil {
+			return nil, fmt.Errorf("build runner: storage capability: %w", err)
+		}
+		sessions, err = capabilities.Session()
+		if err != nil {
+			_ = capabilities.Close()
+			return nil, fmt.Errorf("build runner: session capability: %w", err)
+		}
 	}
 	scopedSessions, err := NewTenantSessionService(plan.Tenant(), sessions)
 	if err != nil {
@@ -59,7 +79,8 @@ func NewRunner(
 		trpcrunner.WithSessionService(scopedSessions),
 	)
 	return &policyRunner{
-		delegate: delegate,
+		delegate:     delegate,
+		capabilities: capabilities,
 		runOptions: []trpcagent.RunOption{
 			trpcagent.WithMaxRunDuration(time.Duration(agentInput.Runtime.ExecutionTimeoutSeconds) * time.Second),
 		},
@@ -84,8 +105,9 @@ func llmAgentOptions(input agent.LLMAgentFactoryInput, model trpcmodel.Model) []
 // boundary. Caller-provided options are applied first; the fixed policy is
 // appended last so an execution cannot silently extend its control-plane limits.
 type policyRunner struct {
-	delegate   trpcrunner.Runner
-	runOptions []trpcagent.RunOption
+	delegate     trpcrunner.Runner
+	capabilities *backend.CapabilitySet
+	runOptions   []trpcagent.RunOption
 }
 
 func (runner *policyRunner) Run(ctx context.Context, userID, sessionID string, message trpcmodel.Message, options ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
@@ -95,7 +117,17 @@ func (runner *policyRunner) Run(ctx context.Context, userID, sessionID string, m
 	return runner.delegate.Run(ctx, userID, sessionID, message, allOptions...)
 }
 
-func (runner *policyRunner) Close() error { return runner.delegate.Close() }
+func (runner *policyRunner) Close() error {
+	if runner == nil {
+		return nil
+	}
+	return errors.Join(runner.delegate.Close(), runner.capabilities.Close())
+}
+
+func mustStorageInput(plan ExecutionPlan) backend.StorageFactoryInput {
+	input, _ := plan.StorageFactoryInput()
+	return input
+}
 
 func toTRPCGenerationConfig(configuration agent.GenerationConfig) trpcmodel.GenerationConfig {
 	return trpcmodel.GenerationConfig{
