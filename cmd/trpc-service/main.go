@@ -10,12 +10,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/migrations"
 	"github.com/XnLemon/trpc-agent-service/trpcservice"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
 
 const (
@@ -25,12 +28,32 @@ const (
 	defaultReadTimeout       = 30 * time.Second
 	defaultWriteTimeout      = 30 * time.Second
 	defaultIdleTimeout       = 60 * time.Second
+	initUsage                = "usage: trpc-service init --confirm [-tenant-key key] [-tenant-name name] [-app-key key] [-app-name name] [-app-description text]"
+	bootstrapPostgresDSN     = "TRPC_POSTGRES_DSN"
+
+	envInitTenantKey      = "TRPC_INIT_TENANT_KEY"
+	envInitTenantName     = "TRPC_INIT_TENANT_NAME"
+	envInitAppKey         = "TRPC_INIT_APP_KEY"
+	envInitAppName        = "TRPC_INIT_APP_NAME"
+	envInitAppDescription = "TRPC_INIT_APP_DESCRIPTION"
 )
 
 type serviceOptions struct {
 	address         string
 	shutdownTimeout time.Duration
 }
+
+type initOptions struct {
+	confirm bool
+	help    bool
+	config  bootstrap.InitConfig
+}
+
+var (
+	openInitDatabase     = postgres.Open
+	applyInitMigrations  = migrations.Apply
+	verifyInitMigrations = migrations.Verify
+)
 
 var newBootstrapRuntime = bootstrap.NewFromEnvironment
 
@@ -45,12 +68,15 @@ func main() {
 }
 
 func runMain(ctx context.Context, args []string, stdout, stderr io.Writer, signals <-chan os.Signal) error {
+	if len(args) > 0 && args[0] == "init" {
+		return runInit(ctx, args[1:], stdout, stderr, signals)
+	}
 	options, help, err := parseServiceOptions(args, stderr)
 	if err != nil {
 		return err
 	}
 	if help {
-		_, _ = fmt.Fprintf(stdout, "trpc-agent-service %s\nusage: trpc-service [-addr address] [-shutdown-timeout duration]\n", trpcservice.Version)
+		_, _ = fmt.Fprintf(stdout, "trpc-agent-service %s\nusage: trpc-service [-addr address] [-shutdown-timeout duration]\n       trpc-service init --confirm [options]\n", trpcservice.Version)
 		return nil
 	}
 	bootstrapRuntime, err := newBootstrapRuntime(ctx)
@@ -62,6 +88,114 @@ func runMain(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 	_, _ = fmt.Fprintf(stdout, "trpc-agent-service %s listening on %s\n", trpcservice.Version, options.address)
 	returnErr := runService(ctx, signals, handler, options.shutdownTimeout, server.ListenAndServe, server.Shutdown)
 	return errors.Join(returnErr, bootstrapRuntime.Close())
+}
+
+func runInit(ctx context.Context, args []string, stdout, stderr io.Writer, signals <-chan os.Signal) error {
+	options, help, err := parseInitOptions(args, stderr)
+	if err != nil {
+		return err
+	}
+	if help {
+		_, err := fmt.Fprintln(stdout, initUsage+"\n\nThe database DSN is read from TRPC_POSTGRES_DSN. Metadata may also be supplied with TRPC_INIT_TENANT_KEY, TRPC_INIT_TENANT_NAME, TRPC_INIT_APP_KEY, TRPC_INIT_APP_NAME, and TRPC_INIT_APP_DESCRIPTION.")
+		return err
+	}
+	if !options.confirm {
+		return fmt.Errorf("%w: use --confirm", bootstrap.ErrInitializationAuthorization)
+	}
+	dsn, config, err := loadInitEnvironment(options.config)
+	if err != nil {
+		return err
+	}
+	if ctx == nil {
+		return bootstrap.ErrInvalidConfig
+	}
+	initContext := ctx
+	if signals != nil {
+		var cancel context.CancelFunc
+		initContext, cancel = context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			select {
+			case <-signals:
+				cancel()
+			case <-initContext.Done():
+			}
+		}()
+	}
+	db, err := openInitDatabase(initContext, dsn, postgres.Options{MaxOpenConns: 4, MaxIdleConns: 4})
+	if err != nil {
+		return mapInitCommandError(initContext, err, "PostgreSQL is unavailable")
+	}
+	if db == nil {
+		return bootstrap.ErrInitialization
+	}
+	applyErr := applyInitMigrations(initContext, db)
+	if applyErr == nil {
+		applyErr = verifyInitMigrations(initContext, db)
+	}
+	if applyErr != nil {
+		_ = db.Close()
+		return mapInitCommandError(initContext, applyErr, "database migrations are not ready")
+	}
+	result, initErr := bootstrap.Initialize(initContext, db, config)
+	closeErr := db.Close()
+	if initErr != nil {
+		return initErr
+	}
+	if closeErr != nil {
+		return fmt.Errorf("%w: database close failed", bootstrap.ErrInitialization)
+	}
+	return bootstrap.WriteInitResult(stdout, result)
+}
+
+func parseInitOptions(args []string, stderr io.Writer) (initOptions, bool, error) {
+	options := initOptions{config: bootstrap.InitConfig{
+		TenantKey:         strings.TrimSpace(os.Getenv(envInitTenantKey)),
+		TenantDisplayName: strings.TrimSpace(os.Getenv(envInitTenantName)),
+		AppKey:            strings.TrimSpace(os.Getenv(envInitAppKey)),
+		AppDisplayName:    strings.TrimSpace(os.Getenv(envInitAppName)),
+		AppDescription:    strings.TrimSpace(os.Getenv(envInitAppDescription)),
+	}}
+	flags := flag.NewFlagSet("trpc-service init", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.BoolVar(&options.help, "help", false, "show help")
+	flags.BoolVar(&options.help, "h", false, "show help")
+	flags.BoolVar(&options.confirm, "confirm", false, "authorize first-run initialization")
+	flags.StringVar(&options.config.TenantKey, "tenant-key", options.config.TenantKey, "initial tenant key")
+	flags.StringVar(&options.config.TenantDisplayName, "tenant-name", options.config.TenantDisplayName, "initial tenant display name")
+	flags.StringVar(&options.config.AppKey, "app-key", options.config.AppKey, "initial agent app key")
+	flags.StringVar(&options.config.AppDisplayName, "app-name", options.config.AppDisplayName, "initial agent app display name")
+	flags.StringVar(&options.config.AppDescription, "app-description", options.config.AppDescription, "initial agent app description")
+	if err := flags.Parse(args); err != nil {
+		return initOptions{}, false, err
+	}
+	if flags.NArg() != 0 {
+		return initOptions{}, false, errors.New("unexpected init arguments")
+	}
+	return options, options.help, nil
+}
+
+func loadInitEnvironment(config bootstrap.InitConfig) (string, bootstrap.InitConfig, error) {
+	dsn := strings.TrimSpace(os.Getenv(bootstrapPostgresDSN))
+	if dsn == "" {
+		return "", bootstrap.InitConfig{}, fmt.Errorf("%w: %s is required", bootstrap.ErrInvalidConfig, bootstrapPostgresDSN)
+	}
+	if err := config.Validate(); err != nil {
+		return "", bootstrap.InitConfig{}, err
+	}
+	return dsn, config, nil
+}
+
+func mapInitCommandError(ctx context.Context, err error, message string) error {
+	if ctx != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("%w: %s", bootstrap.ErrInvalidConfig, message)
 }
 
 func parseServiceOptions(args []string, stderr io.Writer) (serviceOptions, bool, error) {
