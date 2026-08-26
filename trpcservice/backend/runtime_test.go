@@ -14,6 +14,12 @@ func TestBackendExecutionSnapshotFreezesFactoryInputAndCacheIdentity(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	input := assertBackendSnapshotCacheAndInput(t, snapshot, tenantRoot, profile)
+	assertBackendSnapshotDefensiveCopies(t, snapshot, tenantRoot, profile, input)
+}
+
+func assertBackendSnapshotCacheAndInput(t *testing.T, snapshot BackendExecutionSnapshot, tenantRoot *tenant.Tenant, profile *Profile) StorageFactoryInput {
+	t.Helper()
 	key, err := snapshot.CacheKey()
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +37,11 @@ func TestBackendExecutionSnapshotFreezesFactoryInputAndCacheIdentity(t *testing.
 		input.SchemaVersion != profile.SchemaVersion || len(input.Bindings) != 1 || input.Bindings[0].SecretRef != "secret://tenant/database" {
 		t.Fatalf("unexpected Factory input: %+v", input)
 	}
+	return input
+}
 
+func assertBackendSnapshotDefensiveCopies(t *testing.T, snapshot BackendExecutionSnapshot, tenantRoot *tenant.Tenant, profile *Profile, input StorageFactoryInput) {
+	t.Helper()
 	*tenantRoot.DefaultBackendProfileID = "source-tenant-mutation"
 	profile.Bindings[0].Options["database"] = "source-profile-mutation"
 	if got := snapshot.Tenant().DefaultBackendProfileID; got == nil || *got == "source-tenant-mutation" {
