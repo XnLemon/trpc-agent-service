@@ -62,9 +62,6 @@ linters:
       - path: ^trpcservice/gateway/dispatch_test\.go$
         text: 'cyclomatic complexity .* of func `(?:TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle|TestDispatcherDurableClaimReclaimsReceivedAndExpiredRunning)`'
         linters: [gocyclo]
-      - path: ^trpcservice/model/inmemory/inmemory_test\.go$
-        text: 'cyclomatic complexity .* of func `TestRepositoryTenantIsolationLifecycleAndDefensiveCopies`'
-        linters: [gocyclo]
       - path: ^trpcservice/model/repository_test\.go$
         text: 'cyclomatic complexity .* of func `TestPrepareProfileChangesValidateAuditAndLifecycleEvents`'
         linters: [gocyclo]
