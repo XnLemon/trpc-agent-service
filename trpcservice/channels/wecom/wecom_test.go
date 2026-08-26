@@ -136,12 +136,14 @@ func TestHandlerVerifyDynamicCandidateBoundaries(t *testing.T) {
 	})
 
 	t.Run("rejects when every candidate fails verification", func(t *testing.T) {
-		handler, _, ciphertext, request := newDynamicVerifyFixture(t)
-		handler.credentials = &sequenceCredentialResolver{values: []Credentials{{
-			CallbackToken: "wrong-token", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)),
-		}}}
-		if _, _, err := handler.verify(request, ciphertext); !errors.Is(err, ErrVerification) {
-			t.Fatalf("exhausted candidates error = %v", err)
+		handler, consumer, ciphertext, request := newDynamicVerifyFixture(t)
+		consumer.candidates = []channels.CandidateBindingContext{{Channel: channels.ChannelWeCom}, {Channel: channels.ChannelWeCom}}
+		handler.credentials = &sequenceCredentialResolver{values: []Credentials{
+			{CallbackToken: "wrong-token", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))},
+			{CallbackToken: "wrong-token", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))},
+		}}
+		if _, _, err := handler.verify(request, ciphertext); !errors.Is(err, ErrVerification) || consumer.consumeCalls != 2 {
+			t.Fatalf("exhausted candidates error = %v consumes %d", err, consumer.consumeCalls)
 		}
 	})
 
