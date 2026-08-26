@@ -540,8 +540,14 @@ func assertIngressAudit(t *testing.T, writer audit.Reader, count int, eventType 
 		t.Fatalf("ingress audit = %+v, err=%v", events, err)
 	}
 	event := events[count-1]
-	if event.EventType != eventType || event.Decision != decision || event.ErrorType != errorType {
-		t.Fatalf("ingress audit event = %+v", event)
+	if event.EventType != eventType {
+		t.Fatalf("ingress event type = %q, want %q", event.EventType, eventType)
+	}
+	if event.Decision != decision {
+		t.Fatalf("ingress decision = %q, want %q", event.Decision, decision)
+	}
+	if event.ErrorType != errorType {
+		t.Fatalf("ingress error type = %q, want %q", event.ErrorType, errorType)
 	}
 	if requestID != "" && event.RequestID != requestID {
 		t.Fatalf("ingress request ID = %q, want %q", event.RequestID, requestID)
