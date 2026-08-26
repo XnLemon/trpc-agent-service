@@ -1102,22 +1102,7 @@ func TestDispatcherConfigurationAndEventMappingEdges(t *testing.T) {
 		t.Fatalf("nil dispatch context error = %v", err)
 	}
 
-	for name, event := range map[string]*trpcevent.Event{
-		"nil event":        nil,
-		"partial status":   {Response: &trpcmodel.Response{IsPartial: true}},
-		"message fallback": {Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Message: trpcmodel.Message{Content: "fallback"}}}}},
-		"done with text":   {Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "final"}}}, Done: true}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			mapped, done := mapRunnerEvent(event, "request", "trace")
-			if name == "done with text" && !done {
-				t.Fatal("done event was not terminal")
-			}
-			if len(mapped) == 0 || mapped[0].RequestID != "request" {
-				t.Fatalf("mapped event = %+v", mapped)
-			}
-		})
-	}
+	assertDispatchEventMappings(t)
 	if got := cancellationStatus(contextWithDeadline(t)); got != "deadline_exceeded" {
 		t.Fatalf("deadline cancellation status = %q", got)
 	}
@@ -1141,6 +1126,26 @@ func TestDispatcherConfigurationAndEventMappingEdges(t *testing.T) {
 	}
 	if _, err := dispatchRunnerIdentity(principal, groupMessage); err != nil {
 		t.Fatalf("API group identity error = %v", err)
+	}
+}
+
+func assertDispatchEventMappings(t *testing.T) {
+	t.Helper()
+	for name, event := range map[string]*trpcevent.Event{
+		"nil event":        nil,
+		"partial status":   {Response: &trpcmodel.Response{IsPartial: true}},
+		"message fallback": {Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Message: trpcmodel.Message{Content: "fallback"}}}}},
+		"done with text":   {Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "final"}}}, Done: true}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mapped, done := mapRunnerEvent(event, "request", "trace")
+			if name == "done with text" && !done {
+				t.Fatal("done event was not terminal")
+			}
+			if len(mapped) == 0 || mapped[0].RequestID != "request" {
+				t.Fatalf("mapped event = %+v", mapped)
+			}
+		})
 	}
 }
 

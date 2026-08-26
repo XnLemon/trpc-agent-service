@@ -68,11 +68,11 @@ linters:
       - path: ^trpcservice/controlplane/postgres/postgres_error_paths_test\.go$
         text: 'cyclomatic complexity .* of func `TestPostgreSQLRepositoriesMapDriverFailures`'
         linters: [gocyclo]
-      - path: ^trpcservice/gateway/dispatch_test\.go$
-        text: 'cyclomatic complexity .* of func `(?:TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle|TestDispatcherDurableClaimReclaimsReceivedAndExpiredRunning|TestDispatcherConfigurationAndEventMappingEdges)`'
-        linters: [gocyclo]
       - path: ^trpcservice/gateway/gateway_test\.go$
         text: 'cyclomatic complexity .* of func `TestGatewayAuthenticationAndPrincipalValidationEdges`'
+        linters: [gocyclo]
+      - path: ^trpcservice/gateway/dispatch_test\.go$
+        text: 'cyclomatic complexity .* of func `(?:TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle|TestDispatcherDurableClaimReclaimsReceivedAndExpiredRunning)`'
         linters: [gocyclo]
       - path: ^trpcservice/gateway/idempotency_test\.go$
         text: 'cyclomatic complexity .* of func `(?:TestIdempotencyStorePendingCompletedAndFailedLifecycle|TestIdempotencyStoreScopesCapacityAndConfigurationEdges)`'
