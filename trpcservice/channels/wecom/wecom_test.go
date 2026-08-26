@@ -207,6 +207,20 @@ func TestProviderClassifiesDeliveryOutcomes(t *testing.T) {
 	}
 }
 
+func TestProviderDefaultsAndContextCancellation(t *testing.T) {
+	provider := &Provider{}
+	if provider.baseURL() != "https://qyapi.weixin.qq.com" || provider.client() == nil {
+		t.Fatalf("provider defaults are invalid")
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := (&Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret"}).Deliver(canceled, storage.ReplyOutbox{Payload: "hello", ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user"}})
+	var deliveryErr *outbox.DeliveryError
+	if !errors.As(err, &deliveryErr) || deliveryErr.Class != "canceled" && deliveryErr.Class != "unavailable" {
+		t.Fatalf("canceled delivery = %v", err)
+	}
+}
+
 func TestHandlerAcceptsEncryptedTextWithRequestAndTraceIDs(t *testing.T) {
 	dispatcher := &callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)}
 	handler := newCallbackTestHandler(t, dispatcher)
@@ -287,15 +301,25 @@ func TestDynamicHandlerRoutesOnlyVerifiedBinding(t *testing.T) {
 	if recorder.Code != http.StatusOK || recorder.Body.String() != "success" {
 		t.Fatalf("dynamic callback response = %d %q", recorder.Code, recorder.Body.String())
 	}
+	var target channels.RoutingTarget
 	select {
 	case request := <-dispatcher.requests:
-		target, ok := request.Principal.RoutingTarget()
+		var ok bool
+		target, ok = request.Principal.RoutingTarget()
 		if !ok || request.Principal.TenantID() != binding.TenantID || target.BindingID != binding.BindingID || request.RequestID == "" || request.TraceID == "" {
 			t.Fatalf("dynamic dispatch request = %+v", request)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("verified dynamic callback did not dispatch")
 	}
+	staticHandler, err := New(Config{Dispatcher: dispatcher, Token: "token", ReceiveID: "receive", AgentID: "1", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), Target: target})
+	if err != nil {
+		t.Fatalf("static handler = %v", err)
+	}
+	if staticHandler == nil {
+		t.Fatal("static handler is nil")
+	}
+	_ = staticHandler.Close()
 
 	badSignature := callbackTestRequestAtPath(t, "/wecom/callback/route-key", "message-bad", "user-1", "hello")
 	badQuery := badSignature.URL.Query()
@@ -311,6 +335,18 @@ func TestDynamicHandlerRoutesOnlyVerifiedBinding(t *testing.T) {
 	handler.ServeHTTP(unknown, callbackTestRequestAtPath(t, "/wecom/callback", "message-unknown", "user-1", "hello"))
 	if unknown.Code != http.StatusNotFound {
 		t.Fatalf("unknown route response = %d", unknown.Code)
+	}
+}
+
+func TestHandlerRejectsMalformedMessages(t *testing.T) {
+	handler := newCallbackTestHandler(t, &callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)})
+	t.Cleanup(func() { _ = handler.Close() })
+	for _, body := range []string{"", "<xml></xml>", "<xml><Encrypt>bad</Encrypt></xml>"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body)))
+		if response.Code != http.StatusForbidden && response.Code != http.StatusBadRequest {
+			t.Fatalf("malformed body %q status = %d", body, response.Code)
+		}
 	}
 }
 
