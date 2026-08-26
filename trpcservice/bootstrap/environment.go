@@ -68,6 +68,8 @@ var (
 	openEnvironmentDatabase     = postgres.Open
 	applyEnvironmentMigrations  = migrations.Apply
 	verifyEnvironmentMigrations = migrations.Verify
+	environmentWeComOwnerFunc   = environmentWeComOwner
+	newEnvironmentWeComWorker   = outbox.New
 )
 
 // environmentConfig is intentionally private: it contains the one secret
@@ -146,14 +148,14 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		wecomFactory = func(dispatcher gateway.DispatchService) (http.Handler, error) {
 			return wecom.New(wecom.Config{Candidates: channelRepo, Tenants: tenantRepo, Apps: appRepo, Credentials: credentials, Dispatcher: dispatcher})
 		}
-		owner, ownerErr := environmentWeComOwner()
+		owner, ownerErr := environmentWeComOwnerFunc()
 		if ownerErr != nil {
 			_ = delegateSessions.Close()
 			_ = runtimeStore.Close()
 			_ = db.Close()
 			return nil, ErrInvalidConfig
 		}
-		wecomWorker, err = outbox.New(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelRepo, Credentials: credentials}, TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second})
+		wecomWorker, err = newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelRepo, Credentials: credentials}, TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second})
 		if err != nil {
 			_ = delegateSessions.Close()
 			_ = runtimeStore.Close()

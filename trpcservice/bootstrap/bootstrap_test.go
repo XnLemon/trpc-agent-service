@@ -608,6 +608,67 @@ func TestNewFromEnvironmentInstallsWeComCallbackAndOutboxWorker(t *testing.T) {
 	}
 }
 
+func TestNewFromEnvironmentCleansUpWhenWeComWorkerSetupFails(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envWeComCallbackToken, "callback-token")
+	t.Setenv(envWeComEncodingAESKey, base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)))
+	t.Setenv(envWeComAppSecret, "app-secret")
+	t.Setenv(envWeComSecretRef, "env/wecom")
+
+	registerBootstrapPingDriver.Do(func() {
+		sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{})
+	})
+	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousVerify := verifyEnvironmentMigrations
+	previousOwner := environmentWeComOwnerFunc
+	previousWorker := newEnvironmentWeComWorker
+	defer func() {
+		openEnvironmentDatabase = previousOpen
+		applyEnvironmentMigrations = previousApply
+		verifyEnvironmentMigrations = previousVerify
+		environmentWeComOwnerFunc = previousOwner
+		newEnvironmentWeComWorker = previousWorker
+	}()
+
+	tests := []struct {
+		name      string
+		ownerErr  error
+		workerErr error
+	}{
+		{name: "owner", ownerErr: errors.New("owner unavailable")},
+		{name: "worker", workerErr: errors.New("worker unavailable")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, err := sql.Open("trpc-service-bootstrap-ping", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+			applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+			verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+			if tt.ownerErr != nil {
+				environmentWeComOwnerFunc = func() (string, error) { return "", tt.ownerErr }
+			} else {
+				environmentWeComOwnerFunc = func() (string, error) { return "test-owner", nil }
+			}
+			if tt.workerErr != nil {
+				newEnvironmentWeComWorker = func(outbox.Config) (*outbox.Worker, error) { return nil, tt.workerErr }
+			} else {
+				newEnvironmentWeComWorker = outbox.New
+			}
+
+			if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("setup error = %v", err)
+			}
+			if err := db.Ping(); err == nil {
+				t.Fatal("database was not closed after WeCom setup failure")
+			}
+		})
+	}
+}
+
 var registerBootstrapPingDriver sync.Once
 
 func TestNewUsesDatabasePingAndBuildsPostgreSQLRepositories(t *testing.T) {
