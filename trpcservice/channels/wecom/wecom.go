@@ -248,6 +248,10 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	case <-accepted:
 		h.writeSuccess(w)
 	case dispatchErr := <-result:
+		if dispatchErr == nil {
+			h.writeSuccess(w)
+			return
+		}
 		if errors.Is(dispatchErr, gateway.ErrDuplicateMessage) {
 			h.writeSuccess(w)
 			return
