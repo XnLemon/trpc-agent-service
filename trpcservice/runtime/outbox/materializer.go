@@ -11,7 +11,9 @@ import (
 // ErrMaterialization wraps failures while creating durable reply segments.
 var ErrMaterialization = errors.New("reply materialization failed")
 
-const defaultSegmentRunes = 4096
+// defaultSegmentRunes is deliberately conservative: 512 Unicode code points
+// fit within the 2048-byte text limit of currently supported IM providers.
+const defaultSegmentRunes = 512
 
 // Materializer turns one completed Runner reply into durable, idempotent
 // segments. It is deliberately independent of any channel SDK.

@@ -33,6 +33,8 @@ type Provider struct {
 
 var _ outbox.Provider = (*Provider)(nil)
 
+const maximumTextBytes = 2048
+
 // Deliver sends one durable text segment through the WeCom application API.
 //
 //nolint:gocyclo
@@ -41,6 +43,9 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
 	}
 	if value.ReplyTarget.ConversationKind != "direct" || value.ReplyTarget.ReceiverID == "" {
+		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
+	}
+	if len([]byte(value.Payload)) == 0 || len([]byte(value.Payload)) > maximumTextBytes {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
 	}
 	token, err := p.accessToken(ctx)
@@ -72,9 +77,6 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return "", &outbox.DeliveryError{Class: "timeout", Retryable: true}
-		}
-		if errors.Is(err, context.Canceled) {
-			return "", &outbox.DeliveryError{Class: "canceled", Retryable: false}
 		}
 		if errors.Is(err, context.Canceled) {
 			return "", &outbox.DeliveryError{Class: "canceled", Retryable: true}

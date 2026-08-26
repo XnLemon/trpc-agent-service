@@ -283,6 +283,9 @@ func TestMaterializerDefaultSegmentSizeAndUnicodeSplit(t *testing.T) {
 	if got := splitRunes("  ", 2); got != nil {
 		t.Fatalf("blank split = %#v", got)
 	}
+	if got := splitRunes(strings.Repeat("界", 513), defaultSegmentRunes); len(got) != 2 || len([]byte(got[0])) > 2048 {
+		t.Fatalf("default segment boundary = %#v", got)
+	}
 }
 
 type countingProvider struct {

@@ -86,3 +86,11 @@ func TestProviderCachesTokenAndDeliversText(t *testing.T) {
 		t.Fatalf("calls token=%d send=%d", tokenCalls, sendCalls)
 	}
 }
+
+func TestProviderRejectsOversizedText(t *testing.T) {
+	p := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "app-secret"}
+	_, err := p.Deliver(context.Background(), storage.ReplyOutbox{Payload: strings.Repeat("界", 683), ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user-1"}})
+	if err == nil {
+		t.Fatal("oversized text was accepted")
+	}
+}
