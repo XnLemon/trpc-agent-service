@@ -18,6 +18,13 @@ func TestModelExecutionSnapshotFreezesInputAndKeepsSecretOutOfState(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	input := assertModelSnapshotCacheAndInput(t, snapshot, root, profile)
+	assertModelSnapshotDefensiveCopies(t, snapshot, profile, input)
+	assertModelSnapshotContextBoundary(t, snapshot, profile)
+}
+
+func assertModelSnapshotCacheAndInput(t *testing.T, snapshot ModelExecutionSnapshot, root *tenant.Tenant, profile *Profile) ModelFactoryInput {
+	t.Helper()
 	key, err := snapshot.CacheKey()
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +46,11 @@ func TestModelExecutionSnapshotFreezesInputAndKeepsSecretOutOfState(t *testing.T
 	if strings.Contains(string(encoded), "super-secret") {
 		t.Fatal("secret value entered serialized factory input")
 	}
+	return input
+}
 
+func assertModelSnapshotDefensiveCopies(t *testing.T, snapshot ModelExecutionSnapshot, profile *Profile, input ModelFactoryInput) {
+	t.Helper()
 	profile.Configuration.SecretRef = "secret://other/value"
 	if snapshot.Profile().Configuration.SecretRef != "secret://tenant/model" {
 		t.Fatal("snapshot retained mutable source Profile")
@@ -52,7 +63,10 @@ func TestModelExecutionSnapshotFreezesInputAndKeepsSecretOutOfState(t *testing.T
 	if again.SecretRef != "secret://tenant/model" {
 		t.Fatal("Factory input mutation changed snapshot state")
 	}
+}
 
+func assertModelSnapshotContextBoundary(t *testing.T, snapshot ModelExecutionSnapshot, profile *Profile) {
+	t.Helper()
 	ctx := WithModelExecutionSnapshot(context.Background(), snapshot)
 	fromContext, ok := ModelExecutionSnapshotFromContext(ctx)
 	if !ok || fromContext.Profile().ProfileID != profile.ProfileID {
