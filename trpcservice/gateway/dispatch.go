@@ -153,24 +153,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	if dispatcher == nil || dispatcher.resolver == nil || dispatcher.registry == nil {
 		return nil, ErrNotReady
 	}
-	if ctx == nil {
-		return nil, fmt.Errorf("%w: context is required", ErrInvalid)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := request.Principal.Validate(); err != nil {
-		return nil, ErrUnauthenticated
-	}
-	message, err := request.Message.Normalize()
-	if err != nil {
-		return nil, err
-	}
-	requestID, err := normalizeCorrelationID(request.RequestID, true)
-	if err != nil {
-		return nil, err
-	}
-	traceID, err := normalizeCorrelationID(request.TraceID, false)
+	message, requestID, traceID, err := normalizeDispatchRequest(ctx, request)
 	if err != nil {
 		return nil, err
 	}
@@ -206,11 +189,9 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		finishWithError(err)
 		return nil, auditWriteFailure()
 	}
-	if dispatcher.handoffStore != nil {
-		if _, err := dispatcher.handoffStore.Reserve(ctx, audit.ExecutionHandoff{TenantID: request.Principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), RequestID: requestID, TraceID: traceID, EventID: audit.NewEventID(requestID, string(audit.EventExecutionStarted)), State: audit.HandoffPending}); err != nil {
-			finishWithError(err)
-			return nil, auditWriteFailure()
-		}
+	if err := dispatcher.reserveHandoff(ctx, request.Principal, requestID, traceID); err != nil {
+		finishWithError(err)
+		return nil, auditWriteFailure()
 	}
 	lease, err := dispatcher.registry.Acquire(ctx, plan)
 	if err != nil {
@@ -271,6 +252,42 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	_ = dispatcher.metrics.Active(ctx, 1, map[string]string{"component": "runner"})
 	go dispatcher.forward(ctx, requestID, traceID, runnerEvents, lease, durable, output, span, started, request.Principal, message, identity)
 	return output, nil
+}
+
+func (dispatcher *Dispatcher) reserveHandoff(ctx context.Context, principal Principal, requestID, traceID string) error {
+	if dispatcher.handoffStore == nil {
+		return nil
+	}
+	_, err := dispatcher.handoffStore.Reserve(ctx, audit.ExecutionHandoff{
+		TenantID: principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"),
+		RequestID: requestID, TraceID: traceID, EventID: audit.NewEventID(requestID, string(audit.EventExecutionStarted)), State: audit.HandoffPending,
+	})
+	return err
+}
+
+func normalizeDispatchRequest(ctx context.Context, request DispatchRequest) (InboundMessage, string, string, error) {
+	if ctx == nil {
+		return InboundMessage{}, "", "", fmt.Errorf("%w: context is required", ErrInvalid)
+	}
+	if err := ctx.Err(); err != nil {
+		return InboundMessage{}, "", "", err
+	}
+	if err := request.Principal.Validate(); err != nil {
+		return InboundMessage{}, "", "", ErrUnauthenticated
+	}
+	message, err := request.Message.Normalize()
+	if err != nil {
+		return InboundMessage{}, "", "", err
+	}
+	requestID, err := normalizeCorrelationID(request.RequestID, true)
+	if err != nil {
+		return InboundMessage{}, "", "", err
+	}
+	traceID, err := normalizeCorrelationID(request.TraceID, false)
+	if err != nil {
+		return InboundMessage{}, "", "", err
+	}
+	return message, requestID, traceID, nil
 }
 
 func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity) (*durableExecution, error) {
