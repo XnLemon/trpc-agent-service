@@ -26,9 +26,6 @@ linters:
       - path: ^trpcservice/agent/inmemory/inmemory_test\.go$
         text: 'cyclomatic complexity .* of func `TestPublishRollbackAndLifecycleReturnCompleteEvents`'
         linters: [gocyclo]
-      - path: ^trpcservice/agent/revision_test\.go$
-        text: 'cyclomatic complexity .* of func `TestContentDigestIsDeterministicAndSensitiveToBehavior`'
-        linters: [gocyclo]
       - path: ^trpcservice/agent/runtime_test\.go$
         text: 'cyclomatic complexity .* of func `TestAgentExecutionSnapshotFreezesFactoryInputAndCacheIdentity`'
         linters: [gocyclo]
