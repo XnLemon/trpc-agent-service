@@ -48,7 +48,7 @@ linters:
         text: 'cyclomatic complexity .* of func `(?:TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle|TestDispatcherDurableClaimReclaimsReceivedAndExpiredRunning)`'
         linters: [gocyclo]
       - path: ^trpcservice/runtime/runtime_test\.go$
-        text: 'cyclomatic complexity .* of func `(?:TestRunnerExecutesFakeModelAndPersistsTenantScopedSession|TestTenantSessionServiceDelegatesEveryOperationAndScopesKeys)`'
+        text: 'cyclomatic complexity .* of func `TestRunnerExecutesFakeModelAndPersistsTenantScopedSession`'
         linters: [gocyclo]
       - path: ^trpcservice/runtime/storage/postgres/integration_test\.go$
         text: 'cyclomatic complexity .* of func `TestRuntimeStorePostgreSQLConformanceAndRestart`'

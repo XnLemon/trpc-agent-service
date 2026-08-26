@@ -417,18 +417,39 @@ func TestTenantSessionServiceRejectsCrossTenantGetAndAppend(t *testing.T) {
 }
 
 func TestTenantSessionServiceDelegatesEveryOperationAndScopesKeys(t *testing.T) {
+	setup := setupTenantSessionOperations(t)
+	created := assertTenantSessionLifecycleOperations(t, setup)
+	assertTenantSessionSummaryAndDelete(t, setup, created)
+	assertTenantSessionValidationBoundaries(t, setup)
+}
+
+type tenantSessionOperationsSetup struct {
+	root     *tenant.Tenant
+	service  *TenantSessionService
+	delegate session.Service
+	key      session.Key
+}
+
+func setupTenantSessionOperations(t *testing.T) tenantSessionOperationsSetup {
+	t.Helper()
 	root := runtimeTenant(t, "all-session-operations")
 	delegate := inmemory.NewSessionService()
 	service, err := NewTenantSessionService(*root, delegate)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
+	t.Cleanup(func() {
 		if err := service.Close(); err != nil {
 			t.Errorf("service.Close() error = %v", err)
 		}
-	}()
-	key := session.Key{AppName: "operations-app", UserID: "operations-user", SessionID: "operations-session"}
+	})
+	return tenantSessionOperationsSetup{root: root, service: service, delegate: delegate, key: session.Key{AppName: "operations-app", UserID: "operations-user", SessionID: "operations-session"}}
+}
+
+func assertTenantSessionLifecycleOperations(t *testing.T, setup tenantSessionOperationsSetup) *session.Session {
+	t.Helper()
+	service := setup.service
+	key := setup.key
 	created, err := service.CreateSession(context.Background(), key, session.StateMap{"initial": []byte("value")})
 	if err != nil {
 		t.Fatal(err)
@@ -466,6 +487,12 @@ func TestTenantSessionServiceDelegatesEveryOperationAndScopesKeys(t *testing.T) 
 	if err := service.AppendEvent(context.Background(), created, &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Message: trpcmodel.NewAssistantMessage("event")}}, Done: true}}); err != nil {
 		t.Fatal(err)
 	}
+	return created
+}
+
+func assertTenantSessionSummaryAndDelete(t *testing.T, setup tenantSessionOperationsSetup, created *session.Session) {
+	t.Helper()
+	service := setup.service
 	if err := service.CreateSessionSummary(context.Background(), created, "", false); err != nil {
 		t.Fatal(err)
 	}
@@ -475,13 +502,19 @@ func TestTenantSessionServiceDelegatesEveryOperationAndScopesKeys(t *testing.T) 
 	if summary, ok := service.GetSessionSummaryText(context.Background(), created); ok || summary != "" {
 		t.Fatalf("unexpected summary = %q, ok=%v", summary, ok)
 	}
-	if err := service.DeleteSession(context.Background(), key); err != nil {
+	if err := service.DeleteSession(context.Background(), setup.key); err != nil {
 		t.Fatal(err)
 	}
-	if deleted, err := service.GetSession(context.Background(), key); err != nil || deleted != nil {
+	if deleted, err := service.GetSession(context.Background(), setup.key); err != nil || deleted != nil {
 		t.Fatalf("deleted session = %+v, err=%v", deleted, err)
 	}
+}
 
+func assertTenantSessionValidationBoundaries(t *testing.T, setup tenantSessionOperationsSetup) {
+	t.Helper()
+	service := setup.service
+	delegate := setup.delegate
+	root := setup.root
 	if _, err := NewTenantSessionService(tenant.Tenant{}, delegate); !errors.Is(err, ErrTenantSessionScope) {
 		t.Fatalf("invalid tenant constructor error = %v", err)
 	}
