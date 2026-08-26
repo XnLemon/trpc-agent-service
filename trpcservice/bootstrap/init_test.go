@@ -358,6 +358,9 @@ func TestInitializationErrorMappingAndOutputEdges(t *testing.T) {
 		t.Fatalf("output writer error = %v", err)
 	}
 
+}
+
+func TestInitializeRejectsInvalidConfigurationAndCancellation(t *testing.T) {
 	validationDB, _, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
