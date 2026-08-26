@@ -33,7 +33,8 @@ type Provider struct {
 
 var _ outbox.Provider = (*Provider)(nil)
 
-func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (string, error) { //nolint:gocyclo -- provider error mapping follows the documented protocol boundary.
+//nolint:gocyclo
+func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (string, error) {
 	if p == nil || strings.TrimSpace(p.CorpID) == "" || strings.TrimSpace(p.AgentID) == "" || strings.TrimSpace(p.AppSecret) == "" || ctx == nil {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
 	}
