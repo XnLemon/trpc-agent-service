@@ -402,8 +402,10 @@ func decrypt(key []byte, receiveID, value string) ([]byte, error) {
 	if err != nil {
 		return nil, ErrVerification
 	}
+	iv := make([]byte, aes.BlockSize)
+	copy(iv, key)
 	plain := make([]byte, len(ciphertext))
-	cipher.NewCBCDecrypter(block, key[:aes.BlockSize]).CryptBlocks(plain, ciphertext)
+	cipher.NewCBCDecrypter(block, iv).CryptBlocks(plain, ciphertext)
 	plain, err = unpad(plain)
 	if err != nil || len(plain) < 20 {
 		return nil, ErrVerification
