@@ -112,6 +112,11 @@ func TestProfileLifecycleAndSessionInvariant(t *testing.T) {
 	}, catalog); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "session") {
 		t.Fatalf("active Profile without Session error = %v", err)
 	}
+	assertProfileLifecycleStates(t, catalog, memoryOnly)
+}
+
+func assertProfileLifecycleStates(t *testing.T, catalog *ProviderCatalog, memoryOnly []CapabilityBinding) {
+	t.Helper()
 	suspended, err := NewProfile(CreateInput{
 		TenantID: testTenantID, ProfileKey: "suspended", DisplayName: "Suspended",
 		Status: StatusSuspended, Bindings: memoryOnly,
