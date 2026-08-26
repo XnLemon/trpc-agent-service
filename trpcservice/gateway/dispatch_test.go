@@ -748,6 +748,12 @@ func TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle(t 
 	if err != nil {
 		t.Fatal(err)
 	}
+	message := dispatchAndAssertDurableReply(t, dispatcher, principal, store)
+	assertDurableReplyWorkerCompletes(t, store, principal.TenantID(), message.EventID)
+}
+
+func dispatchAndAssertDurableReply(t *testing.T, dispatcher *Dispatcher, principal Principal, store runtimestorage.RuntimeStore) runtimestorage.MessageEvent {
+	t.Helper()
 	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{
 		Principal: principal, RequestID: "durable-reply",
 		Message: InboundMessage{Content: "inbound", ExternalMessageID: "durable-reply", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"},
@@ -775,8 +781,13 @@ func TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle(t 
 	if err != nil || message.Status != runtimestorage.EventCompleted || message.ReplyID != first.ReplyID || message.SegmentCount != 2 {
 		t.Fatalf("materialized message = %+v / %v", message, err)
 	}
+	return message
+}
+
+func assertDurableReplyWorkerCompletes(t *testing.T, store runtimestorage.RuntimeStore, tenantID, eventID string) {
+	t.Helper()
 	provider := &durableOutboxProvider{}
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: principal.TenantID(), Owner: "worker", LeaseDuration: time.Second})
+	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: tenantID, Owner: "worker", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -784,7 +795,7 @@ func TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle(t 
 	if err != nil || processed != 2 || len(provider.deliveries) != 2 {
 		t.Fatalf("worker = processed %d deliveries %d err %v", processed, len(provider.deliveries), err)
 	}
-	message, err = store.GetMessage(context.Background(), principal.TenantID(), message.EventID)
+	message, err := store.GetMessage(context.Background(), tenantID, eventID)
 	if err != nil || message.Status != runtimestorage.EventReplied {
 		t.Fatalf("final message = %+v / %v", message, err)
 	}
@@ -807,7 +818,14 @@ func TestDispatcherDurableClaimReclaimsReceivedAndExpiredRunning(t *testing.T) {
 	if _, err := store.CreateSession(context.Background(), principal.TenantID(), identity.SessionID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: principal.TenantID(), EventID: "received-event", SessionID: identity.SessionID, BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID}); err != nil {
+	assertDurableClaimReclaimsLeases(t, dispatcher, principal, message, identity, store, target.BindingID)
+	assertDurableClaimRejectsTerminalStates(t, dispatcher, principal, message, identity, store, target.BindingID)
+	assertDurableClaimReclaimsReconcilingAndValidatesIDs(t, dispatcher, principal, message, identity, store, target.BindingID)
+}
+
+func assertDurableClaimReclaimsLeases(t *testing.T, dispatcher *Dispatcher, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, store runtimestorage.RuntimeStore, bindingID string) {
+	t.Helper()
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: principal.TenantID(), EventID: "received-event", SessionID: identity.SessionID, BindingID: bindingID, ExternalMessageID: message.ExternalMessageID}); err != nil {
 		t.Fatal(err)
 	}
 	reclaimed, err := dispatcher.claimInbound(context.Background(), principal, message, identity)
@@ -816,7 +834,7 @@ func TestDispatcherDurableClaimReclaimsReceivedAndExpiredRunning(t *testing.T) {
 	}
 	dispatcher.failDurable(reclaimed, errors.New("runner unavailable"))
 	message.ExternalMessageID = "claim-expired"
-	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: principal.TenantID(), EventID: "expired-event", SessionID: identity.SessionID, BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID}); err != nil {
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: principal.TenantID(), EventID: "expired-event", SessionID: identity.SessionID, BindingID: bindingID, ExternalMessageID: message.ExternalMessageID}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: principal.TenantID(), EventID: "expired-event", From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "old", LeaseDuration: time.Millisecond}); err != nil {
@@ -830,9 +848,13 @@ func TestDispatcherDurableClaimReclaimsReceivedAndExpiredRunning(t *testing.T) {
 	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrDuplicateMessage) {
 		t.Fatalf("active duplicate error = %v", err)
 	}
+}
+
+func assertDurableClaimRejectsTerminalStates(t *testing.T, dispatcher *Dispatcher, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, store runtimestorage.RuntimeStore, bindingID string) {
+	t.Helper()
 	seedClaimEvent := func(eventID, externalID string, status string) {
 		t.Helper()
-		if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: principal.TenantID(), EventID: eventID, SessionID: identity.SessionID, BindingID: target.BindingID, ExternalMessageID: externalID}); err != nil {
+		if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: principal.TenantID(), EventID: eventID, SessionID: identity.SessionID, BindingID: bindingID, ExternalMessageID: externalID}); err != nil {
 			t.Fatal(err)
 		}
 		if status == runtimestorage.EventFailed {
@@ -865,8 +887,12 @@ func TestDispatcherDurableClaimReclaimsReceivedAndExpiredRunning(t *testing.T) {
 	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrDuplicateMessage) {
 		t.Fatalf("failed duplicate error = %v", err)
 	}
+}
+
+func assertDurableClaimReclaimsReconcilingAndValidatesIDs(t *testing.T, dispatcher *Dispatcher, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, store runtimestorage.RuntimeStore, bindingID string) {
+	t.Helper()
 	message.ExternalMessageID = "claim-reconciling"
-	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: principal.TenantID(), EventID: "reconciling-event", SessionID: identity.SessionID, BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID}); err != nil {
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: principal.TenantID(), EventID: "reconciling-event", SessionID: identity.SessionID, BindingID: bindingID, ExternalMessageID: message.ExternalMessageID}); err != nil {
 		t.Fatal(err)
 	}
 	running, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: principal.TenantID(), EventID: "reconciling-event", From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "seed", LeaseDuration: time.Millisecond})
