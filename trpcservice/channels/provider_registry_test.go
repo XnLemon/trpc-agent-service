@@ -20,7 +20,7 @@ func TestProviderRegistryIsTenantChannelScoped(t *testing.T) {
 	}
 	registry := NewProviderRegistry()
 	factory := registryProviderFactory{}
-	if err := registry.Register(binding.TenantID, binding.Channel, binding.ProviderAccountID, factory); err != nil {
+	if err := registry.Register(binding.TenantID, binding.Channel, " "+binding.ProviderAccountID+" ", factory); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err := registry.Resolve(context.Background(), *binding)

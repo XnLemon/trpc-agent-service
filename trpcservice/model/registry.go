@@ -213,6 +213,9 @@ func (registry *ModelProviderRegistry) New(ctx context.Context, input ModelFacto
 	if model == nil {
 		return nil, ErrProviderUnavailable
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return model, nil
 }
 

@@ -79,10 +79,34 @@ func TestModelProviderRegistryScopesAndClonesInput(t *testing.T) {
 	}
 }
 
-type registryModelFactory struct{ options string }
+func TestModelProviderRegistryHonorsCancellationAfterFactoryReturns(t *testing.T) {
+	registry := NewModelProviderRegistry()
+	cancelFactory := &registryModelFactory{}
+	if err := registry.Register(registryTenant, "fake", cancelFactory); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelFactory.cancel = cancel
+	secret, err := NewSecretValue("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = registry.New(ctx, ModelFactoryInput{TenantID: registryTenant, Provider: "fake", Model: "chat"}, secret)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("New() after factory cancellation = %v", err)
+	}
+}
+
+type registryModelFactory struct {
+	options string
+	cancel  context.CancelFunc
+}
 
 func (factory *registryModelFactory) New(_ context.Context, input ModelFactoryInput, _ SecretValue) (trpcmodel.Model, error) {
 	factory.options = input.Options["mode"]
+	if factory.cancel != nil {
+		factory.cancel()
+	}
 	return registryFakeModel{}, nil
 }
 

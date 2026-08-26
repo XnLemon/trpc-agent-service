@@ -43,7 +43,8 @@ func NewProviderRegistry() *ProviderRegistry {
 
 // Register installs or replaces one tenant/channel/provider-account factory.
 func (registry *ProviderRegistry) Register(tenantID string, channel Channel, providerAccountID string, factory ProviderFactory) error {
-	if registry == nil || validateTenantID(tenantID) != nil || channel.Validate() != nil || strings.TrimSpace(providerAccountID) == "" || factory == nil {
+	providerAccountID = strings.TrimSpace(providerAccountID)
+	if registry == nil || validateTenantID(tenantID) != nil || channel.Validate() != nil || providerAccountID == "" || factory == nil {
 		return fmt.Errorf("%w: invalid channel provider registration", ErrInvalid)
 	}
 	registry.mu.Lock()
@@ -67,7 +68,7 @@ func (registry *ProviderRegistry) Resolve(ctx context.Context, binding Binding) 
 		return nil, ErrProviderUnavailable
 	}
 	registry.mu.RLock()
-	factory := registry.factories[channelProviderKey{tenantID: binding.TenantID, channel: string(binding.Channel), account: binding.ProviderAccountID}]
+	factory := registry.factories[channelProviderKey{tenantID: binding.TenantID, channel: string(binding.Channel), account: strings.TrimSpace(binding.ProviderAccountID)}]
 	closed := registry.closed
 	registry.mu.RUnlock()
 	if closed || factory == nil {
@@ -86,7 +87,7 @@ func (registry *ProviderRegistry) Remove(tenantID string, channel Channel, provi
 	if registry.closed {
 		return ErrProviderRegistryClosed
 	}
-	delete(registry.factories, channelProviderKey{tenantID: tenantID, channel: string(channel), account: providerAccountID})
+	delete(registry.factories, channelProviderKey{tenantID: tenantID, channel: string(channel), account: strings.TrimSpace(providerAccountID)})
 	return nil
 }
 
