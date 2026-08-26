@@ -276,36 +276,17 @@ func (r *AgentRepository) Publish(ctx context.Context, input agent.PublishInput)
 	if r == nil || r.db == nil {
 		return nil, nil, agent.ChangeEvent{}, ErrStorage
 	}
-	if err := validateAgentMetadata(input.Metadata); err != nil {
+	if err := validatePublishInput(input); err != nil {
 		return nil, nil, agent.ChangeEvent{}, err
-	}
-	if !input.TenantActive {
-		return nil, nil, agent.ChangeEvent{}, fmt.Errorf("%w: tenant must be active", agent.ErrInvalid)
 	}
 	tx, err := begin(ctx, r.db)
 	if err != nil {
 		return nil, nil, agent.ChangeEvent{}, err
 	}
 	defer rollback(tx)
-	if err := assertTenantActive(ctx, tx, input.TenantID); err != nil {
-		return nil, nil, agent.ChangeEvent{}, err
-	}
-	currentApp, err := loadAgentApp(ctx, tx, input.TenantID, input.AppID, true)
+	currentApp, draft, err := loadPublishState(ctx, tx, input)
 	if err != nil {
-		return nil, nil, agent.ChangeEvent{}, mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
-	}
-	if err := mutableAgentApp(currentApp, input.ExpectedAppVersion); err != nil {
 		return nil, nil, agent.ChangeEvent{}, err
-	}
-	draft, err := loadAgentRevision(ctx, tx, input.TenantID, input.AppID, input.Revision, true)
-	if err != nil {
-		return nil, nil, agent.ChangeEvent{}, mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
-	}
-	if draft.State != agent.RevisionStateDraft {
-		return nil, nil, agent.ChangeEvent{}, agent.ErrImmutableRevision
-	}
-	if draft.DraftVersion != input.ExpectedDraftVersion {
-		return nil, nil, agent.ChangeEvent{}, fmt.Errorf("%w: expected %d, got %d", agent.ErrConflict, input.ExpectedDraftVersion, draft.DraftVersion)
 	}
 	now := monotonicNow(maxTime(currentApp.UpdatedAt, draft.UpdatedAt))
 	published, err := draft.Publish(now)
@@ -361,6 +342,40 @@ func (r *AgentRepository) Publish(ctx context.Context, input agent.PublishInput)
 		return nil, nil, agent.ChangeEvent{}, err
 	}
 	return storedApp, storedRevision, committed, nil
+}
+
+func validatePublishInput(input agent.PublishInput) error {
+	if err := validateAgentMetadata(input.Metadata); err != nil {
+		return err
+	}
+	if !input.TenantActive {
+		return fmt.Errorf("%w: tenant must be active", agent.ErrInvalid)
+	}
+	return nil
+}
+
+func loadPublishState(ctx context.Context, tx *sql.Tx, input agent.PublishInput) (*agent.App, *agent.Revision, error) {
+	if err := assertTenantActive(ctx, tx, input.TenantID); err != nil {
+		return nil, nil, err
+	}
+	currentApp, err := loadAgentApp(ctx, tx, input.TenantID, input.AppID, true)
+	if err != nil {
+		return nil, nil, mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
+	}
+	if err := mutableAgentApp(currentApp, input.ExpectedAppVersion); err != nil {
+		return nil, nil, err
+	}
+	draft, err := loadAgentRevision(ctx, tx, input.TenantID, input.AppID, input.Revision, true)
+	if err != nil {
+		return nil, nil, mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
+	}
+	if draft.State != agent.RevisionStateDraft {
+		return nil, nil, agent.ErrImmutableRevision
+	}
+	if draft.DraftVersion != input.ExpectedDraftVersion {
+		return nil, nil, fmt.Errorf("%w: expected %d, got %d", agent.ErrConflict, input.ExpectedDraftVersion, draft.DraftVersion)
+	}
+	return currentApp, draft, nil
 }
 
 // Rollback restores an earlier published revision.

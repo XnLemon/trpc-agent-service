@@ -13,6 +13,13 @@ import (
 
 func TestRepositoryTenantIsolationLifecycleAndDefensiveCopies(t *testing.T) {
 	repository := NewRepository(inmemoryTestCatalog(t))
+	created := assertTenantScopedProfileCreation(t, repository)
+	updated := assertProfileCopiesAndConfigurationUpdate(t, repository, created)
+	assertProfileLifecycleAndDisabledMutation(t, repository, updated)
+}
+
+func assertTenantScopedProfileCreation(t *testing.T, repository *InMemoryRepository) *modelprofile.Profile {
+	t.Helper()
 	created, event, err := repository.Create(context.Background(), inmemoryCreateInput("tenant-one", "primary"))
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +40,11 @@ func TestRepositoryTenantIsolationLifecycleAndDefensiveCopies(t *testing.T) {
 	if _, err := repository.Get(context.Background(), "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", created.ProfileID); !errors.Is(err, modelprofile.ErrNotFound) {
 		t.Fatalf("cross-tenant read error = %v", err)
 	}
+	return created
+}
 
+func assertProfileCopiesAndConfigurationUpdate(t *testing.T, repository *InMemoryRepository, created *modelprofile.Profile) *modelprofile.Profile {
+	t.Helper()
 	created.Configuration.Options["mode"] = "fast"
 	fetched, err := repository.Get(context.Background(), created.TenantID, created.ProfileID)
 	if err != nil {
@@ -69,7 +80,11 @@ func TestRepositoryTenantIsolationLifecycleAndDefensiveCopies(t *testing.T) {
 	}); !errors.Is(err, modelprofile.ErrConflict) {
 		t.Fatalf("stale update error = %v", err)
 	}
+	return updated
+}
 
+func assertProfileLifecycleAndDisabledMutation(t *testing.T, repository *InMemoryRepository, updated *modelprofile.Profile) {
+	t.Helper()
 	suspended, transitionEvent, err := repository.TransitionStatus(context.Background(), modelprofile.TransitionStatusInput{
 		TenantID: updated.TenantID, ProfileID: updated.ProfileID, ExpectedVersion: updated.Version,
 		NextStatus: modelprofile.StatusSuspended, Metadata: inmemoryMetadata(),

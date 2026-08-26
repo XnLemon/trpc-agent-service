@@ -99,6 +99,28 @@ func TestTenantLimiterWindowRolloverPreservesActiveLeases(t *testing.T) {
 	}
 }
 
+func TestTenantLimiterOutOfOrderClockSamplesDoNotResetWindow(t *testing.T) {
+	base := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	times := []time.Time{base.Add(time.Second), base}
+	limiter, err := NewTenantLimiter(TenantLimiterConfig{MaxConcurrent: 2, MaxRequests: 1, Window: time.Minute, Now: func() time.Time {
+		now := times[0]
+		times = times[1:]
+		return now
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := newGatewayFixture(t)
+	first, err := limiter.Acquire(context.Background(), fixture.tenant.TenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Release() }()
+	if _, err := limiter.Acquire(context.Background(), fixture.tenant.TenantID); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("out-of-order clock sample error = %v", err)
+	}
+}
+
 func TestTenantLimiterConcurrentAdmissionAndConfigurationEdges(t *testing.T) {
 	if _, err := NewTenantLimiter(TenantLimiterConfig{MaxConcurrent: -1}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("negative concurrent limit error = %v", err)

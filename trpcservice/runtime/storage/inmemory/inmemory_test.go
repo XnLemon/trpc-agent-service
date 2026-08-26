@@ -431,6 +431,17 @@ func TestStoreCreateAndTransitionValidationEdges(t *testing.T) {
 	}
 }
 
+func TestStoreTransitionMessageRequiresRunningLease(t *testing.T) {
+	store := inmemory.New()
+	seedEvent(t, store, "tenant-a", "session-zero-lease", "event-zero-lease")
+	if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{
+		TenantID: "tenant-a", EventID: "event-zero-lease", From: runtimestorage.EventReceived,
+		To: runtimestorage.EventRunning, Owner: "worker",
+	}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("zero running lease error = %v", err)
+	}
+}
+
 func TestStoreEventHistoryAndMessageLifecycle(t *testing.T) {
 	store := inmemory.New()
 	seedEvent(t, store, "tenant-a", "session-history", "inbound-1")

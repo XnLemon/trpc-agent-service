@@ -49,9 +49,10 @@ const (
 	envWeComAppSecret      = "WECOM_APP_SECRET"
 	envWeComSecretRef      = "WECOM_SECRET_REF"
 
-	defaultModelProvider  = "openai"
-	defaultModelNames     = "gpt-4o-mini"
-	defaultEndpointHost   = "api.openai.com"
+	defaultModelProvider = "openai"
+	defaultModelNames    = "gpt-4o-mini"
+	defaultEndpointHost  = "api.openai.com"
+	// #nosec G101 -- symbolic secret reference, not secret material.
 	defaultModelSecretRef = "env/trpc-model-api-key"
 	defaultSubjectID      = "service"
 )

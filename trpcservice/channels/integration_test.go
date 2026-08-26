@@ -16,6 +16,25 @@ import (
 )
 
 func TestFakeTrustedInboundRouteAndBindingAwareIdentity(t *testing.T) {
+	setup := setupTrustedInbound(t)
+	verified, target := assertTrustedInboundVerification(t, setup)
+	direct := assertRunnerIdentityBoundaries(t, setup, target)
+	assertTrustedTargetRejectsInvalidStates(t, setup, verified, direct)
+}
+
+type trustedInboundSetup struct {
+	root        *tenant.Tenant
+	snapshot    tenant.ConfigurationSnapshot
+	app         *agent.App
+	repo        *inmemory.InMemoryRepository
+	binding     *channels.Binding
+	routeDigest string
+	secret      string
+	resolver    *inmemory.FakeCandidateResolver
+}
+
+func setupTrustedInbound(t *testing.T) trustedInboundSetup {
+	t.Helper()
 	root, snapshot, app := activeTenantApp(t, "trusted-route")
 	repo := inmemory.NewInMemoryRepository()
 	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeCom, "public-wecom-route")
@@ -25,32 +44,41 @@ func TestFakeTrustedInboundRouteAndBindingAwareIdentity(t *testing.T) {
 	binding := createActiveBinding(t, repo, root.TenantID, app.AppID, "wecom", channels.ChannelWeCom, "corp-trusted", routeDigest, "secret/wecom")
 	secret := "offline-fake-secret" // #nosec G101 -- deterministic fixture secret for an offline test.
 	resolver := inmemory.NewFakeCandidateResolver(repo, map[channels.SecretScope]string{{TenantID: root.TenantID, SecretRef: binding.SecretRef}: secret})
-	candidates, err := repo.LookupCandidates(context.Background(), channels.ChannelWeCom, routeDigest)
+	return trustedInboundSetup{root: root, snapshot: snapshot, app: app, repo: repo, binding: binding, routeDigest: routeDigest, secret: secret, resolver: resolver}
+}
+
+func assertTrustedInboundVerification(t *testing.T, setup trustedInboundSetup) (channels.VerifiedBinding, channels.RoutingTarget) {
+	t.Helper()
+	candidates, err := setup.repo.LookupCandidates(context.Background(), channels.ChannelWeCom, setup.routeDigest)
 	if err != nil || len(candidates) != 1 {
 		t.Fatalf("route discovery failed: candidates=%d err=%v", len(candidates), err)
 	}
 	request := fakeRequest("nonce-trusted", "message body")
 	request.RouteHints = channels.UntrustedRouteHints{TenantID: "t_77777777777777777777777777", BindingID: "cb_77777777777777777777777777", AppID: "app_77777777777777777777777777"}
-	request.Signature = inmemory.SignFakeRequest(secret, request)
-	handle, err := resolver.ResolveCandidate(context.Background(), channels.CandidateSecretRequest{Candidate: candidates[0], Purpose: channels.PurposeWebhookVerification})
+	request.Signature = inmemory.SignFakeRequest(setup.secret, request)
+	handle, err := setup.resolver.ResolveCandidate(context.Background(), channels.CandidateSecretRequest{Candidate: candidates[0], Purpose: channels.PurposeWebhookVerification})
 	if err != nil {
 		t.Fatal(err)
 	}
-	verified, err := resolver.Verify(context.Background(), handle, request)
+	verified, err := setup.resolver.Verify(context.Background(), handle, request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if verified.TenantID != root.TenantID || verified.BindingID != binding.BindingID || verified.AppID != app.AppID || verified.BindingVersion != binding.Version || verified.Channel != binding.Channel || verified.ProviderAccountID != binding.ProviderAccountID {
+	if verified.TenantID != setup.root.TenantID || verified.BindingID != setup.binding.BindingID || verified.AppID != setup.app.AppID || verified.BindingVersion != setup.binding.Version || verified.Channel != setup.binding.Channel || verified.ProviderAccountID != setup.binding.ProviderAccountID {
 		t.Fatalf("verified result was not fixed to the binding: %+v", verified)
 	}
-	target, err := channels.NewRoutingTarget(snapshot, binding, app, verified)
+	target, err := channels.NewRoutingTarget(setup.snapshot, setup.binding, setup.app, verified)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if target.TenantID != root.TenantID || target.AppID != app.AppID || target.BindingID != binding.BindingID {
+	if target.TenantID != setup.root.TenantID || target.AppID != setup.app.AppID || target.BindingID != setup.binding.BindingID {
 		t.Fatalf("unexpected trusted target: %+v", target)
 	}
+	return verified, target
+}
 
+func assertRunnerIdentityBoundaries(t *testing.T, setup trustedInboundSetup, target channels.RoutingTarget) tenant.RunnerIdentity {
+	t.Helper()
 	direct, err := target.RunnerIdentity(channels.IdentityInput{ExternalUserID: "user-1", Kind: channels.ConversationDirect, ExternalPeerID: "peer-1"})
 	if err != nil {
 		t.Fatal(err)
@@ -75,14 +103,14 @@ func TestFakeTrustedInboundRouteAndBindingAwareIdentity(t *testing.T) {
 	}
 
 	otherRoute, _ := channels.DigestPublicRouteKey(channels.ChannelTelegram, "public-telegram-route")
-	otherBinding := createActiveBinding(t, repo, root.TenantID, app.AppID, "telegram", channels.ChannelTelegram, "bot-trusted", otherRoute, "secret/telegram")
+	otherBinding := createActiveBinding(t, setup.repo, setup.root.TenantID, setup.app.AppID, "telegram", channels.ChannelTelegram, "bot-trusted", otherRoute, "secret/telegram")
 	otherSecret := "offline-telegram-secret"
-	resolver = inmemory.NewFakeCandidateResolver(repo, map[channels.SecretScope]string{
-		{TenantID: root.TenantID, SecretRef: binding.SecretRef}:      secret,
-		{TenantID: root.TenantID, SecretRef: otherBinding.SecretRef}: otherSecret,
+	resolver := inmemory.NewFakeCandidateResolver(setup.repo, map[channels.SecretScope]string{
+		{TenantID: setup.root.TenantID, SecretRef: setup.binding.SecretRef}: setup.secret,
+		{TenantID: setup.root.TenantID, SecretRef: otherBinding.SecretRef}:  otherSecret,
 	})
-	otherVerified := resolveOne(t, repo, resolver, channels.ChannelTelegram, otherRoute, otherSecret, "nonce-other")
-	otherTarget, err := channels.NewRoutingTarget(snapshot, otherBinding, app, otherVerified)
+	otherVerified := resolveOne(t, setup.repo, resolver, channels.ChannelTelegram, otherRoute, otherSecret, "nonce-other")
+	otherTarget, err := channels.NewRoutingTarget(setup.snapshot, otherBinding, setup.app, otherVerified)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,17 +122,22 @@ func TestFakeTrustedInboundRouteAndBindingAwareIdentity(t *testing.T) {
 		t.Fatal("different channel bindings collided in Runner identity")
 	}
 
-	suspendedApp := app.Clone()
+	return direct
+}
+
+func assertTrustedTargetRejectsInvalidStates(t *testing.T, setup trustedInboundSetup, verified channels.VerifiedBinding, direct tenant.RunnerIdentity) {
+	t.Helper()
+	suspendedApp := setup.app.Clone()
 	suspendedApp.Status = agent.StatusSuspended
-	if _, err := channels.NewRoutingTarget(snapshot, binding, &suspendedApp, verified); !errors.Is(err, channels.ErrVerificationFailed) {
+	if _, err := channels.NewRoutingTarget(setup.snapshot, setup.binding, &suspendedApp, verified); !errors.Is(err, channels.ErrVerificationFailed) {
 		t.Fatalf("suspended App was accepted by trusted target: %v", err)
 	}
-	disabledBinding := binding.Clone()
+	disabledBinding := setup.binding.Clone()
 	disabledBinding.Status = channels.StatusDisabled
-	if _, err := channels.NewRoutingTarget(snapshot, &disabledBinding, app, verified); !errors.Is(err, channels.ErrVerificationFailed) {
+	if _, err := channels.NewRoutingTarget(setup.snapshot, &disabledBinding, setup.app, verified); !errors.Is(err, channels.ErrVerificationFailed) {
 		t.Fatalf("disabled Binding was accepted by trusted target: %v", err)
 	}
-	if _, err := channels.NewRoutingTarget(tenant.ConfigurationSnapshot{}, binding, app, verified); !errors.Is(err, channels.ErrVerificationFailed) {
+	if _, err := channels.NewRoutingTarget(tenant.ConfigurationSnapshot{}, setup.binding, setup.app, verified); !errors.Is(err, channels.ErrVerificationFailed) {
 		t.Fatalf("zero/non-active Tenant snapshot was accepted: %v", err)
 	}
 }

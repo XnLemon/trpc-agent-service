@@ -175,30 +175,44 @@ func (e Event) Clone() Event {
 
 // Validate checks the event contract and security boundaries.
 func (e Event) Validate() error {
-	if e.SchemaVersion != SchemaVersion || e.EventID != clean(e.EventID) || e.TenantID != clean(e.TenantID) || clean(e.EventID) == "" || clean(e.TenantID) == "" || !validEventType(e.EventType) || e.OccurredAt.IsZero() || e.OccurredAt.Location() != time.UTC {
+	if !e.validIdentity() {
 		return ErrInvalid
 	}
-	for _, value := range []string{e.EventID, e.TenantID, e.Channel, e.UserID, e.SessionID, e.AgentAppID, e.ModelProfileID, e.ToolName, e.ErrorType, e.RequestID, e.TraceID, e.CorrelationID, e.ActorType, e.ActorID, e.Reason} {
-		if hasControl(value) {
-			return ErrInvalid
-		}
-	}
-	if e.LatencyMS != nil && *e.LatencyMS < 0 || e.Revision != nil && *e.Revision < 0 {
+	if !e.validFields() || !e.validVersions() || !e.validControlPlaneMetadata() {
 		return ErrInvalid
 	}
-	if (e.PreviousVersion == nil) != (e.NextVersion == nil) {
-		return ErrInvalid
-	}
-	if e.PreviousVersion != nil && (*e.PreviousVersion < 0 || *e.PreviousVersion == math.MaxInt64 || *e.NextVersion != *e.PreviousVersion+1) {
-		return ErrInvalid
-	}
-	if e.EventType == EventControlPlaneChanged && (clean(e.ActorType) == "" || clean(e.ActorID) == "" || clean(e.Reason) == "" || clean(e.CorrelationID) == "" || e.PreviousVersion == nil) {
-		return ErrInvalid
-	}
-	if len([]rune(strings.TrimSpace(e.Reason))) > 1000 || e.Decision != "" && !validDecision(e.Decision) || e.ErrorType != "" && !validErrorType(e.ErrorType) || containsSensitive(e.EventID, e.TenantID, e.Channel, e.UserID, e.SessionID, e.AgentAppID, e.ModelProfileID, e.ToolName, e.ErrorType, e.RequestID, e.TraceID, e.CorrelationID, e.ActorType, e.ActorID, e.Reason) || e.Cost != nil && e.Cost.Validate() != nil {
+	if !e.validMetadata() {
 		return ErrInvalid
 	}
 	return nil
+}
+
+func (e Event) validIdentity() bool {
+	return e.SchemaVersion == SchemaVersion && e.EventID == clean(e.EventID) && e.TenantID == clean(e.TenantID) && clean(e.EventID) != "" && clean(e.TenantID) != "" && validEventType(e.EventType) && !e.OccurredAt.IsZero() && e.OccurredAt.Location() == time.UTC
+}
+
+func (e Event) validFields() bool {
+	for _, value := range []string{e.EventID, e.TenantID, e.Channel, e.UserID, e.SessionID, e.AgentAppID, e.ModelProfileID, e.ToolName, e.ErrorType, e.RequestID, e.TraceID, e.CorrelationID, e.ActorType, e.ActorID, e.Reason} {
+		if hasControl(value) {
+			return false
+		}
+	}
+	return !(e.LatencyMS != nil && *e.LatencyMS < 0 || e.Revision != nil && *e.Revision < 0)
+}
+
+func (e Event) validVersions() bool {
+	if (e.PreviousVersion == nil) != (e.NextVersion == nil) {
+		return false
+	}
+	return e.PreviousVersion == nil || *e.PreviousVersion >= 0 && *e.PreviousVersion != math.MaxInt64 && *e.NextVersion == *e.PreviousVersion+1
+}
+
+func (e Event) validControlPlaneMetadata() bool {
+	return e.EventType != EventControlPlaneChanged || clean(e.ActorType) != "" && clean(e.ActorID) != "" && clean(e.Reason) != "" && clean(e.CorrelationID) != "" && e.PreviousVersion != nil
+}
+
+func (e Event) validMetadata() bool {
+	return len([]rune(strings.TrimSpace(e.Reason))) <= 1000 && (e.Decision == "" || validDecision(e.Decision)) && (e.ErrorType == "" || validErrorType(e.ErrorType)) && !containsSensitive(e.EventID, e.TenantID, e.Channel, e.UserID, e.SessionID, e.AgentAppID, e.ModelProfileID, e.ToolName, e.ErrorType, e.RequestID, e.TraceID, e.CorrelationID, e.ActorType, e.ActorID, e.Reason) && (e.Cost == nil || e.Cost.Validate() == nil)
 }
 
 // Validate checks usage values and bounded metadata.
@@ -577,17 +591,27 @@ func validErrorType(value string) bool {
 func containsSensitive(values ...string) bool {
 	for _, value := range values {
 		lower := strings.ToLower(value)
-		if strings.Contains(lower, "://") || strings.Contains(lower, "authorization") || strings.Contains(lower, "bearer ") || strings.Contains(lower, "api_key") || strings.Contains(lower, "api-key") || strings.Contains(lower, "token=") || strings.Contains(lower, "secret=") || strings.Contains(lower, "secret_ref") || strings.Contains(lower, "password=") || strings.Contains(lower, "dsn=") || strings.Contains(lower, "provider error") {
+		if containsSensitivePhrase(lower) || containsSensitiveWords(lower) {
 			return true
 		}
-		words := strings.FieldsFunc(lower, func(r rune) bool { return r < 'a' || r > 'z' })
-		for i, word := range words {
-			if (word == "bearer" || word == "authorization" || word == "token" || word == "secret" || word == "password" || word == "dsn") && i+1 < len(words) {
-				return true
-			}
-			if word == "api" && i+1 < len(words) && words[i+1] == "key" {
-				return true
-			}
+	}
+	return false
+}
+
+func containsSensitivePhrase(value string) bool {
+	for _, phrase := range []string{"://", "authorization", "bearer ", "api_key", "api-key", "token=", "secret=", "secret_ref", "password=", "dsn=", "provider error"} {
+		if strings.Contains(value, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSensitiveWords(value string) bool {
+	words := strings.FieldsFunc(value, func(r rune) bool { return r < 'a' || r > 'z' })
+	for i, word := range words {
+		if i+1 < len(words) && (word == "bearer" || word == "authorization" || word == "token" || word == "secret" || word == "password" || word == "dsn" || word == "api" && words[i+1] == "key") {
+			return true
 		}
 	}
 	return false

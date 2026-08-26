@@ -18,13 +18,29 @@ import (
 // receiver sends a durable reply to the sender bot, matching the live adapter
 // topology used by the Telegram E2E workflow.
 func TestTelegramProviderOutboxE2E(t *testing.T) {
+	receiverToken, senderToken := telegramE2ECredentials(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	provider := telegramE2EProvider(t, ctx, receiverToken, senderToken)
+	store := inmemory.New()
+	const tenantID, sessionID, eventID, replyID = "telegram-e2e", "session", "event", "reply"
+	telegramE2ESeed(t, ctx, store, tenantID, sessionID, eventID, replyID)
+	worker := telegramE2EWorker(t, store, provider, tenantID)
+	telegramE2EAssert(t, ctx, store, worker, tenantID, eventID, replyID)
+}
+
+func telegramE2ECredentials(t *testing.T) (string, string) {
+	t.Helper()
 	receiverToken := strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
 	senderToken := strings.TrimSpace(os.Getenv("TELEGRAM_SENDER_BOT_TOKEN"))
 	if receiverToken == "" || senderToken == "" {
 		t.Skip("requires TELEGRAM_BOT_TOKEN and TELEGRAM_SENDER_BOT_TOKEN")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
+	return receiverToken, senderToken
+}
+
+func telegramE2EProvider(t *testing.T, ctx context.Context, receiverToken, senderToken string) *Provider {
+	t.Helper()
 	receiver, err := bot.New(receiverToken, bot.WithSkipGetMe())
 	if err != nil {
 		t.Fatal(err)
@@ -41,8 +57,11 @@ func TestTelegramProviderOutboxE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := inmemory.New()
-	const tenantID, sessionID, eventID, replyID = "telegram-e2e", "session", "event", "reply"
+	return provider
+}
+
+func telegramE2ESeed(t *testing.T, ctx context.Context, store *inmemory.Store, tenantID, sessionID, eventID, replyID string) {
+	t.Helper()
 	if _, err := store.CreateSession(ctx, tenantID, sessionID, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -63,10 +82,19 @@ func TestTelegramProviderOutboxE2E(t *testing.T) {
 	if _, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: tenantID, EventID: eventID, ReplyID: replyID, SegmentCount: 1, Payload: "telegram-outbox-e2e"}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func telegramE2EWorker(t *testing.T, store *inmemory.Store, provider *Provider, tenantID string) *outbox.Worker {
+	t.Helper()
 	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: tenantID, Owner: "telegram-e2e-worker", LeaseDuration: 30 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
+	return worker
+}
+
+func telegramE2EAssert(t *testing.T, ctx context.Context, store *inmemory.Store, worker *outbox.Worker, tenantID, eventID, replyID string) {
+	t.Helper()
 	if processed, err := worker.RunOnce(ctx); err != nil || processed != 1 {
 		t.Fatalf("worker = %d, %v", processed, err)
 	}

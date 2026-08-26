@@ -359,6 +359,9 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 			return nil, runtimestorage.ErrInvalid
 		}
 	}
+	if err := validateReplyBatch(values); err != nil {
+		return nil, err
+	}
 	if first.ReplyTarget != (runtimestorage.ReplyTarget{}) {
 		event, err := s.GetMessage(ctx, first.TenantID, first.EventID)
 		if err != nil {
@@ -373,23 +376,54 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer func() { _ = tx.Rollback() }()
+	result, err := insertReplySegments(ctx, tx, values)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	return result, nil
+}
+
+func validateReplyBatch(values []runtimestorage.ReplyOutbox) error {
+	if len(values) == 0 {
+		return runtimestorage.ErrInvalid
+	}
+	first := values[0]
+	seen := make(map[int]struct{}, len(values))
+	for _, value := range values {
+		if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || value.Status != "" && value.Status != runtimestorage.ReplyPending || value.TenantID != first.TenantID || value.ReplyID != first.ReplyID || value.EventID != first.EventID || value.SegmentCount != first.SegmentCount {
+			return runtimestorage.ErrInvalid
+		}
+		if _, duplicate := seen[value.SegmentIndex]; duplicate {
+			return runtimestorage.ErrInvalid
+		}
+		seen[value.SegmentIndex] = struct{}{}
+	}
+	if len(seen) != first.SegmentCount {
+		return runtimestorage.ErrInvalid
+	}
+	for index := 0; index < first.SegmentCount; index++ {
+		if _, present := seen[index]; !present {
+			return runtimestorage.ErrInvalid
+		}
+	}
+	return nil
+}
+
+func insertReplySegments(ctx context.Context, tx *sql.Tx, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
 	result := make([]runtimestorage.ReplyOutbox, 0, len(values))
 	for _, value := range values {
 		var row runtimestorage.ReplyOutbox
-		err = tx.QueryRowContext(ctx, "INSERT INTO public.reply_outbox (tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending' WHERE EXISTS (SELECT 1 FROM public.message_event WHERE tenant_id=$1 AND event_id=$3 AND ((reply_conversation_kind='' AND reply_receiver_id='' AND reply_thread_id='' AND $7='' AND $8='' AND $9='' AND $10='') OR (binding_id=$7 AND reply_conversation_kind=$8 AND reply_receiver_id=$9 AND reply_thread_id=$10))) ON CONFLICT (tenant_id,reply_id,segment_index) DO UPDATE SET updated_at=public.reply_outbox.updated_at WHERE public.reply_outbox.event_id=EXCLUDED.event_id AND public.reply_outbox.segment_count=EXCLUDED.segment_count AND public.reply_outbox.payload=EXCLUDED.payload AND public.reply_outbox.reply_binding_id=EXCLUDED.reply_binding_id AND public.reply_outbox.reply_conversation_kind=EXCLUDED.reply_conversation_kind AND public.reply_outbox.reply_receiver_id=EXCLUDED.reply_receiver_id AND public.reply_outbox.reply_thread_id=EXCLUDED.reply_thread_id RETURNING "+replyColumns, value.TenantID, value.ReplyID, value.EventID, value.SegmentIndex, value.SegmentCount, value.Payload, value.ReplyTarget.BindingID, value.ReplyTarget.ConversationKind, value.ReplyTarget.ReceiverID, value.ReplyTarget.ThreadID).Scan(replyArgs(&row)...)
+		err := tx.QueryRowContext(ctx, "INSERT INTO public.reply_outbox (tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending' WHERE EXISTS (SELECT 1 FROM public.message_event WHERE tenant_id=$1 AND event_id=$3 AND ((reply_conversation_kind='' AND reply_receiver_id='' AND reply_thread_id='' AND $7='' AND $8='' AND $9='' AND $10='') OR (binding_id=$7 AND reply_conversation_kind=$8 AND reply_receiver_id=$9 AND reply_thread_id=$10))) ON CONFLICT (tenant_id,reply_id,segment_index) DO UPDATE SET updated_at=public.reply_outbox.updated_at WHERE public.reply_outbox.event_id=EXCLUDED.event_id AND public.reply_outbox.segment_count=EXCLUDED.segment_count AND public.reply_outbox.payload=EXCLUDED.payload AND public.reply_outbox.reply_binding_id=EXCLUDED.reply_binding_id AND public.reply_outbox.reply_conversation_kind=EXCLUDED.reply_conversation_kind AND public.reply_outbox.reply_receiver_id=EXCLUDED.reply_receiver_id AND public.reply_outbox.reply_thread_id=EXCLUDED.reply_thread_id RETURNING "+replyColumns, value.TenantID, value.ReplyID, value.EventID, value.SegmentIndex, value.SegmentCount, value.Payload, value.ReplyTarget.BindingID, value.ReplyTarget.ConversationKind, value.ReplyTarget.ReceiverID, value.ReplyTarget.ThreadID).Scan(replyArgs(&row)...)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				if _, lookupErr := s.GetMessage(ctx, value.TenantID, value.EventID); lookupErr != nil {
-					return nil, lookupErr
-				}
 				return nil, runtimestorage.ErrConflict
 			}
 			return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 		}
 		result = append(result, cloneReply(row))
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return result, nil
 }

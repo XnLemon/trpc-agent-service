@@ -334,6 +334,29 @@ func (b Binding) Clone() Binding {
 
 // Validate checks all Binding invariants, including the digest and lifecycle.
 func (b Binding) Validate() error {
+	if err := validateBindingIdentity(b); err != nil {
+		return err
+	}
+	if err := validateBindingFields(b); err != nil {
+		return err
+	}
+	if err := validateBindingProtocol(b); err != nil {
+		return err
+	}
+	if err := validateBindingLifecycle(b); err != nil {
+		return err
+	}
+	digest, err := b.computeConfigDigest()
+	if err != nil {
+		return err
+	}
+	if b.ConfigDigest != digest {
+		return fmt.Errorf("%w: config digest does not match configuration", ErrInvalid)
+	}
+	return nil
+}
+
+func validateBindingIdentity(b Binding) error {
 	if err := validateTenantID(b.TenantID); err != nil {
 		return err
 	}
@@ -350,6 +373,10 @@ func (b Binding) Validate() error {
 	if err := b.Channel.Validate(); err != nil {
 		return err
 	}
+	return nil
+}
+
+func validateBindingFields(b Binding) error {
 	providerAccountID, err := normalizeRequiredValue(b.ProviderAccountID, maxProviderAccountLength, "provider account id")
 	if err != nil || providerAccountID != b.ProviderAccountID {
 		return fmt.Errorf("%w: provider account id must be normalized", ErrInvalid)
@@ -365,6 +392,10 @@ func (b Binding) Validate() error {
 	if err != nil || secretRef != b.SecretRef {
 		return fmt.Errorf("%w: secret reference must be normalized", ErrInvalid)
 	}
+	return nil
+}
+
+func validateBindingProtocol(b Binding) error {
 	protocol, err := normalizeProtocolConfiguration(b.Channel, b.Protocol)
 	if err != nil {
 		return err
@@ -372,18 +403,15 @@ func (b Binding) Validate() error {
 	if !protocolEqual(protocol, b.Protocol) {
 		return fmt.Errorf("%w: protocol configuration must be normalized", ErrInvalid)
 	}
+	return nil
+}
+
+func validateBindingLifecycle(b Binding) error {
 	if b.Status != StatusDraft && b.Status != StatusActive && b.Status != StatusSuspended && b.Status != StatusDisabled {
 		return fmt.Errorf("%w: unknown status %q", ErrInvalid, b.Status)
 	}
 	if b.Version < 1 || b.CreatedAt.IsZero() || b.UpdatedAt.IsZero() || b.UpdatedAt.Before(b.CreatedAt) || b.CreatedAt.Location() != time.UTC || b.UpdatedAt.Location() != time.UTC {
 		return fmt.Errorf("%w: version and UTC timestamps must be initialized and ordered", ErrInvalid)
-	}
-	digest, err := b.computeConfigDigest()
-	if err != nil {
-		return err
-	}
-	if b.ConfigDigest != digest {
-		return fmt.Errorf("%w: config digest does not match configuration", ErrInvalid)
 	}
 	return nil
 }

@@ -33,6 +33,17 @@ func TestNewProfileNormalizesConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProfile() error = %v", err)
 	}
+	assertNormalizedProfile(t, profile, inputOptions, catalog)
+}
+
+func assertNormalizedProfile(t *testing.T, profile *Profile, inputOptions map[string]string, catalog *ProviderCatalog) {
+	t.Helper()
+	assertProfileMetadata(t, profile)
+	assertProfileBindings(t, profile, inputOptions, catalog)
+}
+
+func assertProfileMetadata(t *testing.T, profile *Profile) {
+	t.Helper()
 	if profile.ProfileKey != "primary-data" || profile.DisplayName != "Primary data" || profile.Description != "Shared stores" {
 		t.Fatalf("Profile metadata was not normalized: %#v", profile)
 	}
@@ -48,6 +59,10 @@ func TestNewProfileNormalizesConfiguration(t *testing.T) {
 	if len(profile.Bindings) != 2 || profile.Bindings[0].Capability != CapabilitySession || profile.Bindings[1].Capability != CapabilityMemory {
 		t.Fatalf("Bindings were not canonically sorted: %#v", profile.Bindings)
 	}
+}
+
+func assertProfileBindings(t *testing.T, profile *Profile, inputOptions map[string]string, catalog *ProviderCatalog) {
+	t.Helper()
 	session := profile.Bindings[0]
 	if session.Provider != "postgres" || session.Endpoint != "postgres://db.example.com:5432" || session.SecretRef != "secret://tenant/database" {
 		t.Fatalf("Session binding was not normalized: %#v", session)
@@ -97,6 +112,11 @@ func TestProfileLifecycleAndSessionInvariant(t *testing.T) {
 	}, catalog); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "session") {
 		t.Fatalf("active Profile without Session error = %v", err)
 	}
+	assertProfileLifecycleStates(t, catalog, memoryOnly)
+}
+
+func assertProfileLifecycleStates(t *testing.T, catalog *ProviderCatalog, memoryOnly []CapabilityBinding) {
+	t.Helper()
 	suspended, err := NewProfile(CreateInput{
 		TenantID: testTenantID, ProfileKey: "suspended", DisplayName: "Suspended",
 		Status: StatusSuspended, Bindings: memoryOnly,
@@ -575,6 +595,13 @@ func TestEndpointAuthorityValidation(t *testing.T) {
 }
 
 func TestProviderCatalogNilAndHelperBoundaries(t *testing.T) {
+	assertProviderCatalogNilBoundaries(t)
+	assertProviderCatalogGrammarBoundaries(t)
+	assertProviderCatalogCloneBoundaries(t)
+}
+
+func assertProviderCatalogNilBoundaries(t *testing.T) {
+	t.Helper()
 	var catalog *ProviderCatalog
 	if _, err := catalog.NormalizeBindings(sessionBinding()); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("nil catalog error = %v", err)
@@ -583,6 +610,10 @@ func TestProviderCatalogNilAndHelperBoundaries(t *testing.T) {
 		t.Fatalf("nil configuration catalog error = %v", err)
 	}
 
+}
+
+func assertProviderCatalogGrammarBoundaries(t *testing.T) {
+	t.Helper()
 	if validProviderName("") || validProviderName("1provider") || validProviderName("provider!") || validProviderName(strings.Repeat("p", 65)) {
 		t.Fatal("invalid provider name passed validation")
 	}
@@ -598,7 +629,10 @@ func TestProviderCatalogNilAndHelperBoundaries(t *testing.T) {
 	if _, err := normalizeOptionValue("value", OptionSpec{Kind: "unknown"}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unknown option kind error = %v", err)
 	}
+}
 
+func assertProviderCatalogCloneBoundaries(t *testing.T) {
+	t.Helper()
 	if bindingsEqual(nil, sessionBinding()) || stringMapsEqual(nil, map[string]string{"a": ""}) {
 		t.Fatal("different collection lengths compared equal")
 	}

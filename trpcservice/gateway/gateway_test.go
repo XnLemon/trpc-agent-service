@@ -462,11 +462,7 @@ func TestGatewayAuthenticationAndPrincipalValidationEdges(t *testing.T) {
 		t.Fatalf("zero authenticated identity error = %v", err)
 	}
 
-	for _, credential := range []string{"", " ", "bad\ncredential", strings.Repeat("x", maxPrincipalIDRunes+1)} {
-		if _, err := NewStaticAPIAuthenticator(map[string]APIIdentity{credential: identity}); !errors.Is(err, ErrInvalid) {
-			t.Fatalf("invalid credential %q was accepted: %v", credential, err)
-		}
-	}
+	assertInvalidStaticCredentials(t, identity)
 	authenticator, err := NewStaticAPIAuthenticator(map[string]APIIdentity{"credential": identity})
 	if err != nil {
 		t.Fatal(err)
@@ -484,12 +480,7 @@ func TestGatewayAuthenticationAndPrincipalValidationEdges(t *testing.T) {
 	if _, err := authenticator.Authenticate(canceled, request); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled authentication error = %v", err)
 	}
-	for _, header := range []string{"", "Basic credential", "Bearer ", "Bearer unknown"} {
-		request.Header.Set("Authorization", header)
-		if _, err := authenticator.Authenticate(context.Background(), request); !errors.Is(err, ErrUnauthenticated) {
-			t.Fatalf("invalid authorization %q error = %v", header, err)
-		}
-	}
+	assertInvalidAuthorizationHeaders(t, authenticator, request)
 
 	principal := mustAPIPrincipal(t, identity.TenantID, identity.AppID)
 	mutated := principal
@@ -516,6 +507,25 @@ func TestGatewayAuthenticationAndPrincipalValidationEdges(t *testing.T) {
 	mutatedChannel.tenantID = "t_01J1K9ZQTVE4PAWF1TSB2WMHNQ"
 	if !errors.Is(mutatedChannel.Validate(), ErrInvalid) {
 		t.Fatal("channel principal with mismatched scope was accepted")
+	}
+}
+
+func assertInvalidStaticCredentials(t *testing.T, identity APIIdentity) {
+	t.Helper()
+	for _, credential := range []string{"", " ", "bad\ncredential", strings.Repeat("x", maxPrincipalIDRunes+1)} {
+		if _, err := NewStaticAPIAuthenticator(map[string]APIIdentity{credential: identity}); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid credential %q was accepted: %v", credential, err)
+		}
+	}
+}
+
+func assertInvalidAuthorizationHeaders(t *testing.T, authenticator APIAuthenticator, request *http.Request) {
+	t.Helper()
+	for _, header := range []string{"", "Basic credential", "Bearer ", "Bearer unknown"} {
+		request.Header.Set("Authorization", header)
+		if _, err := authenticator.Authenticate(context.Background(), request); !errors.Is(err, ErrUnauthenticated) {
+			t.Fatalf("invalid authorization %q error = %v", header, err)
+		}
 	}
 }
 

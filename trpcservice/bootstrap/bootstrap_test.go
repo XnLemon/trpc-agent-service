@@ -246,6 +246,14 @@ func TestUnavailableBootstrapBoundariesAndHTTPServer(t *testing.T) {
 }
 
 func TestEnvironmentBootstrapRequiresExplicitConfigurationAndBuildsDependencies(t *testing.T) {
+	setEnvironmentBootstrapTestVariables(t)
+	config := assertEnvironmentConfigurationAndCatalogs(t)
+	assertEnvironmentAuthenticationAndSecret(t, config)
+	assertEnvironmentRequiredValues(t)
+}
+
+func setEnvironmentBootstrapTestVariables(t *testing.T) {
+	t.Helper()
 	t.Setenv(envPostgresDSN, "postgres://postgres:postgres@127.0.0.1:5432/control_plane")
 	t.Setenv(envAPIToken, "api-token")
 	t.Setenv(envTenantID, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")
@@ -259,7 +267,10 @@ func TestEnvironmentBootstrapRequiresExplicitConfigurationAndBuildsDependencies(
 	t.Setenv(envModelEndpointHost, "api.openai.com,proxy.example")
 	t.Setenv(envModelSecretRef, "env/test-key")
 	t.Setenv(envSessionBackend, "postgres")
+}
 
+func assertEnvironmentConfigurationAndCatalogs(t *testing.T) environmentConfig {
+	t.Helper()
 	config, err := loadEnvironment()
 	if err != nil {
 		t.Fatal(err)
@@ -281,7 +292,11 @@ func TestEnvironmentBootstrapRequiresExplicitConfigurationAndBuildsDependencies(
 	if err != nil || modelCatalog == nil || backendCatalog == nil {
 		t.Fatalf("environment catalogs = %v, %v, %v", modelCatalog, backendCatalog, err)
 	}
+	return config
+}
 
+func assertEnvironmentAuthenticationAndSecret(t *testing.T, config environmentConfig) {
+	t.Helper()
 	authenticator, err := gateway.NewStaticAPIAuthenticator(map[string]gateway.APIIdentity{
 		config.apiToken: {TenantID: config.tenantID, AppID: config.appID, SubjectID: config.subjectID},
 	})
@@ -308,7 +323,10 @@ func TestEnvironmentBootstrapRequiresExplicitConfigurationAndBuildsDependencies(
 	if err != nil || model == nil {
 		t.Fatalf("environment model = %v, err=%v", model, err)
 	}
+}
 
+func assertEnvironmentRequiredValues(t *testing.T) {
+	t.Helper()
 	for _, name := range []string{envPostgresDSN, envAPIToken, envTenantID, envAppID, envAdminToken, envAdminTenants, envModelAPIKey} {
 		t.Setenv(name, "")
 		if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {

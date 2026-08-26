@@ -151,6 +151,14 @@ func TestContentDigestIsDeterministicAndSensitiveToBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	firstDigest := assertEquivalentExecutionContentDigest(t, first)
+	assertBehavioralChangeAltersDigest(t, first, firstDigest)
+	assertEmptyToolAllowlistsHaveEquivalentDigests(t)
+	assertSignedZeroTemperaturesHaveEquivalentDigests(t, first)
+}
+
+func assertEquivalentExecutionContentDigest(t *testing.T, first *Revision) string {
+	t.Helper()
 	input := validRevisionInput()
 	input.Revision = 99
 	input.Configuration.Tools[0], input.Configuration.Tools[1] = input.Configuration.Tools[1], input.Configuration.Tools[0]
@@ -169,6 +177,11 @@ func TestContentDigestIsDeterministicAndSensitiveToBehavior(t *testing.T) {
 	if len(firstDigest) != 64 || firstDigest != secondDigest {
 		t.Fatalf("equivalent execution content must have one digest: %q %q", firstDigest, secondDigest)
 	}
+	return firstDigest
+}
+
+func assertBehavioralChangeAltersDigest(t *testing.T, first *Revision, firstDigest string) {
+	t.Helper()
 	changed := first.Clone()
 	changed.Instruction = "Use a different behavior."
 	changedDigest, err := changed.ComputeContentDigest()
@@ -178,6 +191,10 @@ func TestContentDigestIsDeterministicAndSensitiveToBehavior(t *testing.T) {
 	if changedDigest == firstDigest {
 		t.Fatal("behavioral configuration change must alter digest")
 	}
+}
+
+func assertEmptyToolAllowlistsHaveEquivalentDigests(t *testing.T) {
+	t.Helper()
 	nilToolsInput := validRevisionInput()
 	nilToolsInput.Configuration.Tools = nil
 	nilTools, err := NewRevision(nilToolsInput)
@@ -204,6 +221,11 @@ func TestContentDigestIsDeterministicAndSensitiveToBehavior(t *testing.T) {
 	if nilDigest != emptyDigest {
 		t.Fatalf("equivalent empty tool allowlists must have one digest: %q %q", nilDigest, emptyDigest)
 	}
+	assertDirectEmptyToolRepresentationsHaveEquivalentDigests(t, emptyTools)
+}
+
+func assertDirectEmptyToolRepresentationsHaveEquivalentDigests(t *testing.T, emptyTools *Revision) {
+	t.Helper()
 	directNil := emptyTools.Clone()
 	directNil.Tools = nil
 	directEmpty := emptyTools.Clone()
@@ -219,6 +241,10 @@ func TestContentDigestIsDeterministicAndSensitiveToBehavior(t *testing.T) {
 	if directNilDigest != directEmptyDigest {
 		t.Fatalf("digest must normalize external empty tool representations: %q %q", directNilDigest, directEmptyDigest)
 	}
+}
+
+func assertSignedZeroTemperaturesHaveEquivalentDigests(t *testing.T, first *Revision) {
+	t.Helper()
 	positiveZero := first.Clone()
 	positiveZero.Generation.Temperature = float64Pointer(0)
 	negativeZero := first.Clone()

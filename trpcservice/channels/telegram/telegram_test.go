@@ -385,6 +385,13 @@ func TestHandleUpdateMapsPrivateTextAndAggregatesDispatchEvents(t *testing.T) {
 		t.Fatalf("expected one Dispatch call, got %d", len(requests))
 	}
 	request := requests[0]
+	assertPrivateInboundRequest(t, target, request, dispatcher.contextValue(key), key)
+	sent := client.sent()
+	assertPrivateReply(t, sent, aw.events)
+}
+
+func assertPrivateInboundRequest(t *testing.T, target channels.RoutingTarget, request gateway.DispatchRequest, contextValue any, key contextKey) {
+	t.Helper()
 	if request.Principal.Kind() != gateway.PrincipalChannel || request.Principal.TenantID() != target.TenantID || request.Principal.AppID() != target.AppID {
 		t.Fatalf("Dispatch did not receive the trusted principal: %+v", request.Principal)
 	}
@@ -395,15 +402,18 @@ func TestHandleUpdateMapsPrivateTextAndAggregatesDispatchEvents(t *testing.T) {
 	if request.Message.ExternalMessageID != expectedID || request.RequestID != expectedID {
 		t.Fatalf("unexpected stable message/request ID: message=%q request=%q expected=%q", request.Message.ExternalMessageID, request.RequestID, expectedID)
 	}
-	if got := dispatcher.contextValue(key); got != "preserved" {
-		t.Fatalf("Dispatch did not receive the caller Context: %v", got)
+	if contextValue != "preserved" {
+		t.Fatalf("Dispatch did not receive the caller Context: %v", contextValue)
 	}
-	sent := client.sent()
+}
+
+func assertPrivateReply(t *testing.T, sent []sentMessage, events []audit.Event) {
+	t.Helper()
 	if len(sent) != 1 || sent[0].Text != "hello world" || sent[0].ChatID != 100 || sent[0].ThreadID != 0 {
 		t.Fatalf("unexpected aggregated Telegram reply: %+v", sent)
 	}
-	if len(aw.events) != 2 || aw.events[0].EventType != audit.EventIMIngressAccepted || aw.events[1].EventType != audit.EventIMDeliverySent {
-		t.Fatalf("audit events = %#v", aw.events)
+	if len(events) != 2 || events[0].EventType != audit.EventIMIngressAccepted || events[1].EventType != audit.EventIMDeliverySent {
+		t.Fatalf("audit events = %#v", events)
 	}
 }
 
