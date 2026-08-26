@@ -153,24 +153,32 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	executionCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), h.executionTimeout)
 	defer cancel()
-	stream, err := h.dispatcher.Dispatch(executionCtx, gateway.DispatchRequest{Principal: h.principal, Message: gateway.InboundMessage{Content: message.Content, ContentType: gateway.ContentTypeText, ExternalMessageID: message.MsgID, ExternalUserID: message.FromUserName, ConversationKind: channels.ConversationDirect, ExternalPeerID: message.FromUserName}})
-	if err != nil {
+	accepted := make(chan struct{}, 1)
+	result := make(chan error, 1)
+	go func() {
+		stream, err := h.dispatcher.Dispatch(executionCtx, gateway.DispatchRequest{Accepted: accepted, Principal: h.principal, Message: gateway.InboundMessage{Content: message.Content, ContentType: gateway.ContentTypeText, ExternalMessageID: message.MsgID, ExternalUserID: message.FromUserName, ConversationKind: channels.ConversationDirect, ExternalPeerID: message.FromUserName}})
+		if err == nil && stream != nil {
+			for range stream {
+			}
+		}
+		result <- err
+	}()
+	select {
+	case <-accepted:
+		h.writeSuccess(w)
+	case err := <-result:
 		if errors.Is(err, gateway.ErrDuplicateMessage) {
 			h.writeSuccess(w)
 			return
 		}
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	if stream == nil {
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	go func() {
-		for range stream {
+		if err != nil {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
 		}
-	}()
-	h.writeSuccess(w)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	case <-r.Context().Done():
+		return
+	}
 }
 
 func (h *Handler) writeSuccess(w http.ResponseWriter) {

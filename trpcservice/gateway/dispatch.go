@@ -59,6 +59,9 @@ type DispatchRequest struct {
 	Message   InboundMessage
 	RequestID string
 	TraceID   string
+	// Accepted is notified after the durable channel claim and handoff reserve
+	// succeed, before runner execution begins. It is optional for API callers.
+	Accepted chan<- struct{}
 }
 
 // DispatchEvent is a redacted event safe for a protocol adapter. It contains
@@ -211,6 +214,12 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		if _, err := dispatcher.handoffStore.Reserve(ctx, audit.ExecutionHandoff{TenantID: request.Principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), RequestID: requestID, TraceID: traceID, EventID: audit.NewEventID(requestID, string(audit.EventExecutionStarted)), State: audit.HandoffPending}); err != nil {
 			finishWithError(err)
 			return nil, auditWriteFailure()
+		}
+	}
+	if request.Accepted != nil {
+		select {
+		case request.Accepted <- struct{}{}:
+		default:
 		}
 	}
 	lease, err := dispatcher.registry.Acquire(ctx, plan)
