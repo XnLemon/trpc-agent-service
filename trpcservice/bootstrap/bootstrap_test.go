@@ -319,7 +319,74 @@ func TestEnvironmentBootstrapRequiresExplicitConfigurationAndBuildsDependencies(
 	}
 }
 
+func TestEnvironmentWeComCredentialsMustBeConfiguredTogether(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envWeComCallbackToken, "callback-token")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("partial WeCom configuration error = %v", err)
+	}
+	t.Setenv(envWeComEncodingAESKey, "encoding-key")
+	t.Setenv(envWeComAppSecret, "app-secret")
+	t.Setenv(envWeComSecretRef, "env/wecom")
+	config, err := loadEnvironment()
+	if err != nil || config.wecom == nil {
+		t.Fatalf("complete WeCom environment = %+v, %v", config.wecom, err)
+	}
+	if config.wecom.callbackToken != "callback-token" || config.wecom.secretRef != "env/wecom" {
+		t.Fatalf("WeCom environment = %+v", config.wecom)
+	}
+	resolver := environmentWeComCredentialResolver{tenantID: config.tenantID, config: *config.wecom}
+	credentials, err := resolver.Resolve(context.Background(), channels.SecretScope{TenantID: config.tenantID, SecretRef: config.wecom.secretRef})
+	if err != nil || credentials.CallbackToken != config.wecom.callbackToken || credentials.AppSecret != config.wecom.appSecret {
+		t.Fatalf("WeCom credentials = %+v, %v", credentials, err)
+	}
+	if _, err := resolver.Resolve(context.Background(), channels.SecretScope{TenantID: config.tenantID, SecretRef: "env/other"}); err == nil {
+		t.Fatal("mismatched WeCom secret reference was accepted")
+	}
+}
+
+func TestWeComHandlerFactoryIsWiredAndOwnedByRuntime(t *testing.T) {
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	callback := &bootstrapWeComLifecycle{}
+	var factoryCalls int
+	config.WeComHandlerFactory = func(dispatcher gateway.DispatchService) (http.Handler, error) {
+		if dispatcher == nil {
+			t.Fatal("WeCom factory received nil dispatcher")
+		}
+		factoryCalls++
+		return callback, nil
+	}
+	graph, err := New(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	graph.HandlerValue().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/wecom/callback/route", nil))
+	if response.Code != http.StatusNoContent || factoryCalls != 1 || callback.calls.Load() != 1 {
+		t.Fatalf("WeCom callback wiring = status %d factory %d calls %d", response.Code, factoryCalls, callback.calls.Load())
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if callback.beginShutdown.Load() != 1 || callback.closed.Load() != 1 {
+		t.Fatalf("WeCom lifecycle = begin %d close %d", callback.beginShutdown.Load(), callback.closed.Load())
+	}
+}
+
 func nilContextForTest() context.Context { return nil }
+
+func setRequiredEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv(envPostgresDSN, "postgres://postgres:postgres@127.0.0.1:5432/control_plane")
+	t.Setenv(envAPIToken, "api-token")
+	t.Setenv(envTenantID, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	t.Setenv(envAppID, "app_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	t.Setenv(envAdminToken, "admin-token")
+	t.Setenv(envAdminTenants, "*")
+	t.Setenv(envModelAPIKey, "model-secret")
+	t.Setenv(envSessionBackend, "inmemory")
+}
 
 func TestEnvironmentBootstrapPreservesCancellationAndRejectsBadLists(t *testing.T) {
 	t.Setenv(envPostgresDSN, "postgres://postgres:postgres@127.0.0.1:5432/control_plane")
@@ -563,6 +630,22 @@ type bootstrapBlockingProvider struct {
 	started  chan struct{}
 	canceled chan struct{}
 	once     sync.Once
+}
+
+type bootstrapWeComLifecycle struct {
+	calls         atomic.Int32
+	beginShutdown atomic.Int32
+	closed        atomic.Int32
+}
+
+func (handler *bootstrapWeComLifecycle) ServeHTTP(writer http.ResponseWriter, _ *http.Request) {
+	handler.calls.Add(1)
+	writer.WriteHeader(http.StatusNoContent)
+}
+func (handler *bootstrapWeComLifecycle) BeginShutdown() { handler.beginShutdown.Add(1) }
+func (handler *bootstrapWeComLifecycle) Close() error {
+	handler.closed.Add(1)
+	return nil
 }
 
 func (p *bootstrapBlockingProvider) Deliver(ctx context.Context, _ runtimestorage.ReplyOutbox) (string, error) {

@@ -300,6 +300,73 @@ func NewRoutingTarget(tenantSnapshot tenant.ConfigurationSnapshot, binding *Bind
 	return routingTarget, nil
 }
 
+// ResolveCandidateRoutingTarget consumes one candidate after a protocol
+// verifier has authenticated its Binding, then reads the current trusted
+// Tenant and App snapshots needed to seal a RoutingTarget. The verifier sees
+// a Binding only after route-key candidate selection and must never accept
+// routing identity from an external payload.
+func ResolveCandidateRoutingTarget(
+	ctx context.Context,
+	consumer CandidateConsumer,
+	tenants tenant.Repository,
+	apps agent.Repository,
+	candidate CandidateBindingContext,
+	verify func(context.Context, Binding) error,
+) (RoutingTarget, error) {
+	if ctx == nil {
+		return RoutingTarget{}, ErrVerificationFailed
+	}
+	if err := ctx.Err(); err != nil {
+		return RoutingTarget{}, err
+	}
+	if consumer == nil || tenants == nil || apps == nil || verify == nil || candidate.Channel == "" {
+		return RoutingTarget{}, ErrVerificationFailed
+	}
+	binding, err := consumer.ConsumeCandidate(ctx, candidate)
+	if err != nil {
+		if IsContextCancellation(err) {
+			return RoutingTarget{}, err
+		}
+		return RoutingTarget{}, ErrVerificationFailed
+	}
+	if binding == nil {
+		return RoutingTarget{}, ErrVerificationFailed
+	}
+	if err := verify(ctx, binding.Clone()); err != nil {
+		if IsContextCancellation(err) {
+			return RoutingTarget{}, err
+		}
+		return RoutingTarget{}, ErrVerificationFailed
+	}
+	verified, err := newVerifiedBinding(*binding)
+	if err != nil {
+		return RoutingTarget{}, ErrVerificationFailed
+	}
+	tenantValue, err := tenants.Get(ctx, binding.TenantID)
+	if err != nil {
+		if IsContextCancellation(err) {
+			return RoutingTarget{}, err
+		}
+		return RoutingTarget{}, ErrVerificationFailed
+	}
+	snapshot, err := tenant.NewConfigurationSnapshot(tenantValue)
+	if err != nil {
+		return RoutingTarget{}, ErrVerificationFailed
+	}
+	app, err := apps.Get(ctx, binding.TenantID, binding.AppID)
+	if err != nil {
+		if IsContextCancellation(err) {
+			return RoutingTarget{}, err
+		}
+		return RoutingTarget{}, ErrVerificationFailed
+	}
+	target, err := NewRoutingTarget(snapshot, binding, app, verified)
+	if err != nil {
+		return RoutingTarget{}, ErrVerificationFailed
+	}
+	return target, nil
+}
+
 // Validate checks the non-secret target identity.
 func (target RoutingTarget) Validate() error {
 	if target.capability == nil {

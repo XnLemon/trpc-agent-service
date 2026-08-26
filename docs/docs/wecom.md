@@ -20,7 +20,7 @@ Telegram long polling / WeCom HTTPS callback
 本阶段支持：
 
 - 企业微信自建应用的 URL 验证、签名校验、AES 解密和文本消息；
-- 内部成员单聊；只有供应商 payload 给出稳定群标识时才接受群聊；
+- 内部成员单聊；企业微信自建应用的本阶段 callback 不接受群聊入站；
 - Binding-aware Session identity、持久化入站幂等和受控文本回复；
 - 既有 Outbox 的 retry、lease/fencing、dead-letter 与重启恢复语义。
 
@@ -88,8 +88,9 @@ Secret value 不进入 Binding、digest、Event、Outbox、日志、trace、错�
 - `gateway.DispatchService` 是两者共同调用的 Gateway/Runner 入口；
 - `runtime/outbox.Provider` 是两者共同使用的异步回复交付接口；
 - 每个 Adapter 明确自己的 transport 生命周期。Telegram Adapter 拥有 polling 的
-  `Run/Close`；WeCom Handler 实现 `http.Handler`，由 HTTP Server 拥有 listener 和
-  shutdown，不创建脱离请求或 Runtime 所有权的 goroutine。
+  `Run/Close`；WeCom Handler 实现 `http.Handler`，由 HTTP Server 拥有 listener，
+  Handler 自己拥有 ACK 后的 bounded execution drain，并由 Runtime 的
+  `BeginShutdown/Close` 取消和 join。
 
 共享 Adapter conformance 测试验证：只接受 text、消息身份稳定、取消原样传播、未验证
 payload 不能选择 Tenant/App/Binding、重复入站不重新执行 Runner，以及失败不暴露
@@ -138,7 +139,7 @@ Secret 细节。
 | `ExternalUserID` | `FromUserName` | 稳定成员 UserID |
 | `Content` | `Content` | text-only，交给 Gateway 再次规范化 |
 | direct peer | `FromUserName` | 生成单聊 session 和回复收件人 |
-| group chat | 供应商稳定 chat ID | 缺失时拒绝，不得从昵称拼接 |
+| group chat | 不适用 | 此自建应用 callback 只支持单聊；群机器人、公众号和微信客服需要独立 Adapter |
 
 Session 和 user identity 继续由 `RoutingTarget.RunnerIdentity` 以 Channel、Binding、
 conversation kind、外部稳定 ID 和可选 thread 的长度前缀编码构造。两个 Binding、两个群
@@ -150,10 +151,10 @@ conversation kind、外部稳定 ID 和可选 thread 的长度前缀编码构造
 Provider。这样同一个 Bot 或 WeCom App 才能回复多个用户/会话，重启、重试和 dead-letter
 不会丢失目的地。
 
-企业微信 Provider 把文本分段为供应商允许的最大长度，使用应用 `access_token` 调用
-发送应用消息接口，并将成功返回的 provider receipt 写入既有 Outbox 状态机。HTTP、
-token 或供应商错误仅映射为稳定 retryable/permanent error class。Provider 不把原始 body、
-URL、token 或消息内容写入日志。
+现有 reply materializer 在进入 Outbox 前按企业微信文本限制生成持久化片段；企业微信
+Provider 再校验每个片段，使用应用 `access_token` 调用发送应用消息接口，并将成功返回的
+provider receipt 写入既有 Outbox 状态机。HTTP、token 或供应商错误仅映射为稳定
+retryable/permanent error class。Provider 不把原始 body、URL、token 或消息内容写入日志。
 
 ## 可靠性、关联与审计
 
@@ -170,7 +171,7 @@ duplicate ingress、delivery 成功/重试/dead-letter，以及 channel/error cl
 ## 验收矩阵
 
 - URL 验证、AES decrypt/encrypt、签名/receive ID/AgentID failures 和安全错误响应；
-- direct text 到 Gateway/Runner/Outbox，群聊稳定 chat ID 与缺失 ID 拒绝；
+- direct text 到 Gateway/Runner/Outbox；WeCom group callback 拒绝；
 - duplicate、并发、乱序和跨 Tenant/Binding identity；
 - Context cancellation、retry/dead-letter、stale fence 和 restart recovery；
 - Telegram Adapter 仍维持现有 long-polling、直接回复和 lifecycle 行为；
@@ -180,6 +181,24 @@ duplicate ingress、delivery 成功/重试/dead-letter，以及 channel/error cl
   MkDocs strict；
 - 可选 live E2E 使用本地忽略的 `data/wecom-e2e.env`，不把实际凭据或 live pass
   当作默认 CI 证据。
+
+## 环境装配
+
+启用环境 bootstrap 的 WeCom vertical path 时，四个变量必须同时设置：
+
+```text
+WECOM_CALLBACK_TOKEN
+WECOM_ENCODING_AES_KEY
+WECOM_APP_SECRET
+WECOM_SECRET_REF
+```
+
+`WECOM_SECRET_REF` 必须与 active Binding 的 `SecretRef` 和 `TRPC_TENANT_ID` 匹配。
+callback path 的最后一段是公开 route key；环境变量不保存 route key，也不通过 path
+直接构造 Tenant/App/Binding 身份。Bootstrap 会用 candidate index、scoped credential
+resolver 和当前 Tenant/App/Binding 快照完成可信路由，并为该 tenant 启动一个
+binding-aware Outbox worker。未设置任何 `WECOM_*` 变量时，现有无 WeCom 的环境行为保持
+不变；只设置其中一部分会拒绝启动。
 
 ## 运维前提
 

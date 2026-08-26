@@ -81,6 +81,9 @@ type Config struct {
 	AdminAuthenticator admin.Authenticator
 	AdminHandler       http.Handler
 	WeComHandler       http.Handler
+	// WeComHandlerFactory is called after Dispatcher construction so a callback
+	// handler cannot receive an uninitialized execution dependency.
+	WeComHandlerFactory func(gateway.DispatchService) (http.Handler, error)
 
 	Registry          gateway.RunnerRegistryConfig
 	HTTP              gateway.HTTPConfig
@@ -96,11 +99,12 @@ type Config struct {
 // before the HTTP server is drained; Close then closes the Runner Registry and
 // only after that resources explicitly owned by this graph.
 type Runtime struct {
-	Handler      *gateway.HTTPHandler
-	Resolver     *gateway.PlanResolver
-	Registry     *gateway.RunnerRegistry
-	Dispatcher   *gateway.Dispatcher
-	OutboxWorker *outbox.Worker
+	Handler        *gateway.HTTPHandler
+	Resolver       *gateway.PlanResolver
+	Registry       *gateway.RunnerRegistry
+	Dispatcher     *gateway.Dispatcher
+	OutboxWorker   *outbox.Worker
+	wecomLifecycle callbackLifecycle
 
 	db               *sql.DB
 	ownDB            bool
@@ -111,6 +115,11 @@ type Runtime struct {
 	closing          atomic.Bool
 	closeOnce        sync.Once
 	closeErr         error
+}
+
+type callbackLifecycle interface {
+	BeginShutdown()
+	Close() error
 }
 
 // NewWithDatabase is the normal constructor for a real PostgreSQL bootstrap.
@@ -189,6 +198,17 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 		_ = registry.Close()
 		return nil, ErrInvalidConfig
 	}
+	if config.WeComHandler != nil && config.WeComHandlerFactory != nil {
+		_ = registry.Close()
+		return nil, ErrInvalidConfig
+	}
+	if config.WeComHandlerFactory != nil {
+		config.WeComHandler, err = config.WeComHandlerFactory(dispatcher)
+		if err != nil || config.WeComHandler == nil {
+			_ = registry.Close()
+			return nil, ErrInvalidConfig
+		}
+	}
 	readyGate := config.ReadyGate
 	if readyGate == nil {
 		readyGate = func() bool { return true }
@@ -202,6 +222,9 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 		OutboxWorker: config.OutboxWorker,
 		db:           config.DB, ownDB: config.OwnDB, readyGate: readyGate,
 		ping: ping, verifyMigrations: config.VerifyMigrations, closeDeps: config.CloseDependencies,
+	}
+	if lifecycle, ok := config.WeComHandler.(callbackLifecycle); ok {
+		runtimeGraph.wecomLifecycle = lifecycle
 	}
 	if config.AdminAuthenticator != nil {
 		bindingRepository, ok := config.Channels.(channels.Repository)
@@ -279,6 +302,9 @@ func (graph *Runtime) BeginShutdown() {
 	if graph.Handler != nil {
 		graph.Handler.BeginShutdown()
 	}
+	if graph.wecomLifecycle != nil {
+		graph.wecomLifecycle.BeginShutdown()
+	}
 }
 
 // Close performs bounded Registry shutdown, then closes explicitly owned
@@ -292,6 +318,9 @@ func (graph *Runtime) Close() error {
 		var closeErr error
 		if graph.Handler != nil {
 			closeErr = errors.Join(closeErr, graph.Handler.Close())
+		}
+		if graph.wecomLifecycle != nil {
+			closeErr = errors.Join(closeErr, graph.wecomLifecycle.Close())
 		}
 		if graph.Registry != nil {
 			closeErr = errors.Join(closeErr, graph.Registry.Close())

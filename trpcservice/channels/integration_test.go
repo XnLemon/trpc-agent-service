@@ -109,6 +109,79 @@ func TestFakeTrustedInboundRouteAndBindingAwareIdentity(t *testing.T) {
 	}
 }
 
+func TestResolveCandidateRoutingTargetSealsCurrentSnapshots(t *testing.T) {
+	root, _, app := activeTenantApp(t, "resolve-target")
+	repo := inmemory.NewInMemoryRepository()
+	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeCom, "resolve-target-route")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := createActiveBinding(t, repo, root.TenantID, app.AppID, "wecom", channels.ChannelWeCom, "corp-resolve", routeDigest, "secret/wecom")
+	candidate := oneCandidate(t, repo, channels.ChannelWeCom, routeDigest)
+	if candidate.CandidateToken == "" {
+		t.Fatal("candidate token is empty")
+	}
+	tenantRepo := &singleTenantRepository{value: root}
+	appRepo := &singleAppRepository{value: app}
+	target, err := channels.ResolveCandidateRoutingTarget(context.Background(), repo, tenantRepo, appRepo, candidate, func(context.Context, channels.Binding) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := target.Validate(); err != nil || target.BindingID != binding.BindingID || target.TenantID != root.TenantID || target.AppID != app.AppID {
+		t.Fatalf("target = %+v, err=%v", target, err)
+	}
+	if _, err := channels.ResolveCandidateRoutingTarget(context.Background(), repo, tenantRepo, appRepo, candidate, func(context.Context, channels.Binding) error { return nil }); !errors.Is(err, channels.ErrVerificationFailed) {
+		t.Fatalf("candidate replay error = %v", err)
+	}
+}
+
+type singleTenantRepository struct{ value *tenant.Tenant }
+
+func (r *singleTenantRepository) Create(context.Context, tenant.CreateInput) (*tenant.Tenant, error) {
+	return nil, errors.New("unsupported")
+}
+func (r *singleTenantRepository) Get(context.Context, string) (*tenant.Tenant, error) {
+	value := r.value.Clone()
+	return &value, nil
+}
+func (r *singleTenantRepository) UpdateConfiguration(context.Context, tenant.UpdateConfigurationInput) (*tenant.Tenant, error) {
+	return nil, errors.New("unsupported")
+}
+func (r *singleTenantRepository) TransitionStatus(context.Context, tenant.TransitionStatusInput) (*tenant.Tenant, tenant.StatusChangeEvent, error) {
+	return nil, tenant.StatusChangeEvent{}, errors.New("unsupported")
+}
+
+type singleAppRepository struct{ value *agent.App }
+
+func (r *singleAppRepository) Create(context.Context, agent.CreateInput) (*agent.App, error) {
+	return nil, errors.New("unsupported")
+}
+func (r *singleAppRepository) Get(context.Context, string, string) (*agent.App, error) {
+	value := r.value.Clone()
+	return &value, nil
+}
+func (r *singleAppRepository) UpdateMetadata(context.Context, agent.UpdateMetadataInput) (*agent.App, error) {
+	return nil, errors.New("unsupported")
+}
+func (r *singleAppRepository) CreateDraft(context.Context, agent.CreateDraftInput) (*agent.Revision, error) {
+	return nil, errors.New("unsupported")
+}
+func (r *singleAppRepository) UpdateDraft(context.Context, agent.UpdateDraftInput) (*agent.Revision, error) {
+	return nil, errors.New("unsupported")
+}
+func (r *singleAppRepository) GetRevision(context.Context, string, string, int64) (*agent.Revision, error) {
+	return nil, errors.New("unsupported")
+}
+func (r *singleAppRepository) Publish(context.Context, agent.PublishInput) (*agent.App, *agent.Revision, agent.ChangeEvent, error) {
+	return nil, nil, agent.ChangeEvent{}, errors.New("unsupported")
+}
+func (r *singleAppRepository) Rollback(context.Context, agent.RollbackInput) (*agent.App, agent.ChangeEvent, error) {
+	return nil, agent.ChangeEvent{}, errors.New("unsupported")
+}
+func (r *singleAppRepository) TransitionStatus(context.Context, agent.TransitionStatusInput) (*agent.App, agent.ChangeEvent, error) {
+	return nil, agent.ChangeEvent{}, errors.New("unsupported")
+}
+
 func TestFakeResolverRejectsPurposeMismatchBadProofExpiryAndReplay(t *testing.T) {
 	clock := &integrationClock{now: time.Now().UTC().Add(time.Hour)}
 	repo := inmemory.NewInMemoryRepository(inmemory.Options{Clock: clock.Now, CandidateTTL: time.Second})
