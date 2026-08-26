@@ -132,6 +132,46 @@ func newTestDispatcher(t *testing.T, runnerValue *testRunner) (*Dispatcher, Prin
 	return dispatcher, mustAPIPrincipal(t, fixture.tenant.TenantID, fixture.app.AppID)
 }
 
+func TestReplyTargetUsesConversationDestination(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	tests := []struct {
+		name    string
+		message InboundMessage
+		want    runtimestorage.ReplyTarget
+		wantErr bool
+	}{
+		{
+			name:    "direct peer",
+			message: InboundMessage{ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1", ExternalThreadID: "thread-1"},
+			want:    runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: "direct", ReceiverID: "peer-1", ThreadID: "thread-1"},
+		},
+		{
+			name:    "group chat",
+			message: InboundMessage{ConversationKind: channels.ConversationGroup, ExternalChatID: "chat-1", ExternalThreadID: "thread-1"},
+			want:    runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: "group", ReceiverID: "chat-1", ThreadID: "thread-1"},
+		},
+		{name: "unknown conversation", message: InboundMessage{ConversationKind: "unknown"}, wantErr: true},
+		{name: "missing direct peer", message: InboundMessage{ConversationKind: channels.ConversationDirect}, wantErr: true},
+		{name: "blank group chat", message: InboundMessage{ConversationKind: channels.ConversationGroup, ExternalChatID: " "}, wantErr: true},
+		{name: "invalid thread", message: InboundMessage{ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1", ExternalThreadID: "thread\n"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := replyTarget(target, tt.message)
+			if tt.wantErr {
+				if !errors.Is(err, ErrInvalid) {
+					t.Fatalf("error = %v, want invalid", err)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("reply target = %+v err %v, want %+v", got, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestDispatcherMapsEventsAndPropagatesIdentityAndRequestID(t *testing.T) {
 	runnerValue := &testRunner{}
 	var captured capturedRun
