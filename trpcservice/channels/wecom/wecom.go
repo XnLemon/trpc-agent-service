@@ -6,7 +6,7 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/sha1"
+	"crypto/sha1" // #nosec G505 -- WeCom requires SHA-1 callback signatures.
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
@@ -165,7 +165,7 @@ func (h *Handler) validSignature(signature, timestamp, nonce, ciphertext string)
 	}
 	parts := []string{h.token, timestamp, nonce, ciphertext}
 	sort.Strings(parts)
-	sum := sha1.Sum([]byte(strings.Join(parts, "")))
+	sum := sha1.Sum([]byte(strings.Join(parts, ""))) // #nosec G401 -- required by the WeCom protocol.
 	want := hex.EncodeToString(sum[:])
 	return subtle.ConstantTimeCompare([]byte(signature), []byte(want)) == 1
 }

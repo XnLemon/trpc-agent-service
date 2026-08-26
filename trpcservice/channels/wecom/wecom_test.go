@@ -60,7 +60,7 @@ func TestProviderCachesTokenAndDeliversText(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/cgi-bin/gettoken" {
 			tokenCalls++
-			io.WriteString(w, `{"errcode":0,"access_token":"secret-token","expires_in":3600}`)
+			_, _ = io.WriteString(w, `{"errcode":0,"access_token":"secret-token","expires_in":3600}`)
 			return
 		}
 		if r.URL.Path == "/cgi-bin/message/send" {
@@ -68,7 +68,7 @@ func TestProviderCachesTokenAndDeliversText(t *testing.T) {
 			if r.URL.Query().Get("access_token") != "secret-token" {
 				t.Errorf("token missing")
 			}
-			io.WriteString(w, `{"errcode":0,"msgid":"m-1"}`)
+			_, _ = io.WriteString(w, `{"errcode":0,"msgid":"m-1"}`)
 			return
 		}
 		http.NotFound(w, r)

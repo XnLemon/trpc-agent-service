@@ -33,7 +33,7 @@ type Provider struct {
 
 var _ outbox.Provider = (*Provider)(nil)
 
-func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (string, error) {
+func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (string, error) { //nolint:gocyclo -- provider error mapping follows the documented protocol boundary.
 	if p == nil || strings.TrimSpace(p.CorpID) == "" || strings.TrimSpace(p.AgentID) == "" || strings.TrimSpace(p.AppSecret) == "" || ctx == nil {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
 	}
@@ -109,6 +109,7 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 	return result.MsgID, nil
 }
 
+// Reconcile reports unknown because WeCom does not expose a stable receipt query for app text sends.
 func (p *Provider) Reconcile(context.Context, storage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
 	return outbox.DeliveryUnknown, "", nil
 }
