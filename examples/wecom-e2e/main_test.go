@@ -47,8 +47,8 @@ import (
 
 const (
 	wecomRouteKey = "wecom-e2e-route"
-	wecomToken    = "wecom-e2e-callback-token"
-	wecomSecret   = "wecom-e2e-app-secret"
+	wecomToken    = "wecom-e2e-callback-token" // #nosec G101 -- deterministic test fixture, not a credential.
+	wecomSecret   = "wecom-e2e-app-secret"     // #nosec G101 -- deterministic test fixture, not a credential.
 	wecomReceive  = "corp-e2e"
 	wecomAgentID  = "1"
 )
@@ -78,7 +78,8 @@ func TestWeComCallbackOutboxE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := wecom.New(wecom.Config{Dispatcher: fixture.dispatcher, Token: wecomToken, EncodingAESKey: fixture.encodingAESKey, ReceiveID: wecomReceive, AgentID: wecomAgentID, RouteKey: wecomRouteKey, Target: fixture.target})
+	recording := &recordingDispatcher{delegate: fixture.dispatcher}
+	handler, err := wecom.New(wecom.Config{Dispatcher: recording, Token: wecomToken, EncodingAESKey: fixture.encodingAESKey, ReceiveID: wecomReceive, AgentID: wecomAgentID, RouteKey: wecomRouteKey, Target: fixture.target})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +91,7 @@ func TestWeComCallbackOutboxE2E(t *testing.T) {
 	requestURL := callbackURL(server.URL, ciphertext)
 	response := postCallback(t, ctx, requestURL, ciphertext)
 	if response.StatusCode != http.StatusOK || response.Body != "success" {
-		t.Fatalf("callback response = %+v", response)
+		t.Fatalf("callback response = %+v, dispatch error = %v", response, recording.lastError())
 	}
 	rows, err := fixture.store.ListReplyCandidates(ctx, fixture.tenant.TenantID)
 	if err != nil || len(rows) != 1 || rows[0].Payload != fixture.runner.reply {
@@ -263,6 +264,27 @@ func (r *weComRunner) Run(ctx context.Context, _, _ string, _ trpcmodel.Message,
 }
 func (*weComRunner) Close() error { return nil }
 
+type recordingDispatcher struct {
+	delegate gateway.DispatchService
+	err      atomic.Value
+}
+
+func (d *recordingDispatcher) Dispatch(ctx context.Context, request gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+	stream, err := d.delegate.Dispatch(ctx, request)
+	if err != nil {
+		d.err.Store(err)
+	}
+	return stream, err
+}
+
+func (d *recordingDispatcher) lastError() error {
+	value := d.err.Load()
+	if value == nil {
+		return nil
+	}
+	return value.(error)
+}
+
 func newProviderServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -322,7 +344,10 @@ func encryptCallback(t *testing.T, key []byte, receiveID, messageID, content str
 	for index := range value[:16] {
 		value[index] = byte(index + 1)
 	}
-	binary.BigEndian.PutUint32(value[16:20], uint32(len(plain)))
+	if len(plain) > int(^uint32(0)) {
+		t.Fatal("callback plaintext exceeds WeCom uint32 length")
+	}
+	binary.BigEndian.PutUint32(value[16:20], uint32(len(plain))) // #nosec G115 -- bounded by the guard above.
 	copy(value[20:], plain)
 	copy(value[20+len(plain):], receiveID)
 	padding := aes.BlockSize - len(value)%aes.BlockSize
