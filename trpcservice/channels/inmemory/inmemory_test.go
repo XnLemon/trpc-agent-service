@@ -190,6 +190,14 @@ func TestRepositoryLifecycleExpectedVersionAndCandidateInvalidation(t *testing.T
 	repo := NewInMemoryRepository(Options{Clock: clock.Now, CandidateTTL: 2 * time.Second})
 	routeDigest, _ := channels.DigestPublicRouteKey(channels.ChannelWeCom, "lifecycle-route")
 	binding := mustCreate(t, repo, bindingInput("t_00000000000000000000000002", "lifecycle", "bot-one", routeDigest))
+	active, candidate := assertBindingActivation(t, repo, binding, routeDigest)
+	updated, routeDigest, candidate := assertConfigurationUpdateInvalidatesCandidate(t, repo, binding, active, candidate, routeDigest)
+	resumed := assertSuspensionInvalidatesCandidate(t, repo, updated, candidate, routeDigest)
+	assertResumeExpiryAndDisable(t, repo, clock, resumed, routeDigest)
+}
+
+func assertBindingActivation(t *testing.T, repo *InMemoryRepository, binding *channels.Binding, routeDigest string) (*channels.Binding, channels.CandidateBindingContext) {
+	t.Helper()
 	active, event, err := repo.Activate(context.Background(), channels.TransitionStatusInput{TenantID: binding.TenantID, BindingID: binding.BindingID, ExpectedVersion: binding.Version, Metadata: validMetadata()})
 	if err != nil || event.EventType != channels.EventActivated || active.Status != channels.StatusActive || active.Version != 2 {
 		t.Fatalf("activation failed: binding=%+v event=%+v err=%v", active, event, err)
@@ -198,6 +206,11 @@ func TestRepositoryLifecycleExpectedVersionAndCandidateInvalidation(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	return active, candidate
+}
+
+func assertConfigurationUpdateInvalidatesCandidate(t *testing.T, repo *InMemoryRepository, binding, active *channels.Binding, candidate channels.CandidateBindingContext, routeDigest string) (*channels.Binding, string, channels.CandidateBindingContext) {
+	t.Helper()
 	if _, _, err := repo.UpdateConfiguration(context.Background(), channels.UpdateConfigurationInput{TenantID: binding.TenantID, BindingID: binding.BindingID, ExpectedVersion: 1, ProviderAccountID: active.ProviderAccountID, PublicRouteKeyDigest: routeDigest, AppID: active.AppID, SecretRef: active.SecretRef, Protocol: active.Protocol, Metadata: validMetadata()}); !errors.Is(err, channels.ErrConflict) {
 		t.Fatalf("stale configuration update was accepted: %v", err)
 	}
@@ -215,7 +228,11 @@ func TestRepositoryLifecycleExpectedVersionAndCandidateInvalidation(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	return updated, newRouteDigest, candidate
+}
 
+func assertSuspensionInvalidatesCandidate(t *testing.T, repo *InMemoryRepository, active *channels.Binding, candidate channels.CandidateBindingContext, routeDigest string) *channels.Binding {
+	t.Helper()
 	suspended, event, err := repo.Suspend(context.Background(), channels.TransitionStatusInput{TenantID: active.TenantID, BindingID: active.BindingID, ExpectedVersion: active.Version, Metadata: validMetadata()})
 	if err != nil || event.EventType != channels.EventSuspended || suspended.Status != channels.StatusSuspended {
 		t.Fatalf("suspension failed: binding=%+v event=%+v err=%v", suspended, event, err)
@@ -226,7 +243,6 @@ func TestRepositoryLifecycleExpectedVersionAndCandidateInvalidation(t *testing.T
 	if _, err := repo.LookupCandidates(context.Background(), channels.ChannelWeCom, routeDigest); !errors.Is(err, channels.ErrCandidateUnavailable) {
 		t.Fatalf("suspended binding remained discoverable: %v", err)
 	}
-
 	resumed, _, err := repo.Resume(context.Background(), channels.TransitionStatusInput{TenantID: suspended.TenantID, BindingID: suspended.BindingID, ExpectedVersion: suspended.Version, Metadata: validMetadata()})
 	if err != nil {
 		t.Fatal(err)
@@ -234,7 +250,12 @@ func TestRepositoryLifecycleExpectedVersionAndCandidateInvalidation(t *testing.T
 	if resumed.Status != channels.StatusActive || resumed.Version != suspended.Version+1 {
 		t.Fatalf("resume did not advance lifecycle: %+v", resumed)
 	}
-	candidate, err = firstCandidate(t, repo, channels.ChannelWeCom, routeDigest)
+	return resumed
+}
+
+func assertResumeExpiryAndDisable(t *testing.T, repo *InMemoryRepository, clock *testClock, resumed *channels.Binding, routeDigest string) {
+	t.Helper()
+	candidate, err := firstCandidate(t, repo, channels.ChannelWeCom, routeDigest)
 	if err != nil {
 		t.Fatal(err)
 	}
