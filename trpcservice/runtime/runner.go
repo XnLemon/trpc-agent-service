@@ -64,6 +64,12 @@ func NewRunner(
 			return nil, fmt.Errorf("build runner: session capability: %w", err)
 		}
 	}
+	ownedCapabilities := capabilities != nil
+	defer func() {
+		if ownedCapabilities {
+			_ = capabilities.Close()
+		}
+	}()
 	scopedSessions, err := NewTenantSessionService(plan.Tenant(), sessions)
 	if err != nil {
 		return nil, fmt.Errorf("build runner: session scope: %w", err)
@@ -78,13 +84,15 @@ func NewRunner(
 		llmAgent,
 		trpcrunner.WithSessionService(scopedSessions),
 	)
-	return &policyRunner{
+	runner := &policyRunner{
 		delegate:     delegate,
 		capabilities: capabilities,
 		runOptions: []trpcagent.RunOption{
 			trpcagent.WithMaxRunDuration(time.Duration(agentInput.Runtime.ExecutionTimeoutSeconds) * time.Second),
 		},
-	}, nil
+	}
+	ownedCapabilities = false
+	return runner, nil
 }
 
 func llmAgentOptions(input agent.LLMAgentFactoryInput, model trpcmodel.Model) []llmagent.Option {

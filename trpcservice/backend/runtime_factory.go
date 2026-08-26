@@ -137,6 +137,9 @@ func (factory *RegistryStorageFactory) New(ctx context.Context, input StorageFac
 		provider, err := factory.providers.Resolve(ctx, input, binding)
 		if err != nil {
 			_ = set.Close()
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			return nil, ErrStorageFactory
 		}
 		secret := modelprofile.SecretValue{}
@@ -157,6 +160,10 @@ func (factory *RegistryStorageFactory) New(ctx context.Context, input StorageFac
 				return nil, ctx.Err()
 			}
 			return nil, ErrStorageFactory
+		}
+		if err := ctx.Err(); err != nil {
+			_ = set.Close()
+			return nil, err
 		}
 		set.capabilities[binding.Capability] = value
 	}

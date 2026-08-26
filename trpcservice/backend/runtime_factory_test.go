@@ -54,8 +54,29 @@ func TestRegistryStorageFactoryCancellationAndMissingSession(t *testing.T) {
 	}
 }
 
-type sessionCapabilityProvider struct{}
+func TestRegistryStorageFactoryCancellationAfterProviderSuccess(t *testing.T) {
+	providers := NewProviderRegistry()
+	provider := &sessionCapabilityProvider{}
+	const tenantID = "t_00000000000000000000000000"
+	if err := providers.Register(tenantID, CapabilitySession, "memory", provider); err != nil {
+		t.Fatal(err)
+	}
+	factory, err := NewRegistryStorageFactory(providers, modelprofile.NewSecretRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	provider.cancel = cancel
+	if _, err := factory.New(ctx, StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("provider-success cancellation = %v", err)
+	}
+}
 
-func (sessionCapabilityProvider) New(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
+type sessionCapabilityProvider struct{ cancel context.CancelFunc }
+
+func (provider *sessionCapabilityProvider) New(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
+	if provider.cancel != nil {
+		provider.cancel()
+	}
 	return inmemory.NewSessionService(), nil
 }
