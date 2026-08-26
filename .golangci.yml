@@ -32,9 +32,6 @@ linters:
       - path: ^trpcservice/bootstrap/bootstrap_test\.go$
         text: 'cyclomatic complexity .* of func `TestEnvironmentBootstrapRequiresExplicitConfigurationAndBuildsDependencies`'
         linters: [gocyclo]
-      - path: ^trpcservice/bootstrap/restart_test\.go$
-        text: 'cyclomatic complexity .* of func `TestRestartBootstrapRoundTrip`'
-        linters: [gocyclo]
       - path: ^trpcservice/channels/fake_test\.go$
         text: 'cyclomatic complexity .* of func `(?:TestFakeCandidateResolverOwnsCandidateAndVerificationBoundaries|TestFakeCandidateResolverRejectsForgeryReplayAndLifecycleEdges)`'
         linters: [gocyclo]
