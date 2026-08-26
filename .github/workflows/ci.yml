@@ -135,7 +135,7 @@ jobs:
         run: ./scripts/race.sh
 
   wecom-e2e:
-    name: WeCom deterministic E2E
+    name: WeCom deterministic callback E2E
     runs-on: ubuntu-latest
     timeout-minutes: 5
     services:
