@@ -595,6 +595,13 @@ func TestEndpointAuthorityValidation(t *testing.T) {
 }
 
 func TestProviderCatalogNilAndHelperBoundaries(t *testing.T) {
+	assertProviderCatalogNilBoundaries(t)
+	assertProviderCatalogGrammarBoundaries(t)
+	assertProviderCatalogCloneBoundaries(t)
+}
+
+func assertProviderCatalogNilBoundaries(t *testing.T) {
+	t.Helper()
 	var catalog *ProviderCatalog
 	if _, err := catalog.NormalizeBindings(sessionBinding()); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("nil catalog error = %v", err)
@@ -603,6 +610,10 @@ func TestProviderCatalogNilAndHelperBoundaries(t *testing.T) {
 		t.Fatalf("nil configuration catalog error = %v", err)
 	}
 
+}
+
+func assertProviderCatalogGrammarBoundaries(t *testing.T) {
+	t.Helper()
 	if validProviderName("") || validProviderName("1provider") || validProviderName("provider!") || validProviderName(strings.Repeat("p", 65)) {
 		t.Fatal("invalid provider name passed validation")
 	}
@@ -618,7 +629,10 @@ func TestProviderCatalogNilAndHelperBoundaries(t *testing.T) {
 	if _, err := normalizeOptionValue("value", OptionSpec{Kind: "unknown"}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unknown option kind error = %v", err)
 	}
+}
 
+func assertProviderCatalogCloneBoundaries(t *testing.T) {
+	t.Helper()
 	if bindingsEqual(nil, sessionBinding()) || stringMapsEqual(nil, map[string]string{"a": ""}) {
 		t.Fatal("different collection lengths compared equal")
 	}
