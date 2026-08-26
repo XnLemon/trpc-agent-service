@@ -53,6 +53,7 @@ const (
 	envWeComEncodingAESKey = "WECOM_ENCODING_AES_KEY"
 	// #nosec G101 -- environment variable name, not a secret.
 	envWeComAppSecret = "WECOM_APP_SECRET"
+	// #nosec G101 -- environment variable name, not a secret.
 	envWeComSecretRef = "WECOM_SECRET_REF"
 
 	defaultModelProvider = "openai"
