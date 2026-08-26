@@ -55,6 +55,8 @@ const (
 
 // TestWeComCallbackOutboxE2E exercises callback, Gateway durable storage,
 // duplicate idempotency, and provider delivery without external credentials.
+//
+//nolint:gocyclo // The E2E intentionally keeps the complete callback-to-outbox contract in one scenario.
 func TestWeComCallbackOutboxE2E(t *testing.T) {
 	dsn := strings.TrimSpace(os.Getenv("POSTGRES_MIGRATION_TEST_DSN"))
 	if dsn == "" {
@@ -84,6 +86,8 @@ func TestWeComCallbackOutboxE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = handler.Close() }()
+	identity, identityErr := fixture.target.RunnerIdentity(channels.IdentityInput{ExternalUserID: "e2e-user", Kind: channels.ConversationDirect, ExternalPeerID: "e2e-user"})
+	t.Logf("target tenant=%q app=%q binding=%q identity=%+v err=%v", fixture.target.TenantID, fixture.target.AppID, fixture.target.BindingID, identity, identityErr)
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -133,6 +137,7 @@ type weComFixture struct {
 	runner         *weComRunner
 }
 
+//nolint:gocyclo // Fixture assembly mirrors the tenant/app/binding execution boundary.
 func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture {
 	t.Helper()
 	modelCatalog, err := model.NewProviderCatalog(model.ProviderSpec{Provider: "fake", Models: []string{"deterministic"}, EndpointPolicy: model.FieldForbidden, SecretRefPolicy: model.FieldForbidden})
