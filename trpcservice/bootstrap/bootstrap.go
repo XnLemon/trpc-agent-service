@@ -80,6 +80,7 @@ type Config struct {
 	Authenticator      gateway.APIAuthenticator
 	AdminAuthenticator admin.Authenticator
 	AdminHandler       http.Handler
+	WeComHandler       http.Handler
 
 	Registry          gateway.RunnerRegistryConfig
 	HTTP              gateway.HTTPConfig
@@ -222,6 +223,7 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	}
 	httpConfig := gateway.HTTPConfig{
 		Dispatcher: dispatcher, Authenticator: config.Authenticator, Admin: config.AdminHandler,
+		WeCom:   config.WeComHandler,
 		Ready:   runtimeGraph.Ready,
 		Limiter: config.HTTP.Limiter, Idempotency: config.HTTP.Idempotency,
 		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout,
