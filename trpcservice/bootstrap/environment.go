@@ -252,81 +252,106 @@ func loadEnvironment() (environmentConfig, error) {
 		subjectID:      environmentOrDefault(envSubjectID, defaultSubjectID),
 		runtimeStorage: strings.ToLower(strings.TrimSpace(os.Getenv(envSessionBackend))),
 	}
-	var err error
-	if config.dsn, err = requiredEnvironment(envPostgresDSN); err != nil {
-		return environmentConfig{}, err
+	loaders := []func() error{config.loadDatabase, config.loadIdentities, config.loadAdmin, config.loadModel, config.loadRuntime, config.loadWeCom}
+	for _, load := range loaders {
+		if err := load(); err != nil {
+			return environmentConfig{}, err
+		}
 	}
-	if identities := strings.TrimSpace(os.Getenv(envAPIIdentities)); identities != "" {
+	return config, nil
+}
+
+func (config *environmentConfig) loadDatabase() error {
+	var err error
+	config.dsn, err = requiredEnvironment(envPostgresDSN)
+	return err
+}
+
+func (config *environmentConfig) loadIdentities() error {
+	identities := strings.TrimSpace(os.Getenv(envAPIIdentities))
+	if identities != "" {
+		var err error
 		config.apiIdentities, err = parseEnvironmentAPIIdentities(identities)
 		if err != nil {
-			return environmentConfig{}, err
+			return err
 		}
 		if len(config.apiIdentities) == 1 {
 			for _, identity := range config.apiIdentities {
 				config.tenantID, config.appID = identity.TenantID, identity.AppID
 			}
 		}
-	} else {
-		if config.apiToken, err = requiredEnvironment(envAPIToken); err != nil {
-			return environmentConfig{}, err
-		}
-		if config.tenantID, err = requiredEnvironment(envTenantID); err != nil {
-			return environmentConfig{}, err
-		}
-		if config.appID, err = requiredEnvironment(envAppID); err != nil {
-			return environmentConfig{}, err
-		}
-		config.apiIdentities = map[string]gateway.APIIdentity{config.apiToken: {TenantID: config.tenantID, AppID: config.appID, SubjectID: config.subjectID}}
+		return nil
 	}
+	var err error
+	if config.apiToken, err = requiredEnvironment(envAPIToken); err != nil {
+		return err
+	}
+	if config.tenantID, err = requiredEnvironment(envTenantID); err != nil {
+		return err
+	}
+	if config.appID, err = requiredEnvironment(envAppID); err != nil {
+		return err
+	}
+	config.apiIdentities = map[string]gateway.APIIdentity{config.apiToken: {TenantID: config.tenantID, AppID: config.appID, SubjectID: config.subjectID}}
+	return nil
+}
+
+func (config *environmentConfig) loadAdmin() error {
+	var err error
 	if config.adminToken, err = requiredEnvironment(envAdminToken); err != nil {
-		return environmentConfig{}, err
+		return err
 	}
 	adminTenantValue, err := requiredEnvironment(envAdminTenants)
 	if err != nil {
-		return environmentConfig{}, err
+		return err
 	}
-	adminTenants, err := environmentList(envAdminTenants, adminTenantValue, false)
-	if err != nil {
-		return environmentConfig{}, err
-	}
-	config.adminTenants = adminTenants
+	config.adminTenants, err = environmentList(envAdminTenants, adminTenantValue, false)
+	return err
+}
+
+func (config *environmentConfig) loadModel() error {
+	var err error
 	if config.modelAPIKey, err = requiredEnvironment(envModelAPIKey); err != nil {
-		return environmentConfig{}, err
+		return err
 	}
 	config.modelProvider = strings.ToLower(strings.TrimSpace(config.modelProvider))
 	config.secretRef = strings.TrimSpace(config.secretRef)
 	if config.modelProvider == "" || config.secretRef == "" {
-		return environmentConfig{}, fmt.Errorf("%w: model provider and secret reference are required", ErrInvalidConfig)
+		return fmt.Errorf("%w: model provider and secret reference are required", ErrInvalidConfig)
 	}
-	config.modelNames, err = environmentList(envModelNames, environmentOrDefault(envModelNames, defaultModelNames), true)
-	if err != nil {
-		return environmentConfig{}, err
+	if config.modelNames, err = environmentList(envModelNames, environmentOrDefault(envModelNames, defaultModelNames), true); err != nil {
+		return err
 	}
 	config.endpointHosts, err = environmentList(envModelEndpointHost, environmentOrDefault(envModelEndpointHost, defaultEndpointHost), true)
-	if err != nil {
-		return environmentConfig{}, err
-	}
+	return err
+}
+
+func (config *environmentConfig) loadRuntime() error {
 	config.subjectID = strings.TrimSpace(config.subjectID)
 	if config.runtimeStorage != "postgres" && config.runtimeStorage != "inmemory" {
-		return environmentConfig{}, fmt.Errorf("%w: %s must be explicitly set to postgres or inmemory", ErrInvalidConfig, envSessionBackend)
+		return fmt.Errorf("%w: %s must be explicitly set to postgres or inmemory", ErrInvalidConfig, envSessionBackend)
 	}
-	wecomValues := []string{strings.TrimSpace(os.Getenv(envWeComCallbackToken)), strings.TrimSpace(os.Getenv(envWeComEncodingAESKey)), strings.TrimSpace(os.Getenv(envWeComAppSecret)), strings.TrimSpace(os.Getenv(envWeComSecretRef))}
+	return nil
+}
+
+func (config *environmentConfig) loadWeCom() error {
+	values := []string{strings.TrimSpace(os.Getenv(envWeComCallbackToken)), strings.TrimSpace(os.Getenv(envWeComEncodingAESKey)), strings.TrimSpace(os.Getenv(envWeComAppSecret)), strings.TrimSpace(os.Getenv(envWeComSecretRef))}
 	configured := 0
-	for _, value := range wecomValues {
+	for _, value := range values {
 		if value != "" {
 			configured++
 		}
 	}
-	if configured != 0 && configured != len(wecomValues) {
-		return environmentConfig{}, fmt.Errorf("%w: WeCom credentials must be configured together", ErrInvalidConfig)
+	if configured != 0 && configured != len(values) {
+		return fmt.Errorf("%w: WeCom credentials must be configured together", ErrInvalidConfig)
 	}
-	if configured == len(wecomValues) {
-		config.wecom = &environmentWeComConfig{callbackToken: wecomValues[0], encodingAESKey: wecomValues[1], appSecret: wecomValues[2], secretRef: wecomValues[3]}
+	if configured == len(values) {
+		config.wecom = &environmentWeComConfig{callbackToken: values[0], encodingAESKey: values[1], appSecret: values[2], secretRef: values[3]}
 	}
 	if config.wecom != nil && len(config.apiIdentities) != 1 {
-		return environmentConfig{}, fmt.Errorf("%w: WeCom credentials require exactly one API identity", ErrInvalidConfig)
+		return fmt.Errorf("%w: WeCom credentials require exactly one API identity", ErrInvalidConfig)
 	}
-	return config, nil
+	return nil
 }
 
 func environmentRuntimeStore(kind string, db *sql.DB) (runtimestorage.RuntimeStore, error) {

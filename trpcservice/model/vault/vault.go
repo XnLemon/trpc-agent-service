@@ -15,8 +15,11 @@ import (
 )
 
 var (
-	ErrInvalid      = errors.New("invalid vault secret manager")
-	ErrUnavailable  = errors.New("vault secret unavailable")
+	// ErrInvalid indicates invalid Vault manager configuration or input.
+	ErrInvalid = errors.New("invalid vault secret manager")
+	// ErrUnavailable indicates that the Vault secret could not be read.
+	ErrUnavailable = errors.New("vault secret unavailable")
+	// ErrUnauthorized indicates that Vault rejected the configured token.
 	ErrUnauthorized = errors.New("vault secret manager unauthorized")
 )
 

@@ -64,10 +64,15 @@ type CacheInvalidation struct {
 type CacheInvalidationKind string
 
 const (
-	CacheInvalidationTenant  CacheInvalidationKind = "tenant"
-	CacheInvalidationApp     CacheInvalidationKind = "app"
-	CacheInvalidationModel   CacheInvalidationKind = "model"
+	// CacheInvalidationTenant identifies a tenant configuration change.
+	CacheInvalidationTenant CacheInvalidationKind = "tenant"
+	// CacheInvalidationApp identifies an Agent App configuration change.
+	CacheInvalidationApp CacheInvalidationKind = "app"
+	// CacheInvalidationModel identifies a model profile change.
+	CacheInvalidationModel CacheInvalidationKind = "model"
+	// CacheInvalidationBackend identifies a backend profile change.
 	CacheInvalidationBackend CacheInvalidationKind = "backend"
+	// CacheInvalidationBinding identifies a channel binding change.
 	CacheInvalidationBinding CacheInvalidationKind = "binding"
 )
 
@@ -159,36 +164,45 @@ func (h *Handler) invalidateMutation(parts []string, method string) {
 	if len(parts) < 4 {
 		return
 	}
-	switch parts[2] {
-	case "apps":
-		change.AppID = parts[3]
-		if change.AppID == "" {
-			return
-		}
-		if (len(parts) == 4 && method == http.MethodPatch) ||
-			(len(parts) == 5 && (parts[4] == "status" || parts[4] == "rollback")) ||
-			(len(parts) == 7 && parts[4] == "revisions" && parts[6] == "publish") {
-			change.Kind = CacheInvalidationApp
-		}
-	case "models":
-		change.ProfileID = parts[3]
-		if change.ProfileID != "" && ((len(parts) == 4 && method == http.MethodPatch) || (len(parts) == 5 && parts[4] == "status")) {
-			change.Kind = CacheInvalidationModel
-		}
-	case "backends":
-		change.ProfileID = parts[3]
-		if change.ProfileID != "" && ((len(parts) == 4 && method == http.MethodPatch) || (len(parts) == 5 && parts[4] == "status")) {
-			change.Kind = CacheInvalidationBackend
-		}
-	case "bindings":
-		change.BindingID = parts[3]
-		if change.BindingID != "" && ((len(parts) == 4 && method == http.MethodPatch) || (len(parts) == 5 && parts[4] == "status")) {
-			change.Kind = CacheInvalidationBinding
-		}
-	}
+	change = resourceInvalidation(change, parts[2:], method)
 	if change.Kind != "" {
 		h.config.CacheInvalidator.Invalidate(change)
 	}
+}
+
+func resourceInvalidation(change CacheInvalidation, parts []string, method string) CacheInvalidation {
+	if len(parts) < 2 || parts[1] == "" {
+		return change
+	}
+	switch parts[0] {
+	case "apps":
+		if appMutation(parts, method) {
+			change.AppID, change.Kind = parts[1], CacheInvalidationApp
+		}
+	case "models":
+		if profileMutation(parts, method) {
+			change.ProfileID, change.Kind = parts[1], CacheInvalidationModel
+		}
+	case "backends":
+		if profileMutation(parts, method) {
+			change.ProfileID, change.Kind = parts[1], CacheInvalidationBackend
+		}
+	case "bindings":
+		if profileMutation(parts, method) {
+			change.BindingID, change.Kind = parts[1], CacheInvalidationBinding
+		}
+	}
+	return change
+}
+
+func appMutation(parts []string, method string) bool {
+	return (len(parts) == 2 && method == http.MethodPatch) ||
+		(len(parts) == 3 && (parts[2] == "status" || parts[2] == "rollback")) ||
+		(len(parts) == 5 && parts[2] == "revisions" && parts[4] == "publish")
+}
+
+func profileMutation(parts []string, method string) bool {
+	return (len(parts) == 2 && method == http.MethodPatch) || (len(parts) == 3 && parts[2] == "status")
 }
 
 func (h *Handler) recordMutation(ctx context.Context, principal Principal, requestID string, value any) error {

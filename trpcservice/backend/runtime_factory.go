@@ -130,38 +130,8 @@ func (factory *RegistryStorageFactory) New(ctx context.Context, input StorageFac
 			_ = set.Close()
 			return nil, err
 		}
-		if binding.Capability == "" || binding.Provider == "" {
-			_ = set.Close()
-			return nil, ErrStorageFactory
-		}
-		provider, err := factory.providers.Resolve(ctx, input, binding)
+		value, err := factory.materializeBinding(ctx, input, binding)
 		if err != nil {
-			_ = set.Close()
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, ErrStorageFactory
-		}
-		secret := modelprofile.SecretValue{}
-		if binding.SecretRef != "" {
-			secret, err = factory.secrets.Resolve(ctx, modelprofile.SecretScope{TenantID: input.TenantID, SecretRef: binding.SecretRef})
-			if err != nil {
-				_ = set.Close()
-				if ctx.Err() != nil {
-					return nil, ctx.Err()
-				}
-				return nil, ErrStorageFactory
-			}
-		}
-		value, err := provider.New(ctx, input.Clone(), binding.Clone(), secret)
-		if err != nil || value == nil {
-			_ = set.Close()
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, ErrStorageFactory
-		}
-		if err := ctx.Err(); err != nil {
 			_ = set.Close()
 			return nil, err
 		}
@@ -172,4 +142,38 @@ func (factory *RegistryStorageFactory) New(ctx context.Context, input StorageFac
 		return nil, ErrCapabilityUnavailable
 	}
 	return set, nil
+}
+
+func (factory *RegistryStorageFactory) materializeBinding(ctx context.Context, input StorageFactoryInput, binding CapabilityBinding) (any, error) {
+	if binding.Capability == "" || binding.Provider == "" {
+		return nil, ErrStorageFactory
+	}
+	provider, err := factory.providers.Resolve(ctx, input, binding)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, ErrStorageFactory
+	}
+	secret := modelprofile.SecretValue{}
+	if binding.SecretRef != "" {
+		secret, err = factory.secrets.Resolve(ctx, modelprofile.SecretScope{TenantID: input.TenantID, SecretRef: binding.SecretRef})
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, ErrStorageFactory
+		}
+	}
+	value, err := provider.New(ctx, input.Clone(), binding.Clone(), secret)
+	if err != nil || value == nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, ErrStorageFactory
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return value, nil
 }
