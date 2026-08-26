@@ -86,6 +86,16 @@ func runIdempotencyFailureAndExpiryLifecycle(t *testing.T, store *IdempotencySto
 }
 
 func TestIdempotencyStoreScopesCapacityAndConfigurationEdges(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	principal := mustAPIPrincipal(t, fixture.tenant.TenantID, fixture.app.AppID)
+	message := InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}
+	runIdempotencyConfigurationEdges(t, principal, message)
+	runIdempotencyCapacityAndIsolation(t, principal, message)
+	runIdempotencyChannelKeyEdges(t, principal, message)
+}
+
+func runIdempotencyConfigurationEdges(t *testing.T, principal Principal, message InboundMessage) {
+	t.Helper()
 	if _, err := NewIdempotencyStore(IdempotencyConfig{TTL: -time.Second}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("negative TTL error = %v", err)
 	}
@@ -96,9 +106,6 @@ func TestIdempotencyStoreScopesCapacityAndConfigurationEdges(t *testing.T) {
 	if nilStore.Ready() {
 		t.Fatal("nil idempotency store is ready")
 	}
-	fixture := newGatewayFixture(t)
-	principal := mustAPIPrincipal(t, fixture.tenant.TenantID, fixture.app.AppID)
-	message := InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}
 	var nilContext context.Context
 	if _, _, err := nilStore.Begin(nilContext, principal, message); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("nil store error = %v", err)
@@ -130,6 +137,14 @@ func TestIdempotencyStoreScopesCapacityAndConfigurationEdges(t *testing.T) {
 		t.Fatalf("invalid principal error = %v", err)
 	}
 
+}
+
+func runIdempotencyCapacityAndIsolation(t *testing.T, principal Principal, message InboundMessage) {
+	t.Helper()
+	store, err := NewIdempotencyStore(IdempotencyConfig{MaxEntries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
 	firstMessage := message
 	firstMessage.ExternalMessageID = "first"
 	claim, _, err := store.Begin(context.Background(), principal, firstMessage)
@@ -155,6 +170,10 @@ func TestIdempotencyStoreScopesCapacityAndConfigurationEdges(t *testing.T) {
 		t.Fatalf("second tenant was not isolated: claim=%v err=%v", other, err)
 	}
 
+}
+
+func runIdempotencyChannelKeyEdges(t *testing.T, principal Principal, message InboundMessage) {
+	t.Helper()
 	channelFixture := newGatewayFixture(t)
 	target := newTrustedRoutingTarget(t, channelFixture)
 	channelPrincipal, err := NewChannelPrincipal(target)
@@ -164,6 +183,10 @@ func TestIdempotencyStoreScopesCapacityAndConfigurationEdges(t *testing.T) {
 	channelMessage := InboundMessage{Content: "hello", ExternalMessageID: "channel-message", ExternalUserID: "user", ConversationKind: channels.ConversationGroup, ExternalChatID: "chat"}
 	if key, err := makeIdempotencyKey(channelPrincipal, channelMessage); err != nil || !strings.Contains(key, target.BindingID) {
 		t.Fatalf("channel idempotency key = %q, err=%v", key, err)
+	}
+	isolationStore, err := NewIdempotencyStore(IdempotencyConfig{MaxEntries: 2})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if _, _, err := isolationStore.Begin(context.Background(), principal, InboundMessage{Content: "bad", ExternalMessageID: "id"}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unnormalized idempotency message error = %v", err)
