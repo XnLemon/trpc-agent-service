@@ -513,27 +513,8 @@ func TestDynamicHandlerRoutesOnlyVerifiedBinding(t *testing.T) {
 		t.Fatal("static handler is nil")
 	}
 	_ = staticHandler.Close()
-	events, err := writer.List(context.Background(), audit.Query{})
-	if err != nil || len(events) != 1 || events[0].EventType != audit.EventIMIngressAccepted || events[0].Decision != audit.DecisionAccepted || events[0].RequestID != requestID || events[0].TraceID != traceID {
-		t.Fatalf("accepted ingress audit = %+v, err=%v", events, err)
-	}
-
-	duplicateHandler, err := New(Config{Dispatcher: dispatchFunc(func(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
-		return nil, gateway.ErrDuplicateMessage
-	}), Token: "token", ReceiveID: "receive", AgentID: "1", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), Target: target, AuditWriter: writer})
-	if err != nil {
-		t.Fatalf("duplicate handler = %v", err)
-	}
-	duplicateResponse := httptest.NewRecorder()
-	duplicateHandler.ServeHTTP(duplicateResponse, callbackTestRequest(t, "message-duplicate", "user-1", "hello"))
-	if duplicateResponse.Code != http.StatusOK || duplicateResponse.Body.String() != "success" {
-		t.Fatalf("duplicate callback response = %d %q", duplicateResponse.Code, duplicateResponse.Body.String())
-	}
-	_ = duplicateHandler.Close()
-	events, err = writer.List(context.Background(), audit.Query{})
-	if err != nil || len(events) != 2 || events[1].EventType != audit.EventIMIngressDuplicate || events[1].Decision != audit.DecisionDuplicate || events[1].ErrorType != string(audit.ErrorDuplicate) {
-		t.Fatalf("duplicate ingress audit = %+v, err=%v", events, err)
-	}
+	assertIngressAudit(t, writer, 1, audit.EventIMIngressAccepted, audit.DecisionAccepted, "", requestID, traceID)
+	assertDuplicateIngressAudit(t, target, writer)
 
 	badSignature := callbackTestRequestAtPath(t, "/wecom/callback/route-key", "message-bad", "user-1", "hello")
 	badQuery := badSignature.URL.Query()
@@ -550,6 +531,35 @@ func TestDynamicHandlerRoutesOnlyVerifiedBinding(t *testing.T) {
 	if unknown.Code != http.StatusNotFound {
 		t.Fatalf("unknown route response = %d", unknown.Code)
 	}
+}
+
+func assertIngressAudit(t *testing.T, writer audit.Reader, count int, eventType audit.EventType, decision audit.Decision, errorType, requestID, traceID string) {
+	t.Helper()
+	events, err := writer.List(context.Background(), audit.Query{})
+	if err != nil || len(events) != count {
+		t.Fatalf("ingress audit = %+v, err=%v", events, err)
+	}
+	event := events[count-1]
+	if event.EventType != eventType || event.Decision != decision || event.ErrorType != errorType || requestID != "" && event.RequestID != requestID || traceID != "" && event.TraceID != traceID {
+		t.Fatalf("ingress audit event = %+v", event)
+	}
+}
+
+func assertDuplicateIngressAudit(t *testing.T, target channels.RoutingTarget, writer audit.Writer) {
+	t.Helper()
+	handler, err := New(Config{Dispatcher: dispatchFunc(func(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+		return nil, gateway.ErrDuplicateMessage
+	}), Token: "token", ReceiveID: "receive", AgentID: "1", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), Target: target, AuditWriter: writer})
+	if err != nil {
+		t.Fatalf("duplicate handler = %v", err)
+	}
+	defer func() { _ = handler.Close() }()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, callbackTestRequest(t, "message-duplicate", "user-1", "hello"))
+	if response.Code != http.StatusOK || response.Body.String() != "success" {
+		t.Fatalf("duplicate callback response = %d %q", response.Code, response.Body.String())
+	}
+	assertIngressAudit(t, writer.(audit.Reader), 2, audit.EventIMIngressDuplicate, audit.DecisionDuplicate, string(audit.ErrorDuplicate), "", "")
 }
 
 func TestHandlerRejectsMalformedMessages(t *testing.T) {

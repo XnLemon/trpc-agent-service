@@ -253,27 +253,27 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}()
 	select {
 	case <-accepted:
-		if h.recordIngress(r.Context(), state.principal, message, requestID, traceID, audit.EventIMIngressAccepted, audit.DecisionAccepted, "") != nil {
-			http.Error(w, "unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		h.writeSuccess(w)
+		h.writeIngressSuccess(w, r.Context(), state.principal, message, requestID, traceID, audit.EventIMIngressAccepted, audit.DecisionAccepted, "")
 	case dispatchErr := <-result:
 		if dispatchErr == nil {
 			h.writeSuccess(w)
 			return
 		}
 		if errors.Is(dispatchErr, gateway.ErrDuplicateMessage) {
-			if h.recordIngress(r.Context(), state.principal, message, requestID, traceID, audit.EventIMIngressDuplicate, audit.DecisionDuplicate, string(audit.ErrorDuplicate)) != nil {
-				http.Error(w, "unavailable", http.StatusServiceUnavailable)
-				return
-			}
-			h.writeSuccess(w)
+			h.writeIngressSuccess(w, r.Context(), state.principal, message, requestID, traceID, audit.EventIMIngressDuplicate, audit.DecisionDuplicate, string(audit.ErrorDuplicate))
 			return
 		}
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	case <-r.Context().Done():
 	}
+}
+
+func (h *Handler) writeIngressSuccess(w http.ResponseWriter, ctx context.Context, principal gateway.Principal, message inboundXML, requestID, traceID string, eventType audit.EventType, decision audit.Decision, errorType string) {
+	if h.recordIngress(ctx, principal, message, requestID, traceID, eventType, decision, errorType) != nil {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	h.writeSuccess(w)
 }
 
 func (h *Handler) recordIngress(ctx context.Context, principal gateway.Principal, message inboundXML, requestID, traceID string, eventType audit.EventType, decision audit.Decision, errorType string) error {
