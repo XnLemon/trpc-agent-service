@@ -87,6 +87,73 @@ func TestSignatureAndInvalidPadding(t *testing.T) {
 	}
 }
 
+func TestHandlerVerifyStaticCallbackState(t *testing.T) {
+	handler := newCallbackTestHandler(t, &callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)})
+	t.Cleanup(func() { _ = handler.Close() })
+	ciphertext := encryptCallbackTestPayload(t, handler.static.key, handler.static.receiveID, []byte("static callback"))
+	request := callbackVerificationRequest("token", "/", ciphertext)
+	plain, state, err := handler.verify(request, ciphertext)
+	if err != nil || string(plain) != "static callback" || state.token != handler.static.token || state.receiveID != handler.static.receiveID || state.agentID != handler.static.agentID || !bytes.Equal(state.key, handler.static.key) {
+		t.Fatalf("verify = plain %q state %+v err %v", plain, state, err)
+	}
+	query := request.URL.Query()
+	query.Set("msg_signature", "bad")
+	request.URL.RawQuery = query.Encode()
+	if _, _, err := handler.verify(request, ciphertext); !errors.Is(err, ErrVerification) {
+		t.Fatalf("bad static signature error = %v", err)
+	}
+}
+
+func TestHandlerVerifyDynamicCandidateBoundaries(t *testing.T) {
+	t.Run("rejects malformed route and lookup failure", func(t *testing.T) {
+		handler, consumer, ciphertext, request := newDynamicVerifyFixture(t)
+		request.URL.Path = "/wecom/callback"
+		if _, _, err := handler.verify(request, ciphertext); !errors.Is(err, ErrVerification) {
+			t.Fatalf("malformed route error = %v", err)
+		}
+		request.URL.Path = "/wecom/callback/verify-route"
+		consumer.lookupErr = errors.New("candidate lookup failed")
+		if _, _, err := handler.verify(request, ciphertext); !errors.Is(err, ErrVerification) {
+			t.Fatalf("lookup error = %v", err)
+		}
+	})
+
+	t.Run("skips failed candidate and returns verified target", func(t *testing.T) {
+		handler, consumer, ciphertext, request := newDynamicVerifyFixture(t)
+		consumer.candidates = []channels.CandidateBindingContext{{Channel: channels.ChannelWeCom}, {Channel: channels.ChannelWeCom}}
+		handler.credentials = &sequenceCredentialResolver{values: []Credentials{
+			{CallbackToken: "wrong-token", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))},
+			{CallbackToken: "token", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))},
+		}}
+		plain, state, err := handler.verify(request, ciphertext)
+		if err != nil || string(plain) != "dynamic callback" || state.principal.TenantID() == "" || consumer.consumeCalls != 2 {
+			t.Fatalf("verify = plain %q state %+v consumes %d err %v", plain, state, consumer.consumeCalls, err)
+		}
+		target, ok := state.principal.RoutingTarget()
+		if !ok || target.BindingID != consumer.binding.BindingID {
+			t.Fatalf("principal target = %+v, ok=%t", target, ok)
+		}
+	})
+
+	t.Run("rejects when every candidate fails verification", func(t *testing.T) {
+		handler, _, ciphertext, request := newDynamicVerifyFixture(t)
+		handler.credentials = &sequenceCredentialResolver{values: []Credentials{{
+			CallbackToken: "wrong-token", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)),
+		}}}
+		if _, _, err := handler.verify(request, ciphertext); !errors.Is(err, ErrVerification) {
+			t.Fatalf("exhausted candidates error = %v", err)
+		}
+	})
+
+	t.Run("propagates cancellation", func(t *testing.T) {
+		handler, consumer, ciphertext, request := newDynamicVerifyFixture(t)
+		consumer.consumeErrs = []error{context.Canceled}
+		if _, _, err := handler.verify(request, ciphertext); !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation error = %v", err)
+		}
+	})
+}
+
 func TestHandlerRejectsUnsupportedMethodsAndRoutes(t *testing.T) {
 	handler := newCallbackTestHandler(t, &callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)})
 	t.Cleanup(func() { _ = handler.Close() })
@@ -698,16 +765,23 @@ func callbackTestRequest(t *testing.T, messageID, userID, content string) *http.
 	return callbackTestRequestAtPath(t, "/", messageID, userID, content)
 }
 
+func callbackVerificationRequest(token, path, ciphertext string) *http.Request {
+	timestamp, nonce := "123", "456"
+	parts := []string{token, timestamp, nonce, ciphertext}
+	sort.Strings(parts)
+	sum := sha1.Sum([]byte(strings.Join(parts, ""))) // #nosec G401 -- required by the WeCom protocol.
+	query := url.Values{"msg_signature": {hex.EncodeToString(sum[:])}, "timestamp": {timestamp}, "nonce": {nonce}}
+	return httptest.NewRequest(http.MethodGet, path+"?"+query.Encode(), nil)
+}
+
 func callbackTestRequestAtPath(t *testing.T, path, messageID, userID, content string) *http.Request {
 	t.Helper()
 	plain := []byte("<xml><MsgId>" + messageID + "</MsgId><FromUserName>" + userID + "</FromUserName><MsgType>text</MsgType><AgentID>1</AgentID><Content>" + content + "</Content></xml>")
 	ciphertext := encryptCallbackTestPayload(t, bytes.Repeat([]byte{1}, 32), "receive", plain)
-	timestamp, nonce := "123", "456"
-	parts := []string{"token", timestamp, nonce, ciphertext}
-	sort.Strings(parts)
-	sum := sha1.Sum([]byte(strings.Join(parts, ""))) // #nosec G401 -- required by the WeCom protocol.
-	query := url.Values{"msg_signature": {hex.EncodeToString(sum[:])}, "timestamp": {timestamp}, "nonce": {nonce}}
-	return httptest.NewRequest(http.MethodPost, path+"?"+query.Encode(), strings.NewReader("<xml><Encrypt>"+ciphertext+"</Encrypt></xml>"))
+	request := callbackVerificationRequest("token", path, ciphertext)
+	request.Method = http.MethodPost
+	request.Body = io.NopCloser(strings.NewReader("<xml><Encrypt>" + ciphertext + "</Encrypt></xml>"))
+	return request
 }
 
 func encryptCallbackTestPayload(t *testing.T, key []byte, receiveID string, message []byte) string {
@@ -766,6 +840,65 @@ func (stub *dynamicCandidateConsumer) Get(_ context.Context, tenantID, bindingID
 func (stub *dynamicCandidateConsumer) ConsumeCandidate(context.Context, channels.CandidateBindingContext) (*channels.Binding, error) {
 	value := stub.binding.Clone()
 	return &value, nil
+}
+
+type verifyCandidateConsumer struct {
+	binding      *channels.Binding
+	candidates   []channels.CandidateBindingContext
+	lookupErr    error
+	consumeErrs  []error
+	consumeCalls int
+}
+
+func (stub *verifyCandidateConsumer) LookupCandidates(_ context.Context, channel channels.Channel, _ string) ([]channels.CandidateBindingContext, error) {
+	if stub.lookupErr != nil {
+		return nil, stub.lookupErr
+	}
+	if channel != channels.ChannelWeCom {
+		return nil, errors.New("unexpected channel")
+	}
+	return append([]channels.CandidateBindingContext(nil), stub.candidates...), nil
+}
+func (stub *verifyCandidateConsumer) Get(context.Context, string, string) (*channels.Binding, error) {
+	return nil, errors.New("unsupported")
+}
+func (stub *verifyCandidateConsumer) ConsumeCandidate(context.Context, channels.CandidateBindingContext) (*channels.Binding, error) {
+	index := stub.consumeCalls
+	stub.consumeCalls++
+	if index < len(stub.consumeErrs) && stub.consumeErrs[index] != nil {
+		return nil, stub.consumeErrs[index]
+	}
+	value := stub.binding.Clone()
+	return &value, nil
+}
+
+type sequenceCredentialResolver struct {
+	values []Credentials
+	calls  int
+}
+
+func (resolver *sequenceCredentialResolver) Resolve(context.Context, channels.SecretScope) (Credentials, error) {
+	if resolver.calls >= len(resolver.values) {
+		return Credentials{}, errors.New("unexpected credential resolution")
+	}
+	value := resolver.values[resolver.calls]
+	resolver.calls++
+	return value, nil
+}
+
+func newDynamicVerifyFixture(t *testing.T) (*Handler, *verifyCandidateConsumer, string, *http.Request) {
+	t.Helper()
+	app := dynamicTestApp(t, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	binding := dynamicTestBinding(t, "verify-route", "env/wecom", app.AppID)
+	consumer := &verifyCandidateConsumer{binding: binding, candidates: []channels.CandidateBindingContext{{Channel: channels.ChannelWeCom}}}
+	handler := &Handler{
+		candidates:  consumer,
+		tenants:     dynamicTenantRepository{value: dynamicTestTenant(t)},
+		apps:        dynamicAppRepository{value: app},
+		credentials: &sequenceCredentialResolver{values: []Credentials{{CallbackToken: "token", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))}}},
+	}
+	ciphertext := encryptCallbackTestPayload(t, bytes.Repeat([]byte{1}, 32), "receive", []byte("dynamic callback"))
+	return handler, consumer, ciphertext, callbackVerificationRequest("token", "/wecom/callback/verify-route", ciphertext)
 }
 
 type dynamicCredentials struct{ values map[string]Credentials }

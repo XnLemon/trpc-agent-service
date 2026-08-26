@@ -182,8 +182,16 @@ func (s *Store) GetMessage(ctx context.Context, tenantID, eventID string) (runti
 	if runtimestorage.ValidateTenant(tenantID) != nil || eventID == "" {
 		return runtimestorage.MessageEvent{}, runtimestorage.ErrInvalid
 	}
+	return lookupMessage(ctx, s.db, tenantID, eventID)
+}
+
+type messageQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func lookupMessage(ctx context.Context, query messageQuerier, tenantID, eventID string) (runtimestorage.MessageEvent, error) {
 	var value runtimestorage.MessageEvent
-	err := s.db.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM public.message_event WHERE tenant_id=$1 AND event_id=$2", tenantID, eventID).Scan(eventArgs(&value)...)
+	err := query.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM public.message_event WHERE tenant_id=$1 AND event_id=$2", tenantID, eventID).Scan(eventArgs(&value)...)
 	if err != nil {
 		return runtimestorage.MessageEvent{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
@@ -400,7 +408,7 @@ func (s *Store) insertReplySegments(ctx context.Context, tx *sql.Tx, values []ru
 		err := tx.QueryRowContext(ctx, "INSERT INTO public.reply_outbox (tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending' WHERE EXISTS (SELECT 1 FROM public.message_event WHERE tenant_id=$1 AND event_id=$3 AND ((reply_conversation_kind='' AND reply_receiver_id='' AND reply_thread_id='' AND $7='' AND $8='' AND $9='' AND $10='') OR (binding_id=$7 AND reply_conversation_kind=$8 AND reply_receiver_id=$9 AND reply_thread_id=$10))) ON CONFLICT (tenant_id,reply_id,segment_index) DO UPDATE SET updated_at=public.reply_outbox.updated_at WHERE public.reply_outbox.event_id=EXCLUDED.event_id AND public.reply_outbox.segment_count=EXCLUDED.segment_count AND public.reply_outbox.payload=EXCLUDED.payload AND public.reply_outbox.reply_binding_id=EXCLUDED.reply_binding_id AND public.reply_outbox.reply_conversation_kind=EXCLUDED.reply_conversation_kind AND public.reply_outbox.reply_receiver_id=EXCLUDED.reply_receiver_id AND public.reply_outbox.reply_thread_id=EXCLUDED.reply_thread_id RETURNING "+replyColumns, value.TenantID, value.ReplyID, value.EventID, value.SegmentIndex, value.SegmentCount, value.Payload, value.ReplyTarget.BindingID, value.ReplyTarget.ConversationKind, value.ReplyTarget.ReceiverID, value.ReplyTarget.ThreadID).Scan(replyArgs(&row)...)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				if _, lookupErr := s.GetMessage(ctx, value.TenantID, value.EventID); lookupErr != nil {
+				if _, lookupErr := lookupMessage(ctx, tx, value.TenantID, value.EventID); lookupErr != nil {
 					return nil, lookupErr
 				}
 				return nil, runtimestorage.ErrConflict

@@ -608,6 +608,7 @@ func TestRuntimeStoreEnqueueRepliesMapsMissingEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
 	store := runtimepostgres.New(db)
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply-missing-event", "event-missing", 0, 1, "payload", "", "", "", "").WillReturnError(sql.ErrNoRows)
