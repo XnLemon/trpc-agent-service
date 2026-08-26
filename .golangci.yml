@@ -29,9 +29,6 @@ linters:
       - path: ^trpcservice/backend/backend_test\.go$
         text: 'cyclomatic complexity .* of func `TestProviderCatalogNilAndHelperBoundaries`'
         linters: [gocyclo]
-      - path: ^trpcservice/channels/fake_test\.go$
-        text: 'cyclomatic complexity .* of func `TestFakeCandidateResolverRejectsForgeryReplayAndLifecycleEdges`'
-        linters: [gocyclo]
       - path: ^trpcservice/channels/integration_test\.go$
         text: 'cyclomatic complexity .* of func `TestFakeTrustedInboundRouteAndBindingAwareIdentity`'
         linters: [gocyclo]

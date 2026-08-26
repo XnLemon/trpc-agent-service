@@ -242,22 +242,47 @@ func assertFakeResolverCancellationAndNil(t *testing.T, setup fakeBoundarySetup)
 }
 
 func TestFakeCandidateResolverRejectsForgeryReplayAndLifecycleEdges(t *testing.T) {
+	setup := newFakeLifecycleSetup(t)
+	assertFakeResolverRejectsBadRequests(t, setup)
+	assertFakeResolverRejectsForgedHandles(t, setup)
+	assertFakeResolverRejectsRepositoryFailures(t, setup)
+	assertFakeResolverRejectsReplayAndPrunesNonce(t, setup)
+	assertFakeResolverEnforcesCapacityAndPrimitiveBoundaries(t, setup)
+}
+
+type fakeLifecycleSetup struct {
+	now       time.Time
+	clockNow  *time.Time
+	repo      *fakeCandidateConsumer
+	binding   *Binding
+	candidate CandidateBindingContext
+	secret    string
+	scope     SecretScope
+	resolver  *FakeCandidateResolver
+}
+
+func newFakeLifecycleSetup(t *testing.T) fakeLifecycleSetup {
+	t.Helper()
 	now := time.Date(2026, 8, 23, 11, 0, 0, 0, time.UTC)
 	repo, binding, candidate, secret, scope := newFakeResolverFixture(t, now)
 	clockNow := now
 	resolver := NewFakeCandidateResolver(repo, map[SecretScope]string{scope: secret}, FakeResolverOptions{
 		Clock: func() time.Time { return clockNow }, MaxClockSkew: time.Minute, MaxHandles: 1,
 	})
+	return fakeLifecycleSetup{now: now, clockNow: &clockNow, repo: repo, binding: binding, candidate: candidate, secret: secret, scope: scope, resolver: resolver}
+}
 
+func assertFakeResolverRejectsBadRequests(t *testing.T, setup fakeLifecycleSetup) {
+	t.Helper()
 	badRequest := func(name string, mutate func(*VerificationRequest)) {
 		t.Helper()
-		handle := newFakeHandle(t, resolver, candidate)
-		request := fakeVerificationRequest(now, "nonce-"+name, name)
+		handle := newFakeHandle(t, setup.resolver, setup.candidate)
+		request := fakeVerificationRequest(setup.now, "nonce-"+name, name)
 		mutate(&request)
 		if name != "signature" {
-			request.Signature = SignFakeRequest(secret, request)
+			request.Signature = SignFakeRequest(setup.secret, request)
 		}
-		if _, err := resolver.Verify(context.Background(), handle, request); !errors.Is(err, ErrVerificationFailed) {
+		if _, err := setup.resolver.Verify(context.Background(), handle, request); !errors.Is(err, ErrVerificationFailed) {
 			t.Fatalf("invalid request %s returned %v", name, err)
 		}
 	}
@@ -266,98 +291,110 @@ func TestFakeCandidateResolverRejectsForgeryReplayAndLifecycleEdges(t *testing.T
 	badRequest("digest", func(request *VerificationRequest) { request.MessageDigest = "not-a-digest" })
 	badRequest("signature", func(request *VerificationRequest) { request.Signature = "" })
 	badRequest("receive", func(request *VerificationRequest) { request.ReceiveID = "bad\nreceive" })
-	badRequest("timestamp", func(request *VerificationRequest) { request.Timestamp = now.In(time.FixedZone("not-utc", 3600)) })
-	badRequest("future", func(request *VerificationRequest) { request.Timestamp = now.Add(2 * time.Minute) })
+	badRequest("timestamp", func(request *VerificationRequest) { request.Timestamp = setup.now.In(time.FixedZone("not-utc", 3600)) })
+	badRequest("future", func(request *VerificationRequest) { request.Timestamp = setup.now.Add(2 * time.Minute) })
+}
 
-	handle := newFakeHandle(t, resolver, candidate)
+func assertFakeResolverRejectsForgedHandles(t *testing.T, setup fakeLifecycleSetup) {
+	t.Helper()
+	handle := newFakeHandle(t, setup.resolver, setup.candidate)
 	forgedPurpose, err := NewScopedVerifierHandle(handle.Token(), VerificationPurpose("other-purpose"), handle.ExpiresAt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := fakeVerificationRequest(now, "nonce-forged-purpose", "forged-purpose")
-	request.Signature = SignFakeRequest(secret, request)
-	if _, err := resolver.Verify(context.Background(), forgedPurpose, request); !errors.Is(err, ErrVerificationFailed) {
+	request := fakeVerificationRequest(setup.now, "nonce-forged-purpose", "forged-purpose")
+	request.Signature = SignFakeRequest(setup.secret, request)
+	if _, err := setup.resolver.Verify(context.Background(), forgedPurpose, request); !errors.Is(err, ErrVerificationFailed) {
 		t.Fatalf("forged purpose handle returned %v", err)
 	}
 
-	handle = newFakeHandle(t, resolver, candidate)
+	handle = newFakeHandle(t, setup.resolver, setup.candidate)
 	forgedExpiry, err := NewScopedVerifierHandle(handle.Token(), handle.Purpose, handle.ExpiresAt.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
-	request = fakeVerificationRequest(now, "nonce-forged-expiry", "forged-expiry")
-	request.Signature = SignFakeRequest(secret, request)
-	if _, err := resolver.Verify(context.Background(), forgedExpiry, request); !errors.Is(err, ErrVerificationFailed) {
+	request = fakeVerificationRequest(setup.now, "nonce-forged-expiry", "forged-expiry")
+	request.Signature = SignFakeRequest(setup.secret, request)
+	if _, err := setup.resolver.Verify(context.Background(), forgedExpiry, request); !errors.Is(err, ErrVerificationFailed) {
 		t.Fatalf("forged expiry handle returned %v", err)
 	}
 
-	handle = newFakeHandle(t, resolver, candidate)
-	clockNow = now.Add(6 * time.Minute)
-	request = fakeVerificationRequest(clockNow, "nonce-expired-handle", "expired-handle")
-	request.Signature = SignFakeRequest(secret, request)
-	if _, err := resolver.Verify(context.Background(), handle, request); !errors.Is(err, ErrVerificationFailed) {
+	handle = newFakeHandle(t, setup.resolver, setup.candidate)
+	*setup.clockNow = setup.now.Add(6 * time.Minute)
+	request = fakeVerificationRequest(*setup.clockNow, "nonce-expired-handle", "expired-handle")
+	request.Signature = SignFakeRequest(setup.secret, request)
+	if _, err := setup.resolver.Verify(context.Background(), handle, request); !errors.Is(err, ErrVerificationFailed) {
 		t.Fatalf("expired handle returned %v", err)
 	}
-	clockNow = now
+	*setup.clockNow = setup.now
+}
 
-	handle = newFakeHandle(t, resolver, candidate)
-	request = fakeVerificationRequest(now, "nonce-bad-signature", "bad-signature")
+func assertFakeResolverRejectsRepositoryFailures(t *testing.T, setup fakeLifecycleSetup) {
+	t.Helper()
+	handle := newFakeHandle(t, setup.resolver, setup.candidate)
+	request := fakeVerificationRequest(setup.now, "nonce-bad-signature", "bad-signature")
 	request.Signature = SignFakeRequest("wrong-secret", request)
-	if _, err := resolver.Verify(context.Background(), handle, request); !errors.Is(err, ErrVerificationFailed) {
+	if _, err := setup.resolver.Verify(context.Background(), handle, request); !errors.Is(err, ErrVerificationFailed) {
 		t.Fatalf("bad signature returned %v", err)
 	}
 
-	handle = newFakeHandle(t, resolver, candidate)
-	request = fakeVerificationRequest(now, "nonce-get-error", "get-error")
-	request.Signature = SignFakeRequest(secret, request)
-	repo.getErr = errors.New("private lookup failure")
-	if _, err := resolver.Verify(context.Background(), handle, request); !errors.Is(err, ErrVerificationFailed) {
+	handle = newFakeHandle(t, setup.resolver, setup.candidate)
+	request = fakeVerificationRequest(setup.now, "nonce-get-error", "get-error")
+	request.Signature = SignFakeRequest(setup.secret, request)
+	setup.repo.getErr = errors.New("private lookup failure")
+	if _, err := setup.resolver.Verify(context.Background(), handle, request); !errors.Is(err, ErrVerificationFailed) {
 		t.Fatalf("repository lookup failure returned %v", err)
 	}
-	repo.getErr = context.Canceled
-	handle = newFakeHandle(t, resolver, candidate)
-	request = fakeVerificationRequest(now, "nonce-get-canceled", "get-canceled")
-	request.Signature = SignFakeRequest(secret, request)
-	if _, err := resolver.Verify(context.Background(), handle, request); !errors.Is(err, context.Canceled) {
+	setup.repo.getErr = context.Canceled
+	handle = newFakeHandle(t, setup.resolver, setup.candidate)
+	request = fakeVerificationRequest(setup.now, "nonce-get-canceled", "get-canceled")
+	request.Signature = SignFakeRequest(setup.secret, request)
+	if _, err := setup.resolver.Verify(context.Background(), handle, request); !errors.Is(err, context.Canceled) {
 		t.Fatalf("repository cancellation returned %v", err)
 	}
-	repo.getErr = nil
+	setup.repo.getErr = nil
 
-	changed := binding.Clone()
+	changed := setup.binding.Clone()
 	changed.Version++
-	repo.current = &changed
-	handle = newFakeHandle(t, resolver, candidate)
-	request = fakeVerificationRequest(now, "nonce-stale-binding", "stale-binding")
-	request.Signature = SignFakeRequest(secret, request)
-	if _, err := resolver.Verify(context.Background(), handle, request); !errors.Is(err, ErrVerificationFailed) {
+	setup.repo.current = &changed
+	handle = newFakeHandle(t, setup.resolver, setup.candidate)
+	request = fakeVerificationRequest(setup.now, "nonce-stale-binding", "stale-binding")
+	request.Signature = SignFakeRequest(setup.secret, request)
+	if _, err := setup.resolver.Verify(context.Background(), handle, request); !errors.Is(err, ErrVerificationFailed) {
 		t.Fatalf("stale binding was accepted: %v", err)
 	}
-	repo.current = nil
+	setup.repo.current = nil
+}
 
-	handle = newFakeHandle(t, resolver, candidate)
-	request = fakeVerificationRequest(now, "nonce-replay", "replay")
-	request.Signature = SignFakeRequest(secret, request)
-	if _, err := resolver.Verify(context.Background(), handle, request); err != nil {
+func assertFakeResolverRejectsReplayAndPrunesNonce(t *testing.T, setup fakeLifecycleSetup) {
+	t.Helper()
+	handle := newFakeHandle(t, setup.resolver, setup.candidate)
+	request := fakeVerificationRequest(setup.now, "nonce-replay", "replay")
+	request.Signature = SignFakeRequest(setup.secret, request)
+	if _, err := setup.resolver.Verify(context.Background(), handle, request); err != nil {
 		t.Fatal(err)
 	}
-	handle = newFakeHandle(t, resolver, candidate)
-	if _, err := resolver.Verify(context.Background(), handle, request); !errors.Is(err, ErrVerificationFailed) {
+	handle = newFakeHandle(t, setup.resolver, setup.candidate)
+	if _, err := setup.resolver.Verify(context.Background(), handle, request); !errors.Is(err, ErrVerificationFailed) {
 		t.Fatalf("replayed nonce returned %v", err)
 	}
-	clockNow = now.Add(2 * time.Minute)
-	handle = newFakeHandle(t, resolver, candidate)
-	request = fakeVerificationRequest(clockNow, "nonce-after-prune", "after-prune")
-	request.Signature = SignFakeRequest(secret, request)
-	if _, err := resolver.Verify(context.Background(), handle, request); err != nil {
+	*setup.clockNow = setup.now.Add(2 * time.Minute)
+	handle = newFakeHandle(t, setup.resolver, setup.candidate)
+	request = fakeVerificationRequest(*setup.clockNow, "nonce-after-prune", "after-prune")
+	request.Signature = SignFakeRequest(setup.secret, request)
+	if _, err := setup.resolver.Verify(context.Background(), handle, request); err != nil {
 		t.Fatal(err)
 	}
-	clockNow = now
+	*setup.clockNow = setup.now
+}
 
-	capacityResolver := NewFakeCandidateResolver(repo, map[SecretScope]string{scope: secret}, FakeResolverOptions{Clock: func() time.Time { return clockNow }, MaxHandles: 1})
-	if _, err := capacityResolver.ResolveCandidate(context.Background(), CandidateSecretRequest{Candidate: candidate, Purpose: PurposeWebhookVerification}); err != nil {
+func assertFakeResolverEnforcesCapacityAndPrimitiveBoundaries(t *testing.T, setup fakeLifecycleSetup) {
+	t.Helper()
+	capacityResolver := NewFakeCandidateResolver(setup.repo, map[SecretScope]string{setup.scope: setup.secret}, FakeResolverOptions{Clock: func() time.Time { return *setup.clockNow }, MaxHandles: 1})
+	if _, err := capacityResolver.ResolveCandidate(context.Background(), CandidateSecretRequest{Candidate: setup.candidate, Purpose: PurposeWebhookVerification}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := capacityResolver.ResolveCandidate(context.Background(), CandidateSecretRequest{Candidate: candidate, Purpose: PurposeWebhookVerification}); !errors.Is(err, ErrVerificationFailed) {
+	if _, err := capacityResolver.ResolveCandidate(context.Background(), CandidateSecretRequest{Candidate: setup.candidate, Purpose: PurposeWebhookVerification}); !errors.Is(err, ErrVerificationFailed) {
 		t.Fatalf("handle capacity returned %v", err)
 	}
 
@@ -367,7 +404,7 @@ func TestFakeCandidateResolverRejectsForgeryReplayAndLifecycleEdges(t *testing.T
 	if validLowerHexDigest(strings.Repeat("A", 64)) || validLowerHexDigest(strings.Repeat("g", 64)) || validLowerHexDigest("short") || !validLowerHexDigest(strings.Repeat("a", 64)) {
 		t.Fatal("fake digest validation boundary failed")
 	}
-	if validFakeVerificationRequest(VerificationRequest{Purpose: PurposeWebhookVerification, Timestamp: now, Nonce: "n", MessageDigest: strings.Repeat("a", 64), Signature: "s"}, now, 0) {
+	if validFakeVerificationRequest(VerificationRequest{Purpose: PurposeWebhookVerification, Timestamp: setup.now, Nonce: "n", MessageDigest: strings.Repeat("a", 64), Signature: "s"}, setup.now, 0) {
 		t.Fatal("zero clock skew accepted a verification request")
 	}
 	var nilContext context.Context
