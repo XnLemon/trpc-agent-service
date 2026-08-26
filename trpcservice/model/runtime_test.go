@@ -174,6 +174,14 @@ func TestModelExecutionSnapshotRejectsInvalidStatesAndInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertInvalidModelSnapshotAccessors(t)
+	assertInvalidModelExecutionStates(t, root, profile, catalog)
+	assertResolveAndBuildBoundaries(t, snapshot, root, tenantSnapshot, catalog)
+	assertInvalidModelFactoryInputs(t, root)
+}
+
+func assertInvalidModelSnapshotAccessors(t *testing.T) {
+	t.Helper()
 	if zero := (ModelExecutionSnapshot{}).Tenant(); zero.TenantID != "" {
 		t.Fatalf("zero snapshot tenant = %+v", zero)
 	}
@@ -189,6 +197,16 @@ func TestModelExecutionSnapshotRejectsInvalidStatesAndInputs(t *testing.T) {
 	if _, ok := ModelExecutionSnapshotFromContext(context.Background()); ok {
 		t.Fatal("empty context returned a model snapshot")
 	}
+	if contextWithZero := WithModelExecutionSnapshot(context.Background(), ModelExecutionSnapshot{}); func() bool {
+		_, ok := ModelExecutionSnapshotFromContext(contextWithZero)
+		return ok
+	}() {
+		t.Fatal("zero model snapshot entered context")
+	}
+}
+
+func assertInvalidModelExecutionStates(t *testing.T, root *tenant.Tenant, profile *Profile, catalog *ProviderCatalog) {
+	t.Helper()
 	if _, err := NewModelExecutionSnapshot(tenant.ConfigurationSnapshot{}, profile, catalog); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("invalid tenant snapshot error = %v", err)
 	}
@@ -224,13 +242,10 @@ func TestModelExecutionSnapshotRejectsInvalidStatesAndInputs(t *testing.T) {
 	if err := validateExecutionState(*root, &inactiveProfile, catalog); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("inactive profile state error = %v", err)
 	}
-	if contextWithZero := WithModelExecutionSnapshot(context.Background(), ModelExecutionSnapshot{}); func() bool {
-		_, ok := ModelExecutionSnapshotFromContext(contextWithZero)
-		return ok
-	}() {
-		t.Fatal("zero model snapshot entered context")
-	}
+}
 
+func assertResolveAndBuildBoundaries(t *testing.T, snapshot ModelExecutionSnapshot, root *tenant.Tenant, tenantSnapshot tenant.ConfigurationSnapshot, catalog *ProviderCatalog) {
+	t.Helper()
 	if _, err := NewSecretValue(""); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("empty secret error = %v", err)
 	}
@@ -284,7 +299,10 @@ func TestModelExecutionSnapshotRejectsInvalidStatesAndInputs(t *testing.T) {
 	if _, err := ResolveAndBuild(cancelled, input, nil, &recordingFactory{err: errors.New("factory failure")}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled factory error = %v", err)
 	}
+}
 
+func assertInvalidModelFactoryInputs(t *testing.T, root *tenant.Tenant) {
+	t.Helper()
 	incompleteInputs := []ModelFactoryInput{
 		{TenantID: root.TenantID},
 		{TenantID: root.TenantID, ProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", TenantVersion: 1, ProfileVersion: 1, SchemaVersion: 99, ContentDigest: "digest", Provider: "fake", Model: "deterministic"},

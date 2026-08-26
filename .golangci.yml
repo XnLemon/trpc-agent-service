@@ -65,9 +65,6 @@ linters:
       - path: ^trpcservice/model/repository_test\.go$
         text: 'cyclomatic complexity .* of func `TestPrepareProfileChangesValidateAuditAndLifecycleEvents`'
         linters: [gocyclo]
-      - path: ^trpcservice/model/runtime_test\.go$
-        text: 'cyclomatic complexity .* of func `TestModelExecutionSnapshotRejectsInvalidStatesAndInputs`'
-        linters: [gocyclo]
       - path: ^trpcservice/runtime/runtime_test\.go$
         text: 'cyclomatic complexity .* of func `(?:TestRunnerExecutesFakeModelAndPersistsTenantScopedSession|TestTenantSessionServiceDelegatesEveryOperationAndScopesKeys)`'
         linters: [gocyclo]
