@@ -36,6 +36,49 @@ type Config struct {
 	BackendCatalog *backend.ProviderCatalog
 	// AuditWriter receives control-plane mutation facts returned by repositories.
 	AuditWriter audit.Writer
+	// CacheInvalidator is notified after a successful control-plane mutation.
+	// It is intentionally best-effort during shutdown: a closed runtime cannot
+	// admit a new execution with a stale Runner.
+	CacheInvalidator CacheInvalidator
+}
+
+// CacheInvalidator receives the smallest control-plane scope whose future
+// runtime dependency may need rebuilding. It is owned by the Admin consumer so
+// configuration repositories stay independent from process-local caches.
+type CacheInvalidator interface {
+	Invalidate(CacheInvalidation)
+}
+
+// CacheInvalidation identifies one successfully committed control-plane change.
+// Binding changes are included even though the current channel resolver does
+// not cache bindings; future provider caches can consume the same signal.
+type CacheInvalidation struct {
+	TenantID  string
+	AppID     string
+	ProfileID string
+	BindingID string
+	Kind      CacheInvalidationKind
+}
+
+// CacheInvalidationKind distinguishes the resource that changed.
+type CacheInvalidationKind string
+
+const (
+	CacheInvalidationTenant  CacheInvalidationKind = "tenant"
+	CacheInvalidationApp     CacheInvalidationKind = "app"
+	CacheInvalidationModel   CacheInvalidationKind = "model"
+	CacheInvalidationBackend CacheInvalidationKind = "backend"
+	CacheInvalidationBinding CacheInvalidationKind = "binding"
+)
+
+// CacheInvalidatorFunc adapts a function to CacheInvalidator.
+type CacheInvalidatorFunc func(CacheInvalidation)
+
+// Invalidate implements CacheInvalidator.
+func (function CacheInvalidatorFunc) Invalidate(change CacheInvalidation) {
+	if function != nil {
+		function(change)
+	}
 }
 
 // Handler serves the tenant-scoped control-plane HTTP API.
@@ -98,8 +141,54 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeMappedError(w, requestID, err)
 			return
 		}
+		h.invalidateMutation(parts, r.Method)
 	}
 	writeJSON(w, requestID, status, value)
+}
+
+func (h *Handler) invalidateMutation(parts []string, method string) {
+	if h == nil || h.config.CacheInvalidator == nil || len(parts) < 2 || parts[0] != "tenants" || parts[1] == "" {
+		return
+	}
+	change := CacheInvalidation{TenantID: parts[1]}
+	if len(parts) == 2 || (len(parts) == 3 && parts[2] == "status") {
+		change.Kind = CacheInvalidationTenant
+		h.config.CacheInvalidator.Invalidate(change)
+		return
+	}
+	if len(parts) < 4 {
+		return
+	}
+	switch parts[2] {
+	case "apps":
+		change.AppID = parts[3]
+		if change.AppID == "" {
+			return
+		}
+		if (len(parts) == 4 && method == http.MethodPatch) ||
+			(len(parts) == 5 && (parts[4] == "status" || parts[4] == "rollback")) ||
+			(len(parts) == 7 && parts[4] == "revisions" && parts[6] == "publish") {
+			change.Kind = CacheInvalidationApp
+		}
+	case "models":
+		change.ProfileID = parts[3]
+		if change.ProfileID != "" && ((len(parts) == 4 && method == http.MethodPatch) || (len(parts) == 5 && parts[4] == "status")) {
+			change.Kind = CacheInvalidationModel
+		}
+	case "backends":
+		change.ProfileID = parts[3]
+		if change.ProfileID != "" && ((len(parts) == 4 && method == http.MethodPatch) || (len(parts) == 5 && parts[4] == "status")) {
+			change.Kind = CacheInvalidationBackend
+		}
+	case "bindings":
+		change.BindingID = parts[3]
+		if change.BindingID != "" && ((len(parts) == 4 && method == http.MethodPatch) || (len(parts) == 5 && parts[4] == "status")) {
+			change.Kind = CacheInvalidationBinding
+		}
+	}
+	if change.Kind != "" {
+		h.config.CacheInvalidator.Invalidate(change)
+	}
 }
 
 func (h *Handler) recordMutation(ctx context.Context, principal Principal, requestID string, value any) error {

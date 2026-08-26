@@ -2,6 +2,10 @@
 
 本阶段为运行时多租户装配提供进程内注册表契约。它们是本地开发和确定性测试的适配器；生产环境可以用 KMS、Secret Manager 或服务发现实现相同的接口。
 
+生产 SecretManager 适配器位于 `trpcservice/model/vault`，面向 HashiCorp Vault KV v2。它按
+`<tenant-id>/<secret-ref>` 读取 `value` 字段，只接受 HTTPS endpoint，Token 仅保留在运行时
+HTTP header；Vault 的状态码、响应体和 transport 错误均转换为稳定的脱敏错误。
+
 ## Secret
 
 `model.SecretRegistry` 使用 `(tenant_id, secret_ref)` 作为唯一 key，注册、替换、删除和解析均要求显式租户。解析失败统一返回脱敏错误，secret 值不会出现在错误、`String` 表示、计划、缓存 key 或持久化对象中。`Close` 会清空值并拒绝后续写入。

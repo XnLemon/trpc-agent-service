@@ -71,6 +71,101 @@ func TestNewBuildsRealGraphAndGatesReadiness(t *testing.T) {
 	}
 }
 
+func TestBootstrapServesConcurrentTenantsWithIndependentProviders(t *testing.T) {
+	modelCatalog, err := modelprofile.NewProviderCatalog(modelprofile.ProviderSpec{
+		Provider: "fake", Models: []string{"model-one", "model-two"},
+		EndpointPolicy: modelprofile.FieldForbidden, SecretRefPolicy: modelprofile.FieldRequired,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backendCatalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
+		Provider: "memory", Capabilities: []backend.Capability{backend.CapabilitySession},
+		EndpointPolicy: backend.FieldForbidden, SecretRefPolicy: backend.FieldForbidden,
+		Options: map[string]backend.OptionSpec{"namespace": {Kind: backend.OptionString, Required: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenants := tenantmemory.NewRepository()
+	apps := agentmemory.NewRepository()
+	models := modelmemory.NewRepository(modelCatalog)
+	backends := backendmemory.NewRepository(backendCatalog)
+	identities := make(map[string]gateway.APIIdentity)
+	secrets := modelprofile.NewSecretRegistry()
+	for _, configured := range []struct {
+		token, tenantKey, appKey, modelName, secretRef, secretValue string
+	}{
+		{token: "token-one", tenantKey: "bootstrap-one", appKey: "app-one", modelName: "model-one", secretRef: "secret/one", secretValue: "value-one"},
+		{token: "token-two", tenantKey: "bootstrap-two", appKey: "app-two", modelName: "model-two", secretRef: "secret/two", secretValue: "value-two"},
+	} {
+		root, app := createBootstrapTenantExecutionState(t, tenants, apps, models, backends, configured.tenantKey, configured.appKey, configured.modelName, configured.secretRef)
+		if err := secrets.RegisterValue(modelprofile.SecretScope{TenantID: root.TenantID, SecretRef: configured.secretRef}, configured.secretValue); err != nil {
+			t.Fatal(err)
+		}
+		identities[configured.token] = gateway.APIIdentity{TenantID: root.TenantID, AppID: app.AppID, SubjectID: configured.tenantKey}
+	}
+	authenticator, err := gateway.NewStaticAPIAuthenticator(identities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelFactory := &bootstrapRecordingModelFactory{}
+	storageFactory := &bootstrapRecordingStorageFactory{}
+	graph, err := New(context.Background(), Config{
+		Tenants: tenants, Apps: apps, Models: models, Backends: backends, Channels: channelmemory.NewRepository(),
+		ModelCatalog: modelCatalog, BackendCatalog: backendCatalog, SecretResolver: secrets, ModelFactory: modelFactory,
+		StorageFactory: storageFactory, Authenticator: authenticator,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = graph.Close() }()
+	type result struct {
+		tenantID string
+		err      error
+	}
+	results := make(chan result, len(identities))
+	var group sync.WaitGroup
+	for token, identity := range identities {
+		group.Add(1)
+		go func(token string, identity gateway.APIIdentity) {
+			defer group.Done()
+			request := httptest.NewRequest(http.MethodGet, "/v1/chat", nil)
+			request.Header.Set("Authorization", "Bearer "+token)
+			authenticated, authErr := authenticator.Authenticate(context.Background(), request)
+			if authErr != nil {
+				results <- result{tenantID: identity.TenantID, err: authErr}
+				return
+			}
+			plan, resolveErr := graph.Resolver.ResolveAuthenticatedAPI(context.Background(), authenticated)
+			if resolveErr != nil {
+				results <- result{tenantID: identity.TenantID, err: resolveErr}
+				return
+			}
+			lease, acquireErr := graph.Registry.Acquire(context.Background(), plan)
+			if acquireErr == nil {
+				acquireErr = lease.Release()
+			}
+			results <- result{tenantID: identity.TenantID, err: acquireErr}
+		}(token, identity)
+	}
+	group.Wait()
+	close(results)
+	for outcome := range results {
+		if outcome.err != nil {
+			t.Fatalf("tenant %s execution setup = %v", outcome.tenantID, outcome.err)
+		}
+	}
+	for _, identity := range identities {
+		if modelFactory.Secret(identity.TenantID) == "" || storageFactory.SessionCount(identity.TenantID) != 1 {
+			t.Fatalf("tenant %s did not receive independent provider materialization", identity.TenantID)
+		}
+	}
+	if modelFactory.Secret(identities["token-one"].TenantID) == modelFactory.Secret(identities["token-two"].TenantID) {
+		t.Fatal("tenant model secrets crossed provider scope")
+	}
+}
+
 func TestRuntimeStartsAndStopsConfiguredOutboxWorker(t *testing.T) {
 	store := runtimestorageinmemory.New()
 	if _, err := store.CreateSession(context.Background(), "tenant-a", "session", nil); err != nil {
@@ -770,6 +865,113 @@ type bootstrapBlockingProvider struct {
 	started  chan struct{}
 	canceled chan struct{}
 	once     sync.Once
+}
+
+func createBootstrapTenantExecutionState(
+	t *testing.T,
+	tenants *tenantmemory.InMemoryRepository,
+	apps *agentmemory.InMemoryRepository,
+	models *modelmemory.InMemoryRepository,
+	backends *backendmemory.InMemoryRepository,
+	tenantKey, appKey, modelName, secretRef string,
+) (*tenant.Tenant, *agent.App) {
+	t.Helper()
+	root, err := tenants.Create(context.Background(), tenant.CreateInput{TenantKey: tenantKey, DisplayName: tenantKey, AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, _, err := models.Create(context.Background(), modelprofile.CreateInput{
+		TenantID: root.TenantID, ProfileKey: "model-" + tenantKey, DisplayName: "Model " + tenantKey,
+		Configuration: modelprofile.Configuration{Provider: "fake", Model: modelName, SecretRef: secretRef},
+		Metadata:      modelprofile.ChangeMetadata{ActorType: "test", ActorID: "bootstrap", Reason: "fixture", CorrelationID: tenantKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileBackend, _, err := backends.Create(context.Background(), backend.CreateInput{
+		TenantID: root.TenantID, ProfileKey: "backend-" + tenantKey, DisplayName: "Backend " + tenantKey,
+		Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "memory", Options: map[string]string{"namespace": tenantKey}}},
+		Metadata: backend.ChangeMetadata{ActorType: "test", ActorID: "bootstrap", Reason: "fixture", CorrelationID: tenantKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := apps.Create(context.Background(), agent.CreateInput{TenantID: root.TenantID, AppKey: appKey, DisplayName: appKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft, err := apps.CreateDraft(context.Background(), agent.CreateDraftInput{
+		TenantID: root.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version,
+		Configuration: agent.DraftConfiguration{Instruction: "answer", ModelProfileID: profile.ProfileID, Runtime: agent.DefaultRuntimePolicy()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, _, _, err := apps.Publish(context.Background(), agent.PublishInput{
+		TenantID: root.TenantID, AppID: app.AppID, Revision: draft.Revision, ExpectedAppVersion: app.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true,
+		Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "bootstrap", Reason: "fixture", CorrelationID: tenantKey},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appID, backendID := published.AppID, profileBackend.ProfileID
+	updated, err := tenants.UpdateConfiguration(context.Background(), tenant.UpdateConfigurationInput{
+		TenantID: root.TenantID, ExpectedVersion: root.Version, DisplayName: root.DisplayName, AuditRetentionDays: root.AuditRetentionDays,
+		LogMaskingLevel: root.LogMaskingLevel, TraceSamplingRate: root.TraceSamplingRate, DefaultAgentAppID: &appID, DefaultBackendProfileID: &backendID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return updated, published
+}
+
+type bootstrapRecordingModelFactory struct {
+	mu      sync.Mutex
+	secrets map[string]string
+}
+
+func (factory *bootstrapRecordingModelFactory) New(_ context.Context, input modelprofile.ModelFactoryInput, secret modelprofile.SecretValue) (trpcmodel.Model, error) {
+	factory.mu.Lock()
+	defer factory.mu.Unlock()
+	if factory.secrets == nil {
+		factory.secrets = make(map[string]string)
+	}
+	factory.secrets[input.TenantID] = secret.Value()
+	return bootstrapTestModel{}, nil
+}
+
+func (factory *bootstrapRecordingModelFactory) Secret(tenantID string) string {
+	factory.mu.Lock()
+	defer factory.mu.Unlock()
+	return factory.secrets[tenantID]
+}
+
+type bootstrapTestModel struct{}
+
+func (bootstrapTestModel) Info() trpcmodel.Info { return trpcmodel.Info{Name: "bootstrap-test"} }
+func (bootstrapTestModel) GenerateContent(context.Context, *trpcmodel.Request) (<-chan *trpcmodel.Response, error) {
+	return nil, errors.New("unused bootstrap test model")
+}
+
+type bootstrapRecordingStorageFactory struct {
+	mu       sync.Mutex
+	sessions map[string]int
+}
+
+func (factory *bootstrapRecordingStorageFactory) New(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+	factory.mu.Lock()
+	if factory.sessions == nil {
+		factory.sessions = make(map[string]int)
+	}
+	factory.sessions[input.TenantID]++
+	factory.mu.Unlock()
+	return backend.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: inmemory.NewSessionService()})
+}
+
+func (factory *bootstrapRecordingStorageFactory) SessionCount(tenantID string) int {
+	factory.mu.Lock()
+	defer factory.mu.Unlock()
+	return factory.sessions[tenantID]
 }
 
 type bootstrapWeComLifecycle struct {

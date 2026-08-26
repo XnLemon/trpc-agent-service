@@ -141,8 +141,8 @@
 - [x] 实现 Model Profile 控制面、Secret Resolver 契约和最小 Runner 链路
 - [x] 实现租户、Agent、通道和后端配置的 Admin API（Issue #41）
 - [x] 实现 Agent App 草稿更新、原子发布和版本回滚
-- [ ] 实现配置缓存失效、租户级灰度和租户配置版本回滚
-- [ ] 接入 KMS/Secret Manager，禁止密钥进入运行时快照、日志和 trace
+- [ ] 实现配置缓存失效、租户级灰度和租户配置版本回滚（当前已实现 Runner/Provider 精确失效；灰度与配置版本回滚另行跟踪）
+- [x] 接入 KMS/Secret Manager，禁止密钥进入运行时快照、日志和 trace（SecretManager 契约与 Vault KV v2 adapter；租户级灰度仍需独立治理能力）
 
 ### Gateway 与 Agent Worker
 

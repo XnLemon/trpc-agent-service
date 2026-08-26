@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
@@ -213,6 +214,67 @@ func TestRunnerRegistrySelectiveInvalidationPreservesUnrelatedTenant(t *testing.
 	defer func() { _ = reused.Release() }()
 	if reused.Runner() != secondRunner || calls.Load() != 2 {
 		t.Fatalf("unrelated tenant entry was evicted: runner=%p want=%p calls=%d", reused.Runner(), secondRunner, calls.Load())
+	}
+}
+
+func TestRunnerRegistrySeparatesBackendProfileVersions(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	resolver, err := NewPlanResolver(PlanResolverConfig{
+		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
+		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := mustAPIPrincipal(t, fixture.tenant.TenantID, fixture.app.AppID)
+	firstPlan, err := resolver.Resolve(context.Background(), principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, _, err := fixture.backends.UpdateConfiguration(context.Background(), backend.UpdateConfigurationInput{
+		TenantID: fixture.backend.TenantID, ProfileID: fixture.backend.ProfileID, ExpectedVersion: fixture.backend.Version,
+		DisplayName: fixture.backend.DisplayName, Description: fixture.backend.Description, SchemaVersion: fixture.backend.SchemaVersion,
+		Bindings: fixture.backend.Bindings, Metadata: backend.ChangeMetadata{ActorType: "test", ActorID: "registry", Reason: "version separation", CorrelationID: "registry-version"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPlan, err := resolver.Resolve(context.Background(), principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstKey, err := firstPlan.CacheKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondKey, err := secondPlan.CacheKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstKey.BackendProfileID != secondKey.BackendProfileID || firstKey.BackendProfileVersion == secondKey.BackendProfileVersion || secondKey.BackendProfileVersion != updated.Version {
+		t.Fatalf("backend cache keys = %+v, %+v; updated=%+v", firstKey, secondKey, updated)
+	}
+	var calls atomic.Int32
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+		calls.Add(1)
+		return &testRunner{}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = registry.Close() }()
+	first, err := registry.Acquire(context.Background(), firstPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Release() }()
+	second, err := registry.Acquire(context.Background(), secondPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Release() }()
+	if first.Runner() == second.Runner() || calls.Load() != 2 {
+		t.Fatalf("backend profile versions shared a Runner: first=%p second=%p calls=%d", first.Runner(), second.Runner(), calls.Load())
 	}
 }
 

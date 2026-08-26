@@ -299,6 +299,24 @@ func configureAdmin(config *Config, registry *gateway.RunnerRegistry) error {
 		Backends: config.Backends, Bindings: bindingRepository,
 		Authenticator: config.AdminAuthenticator,
 		ModelCatalog:  config.ModelCatalog, BackendCatalog: config.BackendCatalog,
+		CacheInvalidator: admin.CacheInvalidatorFunc(func(change admin.CacheInvalidation) {
+			// A closed registry cannot admit a future execution. Other errors are
+			// impossible for Admin-derived non-empty IDs, so a committed control-
+			// plane mutation remains successful during shutdown.
+			switch change.Kind {
+			case admin.CacheInvalidationTenant:
+				_ = registry.InvalidateTenant(change.TenantID)
+			case admin.CacheInvalidationApp:
+				_ = registry.InvalidateApp(change.TenantID, change.AppID)
+			case admin.CacheInvalidationModel:
+				_ = registry.InvalidateModelProfile(change.TenantID, change.ProfileID)
+			case admin.CacheInvalidationBackend:
+				_ = registry.InvalidateBackendProfile(change.TenantID, change.ProfileID)
+			case admin.CacheInvalidationBinding:
+				// Bindings are resolved and verified on every channel request. They
+				// do not key a Runner or provider cache in this process.
+			}
+		}),
 	})
 	if err != nil {
 		_ = registry.Close()
