@@ -29,6 +29,11 @@ func TestExecutionPlanFreezesAllTenantScopedInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertExecutionPlanIdentity(t, plan, fixture, key)
+}
+
+func assertExecutionPlanIdentity(t *testing.T, plan ExecutionPlan, fixture runtimeFixtureData, key CacheKey) {
+	t.Helper()
 	if key.TenantID != fixture.root.TenantID || key.AppID != fixture.app.AppID || key.Revision != fixture.revision.Revision || key.ModelProfileID != fixture.modelProfile.ProfileID || key.BackendProfileID != fixture.backendProfile.ProfileID {
 		t.Fatalf("unexpected plan cache key: %+v", key)
 	}
