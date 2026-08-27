@@ -16,6 +16,8 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 )
@@ -155,6 +157,8 @@ type Config struct {
 	AuditWriter audit.Writer
 	// Factory optionally replaces the public SDK factory for tests.
 	Factory BotFactory
+	// Observability supplies provider-neutral trace and metric hooks.
+	Observability observability.Provider
 }
 
 // Adapter owns one trusted Telegram Binding and routes its updates through the
@@ -168,6 +172,8 @@ type Adapter struct {
 	ownIdempotency bool
 	errorHook      ErrorHook
 	audit          audit.Recorder
+	telemetry      observability.Provider
+	metrics        metrics.Catalog
 
 	mu        sync.RWMutex
 	closed    bool
@@ -211,6 +217,11 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 		idempotency: idempotency, ownIdempotency: ownIdempotency, errorHook: config.ErrorHook,
 		audit: audit.Recorder{Writer: config.AuditWriter, TenantID: normalized.target.TenantID},
 	}
+	if config.Observability == nil {
+		config.Observability = observability.NewNoopProvider()
+	}
+	adapter.telemetry = config.Observability
+	adapter.metrics = metrics.New(config.Observability)
 	client, err := factory.New(normalized.token, BotFactoryConfig{
 		Handler:        adapter.sdkHandler(),
 		APIBaseURL:     normalized.apiBaseURL,
@@ -356,7 +367,7 @@ func (adapter *Adapter) Close() error {
 
 // HandleUpdate validates and processes one Telegram update. It is exposed for
 // deterministic tests and for the SDK's default handler.
-func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update) error {
+func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update) (err error) {
 	if adapter == nil {
 		return ErrNotReady
 	}
@@ -365,6 +376,14 @@ func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update)
 		adapter.report(ErrorOperationUpdate, ErrInvalid)
 		return err
 	}
+	started := time.Now()
+	operationCtx, _, finish := observability.StartOperation(ctx, adapter.telemetry, observability.OperationChannelReceive, "channel")
+	_ = adapter.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "telegram", "status": "started"})
+	defer func() {
+		finish(err)
+		_ = adapter.metrics.Operation(operationCtx, started, map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "telegram"}, err)
+	}()
+	ctx = operationCtx
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -525,13 +544,20 @@ func (adapter *Adapter) sendEvents(ctx context.Context, message *models.Message,
 	return adapter.sendText(ctx, message, builder.String())
 }
 
-func (adapter *Adapter) sendText(ctx context.Context, message *models.Message, text string) error {
+func (adapter *Adapter) sendText(ctx context.Context, message *models.Message, text string) (err error) {
 	if message == nil {
 		return ErrInvalidUpdate
 	}
 	if adapter == nil || adapter.client == nil {
 		return ErrNotReady
 	}
+	started := time.Now()
+	operationCtx, _, finish := observability.StartOperation(ctx, adapter.telemetry, observability.OperationChannelSend, "channel")
+	defer func() {
+		finish(err)
+		_ = adapter.metrics.Operation(operationCtx, started, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "channel": "telegram", "provider": "other"}, err)
+	}()
+	ctx = operationCtx
 	chunks := splitText(text, maximumReplyRunes)
 	for _, chunk := range chunks {
 		if err := ctx.Err(); err != nil {
@@ -541,8 +567,10 @@ func (adapter *Adapter) sendText(ctx context.Context, message *models.Message, t
 			ChatID: message.Chat.ID, MessageThreadID: message.MessageThreadID, Text: chunk,
 		})
 		if err != nil {
+			_ = adapter.metrics.Delivery(ctx, map[string]string{"component": "channel", "channel": "telegram", "provider": "other", "status": "failure", "error_class": "error"})
 			return ErrSendMessage
 		}
+		_ = adapter.metrics.Delivery(ctx, map[string]string{"component": "channel", "channel": "telegram", "provider": "other", "status": "success", "error_class": ""})
 	}
 	return nil
 }

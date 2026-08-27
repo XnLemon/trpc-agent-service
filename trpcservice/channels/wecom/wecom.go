@@ -25,6 +25,8 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	"github.com/google/uuid"
 )
@@ -70,6 +72,8 @@ type Config struct {
 	Credentials CredentialResolver
 	// AuditWriter receives mandatory accepted and duplicate ingress facts.
 	AuditWriter audit.Writer
+	// Observability supplies provider-neutral trace and metric hooks.
+	Observability observability.Provider
 }
 
 type callbackState struct {
@@ -99,6 +103,8 @@ type Handler struct {
 	maxBodyBytes     int64
 	executionTimeout time.Duration
 	auditWriter      audit.Writer
+	telemetry        observability.Provider
+	metrics          metrics.Catalog
 
 	mu      sync.Mutex
 	closing bool
@@ -130,7 +136,11 @@ func New(config Config) (*Handler, error) {
 		return nil, ErrInvalid
 	}
 	baseCtx, cancel := context.WithCancel(context.Background())
+	if config.Observability == nil {
+		config.Observability = observability.NewNoopProvider()
+	}
 	handler := &Handler{routeKey: strings.Trim(config.RouteKey, "/"), dispatcher: config.Dispatcher, maxBodyBytes: config.MaxBodyBytes, executionTimeout: config.ExecutionTimeout, auditWriter: config.AuditWriter, baseCtx: baseCtx, cancel: cancel}
+	handler.telemetry, handler.metrics = config.Observability, metrics.New(config.Observability)
 	if config.Candidates != nil || config.Tenants != nil || config.Apps != nil || config.Credentials != nil {
 		if config.Candidates == nil || config.Tenants == nil || config.Apps == nil || config.Credentials == nil || handler.routeKey != "" {
 			cancel()
@@ -212,6 +222,22 @@ func (h *Handler) handleChallenge(w http.ResponseWriter, r *http.Request) {
 
 //nolint:gocyclo // Callback handling intentionally keeps protocol validation and admission in one ordered boundary.
 func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
+	capture := &statusCaptureWriter{ResponseWriter: w}
+	w = capture
+	started := time.Now()
+	operationCtx, _, finish := observability.StartOperation(r.Context(), h.telemetry, observability.OperationChannelReceive, "channel")
+	_ = h.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "wecom", "status": "started"})
+	defer func() {
+		var outcome error
+		if ctxErr := r.Context().Err(); ctxErr != nil {
+			outcome = ctxErr
+		} else if capture.status >= http.StatusBadRequest {
+			outcome = errors.New("wecom callback failed")
+		}
+		finish(outcome)
+		_ = h.metrics.Operation(operationCtx, started, map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "wecom"}, outcome)
+	}()
+	r = r.WithContext(operationCtx)
 	defer func() { _ = r.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(r.Body, h.maxBodyBytes+1))
 	if err != nil {
@@ -243,7 +269,7 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	executionCtx, cancel, ok := h.beginDrain()
+	executionCtx, cancel, ok := h.beginDrain(operationCtx)
 	if !ok {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
@@ -278,6 +304,25 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type statusCaptureWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusCaptureWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusCaptureWriter) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(body)
+}
+
 func (h *Handler) writeIngressSuccess(w http.ResponseWriter, ctx context.Context, principal gateway.Principal, message inboundXML, requestID, traceID string, eventType audit.EventType, decision audit.Decision, errorType string) {
 	if h.recordIngress(ctx, principal, message, requestID, traceID, eventType, decision, errorType) != nil {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
@@ -295,15 +340,35 @@ func (h *Handler) recordIngress(ctx context.Context, principal gateway.Principal
 	return err
 }
 
-func (h *Handler) beginDrain() (context.Context, context.CancelFunc, bool) {
+func (h *Handler) beginDrain(parent context.Context) (context.Context, context.CancelFunc, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closing {
 		return nil, nil, false
 	}
-	ctx, cancel := context.WithTimeout(h.baseCtx, h.executionTimeout)
+	if parent == nil {
+		parent = h.baseCtx
+		if parent == nil {
+			parent = context.Background()
+		}
+	}
+	// Keep the verified receive context as the trace parent while also making
+	// handler shutdown cancel every accepted drain. A request context alone is
+	// insufficient because Close must join in-flight dispatches immediately.
+	merged, mergeCancel := context.WithCancel(context.WithoutCancel(parent))
+	base := h.baseCtx
+	if base == nil {
+		base = context.Background()
+	}
+	stopBase := context.AfterFunc(base, mergeCancel)
+	withTimeout, timeoutCancel := context.WithTimeout(merged, h.executionTimeout)
+	cancel := func() {
+		timeoutCancel()
+		mergeCancel()
+		stopBase()
+	}
 	h.drains.Add(1)
-	return ctx, cancel, true
+	return withTimeout, cancel, true
 }
 
 // BeginShutdown prevents accepting new execution drains and cancels drains already owned by this Handler.

@@ -55,6 +55,8 @@ func (e *DeliveryError) Error() string { return ErrProvider.Error() }
 type Worker struct {
 	store         runtimestorage.RuntimeStore
 	provider      Provider
+	channel       string
+	providerName  string
 	tenantID      string
 	owner         string
 	leaseDuration time.Duration
@@ -72,8 +74,12 @@ type Worker struct {
 
 // Config controls a durable reply worker.
 type Config struct {
-	Store         runtimestorage.RuntimeStore
-	Provider      Provider
+	Store    runtimestorage.RuntimeStore
+	Provider Provider
+	// Channel and ProviderName identify the real delivery route for telemetry.
+	// Empty values retain the legacy outbox/other defaults.
+	Channel       string
+	ProviderName  string
 	TenantID      string
 	Owner         string
 	LeaseDuration time.Duration
@@ -109,7 +115,13 @@ func New(config Config) (*Worker, error) {
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
 	}
-	return &Worker{store: config.Store, provider: config.Provider, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, jitter: config.Jitter, telemetry: config.Observability, metrics: metrics.New(config.Observability), audit: audit.Recorder{Writer: config.AuditWriter, TenantID: config.TenantID}}, nil
+	if config.Channel == "" {
+		config.Channel = "outbox"
+	}
+	if config.ProviderName == "" {
+		config.ProviderName = "other"
+	}
+	return &Worker{store: config.Store, provider: config.Provider, channel: config.Channel, providerName: config.ProviderName, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, jitter: config.Jitter, telemetry: config.Observability, metrics: metrics.New(config.Observability), audit: audit.Recorder{Writer: config.AuditWriter, TenantID: config.TenantID}}, nil
 }
 
 // Run polls until ctx is canceled. It owns no goroutine after returning.
@@ -204,7 +216,9 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 	if ctx == nil {
 		return 0, ErrInvalid
 	}
-	candidates, err := w.store.ListReplyCandidates(ctx, w.tenantID)
+	candidates, err := observeStorage(w, ctx, func(operationCtx context.Context) ([]runtimestorage.ReplyOutbox, error) {
+		return w.store.ListReplyCandidates(operationCtx, w.tenantID)
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -229,7 +243,9 @@ func (w *Worker) claimCandidate(ctx context.Context, candidate runtimestorage.Re
 	if !eligible(candidate) || !w.retryDue(candidate, time.Now().UTC()) {
 		return runtimestorage.ReplyOutbox{}, false, nil
 	}
-	claimed, err := w.store.ClaimReply(ctx, candidate.TenantID, candidate.ReplyID, candidate.SegmentIndex, w.owner, w.leaseDuration)
+	claimed, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.ReplyOutbox, error) {
+		return w.store.ClaimReply(operationCtx, candidate.TenantID, candidate.ReplyID, candidate.SegmentIndex, w.owner, w.leaseDuration)
+	})
 	if errors.Is(err, runtimestorage.ErrConflict) || errors.Is(err, runtimestorage.ErrNotFound) {
 		return runtimestorage.ReplyOutbox{}, false, nil
 	}
@@ -239,56 +255,45 @@ func (w *Worker) claimCandidate(ctx context.Context, candidate runtimestorage.Re
 	return claimed, true, nil
 }
 
-func (w *Worker) processClaimed(ctx context.Context, candidate, claimed runtimestorage.ReplyOutbox) error {
+func (w *Worker) processClaimed(ctx context.Context, candidate, claimed runtimestorage.ReplyOutbox) (err error) {
 	started := time.Now()
-	operationCtx := ctx
-	var finishOperation func(error)
-	if w.telemetry != nil {
-		operationCtx, _, finishOperation = observability.StartOperation(ctx, w.telemetry, observability.OperationChannelSend, "channel")
-		_ = w.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "started"})
-	}
+	operationCtx, _, finishOperation := observability.StartOperation(ctx, w.telemetry, observability.OperationChannelSend, "channel")
+	labels := map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "channel": w.channel, "provider": w.providerName}
+	_ = w.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "channel": w.channel, "provider": w.providerName, "status": "started"})
+	var operationErr error
+	defer func() {
+		if err != nil {
+			operationErr = err
+		}
+		finishOperation(operationErr)
+		_ = w.metrics.Operation(operationCtx, started, labels, operationErr)
+	}()
 	if candidate.Status == runtimestorage.ReplySending {
 		// A sending lease means the previous worker may have reached the
 		// provider before losing its lease. Reconcile is the only safe
 		// resolution path; an unknown/error result must not redeliver.
 		if w.reconcile(operationCtx, claimed) {
 			w.advanceEvent(ctx, claimed.EventID)
-		}
-		if w.telemetry != nil {
-			_ = w.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "retry"})
-		}
-		if finishOperation != nil {
-			finishOperation(nil)
+			_ = w.metrics.Delivery(operationCtx, map[string]string{"component": "channel", "channel": w.channel, "provider": w.providerName, "status": "success", "error_class": ""})
+		} else {
+			operationErr = ErrProvider
+			_ = w.metrics.Delivery(operationCtx, map[string]string{"component": "channel", "channel": w.channel, "provider": w.providerName, "status": "retry", "error_class": "error"})
 		}
 		return nil
 	}
 	providerID, deliveryErr := w.provider.Deliver(operationCtx, claimed)
-	if finishOperation != nil {
-		finishOperation(deliveryErr)
-	}
-	w.recordDeliveryDuration(operationCtx, started, deliveryErr)
+	operationErr = deliveryErr
 	if deliveryErr == nil {
 		return w.acceptDelivery(ctx, operationCtx, claimed, providerID)
 	}
 	return w.rejectDelivery(ctx, operationCtx, claimed, deliveryErr)
 }
 
-func (w *Worker) recordDeliveryDuration(ctx context.Context, started time.Time, deliveryErr error) {
-	if w.telemetry == nil {
-		return
-	}
-	status := "success"
-	if deliveryErr != nil {
-		status = "error"
-	}
-	_ = w.metrics.Duration(ctx, observability.DurationMilliseconds(started), map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": status})
-}
-
 func (w *Worker) acceptDelivery(ctx, operationCtx context.Context, claimed runtimestorage.ReplyOutbox, providerID string) error {
-	if w.telemetry != nil {
-		_ = w.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "success"})
-	}
-	_, err := w.store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: runtimestorage.ReplySent, Owner: w.owner, FencingToken: claimed.FencingToken, ProviderID: providerID})
+	_ = w.metrics.Delivery(operationCtx, map[string]string{"component": "channel", "channel": w.channel, "provider": w.providerName, "status": "success", "error_class": ""})
+	_, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.ReplyOutbox, error) {
+		return w.store.TransitionReply(operationCtx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: runtimestorage.ReplySent, Owner: w.owner, FencingToken: claimed.FencingToken, ProviderID: providerID})
+	})
 	if err == nil {
 		err = w.recordDelivery(operationCtx, audit.EventIMDeliverySent, claimed, "")
 	}
@@ -300,14 +305,13 @@ func (w *Worker) acceptDelivery(ctx, operationCtx context.Context, claimed runti
 
 func (w *Worker) rejectDelivery(ctx, operationCtx context.Context, claimed runtimestorage.ReplyOutbox, deliveryErr error) error {
 	class, retryable := classify(deliveryErr)
-	if w.telemetry != nil {
-		_ = w.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "error", "error_class": metricErrorClass(class)})
-	}
 	to := runtimestorage.ReplyRetryable
 	if !retryable || claimed.Attempts >= w.maxAttempts {
 		to = runtimestorage.ReplyDeadLetter
 	}
-	_, err := w.store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: to, Owner: w.owner, FencingToken: claimed.FencingToken, ErrorClass: class})
+	_, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.ReplyOutbox, error) {
+		return w.store.TransitionReply(operationCtx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: to, Owner: w.owner, FencingToken: claimed.FencingToken, ErrorClass: class})
+	})
 	if err == nil {
 		eventType := audit.EventIMDeliveryRetryScheduled
 		if to == runtimestorage.ReplyDeadLetter {
@@ -315,11 +319,13 @@ func (w *Worker) rejectDelivery(ctx, operationCtx context.Context, claimed runti
 		}
 		err = w.recordDelivery(operationCtx, eventType, claimed, class)
 	}
-	if retryable && to == runtimestorage.ReplyRetryable && w.telemetry != nil {
-		_ = w.metrics.Retry(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "retry", "error_class": metricErrorClass(class)})
+	if retryable && to == runtimestorage.ReplyRetryable {
+		_ = w.metrics.Retry(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "channel": w.channel, "provider": w.providerName, "status": "retry", "error_class": metricErrorClass(class)})
 	}
-	if w.telemetry != nil && to == runtimestorage.ReplyDeadLetter {
-		_ = w.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "failure", "error_class": metricErrorClass(class)})
+	if to == runtimestorage.ReplyDeadLetter {
+		_ = w.metrics.Delivery(operationCtx, map[string]string{"component": "channel", "channel": w.channel, "provider": w.providerName, "status": "dead_letter", "error_class": metricErrorClass(class)})
+	} else if to == runtimestorage.ReplyRetryable {
+		_ = w.metrics.Delivery(operationCtx, map[string]string{"component": "channel", "channel": w.channel, "provider": w.providerName, "status": "retry", "error_class": metricErrorClass(class)})
 	}
 	return err
 }
@@ -331,7 +337,9 @@ func (w *Worker) recordDelivery(ctx context.Context, eventType audit.EventType, 
 	}
 	requestID, traceID := value.ReplyID, ""
 	if correlations, ok := w.store.(runtimestorage.ReplyCorrelationStore); ok {
-		if correlation, err := correlations.GetReplyCorrelation(ctx, value.TenantID, value.EventID); err == nil {
+		if correlation, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.ReplyCorrelation, error) {
+			return correlations.GetReplyCorrelation(operationCtx, value.TenantID, value.EventID)
+		}); err == nil {
 			requestID, traceID = correlation.RequestID, correlation.TraceID
 		}
 	}
@@ -370,7 +378,9 @@ func (w *Worker) advanceEvent(ctx context.Context, eventID string) {
 	if eventID == "" {
 		return
 	}
-	candidates, err := w.store.ListReplyCandidates(ctx, w.tenantID)
+	candidates, err := observeStorage(w, ctx, func(operationCtx context.Context) ([]runtimestorage.ReplyOutbox, error) {
+		return w.store.ListReplyCandidates(operationCtx, w.tenantID)
+	})
 	if err != nil {
 		return
 	}
@@ -387,18 +397,24 @@ func (w *Worker) advanceEvent(ctx context.Context, eventID string) {
 	if !hasEvent {
 		return
 	}
-	event, err := w.store.GetMessage(ctx, w.tenantID, eventID)
+	event, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.MessageEvent, error) {
+		return w.store.GetMessage(operationCtx, w.tenantID, eventID)
+	})
 	if err != nil {
 		return
 	}
 	if event.Status == runtimestorage.EventCompleted {
-		if _, err := w.store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: w.tenantID, EventID: eventID, From: runtimestorage.EventCompleted, To: runtimestorage.EventReplyPending, Owner: w.owner}); err != nil {
+		if _, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.MessageEvent, error) {
+			return w.store.TransitionMessage(operationCtx, runtimestorage.MessageTransition{TenantID: w.tenantID, EventID: eventID, From: runtimestorage.EventCompleted, To: runtimestorage.EventReplyPending, Owner: w.owner})
+		}); err != nil {
 			return
 		}
 		event.Status = runtimestorage.EventReplyPending
 	}
 	if event.Status == runtimestorage.EventReplyPending {
-		_, _ = w.store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: w.tenantID, EventID: eventID, From: runtimestorage.EventReplyPending, To: runtimestorage.EventReplied, Owner: w.owner})
+		_, _ = observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.MessageEvent, error) {
+			return w.store.TransitionMessage(operationCtx, runtimestorage.MessageTransition{TenantID: w.tenantID, EventID: eventID, From: runtimestorage.EventReplyPending, To: runtimestorage.EventReplied, Owner: w.owner})
+		})
 	}
 }
 
@@ -413,8 +429,33 @@ func (w *Worker) reconcile(ctx context.Context, claimed runtimestorage.ReplyOutb
 		to = runtimestorage.ReplyRetryable
 		class = "provider_rejected"
 	}
-	_, transitionErr := w.store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: to, Owner: w.owner, FencingToken: claimed.FencingToken, ProviderID: providerID, ErrorClass: class})
+	_, transitionErr := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.ReplyOutbox, error) {
+		return w.store.TransitionReply(operationCtx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: to, Owner: w.owner, FencingToken: claimed.FencingToken, ProviderID: providerID, ErrorClass: class})
+	})
 	return transitionErr == nil
+}
+
+func observeStorage[T any](worker *Worker, ctx context.Context, operation func(context.Context) (T, error)) (T, error) {
+	var zero T
+	if worker == nil || operation == nil {
+		return zero, ErrInvalid
+	}
+	started := time.Now()
+	operationCtx, _, finish := observability.StartOperation(ctx, worker.telemetry, observability.OperationStorageOperation, "storage")
+	provider := worker.providerName
+	_ = worker.metrics.Request(operationCtx, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": provider, "status": "started"})
+	value, err := operation(operationCtx)
+	finish(err)
+	_ = worker.metrics.Operation(operationCtx, started, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": provider}, err)
+	status := "success"
+	if err != nil {
+		status = observability.ErrorClass(err)
+		if status == "" {
+			status = "error"
+		}
+	}
+	_ = worker.metrics.BackendDuration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "storage", "provider": provider, "status": status, "error_class": observability.ErrorClass(err)})
+	return value, err
 }
 
 func classify(err error) (string, bool) {

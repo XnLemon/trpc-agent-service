@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 )
 
@@ -20,12 +23,17 @@ const defaultSegmentRunes = 512
 type Materializer struct {
 	store       runtimestorage.RuntimeStore
 	segmentSize int
+	telemetry   observability.Provider
+	metrics     metrics.Catalog
+	backend     string
 }
 
 // MaterializerConfig controls durable reply segmentation.
 type MaterializerConfig struct {
-	Store       runtimestorage.RuntimeStore
-	SegmentSize int
+	Store         runtimestorage.RuntimeStore
+	SegmentSize   int
+	Observability observability.Provider
+	Backend       string
 }
 
 // MaterializeInput identifies the completed reply to segment.
@@ -47,12 +55,18 @@ func NewMaterializer(config MaterializerConfig) (*Materializer, error) {
 	if config.SegmentSize <= 0 {
 		config.SegmentSize = defaultSegmentRunes
 	}
-	return &Materializer{store: config.Store, segmentSize: config.SegmentSize}, nil
+	if config.Observability == nil {
+		config.Observability = observability.NewNoopProvider()
+	}
+	if config.Backend == "" {
+		config.Backend = "other"
+	}
+	return &Materializer{store: config.Store, segmentSize: config.SegmentSize, telemetry: config.Observability, metrics: metrics.New(config.Observability), backend: config.Backend}, nil
 }
 
 // Materialize writes all segments under the stable reply identity. A repeated
 // call is idempotent when the existing rows have the same event and payload.
-func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) (int, error) {
+func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) (count int, err error) {
 	if m == nil || ctx == nil || runtimestorage.ValidateTenant(input.TenantID) != nil || input.EventID == "" || input.ReplyID == "" || runtimestorage.ValidateReplyTarget(input.ReplyTarget) != nil {
 		return 0, ErrInvalid
 	}
@@ -68,15 +82,30 @@ func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) 
 	for index, payload := range segments {
 		replies = append(replies, runtimestorage.ReplyOutbox{TenantID: input.TenantID, ReplyID: input.ReplyID, EventID: input.EventID, SegmentIndex: index, SegmentCount: len(segments), Payload: payload, ReplyTarget: input.ReplyTarget})
 	}
-	var err error
+	started := time.Now()
+	operationCtx, _, finish := observability.StartOperation(ctx, m.telemetry, observability.OperationStorageOperation, "storage")
+	labels := map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": m.backend}
+	_ = m.metrics.Request(operationCtx, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": m.backend, "status": "started"})
+	defer func() {
+		finish(err)
+		_ = m.metrics.Operation(operationCtx, started, labels, err)
+		status := "success"
+		if err != nil {
+			status = observability.ErrorClass(err)
+			if status == "" {
+				status = "error"
+			}
+		}
+		_ = m.metrics.BackendDuration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "storage", "provider": m.backend, "status": status, "error_class": observability.ErrorClass(err)})
+	}()
 	if input.RequestID != "" {
 		correlatedStore, correlated := m.store.(runtimestorage.ReplyBatchCorrelationEnqueuer)
 		if !correlated {
 			return 0, errors.Join(ErrMaterialization, runtimestorage.ErrInvalid)
 		}
-		_, err = correlatedStore.EnqueueRepliesWithCorrelation(ctx, runtimestorage.ReplyCorrelation{TenantID: input.TenantID, EventID: input.EventID, RequestID: input.RequestID, TraceID: input.TraceID}, replies)
+		_, err = correlatedStore.EnqueueRepliesWithCorrelation(operationCtx, runtimestorage.ReplyCorrelation{TenantID: input.TenantID, EventID: input.EventID, RequestID: input.RequestID, TraceID: input.TraceID}, replies)
 	} else {
-		_, err = batchStore.EnqueueReplies(ctx, replies)
+		_, err = batchStore.EnqueueReplies(operationCtx, replies)
 	}
 	if err != nil {
 		return 0, errors.Join(ErrMaterialization, err)

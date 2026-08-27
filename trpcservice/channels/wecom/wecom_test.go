@@ -424,6 +424,52 @@ func TestHandlerCloseCancelsAndJoinsAcceptedDrain(t *testing.T) {
 	}
 }
 
+func TestHandlerAcceptedDrainOutlivesRequestCancellation(t *testing.T) {
+	dispatched := make(chan context.Context, 1)
+	canceled := make(chan struct{})
+	dispatcher := dispatchFunc(func(ctx context.Context, request gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+		dispatched <- ctx
+		if request.Accepted != nil {
+			request.Accepted <- struct{}{}
+		}
+		stream := make(chan gateway.DispatchEvent)
+		go func() {
+			<-ctx.Done()
+			close(canceled)
+			close(stream)
+		}()
+		return stream, nil
+	})
+	handler := newCallbackTestHandler(t, dispatcher)
+	defer func() { _ = handler.Close() }()
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	request := callbackTestRequest(t, "message-request-cancel", "user", "hello").WithContext(requestCtx)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("callback response = %d", response.Code)
+	}
+	var dispatchContext context.Context
+	select {
+	case dispatchContext = <-dispatched:
+	case <-time.After(time.Second):
+		t.Fatal("callback did not reach dispatcher")
+	}
+	cancelRequest()
+	if err := dispatchContext.Err(); err != nil {
+		t.Fatalf("request cancellation canceled accepted drain: %v", err)
+	}
+	if err := handler.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("handler close did not cancel accepted drain")
+	}
+}
+
 func TestHandlerAcknowledgesCompletedAndDuplicateDispatch(t *testing.T) {
 	for _, test := range []struct {
 		name string

@@ -24,9 +24,11 @@ import (
 	channelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -55,13 +57,15 @@ var (
 // a successful bootstrap always creates a real Resolver, Registry and HTTP
 // handler.
 type Config struct {
-	DB       *sql.DB
-	OwnDB    bool
-	Tenants  tenant.Repository
-	Apps     agent.Repository
-	Models   modelprofile.Repository
-	Backends backend.Repository
-	Channels channels.CandidateConsumer
+	// Observability is the process telemetry provider. A nil value selects a no-op provider.
+	Observability observability.Provider
+	DB            *sql.DB
+	OwnDB         bool
+	Tenants       tenant.Repository
+	Apps          agent.Repository
+	Models        modelprofile.Repository
+	Backends      backend.Repository
+	Channels      channels.CandidateConsumer
 
 	ModelCatalog   *modelprofile.ProviderCatalog
 	BackendCatalog *backend.ProviderCatalog
@@ -117,6 +121,7 @@ type Runtime struct {
 	ping             func(context.Context) error
 	verifyMigrations func(context.Context, *sql.DB) error
 	closeDeps        func() error
+	telemetry        observability.Provider
 	closing          atomic.Bool
 	closeOnce        sync.Once
 	closeErr         error
@@ -153,6 +158,7 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	if err := prepareRuntimeConfig(&config); err != nil {
 		return nil, err
 	}
+	config.AuditWriter = metrics.WrapAuditWriter(config.AuditWriter, config.Observability)
 	runtimeGraph, err := newRuntimeGraph(config)
 	if err != nil {
 		return nil, err
@@ -223,7 +229,7 @@ func prepareRuntimeConfig(config *Config) error {
 	if config.RuntimeTenantID == "" {
 		return nil
 	}
-	wrapped, err := runtimesessionpostgres.New(config.RuntimeTenantID, config.Sessions, config.RuntimeStore)
+	wrapped, err := runtimesessionpostgres.NewWithObservability(config.RuntimeTenantID, config.Sessions, config.RuntimeStore, config.Observability)
 	if err != nil {
 		return ErrInvalidConfig
 	}
@@ -242,12 +248,13 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	registry, err := gateway.NewRuntimeRunnerRegistry(gateway.RuntimeRunnerRegistryConfig{
 		Registry: config.Registry, SecretResolver: config.SecretResolver,
 		ModelFactory: config.ModelFactory, Sessions: config.Sessions, StorageFactory: config.StorageFactory,
+		Observability: config.Observability,
 	})
 	if err != nil {
 		return nil, ErrInvalidConfig
 	}
 	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{
-		Resolver: resolver, Registry: registry, RuntimeStore: config.RuntimeStore, DrainTimeout: config.DrainTimeout, AuditWriter: config.AuditWriter,
+		Resolver: resolver, Registry: registry, RuntimeStore: config.RuntimeStore, DrainTimeout: config.DrainTimeout, AuditWriter: config.AuditWriter, Observability: config.Observability,
 	})
 	if err != nil {
 		_ = registry.Close()
@@ -278,6 +285,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 		wecomHandler: config.WeComHandler,
 		db:           config.DB, ownDB: config.OwnDB, readyGate: readyGate,
 		ping: ping, verifyMigrations: config.VerifyMigrations, closeDeps: config.CloseDependencies,
+		telemetry: config.Observability,
 	}
 	if lifecycle, ok := config.WeComHandler.(callbackLifecycle); ok {
 		runtimeGraph.wecomLifecycle = lifecycle
@@ -334,7 +342,7 @@ func configureHandler(runtimeGraph *Runtime, config Config) error {
 	handler, err := gateway.NewHTTPHandler(gateway.HTTPConfig{
 		Dispatcher: runtimeGraph.Dispatcher, Authenticator: config.Authenticator, Admin: config.AdminHandler, WeCom: runtimeGraph.wecomHandler,
 		Ready: runtimeGraph.Ready, Limiter: config.HTTP.Limiter, Idempotency: config.HTTP.Idempotency,
-		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout,
+		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout, Observability: config.Observability,
 	})
 	if err != nil {
 		_ = runtimeGraph.Registry.Close()
@@ -423,6 +431,11 @@ func (graph *Runtime) Close() error {
 		}
 		if graph.ownDB && graph.db != nil {
 			closeErr = errors.Join(closeErr, graph.db.Close())
+		}
+		if graph.telemetry != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			closeErr = errors.Join(closeErr, graph.telemetry.Shutdown(ctx))
+			cancel()
 		}
 		graph.closeErr = closeErr
 	})

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 )
 
 const (
@@ -36,6 +38,7 @@ type HTTPConfig struct {
 	Idempotency    *IdempotencyStore
 	MaxBodyBytes   int64
 	RequestTimeout time.Duration
+	Observability  observability.Provider
 }
 
 // HTTPHandler serves the first strict JSON/SSE Gateway surface.
@@ -49,6 +52,8 @@ type HTTPHandler struct {
 	idempotency    *IdempotencyStore
 	maxBodyBytes   int64
 	requestTimeout time.Duration
+	telemetry      observability.Provider
+	metrics        metrics.Catalog
 	ownLimiter     bool
 	ownIdempotency bool
 	draining       atomic.Bool
@@ -98,11 +103,15 @@ func NewHTTPHandler(config HTTPConfig) (*HTTPHandler, error) {
 	if config.Ready == nil {
 		config.Ready = func() bool { return config.Dispatcher != nil && config.Authenticator != nil }
 	}
+	if config.Observability == nil {
+		config.Observability = observability.NewNoopProvider()
+	}
 	handler := &HTTPHandler{
 		dispatcher: config.Dispatcher, authenticator: config.Authenticator, ready: config.Ready,
 		admin:        config.Admin,
 		wecom:        config.WeCom,
 		maxBodyBytes: config.MaxBodyBytes, requestTimeout: config.RequestTimeout,
+		telemetry: config.Observability, metrics: metrics.New(config.Observability),
 		limiter: config.Limiter, idempotency: config.Idempotency,
 	}
 	if handler.limiter == nil {
@@ -169,6 +178,20 @@ func (handler *HTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 	if request == nil {
 		return
 	}
+	started := time.Now()
+	statusWriter := &httpStatusWriter{ResponseWriter: writer}
+	ctx, _, finish := observability.StartOperation(request.Context(), handler.telemetry, observability.OperationHTTPRequest, "http")
+	request = request.WithContext(ctx)
+	_ = handler.metrics.Request(ctx, map[string]string{"component": "http", "operation": observability.OperationHTTPRequest, "status": "started"})
+	defer func() {
+		var outcome error
+		if statusWriter.status >= http.StatusBadRequest {
+			outcome = errors.New("http request failed")
+		}
+		finish(outcome)
+		_ = handler.metrics.Operation(ctx, started, map[string]string{"component": "http", "operation": observability.OperationHTTPRequest}, outcome)
+	}()
+	writer = statusWriter
 	if strings.HasPrefix(request.URL.Path, "/wecom/callback/") {
 		if handler.wecom == nil {
 			handler.writeError(writer, request, http.StatusNotFound, "not found", "", "")
@@ -197,6 +220,24 @@ func (handler *HTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 	default:
 		handler.writeError(writer, request, http.StatusNotFound, "not found", "", "")
 	}
+}
+
+type httpStatusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *httpStatusWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+func (w *httpStatusWriter) Write(value []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(value)
 }
 
 func (handler *HTTPHandler) health(writer http.ResponseWriter, request *http.Request) {
@@ -300,7 +341,7 @@ func (handler *HTTPHandler) chat(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	if stream {
-		if _, ok := writer.(http.Flusher); !ok {
+		if !supportsFlush(writer) {
 			handler.writeError(writer, request, http.StatusInternalServerError, "streaming unavailable", requestID, traceID)
 			return
 		}
@@ -318,6 +359,15 @@ func (handler *HTTPHandler) chat(writer http.ResponseWriter, request *http.Reque
 	}
 	completed = true
 	handler.writeFinalResponse(writer, requestID, traceID, events)
+}
+
+func supportsFlush(writer http.ResponseWriter) bool {
+	if wrapped, ok := writer.(*httpStatusWriter); ok {
+		_, ok = wrapped.ResponseWriter.(http.Flusher)
+		return ok
+	}
+	_, ok := writer.(http.Flusher)
+	return ok
 }
 
 func (handler *HTTPHandler) decodeMessage(writer http.ResponseWriter, request *http.Request) (InboundMessage, error) {
@@ -373,7 +423,13 @@ func collectHTTPEvents(ctx context.Context, events <-chan DispatchEvent) ([]Disp
 }
 
 func (handler *HTTPHandler) writeStream(writer http.ResponseWriter, ctx context.Context, claim *IdempotencyClaim, events <-chan DispatchEvent) bool {
-	flusher, ok := writer.(http.Flusher)
+	var flusher http.Flusher
+	var ok bool
+	if wrapped, wrappedOK := writer.(*httpStatusWriter); wrappedOK {
+		flusher, ok = wrapped.ResponseWriter.(http.Flusher)
+	} else {
+		flusher, ok = writer.(http.Flusher)
+	}
 	if !ok {
 		return false
 	}
@@ -409,7 +465,13 @@ func (handler *HTTPHandler) writeStream(writer http.ResponseWriter, ctx context.
 }
 
 func (handler *HTTPHandler) writeReplayStream(writer http.ResponseWriter, events []DispatchEvent) {
-	flusher, ok := writer.(http.Flusher)
+	var flusher http.Flusher
+	var ok bool
+	if wrapped, wrappedOK := writer.(*httpStatusWriter); wrappedOK {
+		flusher, ok = wrapped.ResponseWriter.(http.Flusher)
+	} else {
+		flusher, ok = writer.(http.Flusher)
+	}
 	if !ok {
 		handler.writeError(writer, nil, http.StatusInternalServerError, "gateway error", "", "")
 		return
