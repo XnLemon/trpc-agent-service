@@ -47,6 +47,7 @@ const (
 	envSubjectID    = "TRPC_SUBJECT_ID"
 	// #nosec G101 -- environment variable name, not a credential.
 	envModelAPIKey       = "TRPC_MODEL_API_KEY"
+	envModelAPIKeys      = "TRPC_MODEL_API_KEYS"
 	envModelProvider     = "TRPC_MODEL_PROVIDER"
 	envModelNames        = "TRPC_MODEL_NAMES"
 	envModelEndpointHost = "TRPC_MODEL_ENDPOINT_HOSTS"
@@ -90,6 +91,7 @@ type environmentConfig struct {
 	appID          string
 	subjectID      string
 	modelAPIKey    string
+	modelAPIKeys   map[string]string
 	modelProvider  string
 	modelNames     []string
 	endpointHosts  []string
@@ -183,7 +185,17 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	modelRegistry := modelprofile.NewModelProviderRegistry()
 	backendRegistry := backend.NewProviderRegistry()
 	for _, identity := range config.apiIdentities {
-		if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.secretRef}, config.modelAPIKey); err != nil {
+		modelAPIKey := config.modelAPIKey
+		if len(config.modelAPIKeys) != 0 {
+			modelAPIKey = config.modelAPIKeys[identity.TenantID]
+		}
+		if modelAPIKey == "" {
+			_ = delegateSessions.Close()
+			_ = runtimeStore.Close()
+			_ = db.Close()
+			return nil, ErrInvalidConfig
+		}
+		if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.secretRef}, modelAPIKey); err != nil {
 			_ = delegateSessions.Close()
 			_ = runtimeStore.Close()
 			_ = db.Close()
@@ -311,8 +323,24 @@ func (config *environmentConfig) loadAdmin() error {
 
 func (config *environmentConfig) loadModel() error {
 	var err error
-	if config.modelAPIKey, err = requiredEnvironment(envModelAPIKey); err != nil {
-		return err
+	if mapped := strings.TrimSpace(os.Getenv(envModelAPIKeys)); mapped != "" {
+		config.modelAPIKeys, err = parseEnvironmentModelAPIKeys(mapped)
+		if err != nil {
+			return err
+		}
+		for _, identity := range config.apiIdentities {
+			if config.modelAPIKeys[identity.TenantID] == "" {
+				return fmt.Errorf("%w: %s has no key for tenant", ErrInvalidConfig, envModelAPIKeys)
+			}
+		}
+	} else {
+		config.modelAPIKey = strings.TrimSpace(os.Getenv(envModelAPIKey))
+		if config.modelAPIKey == "" && len(config.apiIdentities) > 1 {
+			return fmt.Errorf("%w: %s is required for multi-tenant bootstrap", ErrInvalidConfig, envModelAPIKeys)
+		}
+		if config.modelAPIKey == "" {
+			return fmt.Errorf("%w: %s is required", ErrInvalidConfig, envModelAPIKey)
+		}
 	}
 	config.modelProvider = strings.ToLower(strings.TrimSpace(config.modelProvider))
 	config.secretRef = strings.TrimSpace(config.secretRef)
@@ -324,6 +352,33 @@ func (config *environmentConfig) loadModel() error {
 	}
 	config.endpointHosts, err = environmentList(envModelEndpointHost, environmentOrDefault(envModelEndpointHost, defaultEndpointHost), true)
 	return err
+}
+
+func parseEnvironmentModelAPIKeys(value string) (map[string]string, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, fmt.Errorf("%w: %s is required", ErrInvalidConfig, envModelAPIKeys)
+	}
+	keys := make(map[string]string)
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" || strings.ContainsAny(item, "\r\n") {
+			return nil, fmt.Errorf("%w: %s contains an empty entry", ErrInvalidConfig, envModelAPIKeys)
+		}
+		separator := strings.IndexByte(item, '=')
+		if separator < 1 || separator == len(item)-1 {
+			return nil, fmt.Errorf("%w: %s entries must be tenant_id=api_key", ErrInvalidConfig, envModelAPIKeys)
+		}
+		tenantID := strings.TrimSpace(item[:separator])
+		apiKey := strings.TrimSpace(item[separator+1:])
+		if tenantID == "" || strings.ContainsAny(tenantID, "\r\n") || apiKey == "" {
+			return nil, fmt.Errorf("%w: %s contains an invalid tenant entry", ErrInvalidConfig, envModelAPIKeys)
+		}
+		if _, exists := keys[tenantID]; exists {
+			return nil, fmt.Errorf("%w: %s contains duplicate tenant entries", ErrInvalidConfig, envModelAPIKeys)
+		}
+		keys[tenantID] = apiKey
+	}
+	return keys, nil
 }
 
 func (config *environmentConfig) loadRuntime() error {

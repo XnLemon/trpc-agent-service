@@ -50,6 +50,48 @@ func TestLoadEnvironmentSupportsIdentityListWithoutFixedTenantFields(t *testing.
 	}
 }
 
+func TestLoadEnvironmentUsesTenantModelAPIKeysForMultipleIdentities(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envAPIIdentities, "token-a|t_00000000000000000000000000|app_00000000000000000000000000|service-a,token-b|t_00000000000000000000000001|app_00000000000000000000000001|service-b")
+	t.Setenv(envAPIToken, "")
+	t.Setenv(envTenantID, "")
+	t.Setenv(envAppID, "")
+	t.Setenv(envModelAPIKey, "")
+	t.Setenv(envModelAPIKeys, "t_00000000000000000000000000=key-a,t_00000000000000000000000001=key-b")
+	config, err := loadEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.modelAPIKey != "" || config.modelAPIKeys["t_00000000000000000000000000"] != "key-a" || config.modelAPIKeys["t_00000000000000000000000001"] != "key-b" {
+		t.Fatalf("tenant model keys = %#v, global=%q", config.modelAPIKeys, config.modelAPIKey)
+	}
+}
+
+func TestParseEnvironmentModelAPIKeysRejectsMalformedOrDuplicateEntries(t *testing.T) {
+	for _, value := range []string{"", ",", "tenant=", "=key", "tenant\n=key", "tenant=one,tenant=two"} {
+		if _, err := parseEnvironmentModelAPIKeys(value); !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("parse %q error = %v", value, err)
+		}
+	}
+	keys, err := parseEnvironmentModelAPIKeys("tenant-a=key-a, tenant-b=key-b")
+	if err != nil || keys["tenant-a"] != "key-a" || keys["tenant-b"] != "key-b" {
+		t.Fatalf("parsed model keys = %#v, err=%v", keys, err)
+	}
+}
+
+func TestLoadEnvironmentRequiresEveryTenantModelAPIKey(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envAPIIdentities, "token-a|t_00000000000000000000000000|app_00000000000000000000000000|service-a,token-b|t_00000000000000000000000001|app_00000000000000000000000001|service-b")
+	t.Setenv(envAPIToken, "")
+	t.Setenv(envTenantID, "")
+	t.Setenv(envAppID, "")
+	t.Setenv(envModelAPIKey, "")
+	t.Setenv(envModelAPIKeys, "t_00000000000000000000000000=key-a")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("incomplete tenant model keys error = %v", err)
+	}
+}
+
 func TestLoadEnvironmentRejectsSingleWeComCredentialSetForMultipleIdentities(t *testing.T) {
 	setRequiredEnvironment(t)
 	t.Setenv(envAPIIdentities, "token-a|t_00000000000000000000000000|app_00000000000000000000000000|service-a,token-b|t_00000000000000000000000001|app_00000000000000000000000001|service-b")
