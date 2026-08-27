@@ -210,6 +210,7 @@ func (h *Handler) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, string(plain))
 }
 
+//nolint:gocyclo // Callback handling intentionally keeps protocol validation and admission in one ordered boundary.
 func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = r.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(r.Body, h.maxBodyBytes+1))
