@@ -40,7 +40,8 @@ TRPC_MYSQL_MIGRATION_DSN=migrator:password@tcp(host:3306)/db?parseTime=true&char
 默认仍为 PostgreSQL，已有 `TRPC_POSTGRES_DSN` 配置和 API 保持兼容。`mysql` 模式必须
 同时提供应用/运行时账号的 `TRPC_MYSQL_DSN` 和仅用于迁移的
 `TRPC_MYSQL_MIGRATION_DSN`；Bootstrap 先在独立迁移连接上 Apply + Verify，再以应用连接
-执行只读 schema/权限校验和 Repository 装配。缺失驱动、任一 DSN、迁移版本、必需权限或
+读取当前账号和权限信息并装配 Repository；迁移账号负责 schema/trigger 校验，应用账号不
+需要 `TRIGGER` 元数据权限。缺失驱动、任一 DSN、迁移版本、必需权限或
 连接 Ping 失败时，在绑定 HTTP 端口前 fail-closed。DSN 只存在于 Bootstrap 的短生命周期
 配置中，不能写入运行时快照、Repository 错误或 telemetry。测试可以传入已经打开的
 `*sql.DB`，不要求 Repository 自己关闭借用的连接池；Bootstrap 只有在 `OwnDB=true` 时
@@ -61,7 +62,8 @@ TRPC_MYSQL_MIGRATION_DSN=migrator:password@tcp(host:3306)/db?parseTime=true&char
 | `SECURITY DEFINER` 函数 | 最小数据库账号 + 事务内受控 DML | 领域校验和显式租户谓词不可省略 |
 
 MySQL 连接必须使用 InnoDB、明确的 `READ COMMITTED` 隔离级别和 UTC session time
-zone，以匹配现有 PostgreSQL `database/sql` helper 的事务契约；不得用未界定的“或更严格”
+zone（DSN 强制 driver system variable `time_zone='+00:00'`，`loc=UTC` 只负责 Go 解码），
+以匹配现有 PostgreSQL `database/sql` helper 的事务契约；不得用未界定的“或更严格”
 替代这个可测试的级别。迁移脚本不依赖 `public` schema、PostgreSQL 函数、正则运算符或
 `RETURNING`。
 JSON 字段仍只接受受信 Repository 产生的无密钥对象；`secret_ref` 是唯一可以持久化的
@@ -94,6 +96,11 @@ JSON 字段仍只接受受信 Repository 产生的无密钥对象；`secret_ref`
 - 完整配置替换先执行领域 `Prepare*Change`，再锁定 Profile 行并比较版本。
 - Backend binding 使用单独表，替换时在同一事务删除旧集合、插入新集合并写 Outbox；读取
   后重新通过受信 Provider Catalog 校验，不能把未知 provider 带入执行快照。
+- MySQL 没有 PostgreSQL 的 deferred constraint trigger；因此 Backend `Create` 在同一
+  事务内先以 `disabled` 写入根行，再写入完整 binding 集合，最后切到请求状态。这个
+  是存储引擎内部的 provisioning 顺序，Repository 返回的状态、版本、Outbox 事件和
+  非法迁移结果仍与 PostgreSQL 契约一致；绕过 Repository 的直接 DML 不属于受支持的
+  控制面写入口，应用账号也不拥有 schema DDL 权限。
 
 ### Channel Binding
 
@@ -134,8 +141,10 @@ forward-only、幂等且可恢复的，不能承诺通过用户 `ROLLBACK` 撤�
 Change Outbox 表，并保留 `runtime_*`/audit 表所需的同租户复合键形状。表和索引使用
 `utf8mb4`、`utf8mb4_bin`、InnoDB；`tenant_id`、各类 `*_id`、`*_key`、
 `provider_account_id`、route digest 和所有参与唯一键/外键/精确查找的列在列级固定该 binary
-collation（不得依赖服务器默认的 `utf8mb4_0900_ai_ci`）。外键显式包含 `tenant_id`。迁移账号、控制面写账号和运行时读账号
-分离，应用连接不拥有任意 schema DDL 权限。
+collation（不得依赖服务器默认的 `utf8mb4_0900_ai_ci`）。外键显式包含 `tenant_id`。迁移账号与
+应用/运行时账号分离；应用连接不拥有任意 schema DDL 权限。运行时
+Session/Memory/Knowledge/Artifact 仍不在本 Issue 的 MySQL 适配范围内，不能把控制面
+应用账号误当作这些运行时存储的迁移账号。
 
 本方案不依赖 MySQL 存储例程的 `SQL SECURITY DEFINER` 边界，而是由三层共同保证：
 
@@ -149,10 +158,10 @@ collation（不得依赖服务器默认的 `utf8mb4_0900_ai_ci`）。外键显�
 | --- | --- |
 | 契约 | 五类 MySQL Repository 编译实现领域接口，零值、nil DB、取消和错误分类测试 |
 | SQL 单元 | `sqlmock` 覆盖 `?` 参数、事务提交/回滚、版本冲突、重复键、跨租户谓词和防御性副本 |
-| Migration | `MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN` 指向干净 MySQL 8 服务，执行全量 migration、Verify、摘要不匹配、DDL 后失败/重启恢复和大小写变体 |
-| Repository 集成 | `MYSQL_CONTROL_PLANE_TEST_DSN` 执行五类 Repository 的创建、更新、发布/回滚、生命周期、候选消费、双租户隔离和大小写敏感身份 |
-| 并发/race | MySQL 服务上的 optimistic-lock、同 App revision、候选消费和 Context 取消测试；本地继续运行 `go test -race ./...` |
-| Bootstrap | `TRPC_CONTROL_PLANE_DRIVER=mysql` 选择 MySQL；双 DSN 账号分离、权限校验、未知驱动、缺 DSN、迁移失败和重启 rediscovery 均 fail-closed |
+| Migration | `MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN` 使用 migration 账号指向干净 MySQL 8 服务，执行全量 migration、Verify、重启 Verify；摘要/大小写/DDL 后失败恢复由 sqlmock 契约覆盖 |
+| Repository 集成 | `MYSQL_CONTROL_PLANE_TEST_DSN` 使用仅 DML 的应用账号执行五类 Repository 的创建、更新、发布、Backend 生命周期、候选消费和双租户隔离；migration 账号通过独立 DSN 完成该数据库初始化 |
+| 并发/race | `go test -race ./...` 在 CI 的 MySQL 8 服务上运行 live smoke 与 SQL 契约测试；optimistic-lock、同 App revision、候选消费和 Context 取消由 Repository 单测覆盖 |
+| Bootstrap | `TRPC_CONTROL_PLANE_DRIVER=mysql` 选择 MySQL；双 DSN 账号分离、权限校验、未知驱动、缺 DSN、迁移失败和重启 rediscovery 由 Bootstrap/sqlmock 契约 fail-closed，live job 验证受限应用账号可运行 Repository |
 
 未设置 MySQL DSN 时，live 测试必须显式 `Skip`，不能把 skip 记为 MySQL 证据。CI 提供
 独立 MySQL 8 服务运行 migration、Repository 和 race smoke；PostgreSQL 现有 job 不变。
@@ -165,4 +174,13 @@ collation（不得依赖服务器默认的 `utf8mb4_0900_ai_ci`）。外键显�
 | 事务、乐观锁、生命周期、Outbox 和租户隔离语义 | 已完成：事务/复合键/候选消费集成验证 |
 | MySQL migration、摘要校验、权限和重启恢复 | 已完成：`migrations/mysql.go` 与 MySQL 8 migration |
 | Bootstrap 驱动选择与错误脱敏 | 已完成：`TRPC_CONTROL_PLANE_DRIVER` 与 fail-closed 测试 |
-| MySQL unit/integration/race 测试及 CI 服务 | 已完成：sqlmock、live Skip、race 与 CI MySQL 8 service |
+| MySQL unit/integration/race 测试及 CI 服务 | 已完成：sqlmock 失败/恢复契约、MySQL 8 live migration/repository smoke、双账号权限初始化与 race job；未配置服务时 live 测试显式 Skip |
+
+## Issue #81、README 与验收对照
+
+| GitHub Issue #81 验收项 | README 对应项 | 当前证据 |
+| --- | --- | --- |
+| Tenant、Agent、Model、Backend、Channel Repository 支持 MySQL | 多租户控制面中的 MySQL Repository 条目 | 五个 `trpcservice/*/mysql` 包、接口编译断言、sqlmock 与 CI live smoke |
+| 事务、乐观锁、生命周期、租户隔离与 PostgreSQL 契约一致 | 控制面隔离/并发/生命周期条目 | 共享领域校验、复合键/显式租户谓词、Repository 单测；MySQL Backend 的 disabled provisioning 仅是引擎内部顺序 |
+| Migration、restart、race 运行在 MySQL 服务 | CI 与测试清单 | CI 两个 MySQL 8 服务、migration/repository 双账号、重启 Verify 与 `go test -race ./...` |
+| Bootstrap 选择适配器且不泄露 Secret/API | Bootstrap、readiness 和错误脱敏条目 | 双 DSN、应用权限/身份校验、fail-closed 路径与错误脱敏测试 |
