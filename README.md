@@ -197,9 +197,9 @@
 - [ ] 实现 IM 用户权限校验、敏感信息脱敏和租户级预算控制
 - [x] 实现包含 README 指定字段的不可篡改审计日志（Issue #54/#55）
 - [x] 接入运行时 OpenTelemetry tracing、metrics 和结构化日志（Issue #45 阶段 A）
-- [x] 串联 HTTP/IM callback、Gateway、Runner、Model、Tool、Storage 和 IM reply 的 trace（Issue #79）
-- [x] 采集请求量、延迟、错误率、IM 成功率、token、成本和后端延迟指标（Issue #79）
-- [x] 提供租户授权 dashboard、告警规则并控制指标 label 基数（Issue #79）
+- [ ] 串联 HTTP/IM callback、Gateway、Runner、Model、Tool、Storage 和 IM reply 的 trace（Issue #79；含流式模型调用、创建流失败和 WeCom context 继承）
+- [ ] 采集请求量、延迟、终态错误率、IM 成功/重试/死信、token、成本和实际 Session/Storage 后端延迟指标（Issue #79）
+- [ ] 提供通过授权 query adapter 的租户 dashboard、告警规则并控制 provider/channel/model label 基数（Issue #79）
 
 ### 可靠性、运维与测试
 
