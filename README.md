@@ -327,7 +327,7 @@ cd trpc-agent-service
 `TRPC_MYSQL_DSN` 和迁移账号 `TRPC_MYSQL_MIGRATION_DSN`，Bootstrap 会在绑定 HTTP
 端口前完成迁移、schema 和权限校验。迁移账号需要目标数据库的 DDL 权限；应用账号只
 授予控制面 14 张表各自完整的表级 `SELECT/INSERT/UPDATE/DELETE`（缺失任何一项也会拒绝），
-不授予额外表、全局、schema、列级或 routine/`EXECUTE` 权限，也不授予
+不授予额外表、全局、schema、列级、routine/`EXECUTE` 或 `PROXY` 权限，也不授予
 `CREATE/ALTER/DROP/TRIGGER` 等 DDL 权限。两个 DSN 必须实际登录为不同 MySQL 账号并指向
 同一个数据库；Bootstrap 会拒绝超出白名单的直接/角色权限、启用角色权限或 grant option。
 
