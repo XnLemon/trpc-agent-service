@@ -96,8 +96,8 @@ BEGIN
     UPDATE public.agent_app SET canary_revision = p_candidate_revision, version = p_app_version, updated_at = p_app_updated_at
       WHERE tenant_id = p_tenant_id AND app_id = p_app_id AND version = p_expected_app_version;
     IF NOT FOUND THEN RAISE EXCEPTION 'agent app version conflict'; END IF;
-    INSERT INTO public.agent_app_change_outbox(event_type, tenant_id, app_id, previous_revision, current_revision, content_digest, actor_type, actor_id, reason, correlation_id, previous_version, next_version, occurred_at)
-      VALUES (p_event_type, p_tenant_id, p_app_id, p_previous_canary_revision, p_next_canary_revision, NULLIF(p_content_digest,''), public.trim_control_plane_text(p_actor_type), public.trim_control_plane_text(p_actor_id), public.trim_control_plane_text(p_reason), public.trim_control_plane_text(p_correlation_id), p_expected_app_version, p_app_version, p_app_updated_at)
+    INSERT INTO public.agent_app_change_outbox(event_type, tenant_id, app_id, previous_status, current_status, previous_revision, current_revision, content_digest, actor_type, actor_id, reason, correlation_id, previous_version, next_version, occurred_at)
+      VALUES (p_event_type, p_tenant_id, p_app_id, v_status, v_status, p_previous_canary_revision, p_next_canary_revision, NULLIF(p_content_digest,''), public.trim_control_plane_text(p_actor_type), public.trim_control_plane_text(p_actor_id), public.trim_control_plane_text(p_reason), public.trim_control_plane_text(p_correlation_id), p_expected_app_version, p_app_version, p_app_updated_at)
       RETURNING event_id INTO v_event_id;
     RETURN v_event_id;
 END;
