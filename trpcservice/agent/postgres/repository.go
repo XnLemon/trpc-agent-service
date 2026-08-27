@@ -478,7 +478,9 @@ func (r *AgentRepository) SetCanary(ctx context.Context, input agent.SetCanaryIn
 		return nil, agent.ChangeEvent{}, err
 	}
 	defer rollback(tx)
-	current, err := loadAgentApp(ctx, tx, input.TenantID, input.AppID, true)
+	// Keep the preflight read unlocked; the SECURITY DEFINER function acquires
+	// tenant and app together in the canonical order before writing.
+	current, err := loadAgentApp(ctx, tx, input.TenantID, input.AppID, false)
 	if err != nil {
 		return nil, agent.ChangeEvent{}, mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
 	}

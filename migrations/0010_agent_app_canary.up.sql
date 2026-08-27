@@ -75,12 +75,17 @@ AS $$
 DECLARE
     v_current BIGINT; v_version BIGINT; v_status TEXT; v_tenant_status TEXT; v_state TEXT; v_event_id BIGINT;
 BEGIN
-    SELECT app.current_revision, app.version, app.status, tenant.status
-      INTO v_current, v_version, v_status, v_tenant_status
-      FROM public.agent_app AS app
-      JOIN public.tenant AS tenant ON tenant.tenant_id = app.tenant_id
-      WHERE app.tenant_id = p_tenant_id AND app.app_id = p_app_id
-      FOR UPDATE OF app, tenant;
+    -- Lock rows in the same tenant-then-app order used by publication.
+    SELECT status INTO v_tenant_status
+      FROM public.tenant
+      WHERE tenant_id = p_tenant_id
+      FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'tenant does not exist'; END IF;
+    SELECT current_revision, version, status
+      INTO v_current, v_version, v_status
+      FROM public.agent_app
+      WHERE tenant_id = p_tenant_id AND app_id = p_app_id
+      FOR UPDATE;
     IF NOT FOUND THEN RAISE EXCEPTION 'agent app does not exist'; END IF;
     IF v_version <> p_expected_app_version THEN RAISE EXCEPTION 'agent app version conflict'; END IF;
     IF v_tenant_status <> 'active' THEN RAISE EXCEPTION 'tenant must be active'; END IF;

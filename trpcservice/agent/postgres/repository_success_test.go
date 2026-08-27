@@ -106,6 +106,11 @@ func TestAgentRepositoryRejectsInvalidInputsBeforeTransactions(t *testing.T) {
 	if _, _, err := repository.SetCanary(ctx, agent.SetCanaryInput{Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "canary"}}); !errors.Is(err, agent.ErrInvalid) {
 		t.Fatalf("SetCanary inactive tenant error = %v", err)
 	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := repository.SetCanary(canceled, agent.SetCanaryInput{Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "canary"}, TenantActive: true}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SetCanary canceled context error = %v", err)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
@@ -506,6 +511,7 @@ func TestAgentRepositorySetCanaryRejectsTransactionStates(t *testing.T) {
 		{name: "inactive app", app: func(app *agent.App) { app.Status = agent.StatusDraft; app.CurrentRevision = nil }, wantError: agent.ErrInvalid},
 		{name: "zero candidate", candidate: agentInt64(0), wantError: agent.ErrInvalid},
 		{name: "stable candidate", candidate: agentInt64(1), wantError: agent.ErrInvalid},
+		{name: "version conflict", wantError: agent.ErrConflict},
 		{name: "unchanged candidate", app: func(app *agent.App) { app.CanaryRevision = agentInt64(2) }, candidate: agentInt64(2), wantError: agent.ErrInvalid},
 		{name: "missing candidate", candidate: agentInt64(2), prepare: func(mock sqlmock.Sqlmock, app *agent.App) {
 			mock.ExpectQuery(".*").WithArgs(app.TenantID, app.AppID, int64(2)).WillReturnError(sql.ErrNoRows)
@@ -538,8 +544,12 @@ func TestAgentRepositorySetCanaryRejectsTransactionStates(t *testing.T) {
 				}
 			}
 			mock.ExpectRollback()
+			expectedVersion := app.Version
+			if tc.name == "version conflict" {
+				expectedVersion++
+			}
 			_, _, err = NewRepository(db).SetCanary(context.Background(), agent.SetCanaryInput{
-				TenantID: app.TenantID, AppID: app.AppID, CandidateRevision: tc.candidate, ExpectedAppVersion: app.Version, TenantActive: true,
+				TenantID: app.TenantID, AppID: app.AppID, CandidateRevision: tc.candidate, ExpectedAppVersion: expectedVersion, TenantActive: true,
 				Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "workflow", CorrelationID: "correlation"},
 			})
 			if !errors.Is(err, tc.wantError) {
