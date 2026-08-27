@@ -69,6 +69,79 @@ func TestLoadEnvironmentUsesTenantModelAPIKeysForMultipleIdentities(t *testing.T
 	}
 }
 
+func TestLoadEnvironmentUsesIdentityListForSingleFixedIdentity(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envAPIIdentities, "token-a|t_00000000000000000000000000|app_00000000000000000000000000|service-a")
+	t.Setenv(envAPIToken, "")
+	t.Setenv(envTenantID, "")
+	t.Setenv(envAppID, "")
+	config, err := loadEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.tenantID != "t_00000000000000000000000000" || config.appID != "app_00000000000000000000000000" {
+		t.Fatalf("single identity fixed fields = %q/%q", config.tenantID, config.appID)
+	}
+}
+
+func TestEnvironmentRegistriesKeepModelSecretsTenantScoped(t *testing.T) {
+	const (
+		tenantA = "t_00000000000000000000000000"
+		tenantB = "t_00000000000000000000000001"
+	)
+	delegate := inmemory.NewSessionService()
+	store := runtimestorageinmemory.New()
+	defer func() {
+		_ = delegate.Close()
+		_ = store.Close()
+	}()
+	config := environmentConfig{
+		apiIdentities: map[string]gateway.APIIdentity{
+			"token-a": {TenantID: tenantA, AppID: "app-a", SubjectID: "subject-a"},
+			"token-b": {TenantID: tenantB, AppID: "app-b", SubjectID: "subject-b"},
+		},
+		modelAPIKeys:  map[string]string{tenantA: "key-a", tenantB: "key-b"},
+		modelProvider: defaultModelProvider,
+		secretRef:     "env/model",
+	}
+	secrets, models, backends, err := environmentRegistries(config, delegate, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for tenantID, want := range map[string]string{tenantA: "key-a", tenantB: "key-b"} {
+		value, resolveErr := secrets.Resolve(context.Background(), modelprofile.SecretScope{TenantID: tenantID, SecretRef: config.secretRef})
+		if resolveErr != nil || value.Value() != want {
+			t.Fatalf("tenant %s model secret = %q, %v", tenantID, value.Value(), resolveErr)
+		}
+	}
+	modelSecret, err := secrets.Resolve(context.Background(), modelprofile.SecretScope{TenantID: tenantA, SecretRef: config.secretRef})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := models.New(context.Background(), modelprofile.ModelFactoryInput{TenantID: tenantA, Provider: defaultModelProvider, Model: "gpt-4o-mini"}, modelSecret); err != nil {
+		t.Fatalf("tenant model registry = %v", err)
+	}
+	if _, err := backend.NewRegistryStorageFactory(backends, secrets); err != nil {
+		t.Fatalf("tenant backend registry = %v", err)
+	}
+}
+
+func TestEnvironmentRegistriesRejectMissingTenantModelKey(t *testing.T) {
+	delegate := inmemory.NewSessionService()
+	store := runtimestorageinmemory.New()
+	defer func() {
+		_ = delegate.Close()
+		_ = store.Close()
+	}()
+	_, _, _, err := environmentRegistries(environmentConfig{
+		apiIdentities: map[string]gateway.APIIdentity{"token": {TenantID: "t_00000000000000000000000000", AppID: "app", SubjectID: "subject"}},
+		modelAPIKeys:  map[string]string{},
+	}, delegate, store)
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("missing tenant model key = %v", err)
+	}
+}
+
 func TestParseEnvironmentModelAPIKeysRejectsMalformedOrDuplicateEntries(t *testing.T) {
 	for _, value := range []string{"", ",", "tenant=", "=key", "tenant\n=key", "tenant=one,tenant=two"} {
 		if _, err := parseEnvironmentModelAPIKeys(value); !errors.Is(err, ErrInvalidConfig) {
