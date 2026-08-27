@@ -166,6 +166,23 @@ func TestCapabilitySetOwnsValuesAndAggregatesCloseFailures(t *testing.T) {
 	if _, ok := set.Capability(CapabilityMemory); ok {
 		t.Fatal("closed set exposed capability")
 	}
+	var nilSet *CapabilitySet
+	if value, ok := nilSet.Capability(CapabilitySession); value != nil || ok {
+		t.Fatalf("nil Capability() = %v, %v", value, ok)
+	}
+	if _, err := nilSet.Session(); !errors.Is(err, ErrCapabilityUnavailable) {
+		t.Fatalf("nil Session() = %v", err)
+	}
+	if err := nilSet.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wrongType, err := NewCapabilitySet(tenantID, map[Capability]any{CapabilitySession: struct{}{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wrongType.Session(); !errors.Is(err, ErrCapabilityUnavailable) {
+		t.Fatalf("wrong-type Session() = %v", err)
+	}
 }
 
 func TestRegistryStorageFactoryClosesEarlierCapabilityAndScopesSecrets(t *testing.T) {
@@ -229,6 +246,17 @@ func TestRegistryStorageFactoryValidationAndResolverFailures(t *testing.T) {
 	}
 	if _, err := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session", SecretRef: "missing"}}}); !errors.Is(err, ErrStorageFactory) {
 		t.Fatalf("missing secret New() = %v", err)
+	}
+	if _, err := factory.New(nil, StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session"}}}); !errors.Is(err, ErrStorageFactory) {
+		t.Fatalf("nil context New() = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := factory.New(canceled, StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session"}}}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled New() = %v", err)
+	}
+	if _, err := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{}}}); !errors.Is(err, ErrStorageFactory) {
+		t.Fatalf("invalid binding New() = %v", err)
 	}
 }
 

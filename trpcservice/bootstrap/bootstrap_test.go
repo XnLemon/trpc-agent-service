@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
@@ -24,6 +25,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	runtimeservice "github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
@@ -291,6 +293,43 @@ func TestBootstrapFailureAndLifecycleBoundaries(t *testing.T) {
 	if (&Runtime{}).Ready() {
 		t.Fatal("uninitialized runtime reported ready")
 	}
+}
+
+func TestBootstrapCoversConstructionFailureBoundaries(t *testing.T) {
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	config.RuntimeTenantID = "invalid"
+	config.Sessions = nil
+	if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("invalid runtime tenant configuration = %v", err)
+	}
+
+	config, closeDependencies = testConfig(t)
+	config.Registry.Factory = func(context.Context, runtimeservice.ExecutionPlan) (gateway.Runner, error) { return nil, nil }
+	config.HTTP.MaxBodyBytes = -1
+	if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalidConfig) {
+		closeDependencies()
+		t.Fatalf("invalid handler configuration = %v", err)
+	}
+	closeDependencies()
+
+	config, closeDependencies = testConfig(t)
+	config.WeComHandler = &bootstrapWeComLifecycle{}
+	config.WeComHandlerFactory = func(gateway.DispatchService) (http.Handler, error) { return nil, nil }
+	if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalidConfig) {
+		closeDependencies()
+		t.Fatalf("conflicting callback handlers = %v", err)
+	}
+	closeDependencies()
+
+	config, closeDependencies = testConfig(t)
+	config.AdminAuthenticator, _ = admin.NewStaticAuthenticator("admin", []string{"*"})
+	config.Channels = candidateOnly{}
+	if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalidConfig) {
+		closeDependencies()
+		t.Fatalf("non-repository admin channel dependency = %v", err)
+	}
+	closeDependencies()
 }
 
 func TestNewUnavailableUsesRealGraphButReturns503(t *testing.T) {
@@ -885,6 +924,8 @@ type bootstrapBlockingProvider struct {
 	canceled chan struct{}
 	once     sync.Once
 }
+
+type candidateOnly struct{ channels.CandidateConsumer }
 
 func createBootstrapTenantExecutionState(
 	t *testing.T,

@@ -93,6 +93,26 @@ func TestSecretRegistryRegistrationAndRemovalBoundaries(t *testing.T) {
 	}
 }
 
+func TestSecretRegistryNilAndIdempotentCloseBoundaries(t *testing.T) {
+	var nilRegistry *SecretRegistry
+	if err := nilRegistry.Remove(SecretScope{TenantID: registryTenant, SecretRef: "secret/model"}); !errors.Is(err, ErrSecretUnavailable) {
+		t.Fatalf("nil Remove() = %v", err)
+	}
+	registry := NewSecretRegistry()
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := nilRegistry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Remove(SecretScope{TenantID: registryTenant}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid Remove() = %v", err)
+	}
+}
+
 func TestModelProviderRegistryScopesAndClonesInput(t *testing.T) {
 	registry := NewModelProviderRegistry()
 	factory := &registryModelFactory{}
@@ -157,6 +177,16 @@ func TestModelProviderRegistryFailureAndLifecycleBoundaries(t *testing.T) {
 	if _, err := registry.New(context.Background(), input, secret); !errors.Is(err, ErrProviderUnavailable) {
 		t.Fatalf("factory failure New() = %v", err)
 	}
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	if err := registry.Register(registryTenant, "cancel", modelFactoryFunc(func(context.Context, ModelFactoryInput, SecretValue) (trpcmodel.Model, error) {
+		cancel()
+		return nil, errors.New("provider detail")
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.New(cancelCtx, ModelFactoryInput{TenantID: registryTenant, Provider: "cancel", Model: "chat"}, secret); !errors.Is(err, context.Canceled) {
+		t.Fatalf("factory cancellation error = %v", err)
+	}
 	if err := registry.Register(registryTenant, "fake", modelFactoryFunc(func(context.Context, ModelFactoryInput, SecretValue) (trpcmodel.Model, error) {
 		return nil, nil
 	})); err != nil {
@@ -174,12 +204,32 @@ func TestModelProviderRegistryFailureAndLifecycleBoundaries(t *testing.T) {
 	if err := registry.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if err := registry.Register(registryTenant, "fake", &registryModelFactory{}); !errors.Is(err, ErrRegistryClosed) {
+		t.Fatalf("closed Register() = %v", err)
+	}
 	if err := registry.Remove(registryTenant, "fake"); !errors.Is(err, ErrRegistryClosed) {
 		t.Fatalf("closed Remove() = %v", err)
 	}
 	var nilRegistry *ModelProviderRegistry
+	if _, err := registry.New(nil, input, secret); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil context New() = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := registry.New(canceled, input, secret); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled New() = %v", err)
+	}
 	if _, err := nilRegistry.New(context.Background(), input, secret); !errors.Is(err, ErrProviderUnavailable) {
 		t.Fatalf("nil registry New() = %v", err)
+	}
+	if err := registry.Remove("", "fake"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid Remove() = %v", err)
+	}
+	if err := nilRegistry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

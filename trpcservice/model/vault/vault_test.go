@@ -95,6 +95,13 @@ func TestManagerReadFailureBoundaries(t *testing.T) {
 	if _, err := manager.Read(canceled, validScope); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled Read() = %v", err)
 	}
+	var nilManager *Manager
+	if _, err := nilManager.Read(context.Background(), validScope); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("nil manager Read() = %v", err)
+	}
+	if _, err := (&Manager{baseURL: "https://bad\nurl", mount: "secret", client: http.DefaultClient}).Read(context.Background(), validScope); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("invalid request URL Read() = %v", err)
+	}
 }
 
 func TestManagerNewValidationBoundaries(t *testing.T) {

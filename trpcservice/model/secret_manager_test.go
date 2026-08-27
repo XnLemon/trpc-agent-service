@@ -75,6 +75,22 @@ func TestSecretManagerResolverMapsManagerFailureAndLateCancellation(t *testing.T
 	}
 }
 
+func TestSecretManagerResolverNilBoundaries(t *testing.T) {
+	resolver, err := NewSecretManagerResolver(secretManagerFunc(func(context.Context, SecretScope) (SecretValue, error) {
+		return NewSecretValue("value")
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Resolve(nil, SecretScope{TenantID: registryTenant, SecretRef: "secret/manager"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil context Resolve() = %v", err)
+	}
+	var nilResolver *SecretManagerResolver
+	if _, err := nilResolver.Resolve(context.Background(), SecretScope{TenantID: registryTenant, SecretRef: "secret/manager"}); !errors.Is(err, ErrSecretUnavailable) {
+		t.Fatalf("nil resolver Resolve() = %v", err)
+	}
+}
+
 type secretManagerFunc func(context.Context, SecretScope) (SecretValue, error)
 
 func (function secretManagerFunc) Read(ctx context.Context, scope SecretScope) (SecretValue, error) {

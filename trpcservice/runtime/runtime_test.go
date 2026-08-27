@@ -216,6 +216,12 @@ func TestNewRunnerValidatesAndClosesStorageCapabilities(t *testing.T) {
 	if closed.calls != 1 {
 		t.Fatalf("storage capability close calls = %d", closed.calls)
 	}
+	missingSession := backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+		return backend.NewCapabilitySet(fixture.root.TenantID, map[backend.Capability]any{backend.CapabilityMemory: struct{}{}})
+	})
+	if _, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{}, nil, missingSession); err == nil || !strings.Contains(err.Error(), "session capability") {
+		t.Fatalf("missing session capability error = %v", err)
+	}
 }
 
 func TestPolicyRunnerCloseReleasesDelegateAndCapabilities(t *testing.T) {
@@ -231,6 +237,10 @@ func TestPolicyRunnerCloseReleasesDelegateAndCapabilities(t *testing.T) {
 	}
 	if delegate.calls != 1 || capability.calls != 1 {
 		t.Fatalf("close calls delegate=%d capability=%d", delegate.calls, capability.calls)
+	}
+	var nilRunner *policyRunner
+	if err := nilRunner.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -463,6 +463,18 @@ func TestRunnerRegistryInvalidationWrappersAndPredicateBoundaries(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := registry.InvalidateTenant("other-tenant"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.InvalidateApp("other-tenant", "other-app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.InvalidateModelProfile("other-tenant", "other-model"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.InvalidateBackendProfile("other-tenant", "other-backend"); err != nil {
+		t.Fatal(err)
+	}
 	key, err := plan.CacheKey()
 	if err != nil {
 		t.Fatal(err)
@@ -482,6 +494,10 @@ func TestRunnerRegistryInvalidationWrappersAndPredicateBoundaries(t *testing.T) 
 	var nilRegistry *RunnerRegistry
 	if err := nilRegistry.InvalidateMatching(func(runtime.CacheKey) bool { return true }); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("nil registry matching = %v", err)
+	}
+	var nilLease *RunnerLease
+	if nilLease.Runner() != nil || nilLease.Release() != nil {
+		t.Fatal("nil lease boundary was not harmless")
 	}
 }
 
@@ -506,6 +522,18 @@ func TestRuntimeRunnerRegistryWiresBorrowedDependencies(t *testing.T) {
 		t.Fatal("runtime registry is not ready")
 	}
 	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storageRegistry, err := NewRuntimeRunnerRegistry(RuntimeRunnerRegistryConfig{
+		ModelFactory: stage2ModelFactory{},
+		StorageFactory: backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+			return nil, backend.ErrStorageFactory
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storageRegistry.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -583,6 +611,53 @@ func TestRunnerRegistryFactoryAndPendingCancellationEdges(t *testing.T) {
 	}
 	close(release)
 	lease := <-first
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunnerRegistryInvalidatesPendingBuildAndRetries(t *testing.T) {
+	plan := testExecutionPlan(t)
+	key, err := plan.CacheKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(ctx context.Context, _ runtime.ExecutionPlan) (Runner, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return &testRunner{}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = registry.Close() }()
+	result := make(chan *RunnerLease, 1)
+	go func() {
+		lease, acquireErr := registry.Acquire(context.Background(), plan)
+		if acquireErr != nil {
+			t.Errorf("Acquire() = %v", acquireErr)
+			return
+		}
+		result <- lease
+	}()
+	<-started
+	if err := registry.Invalidate(key); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	lease := <-result
+	if calls.Load() != 2 {
+		t.Fatalf("invalidated pending build calls = %d, want 2", calls.Load())
+	}
 	if err := lease.Release(); err != nil {
 		t.Fatal(err)
 	}

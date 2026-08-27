@@ -63,6 +63,15 @@ func TestProviderRegistryRemovalAndValidationBoundaries(t *testing.T) {
 		t.Fatalf("empty tenant Remove() = %v", err)
 	}
 	var nilRegistry *ProviderRegistry
+	if _, err := registry.Resolve(nil, input, binding); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil context Resolve() = %v", err)
+	}
+	if err := registry.Register(tenantID, CapabilitySession, "memory", nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil provider Register() = %v", err)
+	}
+	if err := registry.Register(tenantID, "", "memory", &registryCapabilityProvider{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty capability Register() = %v", err)
+	}
 	if _, err := nilRegistry.Resolve(context.Background(), input, binding); !errors.Is(err, ErrProviderUnavailable) {
 		t.Fatalf("nil registry Resolve() = %v", err)
 	}

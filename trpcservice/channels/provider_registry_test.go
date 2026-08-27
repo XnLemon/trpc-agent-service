@@ -71,6 +71,12 @@ func TestProviderRegistryRemovalAndValidationBoundaries(t *testing.T) {
 		t.Fatalf("closed Remove() = %v", err)
 	}
 	var nilRegistry *ProviderRegistry
+	if _, err := registry.Resolve(nil, Binding{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil context Resolve() = %v", err)
+	}
+	if _, err := registry.Resolve(context.Background(), Binding{}); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("invalid binding Resolve() = %v", err)
+	}
 	if _, err := nilRegistry.Resolve(context.Background(), Binding{}); !errors.Is(err, ErrProviderUnavailable) {
 		t.Fatalf("nil registry Resolve() = %v", err)
 	}
