@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 )
 
+// PutMemory implements the tenant-scoped runtime storage contract.
 func (s *Store) PutMemory(ctx context.Context, input runtimestorage.MemoryInput) (runtimestorage.MemoryRecord, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.MemoryRecord{}, err
@@ -45,6 +46,7 @@ func (s *Store) PutMemory(ctx context.Context, input runtimestorage.MemoryInput)
 	return cloneMemory(value), s.enqueueIndexLocked(value)
 }
 
+// GetMemory implements the tenant-scoped runtime storage contract.
 func (s *Store) GetMemory(ctx context.Context, tenantID, memoryID string) (runtimestorage.MemoryRecord, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.MemoryRecord{}, err
@@ -61,6 +63,7 @@ func (s *Store) GetMemory(ctx context.Context, tenantID, memoryID string) (runti
 	return cloneMemory(value), nil
 }
 
+// ListMemories implements the tenant-scoped runtime storage contract.
 func (s *Store) ListMemories(ctx context.Context, tenantID, userID string, limit int) ([]runtimestorage.MemoryRecord, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
@@ -88,6 +91,7 @@ func (s *Store) ListMemories(ctx context.Context, tenantID, userID string, limit
 	return values, nil
 }
 
+// SearchMemories implements the tenant-scoped runtime storage contract.
 func (s *Store) SearchMemories(ctx context.Context, tenantID, userID, query string, limit int) ([]runtimestorage.MemorySearchResult, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
@@ -126,6 +130,7 @@ func (s *Store) SearchMemories(ctx context.Context, tenantID, userID, query stri
 	return values, nil
 }
 
+// DeleteMemory implements the tenant-scoped runtime storage contract.
 func (s *Store) DeleteMemory(ctx context.Context, tenantID, memoryID string) error {
 	if err := check(ctx); err != nil {
 		return err
@@ -147,6 +152,7 @@ func (s *Store) DeleteMemory(ctx context.Context, tenantID, memoryID string) err
 	return nil
 }
 
+// EnqueueMemoryIndex implements the tenant-scoped runtime storage contract.
 func (s *Store) EnqueueMemoryIndex(ctx context.Context, value runtimestorage.MemoryRecord) error {
 	if err := check(ctx); err != nil {
 		return err
@@ -232,6 +238,7 @@ func (s *Store) indexWorker() {
 	}
 }
 
+// PutSummary implements the tenant-scoped runtime storage contract.
 func (s *Store) PutSummary(ctx context.Context, value runtimestorage.SummaryRecord) (runtimestorage.SummaryRecord, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.SummaryRecord{}, err
@@ -257,6 +264,8 @@ func (s *Store) PutSummary(ctx context.Context, value runtimestorage.SummaryReco
 	s.summaries[k] = value
 	return value, nil
 }
+
+// GetSummary implements the tenant-scoped runtime storage contract.
 func (s *Store) GetSummary(ctx context.Context, tenantID, sessionID, filterKey string) (runtimestorage.SummaryRecord, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.SummaryRecord{}, err
@@ -272,11 +281,14 @@ func (s *Store) GetSummary(ctx context.Context, tenantID, sessionID, filterKey s
 	}
 	return value, nil
 }
+
+// EnqueueSummary implements the tenant-scoped runtime storage contract.
 func (s *Store) EnqueueSummary(ctx context.Context, value runtimestorage.SummaryRecord) error {
 	_, err := s.PutSummary(ctx, value)
 	return err
 }
 
+// PutKnowledge implements the tenant-scoped runtime storage contract.
 func (s *Store) PutKnowledge(ctx context.Context, value runtimestorage.KnowledgeDocument) (runtimestorage.KnowledgeDocument, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.KnowledgeDocument{}, err
@@ -310,6 +322,8 @@ func (s *Store) PutKnowledge(ctx context.Context, value runtimestorage.Knowledge
 	}
 	return cloneKnowledge(value), nil
 }
+
+// GetKnowledge implements the tenant-scoped runtime storage contract.
 func (s *Store) GetKnowledge(ctx context.Context, tenantID, documentID string) (runtimestorage.KnowledgeDocument, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.KnowledgeDocument{}, err
@@ -325,6 +339,8 @@ func (s *Store) GetKnowledge(ctx context.Context, tenantID, documentID string) (
 	}
 	return cloneKnowledge(value), nil
 }
+
+// SearchKnowledge implements the tenant-scoped runtime storage contract.
 func (s *Store) SearchKnowledge(ctx context.Context, tenantID string, embedding []float64, limit int) ([]runtimestorage.KnowledgeSearchResult, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
@@ -355,6 +371,8 @@ func (s *Store) SearchKnowledge(ctx context.Context, tenantID string, embedding 
 	}
 	return values, nil
 }
+
+// DeleteKnowledge implements the tenant-scoped runtime storage contract.
 func (s *Store) DeleteKnowledge(ctx context.Context, tenantID, documentID string) error {
 	if err := check(ctx); err != nil {
 		return err
@@ -373,6 +391,7 @@ func (s *Store) DeleteKnowledge(ctx context.Context, tenantID, documentID string
 	return nil
 }
 
+// PutArtifact implements the tenant-scoped runtime storage contract.
 func (s *Store) PutArtifact(ctx context.Context, value runtimestorage.ArtifactRecord) (runtimestorage.ArtifactRecord, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ArtifactRecord{}, err
@@ -392,6 +411,8 @@ func (s *Store) PutArtifact(ctx context.Context, value runtimestorage.ArtifactRe
 	s.artifacts[k] = value
 	return cloneArtifact(value), nil
 }
+
+// GetArtifact implements the tenant-scoped runtime storage contract.
 func (s *Store) GetArtifact(ctx context.Context, tenantID, artifactID string) (runtimestorage.ArtifactRecord, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ArtifactRecord{}, err
@@ -407,6 +428,8 @@ func (s *Store) GetArtifact(ctx context.Context, tenantID, artifactID string) (r
 	}
 	return cloneArtifact(value), nil
 }
+
+// ListArtifacts implements the tenant-scoped runtime storage contract.
 func (s *Store) ListArtifacts(ctx context.Context, tenantID, sessionID string) ([]runtimestorage.ArtifactRecord, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
@@ -425,6 +448,8 @@ func (s *Store) ListArtifacts(ctx context.Context, tenantID, sessionID string) (
 	sort.Slice(values, func(i, j int) bool { return values[i].ArtifactID < values[j].ArtifactID })
 	return values, nil
 }
+
+// DeleteArtifact implements the tenant-scoped runtime storage contract.
 func (s *Store) DeleteArtifact(ctx context.Context, tenantID, artifactID string) error {
 	if err := check(ctx); err != nil {
 		return err
@@ -442,6 +467,7 @@ func (s *Store) DeleteArtifact(ctx context.Context, tenantID, artifactID string)
 	return nil
 }
 
+// AppendAudit implements the tenant-scoped runtime storage contract.
 func (s *Store) AppendAudit(ctx context.Context, value runtimestorage.AuditRecord) (runtimestorage.AuditRecord, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.AuditRecord{}, err
@@ -473,6 +499,8 @@ func (s *Store) AppendAudit(ctx context.Context, value runtimestorage.AuditRecor
 	s.audits[value.TenantID] = append(rows, value)
 	return cloneAudit(value), nil
 }
+
+// ListAudit implements the tenant-scoped runtime storage contract.
 func (s *Store) ListAudit(ctx context.Context, tenantID string, since time.Time, limit int) ([]runtimestorage.AuditRecord, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
@@ -500,6 +528,7 @@ func (s *Store) ListAudit(ctx context.Context, tenantID string, since time.Time,
 	return values, nil
 }
 
+// UpsertVector implements the tenant-scoped runtime storage contract.
 func (s *Store) UpsertVector(ctx context.Context, value runtimestorage.VectorRecord) error {
 	if err := check(ctx); err != nil {
 		return err
@@ -522,6 +551,8 @@ func (s *Store) UpsertVector(ctx context.Context, value runtimestorage.VectorRec
 	s.vectors[key(value.TenantID, value.DocumentID)] = value
 	return nil
 }
+
+// SearchVectors implements the tenant-scoped runtime storage contract.
 func (s *Store) SearchVectors(ctx context.Context, tenantID string, embedding []float64, limit int) ([]runtimestorage.VectorSearchResult, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
@@ -552,6 +583,8 @@ func (s *Store) SearchVectors(ctx context.Context, tenantID string, embedding []
 	}
 	return values, nil
 }
+
+// DeleteVector implements the tenant-scoped runtime storage contract.
 func (s *Store) DeleteVector(ctx context.Context, tenantID, documentID string) error {
 	if err := check(ctx); err != nil {
 		return err
@@ -569,6 +602,7 @@ func (s *Store) DeleteVector(ctx context.Context, tenantID, documentID string) e
 	return nil
 }
 
+// PutObject implements the tenant-scoped runtime storage contract.
 func (s *Store) PutObject(ctx context.Context, tenantID, objectKey string, content io.Reader, contentType string) (runtimestorage.ObjectInfo, error) {
 	if err := check(ctx); err != nil {
 		return runtimestorage.ObjectInfo{}, err
@@ -591,6 +625,8 @@ func (s *Store) PutObject(ctx context.Context, tenantID, objectKey string, conte
 	s.objectData[k], s.objects[k] = append([]byte(nil), data...), value
 	return value, nil
 }
+
+// GetObject implements the tenant-scoped runtime storage contract.
 func (s *Store) GetObject(ctx context.Context, tenantID, objectKey string) (io.ReadCloser, runtimestorage.ObjectInfo, error) {
 	if err := check(ctx); err != nil {
 		return nil, runtimestorage.ObjectInfo{}, err
@@ -607,6 +643,8 @@ func (s *Store) GetObject(ctx context.Context, tenantID, objectKey string) (io.R
 	}
 	return io.NopCloser(bytes.NewReader(data)), value, nil
 }
+
+// DeleteObject implements the tenant-scoped runtime storage contract.
 func (s *Store) DeleteObject(ctx context.Context, tenantID, objectKey string) error {
 	if err := check(ctx); err != nil {
 		return err

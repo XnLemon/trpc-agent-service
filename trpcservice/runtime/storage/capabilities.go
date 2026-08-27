@@ -194,14 +194,29 @@ type RuntimeCapabilities interface {
 	ObjectStore
 }
 
-// Repository aliases keep the contract discoverable for callers that use the
-// repository naming convention used by the control plane.
+// SessionStore is the tenant-scoped session runtime contract.
 type SessionStore = RuntimeStore
+
+// SessionRepository is the repository naming alias for SessionStore.
 type SessionRepository = RuntimeStore
+
+// MemoryRepository is the repository naming alias for MemoryStore.
 type MemoryRepository = MemoryStore
+
+// SummaryRepository is the repository naming alias for SummaryStore.
 type SummaryRepository = SummaryStore
+
+// KnowledgeRepository is the repository naming alias for KnowledgeStore.
 type KnowledgeRepository = KnowledgeStore
+
+// ArtifactRepository is the repository naming alias for ArtifactStore.
 type ArtifactRepository = ArtifactStore
+
+// AuditRepository is the repository naming alias for AuditStore.
 type AuditRepository = AuditStore
+
+// VectorRepository is the repository naming alias for VectorStore.
 type VectorRepository = VectorStore
+
+// ObjectRepository is the repository naming alias for ObjectStore.
 type ObjectRepository = ObjectStore
