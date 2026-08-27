@@ -103,8 +103,9 @@ jobs:
       POSTGRES_MIGRATION_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5432/trpc_agent_migration_test?sslmode=disable
       POSTGRES_REPOSITORY_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5433/trpc_agent_repository_test?sslmode=disable
       POSTGRES_INIT_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5434/trpc_agent_init_test?sslmode=disable
-      MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN: root:mysql@tcp(127.0.0.1:3306)/trpc_agent_mysql_migration_test?parseTime=true&loc=UTC
-      MYSQL_CONTROL_PLANE_TEST_DSN: root:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
+      MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN: trpc_migration:mysql@tcp(127.0.0.1:3306)/trpc_agent_mysql_migration_test?parseTime=true&loc=UTC
+      MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN: trpc_migration:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
+      MYSQL_CONTROL_PLANE_TEST_DSN: trpc_app:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -113,6 +114,21 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Provision MySQL migration and application accounts
+        run: |
+          mysql --protocol=tcp -h 127.0.0.1 -P 3306 -uroot -pmysql -e "
+            CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
+            CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
+            GRANT ALL PRIVILEGES ON trpc_agent_mysql_migration_test.* TO 'trpc_migration'@'%';
+            GRANT SELECT, INSERT, UPDATE, DELETE ON trpc_agent_mysql_migration_test.* TO 'trpc_app'@'%';
+            FLUSH PRIVILEGES;"
+          mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "
+            CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
+            CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
+            GRANT ALL PRIVILEGES ON trpc_agent_mysql_repository_test.* TO 'trpc_migration'@'%';
+            GRANT SELECT, INSERT, UPDATE, DELETE ON trpc_agent_mysql_repository_test.* TO 'trpc_app'@'%';
+            FLUSH PRIVILEGES;"
 
       - name: Build
         run: ./scripts/build.sh
@@ -198,8 +214,9 @@ jobs:
       POSTGRES_MIGRATION_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5432/trpc_agent_migration_test?sslmode=disable
       POSTGRES_REPOSITORY_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5433/trpc_agent_repository_test?sslmode=disable
       POSTGRES_INIT_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5434/trpc_agent_init_test?sslmode=disable
-      MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN: root:mysql@tcp(127.0.0.1:3306)/trpc_agent_mysql_migration_test?parseTime=true&loc=UTC
-      MYSQL_CONTROL_PLANE_TEST_DSN: root:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
+      MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN: trpc_migration:mysql@tcp(127.0.0.1:3306)/trpc_agent_mysql_migration_test?parseTime=true&loc=UTC
+      MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN: trpc_migration:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
+      MYSQL_CONTROL_PLANE_TEST_DSN: trpc_app:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -208,6 +225,21 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Provision MySQL migration and application accounts
+        run: |
+          mysql --protocol=tcp -h 127.0.0.1 -P 3306 -uroot -pmysql -e "
+            CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
+            CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
+            GRANT ALL PRIVILEGES ON trpc_agent_mysql_migration_test.* TO 'trpc_migration'@'%';
+            GRANT SELECT, INSERT, UPDATE, DELETE ON trpc_agent_mysql_migration_test.* TO 'trpc_app'@'%';
+            FLUSH PRIVILEGES;"
+          mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "
+            CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
+            CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
+            GRANT ALL PRIVILEGES ON trpc_agent_mysql_repository_test.* TO 'trpc_migration'@'%';
+            GRANT SELECT, INSERT, UPDATE, DELETE ON trpc_agent_mysql_repository_test.* TO 'trpc_app'@'%';
+            FLUSH PRIVILEGES;"
 
       - name: Race test
         run: ./scripts/race.sh

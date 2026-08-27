@@ -29,8 +29,12 @@ func TestMySQLControlPlaneRepositoriesLive(t *testing.T) {
 	if dsn == "" {
 		t.Skip("MYSQL_CONTROL_PLANE_TEST_DSN is not configured")
 	}
+	migrationDSN := os.Getenv("MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN")
+	if migrationDSN == "" {
+		t.Skip("MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN is not configured")
+	}
 	ctx := context.Background()
-	db := openMySQLControlPlaneTestDB(t, ctx, dsn)
+	db := openMySQLControlPlaneTestDB(t, ctx, dsn, migrationDSN)
 	defer func() { _ = db.Close() }()
 
 	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -41,7 +45,36 @@ func TestMySQLControlPlaneRepositoriesLive(t *testing.T) {
 		t.Fatalf("cross-tenant model read = %v", err)
 	}
 
-	createMySQLTestBackend(t, ctx, db, first.TenantID, suffix)
+	backendProfile := createMySQLTestBackend(t, ctx, db, first.TenantID, suffix)
+	backendRepo := backendmysql.NewRepository(db, testMySQLBackendCatalog(t))
+	updatedBackend, _, err := backendRepo.UpdateConfiguration(ctx, backend.UpdateConfigurationInput{
+		TenantID: first.TenantID, ProfileID: backendProfile.ProfileID, ExpectedVersion: backendProfile.Version,
+		DisplayName: "Updated", Description: backendProfile.Description, SchemaVersion: backendProfile.SchemaVersion,
+		Bindings: backendProfile.Bindings,
+		Metadata: backend.ChangeMetadata{ActorType: "test", ActorID: "integration", Reason: "update", CorrelationID: suffix + "-update"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	suspendedBackend, _, err := backendRepo.TransitionStatus(ctx, backend.TransitionStatusInput{
+		TenantID: first.TenantID, ProfileID: updatedBackend.ProfileID, ExpectedVersion: updatedBackend.Version,
+		NextStatus: backend.StatusSuspended,
+		Metadata:   backend.ChangeMetadata{ActorType: "test", ActorID: "integration", Reason: "suspend", CorrelationID: suffix + "-suspend"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if suspendedBackend.Status != backend.StatusSuspended {
+		t.Fatalf("backend suspend = %+v", suspendedBackend)
+	}
+	resumedBackend, _, err := backendRepo.TransitionStatus(ctx, backend.TransitionStatusInput{
+		TenantID: first.TenantID, ProfileID: suspendedBackend.ProfileID, ExpectedVersion: suspendedBackend.Version,
+		NextStatus: backend.StatusActive,
+		Metadata:   backend.ChangeMetadata{ActorType: "test", ActorID: "integration", Reason: "resume", CorrelationID: suffix + "-resume"},
+	})
+	if err != nil || resumedBackend.Status != backend.StatusActive {
+		t.Fatalf("backend resume = %+v, err=%v", resumedBackend, err)
+	}
 
 	app, draft := createMySQLTestDraft(t, ctx, db, first.TenantID, profile.ProfileID, suffix)
 	publishedApp, publishedRevision := publishMySQLTestDraft(t, ctx, db, first.TenantID, app, draft, suffix)
@@ -56,15 +89,53 @@ func TestMySQLControlPlaneRepositoriesLive(t *testing.T) {
 	}
 }
 
-func openMySQLControlPlaneTestDB(t *testing.T, ctx context.Context, dsn string) *sql.DB {
+func openMySQLControlPlaneTestDB(t *testing.T, ctx context.Context, dsn, migrationDSN string) *sql.DB {
 	t.Helper()
+	migrationDB, err := storage.Open(ctx, migrationDSN, storage.Options{MaxOpenConns: 4, MaxIdleConns: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.ApplyMySQL(ctx, migrationDB); err != nil {
+		_ = migrationDB.Close()
+		t.Fatal(err)
+	}
+	if err := migrations.VerifyMySQL(ctx, migrationDB); err != nil {
+		_ = migrationDB.Close()
+		t.Fatal(err)
+	}
+	migrationUser, err := storage.CurrentUser(ctx, migrationDB)
+	if err != nil {
+		_ = migrationDB.Close()
+		t.Fatal(err)
+	}
+	if err := migrationDB.Close(); err != nil {
+		t.Fatal(err)
+	}
 	db, err := storage.Open(ctx, dsn, storage.Options{MaxOpenConns: 8, MaxIdleConns: 8})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := migrations.ApplyMySQL(ctx, db); err != nil {
+	appUser, err := storage.CurrentUser(ctx, db)
+	if err != nil {
 		_ = db.Close()
 		t.Fatal(err)
+	}
+	if appUser == migrationUser {
+		_ = db.Close()
+		t.Fatalf("migration and application accounts are shared: %q", appUser)
+	}
+	if err := storage.VerifyApplicationPrivileges(ctx, db); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	var sessionTimeZone string
+	if err := db.QueryRowContext(ctx, "SELECT @@session.time_zone").Scan(&sessionTimeZone); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if sessionTimeZone != "+00:00" {
+		_ = db.Close()
+		t.Fatalf("session time_zone = %q, want +00:00", sessionTimeZone)
 	}
 	return db
 }
@@ -109,7 +180,7 @@ func createMySQLTestModel(t *testing.T, ctx context.Context, db *sql.DB, tenantI
 	return profile
 }
 
-func createMySQLTestBackend(t *testing.T, ctx context.Context, db *sql.DB, tenantID, suffix string) {
+func testMySQLBackendCatalog(t *testing.T) *backend.ProviderCatalog {
 	t.Helper()
 	catalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
 		Provider: "inmemory", Capabilities: []backend.Capability{backend.CapabilitySession}, EndpointPolicy: backend.FieldForbidden,
@@ -118,7 +189,13 @@ func createMySQLTestBackend(t *testing.T, ctx context.Context, db *sql.DB, tenan
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = backendmysql.NewRepository(db, catalog).Create(ctx, backend.CreateInput{
+	return catalog
+}
+
+func createMySQLTestBackend(t *testing.T, ctx context.Context, db *sql.DB, tenantID, suffix string) *backend.Profile {
+	t.Helper()
+	catalog := testMySQLBackendCatalog(t)
+	profile, _, err := backendmysql.NewRepository(db, catalog).Create(ctx, backend.CreateInput{
 		TenantID: tenantID, ProfileKey: "default-" + suffix, DisplayName: "Default",
 		Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory", Options: map[string]string{"namespace": suffix}}},
 		Metadata: backend.ChangeMetadata{ActorType: "test", ActorID: "integration", Reason: "create", CorrelationID: suffix},
@@ -126,6 +203,7 @@ func createMySQLTestBackend(t *testing.T, ctx context.Context, db *sql.DB, tenan
 	if err != nil {
 		t.Fatal(err)
 	}
+	return profile
 }
 
 func createMySQLTestDraft(t *testing.T, ctx context.Context, db *sql.DB, tenantID, profileID, suffix string) (*agent.App, *agent.Revision) {

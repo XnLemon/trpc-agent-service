@@ -622,7 +622,7 @@ func TestNewFromEnvironmentBootstrapsMySQLWithSeparateMigrationAccount(t *testin
 	if err := graph.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 1 || verified != 3 {
+	if applied != 1 || verified != 1 {
 		t.Fatalf("MySQL migration/verification calls = applied %d verified %d", applied, verified)
 	}
 	if len(openedDSNs) != 2 || openedDSNs[0] != "migration:password@tcp(mysql)/control_plane" || openedDSNs[1] != "app:password@tcp(mysql)/control_plane" {
@@ -684,6 +684,48 @@ func TestNewFromEnvironmentRejectsSharedMySQLAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := appMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewFromEnvironmentRejectsMySQLApplicationOpenFailure(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envControlPlaneDriver, "mysql")
+	t.Setenv(envPostgresDSN, "")
+	t.Setenv(envMySQLDSN, "app:password@tcp(mysql)/control_plane")
+	t.Setenv(envMySQLMigrationDSN, "migration:password@tcp(mysql)/control_plane")
+
+	migrationDB, migrationMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = migrationDB.Close() })
+	migrationMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("migration@%"))
+	migrationMock.ExpectClose()
+
+	previousOpen := openMySQLEnvironmentDatabase
+	previousApply := applyMySQLEnvironmentMigrations
+	previousVerify := verifyMySQLEnvironmentMigrations
+	openCalls := 0
+	openMySQLEnvironmentDatabase = func(_ context.Context, _ string, _ mysql.Options) (*sql.DB, error) {
+		openCalls++
+		if openCalls == 1 {
+			return migrationDB, nil
+		}
+		return nil, errors.New("application DSN unavailable")
+	}
+	applyMySQLEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	verifyMySQLEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	t.Cleanup(func() {
+		openMySQLEnvironmentDatabase = previousOpen
+		applyMySQLEnvironmentMigrations = previousApply
+		verifyMySQLEnvironmentMigrations = previousVerify
+	})
+
+	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("application open failure = %v", err)
+	}
+	if err := migrationMock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}
 }

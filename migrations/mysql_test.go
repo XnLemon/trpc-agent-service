@@ -415,6 +415,37 @@ func TestVerifyMySQLSchemaAndIndexes(t *testing.T) {
 	})
 }
 
+func TestVerifyMySQLTriggersRejectsMetadataAndBodyDrift(t *testing.T) {
+	query := `SELECT trigger_name, event_manipulation, event_object_table,
+		action_timing, action_statement
+		FROM information_schema.triggers
+		WHERE trigger_schema = DATABASE() AND trigger_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	for _, test := range []struct {
+		name   string
+		mutate func(*mysqlSchemaTrigger)
+	}{
+		{name: "wrong table", mutate: func(trigger *mysqlSchemaTrigger) { trigger.table = "tenant" }},
+		{name: "wrong event", mutate: func(trigger *mysqlSchemaTrigger) { trigger.event = "DELETE" }},
+		{name: "wrong timing", mutate: func(trigger *mysqlSchemaTrigger) { trigger.timing = "AFTER" }},
+		{name: "incomplete body", mutate: func(trigger *mysqlSchemaTrigger) { trigger.actionFragments = []string{"SIGNAL SQLSTATE '45000'"} }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, mock, conn := newMySQLMockConn(t)
+			defer closeMySQLMock(t, db, conn, mock)
+			triggers := append([]mysqlSchemaTrigger(nil), requiredMySQLTriggers...)
+			test.mutate(&triggers[0])
+			rows := sqlmock.NewRows([]string{"trigger_name", "event_manipulation", "event_object_table", "action_timing", "action_statement"})
+			for _, trigger := range triggers {
+				rows.AddRow(trigger.name, trigger.event, trigger.table, trigger.timing, strings.Join(trigger.actionFragments, "\n"))
+			}
+			mock.ExpectQuery(regexp.QuoteMeta(query)).WithArgs(mysqlMockArgs(mysqlTriggerArgs())...).WillReturnRows(rows)
+			if err := verifyMySQLTriggers(context.Background(), conn); !errors.Is(err, ErrInvalidHistory) {
+				t.Fatalf("trigger verification error = %v", err)
+			}
+		})
+	}
+}
+
 func expectMySQLSchemaRows(mock sqlmock.Sqlmock, tables []mysqlSchemaTable) {
 	query := `SELECT table_name, engine, table_collation
 		FROM information_schema.tables
@@ -447,13 +478,14 @@ func expectMySQLIndexRows(mock sqlmock.Sqlmock, indexes []mysqlSchemaIndex) {
 	mock.ExpectQuery(regexp.QuoteMeta(query)).WithArgs(mysqlMockArgs(mysqlIndexArgs())...).WillReturnRows(rows)
 }
 
-func expectMySQLTriggerRows(mock sqlmock.Sqlmock, triggers []string) {
-	query := `SELECT trigger_name
+func expectMySQLTriggerRows(mock sqlmock.Sqlmock, triggers []mysqlSchemaTrigger) {
+	query := `SELECT trigger_name, event_manipulation, event_object_table,
+		action_timing, action_statement
 		FROM information_schema.triggers
 		WHERE trigger_schema = DATABASE() AND trigger_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	rows := sqlmock.NewRows([]string{"trigger_name"})
+	rows := sqlmock.NewRows([]string{"trigger_name", "event_manipulation", "event_object_table", "action_timing", "action_statement"})
 	for _, trigger := range triggers {
-		rows.AddRow(trigger)
+		rows.AddRow(trigger.name, trigger.event, trigger.table, trigger.timing, strings.Join(trigger.actionFragments, "\n"))
 	}
 	mock.ExpectQuery(regexp.QuoteMeta(query)).WithArgs(mysqlMockArgs(mysqlTriggerArgs())...).WillReturnRows(rows)
 }

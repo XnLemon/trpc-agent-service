@@ -168,13 +168,24 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 			return nil, fmt.Errorf("%w: MySQL migrations are not ready", ErrInvalidConfig)
 		}
 		db, err = openMySQLEnvironmentDatabase(ctx, config.dsn, mysql.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, fmt.Errorf("%w: mysql control plane is unavailable", ErrInvalidConfig)
+		}
 		// The application DSN is deliberately verification-only during bootstrap;
 		// migration DDL is executed through the separately provisioned account.
 		applyMigrations = nil
-		verifyMigrations = verifyMySQLEnvironmentMigrations
+		// VerifyMySQL reads trigger metadata, which is intentionally unavailable to
+		// the restricted application account. The migration connection has already
+		// verified the shared schema before it is closed.
+		verifyMigrations = nil
 		applicationUser, userErr := mysql.CurrentUser(ctx, db)
 		if userErr != nil || applicationUser == migrationUser {
-			_ = db.Close()
+			if db != nil {
+				_ = db.Close()
+			}
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}

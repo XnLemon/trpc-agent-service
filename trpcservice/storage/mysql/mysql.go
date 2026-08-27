@@ -95,7 +95,7 @@ func normalizeDSN(dsn string) string {
 		for _, parameter := range strings.Split(parts[1], "&") {
 			key, _, _ := strings.Cut(parameter, "=")
 			switch strings.ToLower(strings.TrimSpace(key)) {
-			case "parsetime", "loc":
+			case "parsetime", "loc", "time_zone":
 				// These values are part of the storage contract and are
 				// replaced below even when a caller supplies a conflicting value.
 				continue
@@ -106,7 +106,10 @@ func normalizeDSN(dsn string) string {
 			}
 		}
 	}
-	parameters = append(parameters, "parseTime=true", "loc=UTC")
+	// loc controls Go's time.Time decoding only. time_zone is a driver system
+	// variable and is encoded as a SQL literal so every pooled connection uses
+	// the UTC MySQL session timezone as well.
+	parameters = append(parameters, "parseTime=true", "loc=UTC", "time_zone=%27%2B00%3A00%27")
 	return base + "?" + strings.Join(parameters, "&")
 }
 
@@ -231,16 +234,31 @@ func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	var forbidden int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*)
+	if err := db.QueryRowContext(ctx, `WITH effective_grantees (grantee) AS (
+			SELECT CONCAT(CHAR(39), REPLACE(CURRENT_USER(), '@', CONCAT(CHAR(39), '@', CHAR(39))), CHAR(39))
+			UNION
+			SELECT CONCAT(CHAR(39), role_name, CHAR(39), '@', CHAR(39), role_host, CHAR(39))
+			FROM information_schema.enabled_roles
+		)
+		SELECT COUNT(*)
 		FROM (
 			SELECT privilege_type FROM information_schema.user_privileges
-			WHERE grantee = CURRENT_USER()
+			WHERE grantee IN (SELECT grantee FROM effective_grantees)
 			UNION ALL
 			SELECT privilege_type FROM information_schema.schema_privileges
-			WHERE grantee = CURRENT_USER()
+			WHERE grantee IN (SELECT grantee FROM effective_grantees)
 			UNION ALL
 			SELECT privilege_type FROM information_schema.table_privileges
-			WHERE grantee = CURRENT_USER()
+			WHERE grantee IN (SELECT grantee FROM effective_grantees)
+			UNION ALL
+			SELECT privilege_type FROM information_schema.column_privileges
+			WHERE grantee IN (SELECT grantee FROM effective_grantees)
+			UNION ALL
+			SELECT privilege_type FROM information_schema.role_table_grants
+			WHERE CONCAT(CHAR(39), grantee, CHAR(39), '@', CHAR(39), grantee_host, CHAR(39)) IN (SELECT grantee FROM effective_grantees)
+			UNION ALL
+			SELECT privilege_type FROM information_schema.role_column_grants
+			WHERE CONCAT(CHAR(39), grantee, CHAR(39), '@', CHAR(39), grantee_host, CHAR(39)) IN (SELECT grantee FROM effective_grantees)
 		) AS ddl_privileges
 		WHERE privilege_type IN ('ALL PRIVILEGES', 'ALTER', 'CREATE', 'CREATE VIEW', 'DROP', 'EVENT', 'INDEX', 'REFERENCES', 'TRIGGER')`).Scan(&forbidden); err != nil {
 		return MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)

@@ -203,23 +203,29 @@ var requiredMySQLIndexes = []mysqlSchemaIndex{
 	{table: "channel_binding", name: "channel_binding_candidate_idx", unique: false, columns: []string{"channel", "public_route_key_digest", "status"}},
 }
 
-var requiredMySQLTriggers = []string{
-	"agent_app_revision_guard_ins",
-	"agent_app_revision_guard_upd",
-	"agent_revision_immutable_upd",
-	"agent_revision_immutable_del",
-	"agent_revision_tool_guard_ins",
-	"agent_revision_tool_guard_upd",
-	"agent_revision_tool_guard_del",
-	"tenant_identity_immutable_upd",
-	"model_profile_identity_immutable_upd",
-	"agent_app_identity_immutable_upd",
-	"backend_profile_insert_guard",
-	"backend_profile_lifecycle_guard",
-	"backend_profile_identity_guard",
-	"backend_binding_identity_guard",
-	"backend_binding_delete_guard",
-	"channel_binding_identity_guard",
+type mysqlSchemaTrigger struct {
+	name, table, event, timing string
+	actionFragments            []string
+	actionStatement            string
+}
+
+var requiredMySQLTriggers = []mysqlSchemaTrigger{
+	{name: "agent_app_revision_guard_ins", table: "agent_app", event: "INSERT", timing: "BEFORE", actionFragments: []string{"new.current_revision", "from agent_app_revision", "new.status", "agent app current revision must be published"}},
+	{name: "agent_app_revision_guard_upd", table: "agent_app", event: "UPDATE", timing: "BEFORE", actionFragments: []string{"new.current_revision", "from agent_app_revision", "new.status", "agent app current revision must be published"}},
+	{name: "agent_revision_immutable_upd", table: "agent_app_revision", event: "UPDATE", timing: "BEFORE", actionFragments: []string{"new.tenant_id <> old.tenant_id", "old.state = 'published'", "published agent app revision is immutable"}},
+	{name: "agent_revision_immutable_del", table: "agent_app_revision", event: "DELETE", timing: "BEFORE", actionFragments: []string{"old.state = 'published'", "published agent app revision is immutable"}},
+	{name: "agent_revision_tool_guard_ins", table: "agent_app_revision_tool", event: "INSERT", timing: "BEFORE", actionFragments: []string{"select state into revision_state", "revision_state = 'published'", "published agent app tool authorization is immutable"}},
+	{name: "agent_revision_tool_guard_upd", table: "agent_app_revision_tool", event: "UPDATE", timing: "BEFORE", actionFragments: []string{"select state into revision_state", "revision_state = 'published'", "published agent app tool authorization is immutable"}},
+	{name: "agent_revision_tool_guard_del", table: "agent_app_revision_tool", event: "DELETE", timing: "BEFORE", actionFragments: []string{"select state into revision_state", "revision_state = 'published'", "published agent app tool authorization is immutable"}},
+	{name: "tenant_identity_immutable_upd", table: "tenant", event: "UPDATE", timing: "BEFORE", actionFragments: []string{"new.tenant_id <> old.tenant_id", "new.tenant_key <> old.tenant_key", "tenant identity is immutable"}},
+	{name: "model_profile_identity_immutable_upd", table: "model_profile", event: "UPDATE", timing: "BEFORE", actionFragments: []string{"new.tenant_id <> old.tenant_id", "new.profile_id <> old.profile_id", "new.profile_key <> old.profile_key", "model profile identity is immutable"}},
+	{name: "agent_app_identity_immutable_upd", table: "agent_app", event: "UPDATE", timing: "BEFORE", actionFragments: []string{"new.tenant_id <> old.tenant_id", "new.app_id <> old.app_id", "new.app_key <> old.app_key", "agent app identity is immutable"}},
+	{name: "backend_profile_insert_guard", table: "backend_profile", event: "INSERT", timing: "BEFORE", actionFragments: []string{"new.status <> 'disabled'", "backend profile must be created disabled"}},
+	{name: "backend_profile_lifecycle_guard", table: "backend_profile", event: "UPDATE", timing: "BEFORE", actionFragments: []string{"new.status <> 'disabled'", "not exists", "capability = 'session'", "non-disabled backend profile requires a binding"}},
+	{name: "backend_profile_identity_guard", table: "backend_profile", event: "UPDATE", timing: "BEFORE", actionFragments: []string{"new.tenant_id <> old.tenant_id", "new.profile_id <> old.profile_id", "new.profile_key <> old.profile_key", "backend profile identity is immutable"}},
+	{name: "backend_binding_identity_guard", table: "backend_profile_binding", event: "UPDATE", timing: "BEFORE", actionFragments: []string{"new.tenant_id <> old.tenant_id", "new.profile_id <> old.profile_id", "new.capability <> old.capability", "backend profile binding identity is immutable"}},
+	{name: "backend_binding_delete_guard", table: "backend_profile_binding", event: "DELETE", timing: "AFTER", actionFragments: []string{"profile_status", "not exists", "capability = 'session'", "non-disabled backend profile requires a binding"}},
+	{name: "channel_binding_identity_guard", table: "channel_binding", event: "UPDATE", timing: "BEFORE", actionFragments: []string{"new.tenant_id <> old.tenant_id", "new.binding_id <> old.binding_id", "new.binding_key <> old.binding_key", "new.channel <> old.channel", "channel binding identity is immutable"}},
 }
 
 func verifyMySQLSchema(ctx context.Context, conn *sql.Conn) error {
@@ -314,30 +320,45 @@ func verifyMySQLIndexes(ctx context.Context, conn *sql.Conn) error {
 }
 
 func verifyMySQLTriggers(ctx context.Context, conn *sql.Conn) error {
-	rows, err := conn.QueryContext(ctx, `SELECT trigger_name
+	rows, err := conn.QueryContext(ctx, `SELECT trigger_name, event_manipulation, event_object_table,
+		action_timing, action_statement
 		FROM information_schema.triggers
 		WHERE trigger_schema = DATABASE() AND trigger_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, mysqlTriggerArgs()...)
 	if err != nil {
 		return ErrInvalidHistory
 	}
 	defer func() { _ = rows.Close() }()
-	found := make(map[string]bool, len(requiredMySQLTriggers))
+	found := make(map[string]mysqlSchemaTrigger, len(requiredMySQLTriggers))
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var trigger mysqlSchemaTrigger
+		var actionStatement string
+		if err := rows.Scan(&trigger.name, &trigger.event, &trigger.table, &trigger.timing, &actionStatement); err != nil {
 			return ErrInvalidHistory
 		}
-		found[name] = true
+		trigger.actionStatement = actionStatement
+		found[trigger.name] = trigger
 	}
 	if err := rows.Err(); err != nil {
 		return ErrInvalidHistory
 	}
-	for _, name := range requiredMySQLTriggers {
-		if !found[name] {
+	for _, required := range requiredMySQLTriggers {
+		foundTrigger, ok := found[required.name]
+		if !ok || foundTrigger.table != required.table || foundTrigger.event != required.event || foundTrigger.timing != required.timing || !mysqlTriggerActionMatches(foundTrigger.actionStatement, required.actionFragments) {
 			return ErrInvalidHistory
 		}
 	}
 	return nil
+}
+
+func mysqlTriggerActionMatches(action string, required []string) bool {
+	action = strings.Join(strings.Fields(strings.ToLower(action)), " ")
+	for _, fragment := range required {
+		fragment = strings.Join(strings.Fields(strings.ToLower(fragment)), " ")
+		if fragment == "" || !strings.Contains(action, fragment) {
+			return false
+		}
+	}
+	return true
 }
 
 func mysqlTableArgs() []any {
@@ -359,7 +380,7 @@ func mysqlIndexArgs() []any {
 func mysqlTriggerArgs() []any {
 	args := make([]any, 0, len(requiredMySQLTriggers))
 	for _, trigger := range requiredMySQLTriggers {
-		args = append(args, trigger)
+		args = append(args, trigger.name)
 	}
 	return args
 }

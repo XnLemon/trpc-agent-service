@@ -66,13 +66,13 @@ func TestBeginUsesDatabaseSQLTransactionAndRollback(t *testing.T) {
 }
 
 func TestNormalizeDSNAddsUTCParseTime(t *testing.T) {
-	if got := normalizeDSN("user:password@tcp(localhost:3306)/control"); got != "user:password@tcp(localhost:3306)/control?parseTime=true&loc=UTC" {
+	if got := normalizeDSN("user:password@tcp(localhost:3306)/control"); got != "user:password@tcp(localhost:3306)/control?parseTime=true&loc=UTC&time_zone=%27%2B00%3A00%27" {
 		t.Fatalf("normalized DSN = %q", got)
 	}
-	if got := normalizeDSN("user:password@tcp(localhost:3306)/control?parseTime=true"); got != "user:password@tcp(localhost:3306)/control?parseTime=true&loc=UTC" {
+	if got := normalizeDSN("user:password@tcp(localhost:3306)/control?parseTime=true"); got != "user:password@tcp(localhost:3306)/control?parseTime=true&loc=UTC&time_zone=%27%2B00%3A00%27" {
 		t.Fatalf("existing parameter DSN = %q", got)
 	}
-	if got := normalizeDSN("user:password@tcp(localhost:3306)/control?parseTime=false&loc=Local&charset=utf8mb4"); got != "user:password@tcp(localhost:3306)/control?charset=utf8mb4&parseTime=true&loc=UTC" {
+	if got := normalizeDSN("user:password@tcp(localhost:3306)/control?parseTime=false&loc=Local&time_zone=SYSTEM&charset=utf8mb4"); got != "user:password@tcp(localhost:3306)/control?charset=utf8mb4&parseTime=true&loc=UTC&time_zone=%27%2B00%3A00%27" {
 		t.Fatalf("conflicting parameter DSN = %q", got)
 	}
 	if normalizeDSN(" ") != "" {
