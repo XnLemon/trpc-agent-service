@@ -11,7 +11,7 @@ import (
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-func TestTelemetryOptionsRecordsModelAndToolOutcomes(t *testing.T) {
+func TestTelemetryOptionsRecordsModelAndToolOutcomes(t *testing.T) { //nolint:gocyclo -- table-like callback contract coverage
 	t.Run("model success records usage", func(t *testing.T) {
 		provider := &runtimeTelemetryProvider{}
 		options := applyTelemetryOptions(t, provider)
