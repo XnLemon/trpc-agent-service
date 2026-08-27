@@ -309,7 +309,7 @@ func normalizeDispatchRequest(ctx context.Context, request DispatchRequest) (Inb
 	return message, requestID, traceID, nil
 }
 
-func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity) (*durableExecution, error) {
+func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity) (result *durableExecution, err error) {
 	if dispatcher.runtimeStore == nil || principal.Kind() != PrincipalChannel {
 		return nil, nil
 	}
@@ -317,8 +317,12 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 	operationCtx, _, finish := observability.StartOperation(ctx, dispatcher.telemetry, observability.OperationStorageOperation, "storage")
 	_ = dispatcher.metrics.Request(operationCtx, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "status": "started"})
 	defer func() {
-		finish(nil)
-		_ = dispatcher.metrics.BackendDuration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "status": "success"})
+		finish(err)
+		status := "success"
+		if err != nil {
+			status = "error"
+		}
+		_ = dispatcher.metrics.BackendDuration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "status": status, "error_class": observability.ErrorClass(err)})
 	}()
 	ctx = operationCtx
 	target, ok := principal.RoutingTarget()

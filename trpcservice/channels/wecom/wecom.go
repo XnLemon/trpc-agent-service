@@ -222,12 +222,22 @@ func (h *Handler) handleChallenge(w http.ResponseWriter, r *http.Request) {
 
 //nolint:gocyclo // Callback handling intentionally keeps protocol validation and admission in one ordered boundary.
 func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
+	capture := &statusCaptureWriter{ResponseWriter: w}
+	w = capture
 	started := time.Now()
 	operationCtx, _, finish := observability.StartOperation(r.Context(), h.telemetry, observability.OperationChannelReceive, "channel")
 	_ = h.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "wecom", "status": "started"})
 	defer func() {
-		finish(nil)
-		_ = h.metrics.Duration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "wecom", "status": "complete"})
+		var outcome error
+		if capture.status >= http.StatusBadRequest {
+			outcome = errors.New("wecom callback failed")
+		}
+		finish(outcome)
+		status := "success"
+		if outcome != nil {
+			status = "error"
+		}
+		_ = h.metrics.Duration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "wecom", "status": status, "error_class": observability.ErrorClass(outcome)})
 	}()
 	r = r.WithContext(operationCtx)
 	defer func() { _ = r.Body.Close() }()
@@ -294,6 +304,25 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	case <-r.Context().Done():
 	}
+}
+
+type statusCaptureWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusCaptureWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusCaptureWriter) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(body)
 }
 
 func (h *Handler) writeIngressSuccess(w http.ResponseWriter, ctx context.Context, principal gateway.Principal, message inboundXML, requestID, traceID string, eventType audit.EventType, decision audit.Decision, errorType string) {
