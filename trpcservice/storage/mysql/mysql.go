@@ -250,7 +250,9 @@ func verifyNoDirectRoutinePrivileges(ctx context.Context, db *sql.DB) error {
 			return MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
 		}
 		normalized := strings.ToUpper(grant)
-		if strings.Contains(normalized, " ON PROCEDURE ") || strings.Contains(normalized, " ON FUNCTION ") {
+		if strings.Contains(normalized, "GRANT PROXY ON ") ||
+			strings.Contains(normalized, " ON PROCEDURE ") ||
+			strings.Contains(normalized, " ON FUNCTION ") {
 			return ErrStorage
 		}
 	}

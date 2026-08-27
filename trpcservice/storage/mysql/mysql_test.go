@@ -283,6 +283,24 @@ func TestVerifyApplicationPrivilegesRejectsDirectRoutineGrant(t *testing.T) {
 	}
 }
 
+func TestVerifyApplicationPrivilegesRejectsDirectProxyGrant(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
+	mock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
+	mock.ExpectQuery("SELECT COUNT").WithArgs("'app'@'%'").WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
+	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for app@%"}).AddRow("GRANT PROXY ON ''@'' TO 'app'@'%'"))
+	if err := VerifyApplicationPrivileges(context.Background(), db); !errors.Is(err, ErrStorage) {
+		t.Fatalf("proxy grant verification error = %v, want ErrStorage", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCurrentUserRedactsFailuresAndRejectsBlankIdentity(t *testing.T) {
 	for _, test := range []struct {
 		name      string
