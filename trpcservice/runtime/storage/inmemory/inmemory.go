@@ -22,11 +22,51 @@ type Store struct {
 	messages     map[string]string
 	replies      map[string]runtimestorage.ReplyOutbox
 	correlations map[string]runtimestorage.ReplyCorrelation
+	memories     map[string]runtimestorage.MemoryRecord
+	summaries    map[string]runtimestorage.SummaryRecord
+	knowledge    map[string]runtimestorage.KnowledgeDocument
+	artifacts    map[string]runtimestorage.ArtifactRecord
+	audits       map[string][]runtimestorage.AuditRecord
+	vectors      map[string]runtimestorage.VectorRecord
+	objects      map[string]runtimestorage.ObjectInfo
+	objectData   map[string][]byte
+	indexQueue   chan runtimestorage.MemoryRecord
+	indexDone    chan struct{}
+	closeOnce    sync.Once
+}
+
+// Backend owns one in-memory state graph that can be shared by multiple
+// tenant workers in tests, modeling cross-node visibility of a shared store.
+type Backend struct{ store *Store }
+
+// NewBackend creates an isolated shared in-memory backend.
+func NewBackend() *Backend { return &Backend{store: New()} }
+
+// NewWithBackend creates a store view over an existing shared backend.
+func NewWithBackend(backend *Backend) *Store {
+	if backend == nil {
+		return New()
+	}
+	if backend.store == nil {
+		backend.store = New()
+	}
+	return backend.store
 }
 
 // New creates an empty runtime store.
 func New() *Store {
-	return &Store{sessions: map[string]runtimestorage.Session{}, events: map[string]runtimestorage.MessageEvent{}, histories: map[string][]runtimestorage.EventPayload{}, messages: map[string]string{}, replies: map[string]runtimestorage.ReplyOutbox{}, correlations: map[string]runtimestorage.ReplyCorrelation{}}
+	store := &Store{
+		sessions: map[string]runtimestorage.Session{}, events: map[string]runtimestorage.MessageEvent{},
+		histories: map[string][]runtimestorage.EventPayload{}, messages: map[string]string{},
+		replies: map[string]runtimestorage.ReplyOutbox{}, correlations: map[string]runtimestorage.ReplyCorrelation{},
+		memories: map[string]runtimestorage.MemoryRecord{}, summaries: map[string]runtimestorage.SummaryRecord{},
+		knowledge: map[string]runtimestorage.KnowledgeDocument{}, artifacts: map[string]runtimestorage.ArtifactRecord{},
+		audits: map[string][]runtimestorage.AuditRecord{}, vectors: map[string]runtimestorage.VectorRecord{},
+		objects: map[string]runtimestorage.ObjectInfo{}, objectData: map[string][]byte{},
+		indexQueue: make(chan runtimestorage.MemoryRecord, 128), indexDone: make(chan struct{}),
+	}
+	go store.indexWorker()
+	return store
 }
 
 // GetReplyCorrelation loads a durable execution-to-reply correlation.
@@ -122,6 +162,11 @@ func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) e
 	}
 	delete(s.sessions, key(tenantID, sessionID))
 	delete(s.histories, key(tenantID, sessionID))
+	for summaryKey, summary := range s.summaries {
+		if summary.TenantID == tenantID && summary.SessionID == sessionID {
+			delete(s.summaries, summaryKey)
+		}
+	}
 	for eventKey, event := range s.events {
 		if event.TenantID != tenantID || event.SessionID != sessionID {
 			continue
@@ -558,8 +603,16 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 	return cloneReply(value), nil
 }
 
-// Close releases store resources; the in-memory store has none to release.
-func (s *Store) Close() error { return nil }
+// Close stops the asynchronous memory index worker. It is idempotent.
+func (s *Store) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		close(s.indexDone)
+	})
+	return nil
+}
 func check(ctx context.Context) error {
 	if ctx == nil {
 		return runtimestorage.ErrInvalid
