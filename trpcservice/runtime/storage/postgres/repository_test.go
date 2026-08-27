@@ -670,6 +670,81 @@ func TestRuntimeStoreEnqueueRepliesWithCorrelationIsAtomic(t *testing.T) {
 	}
 }
 
+func TestRuntimeStoreEnqueueRepliesWithCorrelationFailureBoundaries(t *testing.T) {
+	value := runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event", RequestID: "request", TraceID: "trace"}
+	batch := []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 1, Payload: "payload"}}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := runtimepostgres.New(db)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.EnqueueRepliesWithCorrelation(ctx, value, batch); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled enqueue = %v", err)
+	}
+	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), runtimestorage.ReplyCorrelation{}, batch); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid correlation = %v", err)
+	}
+	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), value, nil); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid batch = %v", err)
+	}
+	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "other", RequestID: "request"}, batch); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("mismatched correlation = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	for _, test := range []struct {
+		name  string
+		setup func(sqlmock.Sqlmock, time.Time)
+	}{
+		{name: "begin failure", setup: func(mock sqlmock.Sqlmock, _ time.Time) {
+			mock.ExpectBegin().WillReturnError(errors.New("begin failed"))
+		}},
+		{name: "correlation conflict", setup: func(mock sqlmock.Sqlmock, _ time.Time) {
+			mock.ExpectBegin()
+			mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace").WillReturnError(sql.ErrNoRows)
+			mock.ExpectRollback()
+		}},
+		{name: "correlation storage failure", setup: func(mock sqlmock.Sqlmock, _ time.Time) {
+			mock.ExpectBegin()
+			mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace").WillReturnError(errors.New("correlation failed"))
+			mock.ExpectRollback()
+		}},
+		{name: "segment failure", setup: func(mock sqlmock.Sqlmock, when time.Time) {
+			mock.ExpectBegin()
+			mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant-a"))
+			mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply", "event", 0, 1, "payload", "", "", "", "").WillReturnError(errors.New("segment failed"))
+			mock.ExpectRollback()
+			_ = when
+		}},
+		{name: "commit failure", setup: func(mock sqlmock.Sqlmock, when time.Time) {
+			mock.ExpectBegin()
+			mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant-a"))
+			mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply", "event", 0, 1, "payload", "", "", "", "").WillReturnRows(replyRow(when))
+			mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			test.setup(mock, time.Now().UTC())
+			if _, err := runtimepostgres.New(db).EnqueueRepliesWithCorrelation(context.Background(), value, batch); err == nil {
+				t.Fatal("failure path returned nil")
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestRuntimeStoreReplyCorrelationGet(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
