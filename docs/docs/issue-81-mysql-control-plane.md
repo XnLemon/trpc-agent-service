@@ -133,7 +133,7 @@ Change Outbox 表，并保留 `runtime_*`/audit 表所需的同租户复合键�
 collation（不得依赖服务器默认的 `utf8mb4_0900_ai_ci`）。外键显式包含 `tenant_id`。迁移账号、控制面写账号和运行时读账号
 分离，应用连接不拥有任意 schema DDL 权限。
 
-MySQL 没有 PostgreSQL 的 `SECURITY DEFINER` 函数边界，因此安全性由三层共同保证：
+本方案不依赖 MySQL 存储例程的 `SQL SECURITY DEFINER` 边界，而是由三层共同保证：
 
 1. 应用 Repository 的领域校验、显式租户谓词和事务锁；
 2. 数据库账号只授予需要的表/列权限；
