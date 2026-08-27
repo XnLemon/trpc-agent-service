@@ -163,14 +163,14 @@
 - [x] 完成 Backend Profile 的 PostgreSQL DDL、生命周期、运行时快照和框架映射设计
 - [x] 完成 Model Profile 的无密钥 PostgreSQL 目标形状、Repository 事务和启动装配设计（Issue #37）
 - [x] 将 Tenant、Agent App/Revision、Model、Backend、Channel Binding DDL 和受控写入口落地为 PostgreSQL migration（Issue #37）
-- [ ] 补齐 channel binding、session、event、memory、summary、artifact 和 audit log 的可执行 DDL
-- [ ] 定义 Session、Memory、Summary、Knowledge、Artifact 和 Audit 的统一访问接口
-- [ ] 实现租户级 Backend Registry/Factory 和后端路由
+- [x] 补齐 channel binding、session、event、memory、summary、artifact 和 audit log 的可执行 DDL
+- [x] 定义 Session、Memory、Summary、Knowledge、Artifact 和 Audit 的统一访问接口
+- [x] 实现租户级 Backend Registry/Factory 和后端路由
 - [x] 接入 InMemory 与 PostgreSQL Session/Event/Reply Outbox 运行时后端（Issue #49/#50）
-- [ ] 接入至少一种向量库和一种对象存储
+- [x] 接入至少一种向量库和一种对象存储
 - [x] 实现同一 Session 并发写入的版本/CAS/事务控制和事件序号（Issue #49）
-- [ ] 明确并实现 event、state、summary 的更新顺序及冲突重放
-- [ ] 实现 Memory 写入后的跨节点可见性和异步向量索引
+- [x] 明确并实现 event、state、summary 的更新顺序及冲突重放
+- [x] 实现 Memory 写入后的跨节点可见性和异步向量索引
 - [ ] 实现 Redis 到 SQL、以及本地到远端向量库的租户级迁移流程
 - [ ] 实现全量复制、双写、增量追平、校验、切读和回滚工具
 

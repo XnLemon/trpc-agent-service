@@ -44,6 +44,7 @@ nav:
       - Telegram 长轮询 Adapter: telegram.md
       - 企业微信自建应用 Text Webhook: wecom.md
       - Tenant 运行时持久化: runtime-storage.md
+      - Runtime Capabilities (#75): runtime-capabilities.md
       - PostgreSQL 控制面与启动装配: postgresql-control-plane.md
       - 可重启控制面与 Admin API: issue-41-runtime-bootstrap-admin-api.md
       - 首次运行初始化: issue-67-first-run-init.md
