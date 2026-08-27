@@ -125,7 +125,7 @@ func TestSetCanarySelectsPublishedRevisionAndRollbackClearsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	third := createDraft(t, r, app, draftConfiguration("third"))
-	app, third, _, err = r.Publish(context.Background(), publishInput(app, third))
+	app, _, _, err = r.Publish(context.Background(), publishInput(app, third))
 	if err != nil {
 		t.Fatal(err)
 	}

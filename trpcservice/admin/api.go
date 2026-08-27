@@ -402,6 +402,7 @@ func (h *Handler) tenantRoute(ctx context.Context, r *http.Request, p Principal,
 	}
 }
 
+//nolint:gocyclo // App routes coordinate several independently authorized mutations.
 func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenantID string, parts []string) (int, any, error) {
 	if len(parts) == 0 {
 		if r.Method != http.MethodPost {

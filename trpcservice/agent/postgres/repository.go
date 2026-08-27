@@ -456,6 +456,8 @@ func (r *AgentRepository) Rollback(ctx context.Context, input agent.RollbackInpu
 }
 
 // SetCanary selects or clears a published candidate revision.
+//
+//nolint:gocyclo // The transaction validates and persists one complete control-plane mutation.
 func (r *AgentRepository) SetCanary(ctx context.Context, input agent.SetCanaryInput) (*agent.App, agent.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, agent.ChangeEvent{}, err

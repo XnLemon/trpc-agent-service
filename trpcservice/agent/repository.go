@@ -74,8 +74,10 @@ const (
 	// ChangeResumed records an application resume.
 	ChangeResumed ChangeEventType = "resumed"
 	// ChangeDisabled records an application disablement.
-	ChangeDisabled      ChangeEventType = "disabled"
+	ChangeDisabled ChangeEventType = "disabled"
+	// ChangeCanaryStarted records candidate selection.
 	ChangeCanaryStarted ChangeEventType = "canary_started"
+	// ChangeCanaryStopped records candidate clearing.
 	ChangeCanaryStopped ChangeEventType = "canary_stopped"
 )
 
