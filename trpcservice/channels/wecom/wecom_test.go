@@ -474,13 +474,14 @@ func TestDynamicHandlerRoutesOnlyVerifiedBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	writeSignal := make(chan struct{}, 2)
 	handler, err := New(Config{
 		Candidates:  &dynamicCandidateConsumer{binding: binding},
 		Tenants:     dynamicTenantRepository{value: dynamicTestTenant(t)},
 		Apps:        dynamicAppRepository{value: app},
 		Credentials: dynamicCredentials{values: map[string]Credentials{binding.SecretRef: {CallbackToken: "token", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), AppSecret: "app-secret"}}},
 		Dispatcher:  dispatcher,
-		AuditWriter: writer,
+		AuditWriter: signalingAuditWriter{Writer: writer, Signal: writeSignal},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -491,6 +492,11 @@ func TestDynamicHandlerRoutesOnlyVerifiedBinding(t *testing.T) {
 	handler.ServeHTTP(recorder, callbackTestRequestAtPath(t, "/wecom/callback/route-key", "message-dynamic", "user-1", "hello"))
 	if recorder.Code != http.StatusOK || recorder.Body.String() != "success" {
 		t.Fatalf("dynamic callback response = %d %q", recorder.Code, recorder.Body.String())
+	}
+	select {
+	case <-writeSignal:
+	case <-time.After(time.Second):
+		t.Fatal("accepted ingress audit was not appended")
 	}
 	var target channels.RoutingTarget
 	var requestID, traceID string
@@ -838,6 +844,19 @@ func TestHandlerDrainsStreamAndRejectsCryptographicBoundaryFailures(t *testing.T
 type callbackDispatchStub struct {
 	requests chan gateway.DispatchRequest
 	canceled chan struct{}
+}
+
+type signalingAuditWriter struct {
+	audit.Writer
+	Signal chan<- struct{}
+}
+
+func (writer signalingAuditWriter) Append(ctx context.Context, event audit.Event) (audit.AppendResult, error) {
+	result, err := writer.Writer.Append(ctx, event)
+	if err == nil {
+		writer.Signal <- struct{}{}
+	}
+	return result, err
 }
 
 type dispatchFunc func(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error)
