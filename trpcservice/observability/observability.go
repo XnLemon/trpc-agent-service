@@ -208,16 +208,29 @@ func NewOTLPProvider(ctx context.Context, config OTLPConfig) (Provider, error) {
 
 func otlpTraceEndpointOptions(endpoint string) []otlptracehttp.Option {
 	if strings.Contains(endpoint, "://") {
-		return []otlptracehttp.Option{otlptracehttp.WithEndpointURL(endpoint)}
+		return []otlptracehttp.Option{otlptracehttp.WithEndpointURL(otlpSignalEndpointURL(endpoint, "/v1/traces"))}
 	}
 	return []otlptracehttp.Option{otlptracehttp.WithEndpoint(endpoint)}
 }
 
 func otlpMetricEndpointOptions(endpoint string) []otlpmetrichttp.Option {
 	if strings.Contains(endpoint, "://") {
-		return []otlpmetrichttp.Option{otlpmetrichttp.WithEndpointURL(endpoint)}
+		return []otlpmetrichttp.Option{otlpmetrichttp.WithEndpointURL(otlpSignalEndpointURL(endpoint, "/v1/metrics"))}
 	}
 	return []otlpmetrichttp.Option{otlpmetrichttp.WithEndpoint(endpoint)}
+}
+
+func otlpSignalEndpointURL(endpoint, suffix string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	path := strings.TrimRight(u.Path, "/")
+	if !strings.HasSuffix(path, suffix) {
+		path += suffix
+	}
+	u.Path = path
+	return u.String()
 }
 
 func validateOTLPEndpoint(endpoint string) error {

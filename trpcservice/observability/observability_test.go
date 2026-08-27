@@ -212,3 +212,18 @@ func TestOTLPProviderExportsMetricsToURLAndRejectsInvalidEndpoint(t *testing.T) 
 		}
 	}
 }
+
+func TestOTLPSignalEndpointURLAddsProtocolPaths(t *testing.T) {
+	for _, test := range []struct {
+		endpoint, suffix, want string
+	}{
+		{"http://collector:4318", "/v1/metrics", "http://collector:4318/v1/metrics"},
+		{"http://collector:4318/", "/v1/traces", "http://collector:4318/v1/traces"},
+		{"http://collector:4318/v1/otlp", "/v1/metrics", "http://collector:4318/v1/otlp/v1/metrics"},
+		{"http://collector:4318/v1/metrics", "/v1/metrics", "http://collector:4318/v1/metrics"},
+	} {
+		if got := otlpSignalEndpointURL(test.endpoint, test.suffix); got != test.want {
+			t.Fatalf("otlpSignalEndpointURL(%q, %q) = %q, want %q", test.endpoint, test.suffix, got, test.want)
+		}
+	}
+}
