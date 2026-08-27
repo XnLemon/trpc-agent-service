@@ -458,6 +458,42 @@ func TestAgentRepositorySetsCanaryRevision(t *testing.T) {
 	}
 }
 
+func TestAgentRepositoryClearsCanaryRevision(t *testing.T) {
+	app := newStoredAgentApp(t)
+	app.Status = agent.StatusActive
+	app.CurrentRevision = agentInt64(1)
+	app.CanaryRevision = agentInt64(2)
+	app.Version = 3
+	stored := app.Clone()
+	stored.CanaryRevision = nil
+	stored.Version++
+	stored.UpdatedAt = stored.UpdatedAt.Add(time.Second)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectBegin()
+	expectAgentApp(mock, app)
+	mock.ExpectQuery(".*").WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(12)))
+	expectAgentApp(mock, &stored)
+	expectAgentEvent(mock, app, agent.ChangeCanaryStopped, agent.StatusActive, agent.StatusActive, app.CanaryRevision, nil, "", app.Version, stored.Version, stored.UpdatedAt)
+	mock.ExpectCommit()
+	cleared, event, err := NewRepository(db).SetCanary(context.Background(), agent.SetCanaryInput{
+		TenantID: app.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version, TenantActive: true,
+		Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "workflow", CorrelationID: "correlation"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.CanaryRevision != nil || event.EventType != agent.ChangeCanaryStopped || event.PreviousRevision == nil || *event.PreviousRevision != 2 || event.CurrentRevision != nil {
+		t.Fatalf("clear result = app=%+v event=%+v", cleared, event)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAgentRepositorySetCanaryRejectsTransactionStates(t *testing.T) {
 	cases := []struct {
 		name      string
