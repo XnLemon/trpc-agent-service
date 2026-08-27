@@ -373,11 +373,19 @@ func telemetryLabelsEqual(attrs []observability.Attribute, want map[string]strin
 		return false
 	}
 	for _, attr := range attrs {
-		if want[attr.Key] != attr.Value {
+		expected, ok := want[attr.Key]
+		if !ok || expected != attr.Value {
 			return false
 		}
 	}
 	return true
+}
+
+func TestTelemetryLabelsEqualRejectsUnknownEmptyValue(t *testing.T) {
+	attrs := []observability.Attribute{{Key: "unexpected", Value: ""}}
+	if telemetryLabelsEqual(attrs, map[string]string{"expected": ""}) {
+		t.Fatal("unknown empty-valued label was accepted")
+	}
 }
 
 type runtimeTelemetryProvider struct {
