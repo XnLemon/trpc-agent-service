@@ -50,6 +50,7 @@ type App struct {
 	Description     string
 	Status          Status
 	CurrentRevision *int64
+	CanaryRevision  *int64
 	Version         int64
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
@@ -99,6 +100,7 @@ func NewApp(input CreateInput) (*App, error) {
 func (a App) Clone() App {
 	clone := a
 	clone.CurrentRevision = cloneInt64(a.CurrentRevision)
+	clone.CanaryRevision = cloneInt64(a.CanaryRevision)
 	return clone
 }
 
@@ -157,6 +159,9 @@ func (a App) validateLifecycle() error {
 		if a.CurrentRevision != nil && *a.CurrentRevision < 1 {
 			return fmt.Errorf("%w: current revision must be positive", ErrInvalid)
 		}
+	}
+	if a.CanaryRevision != nil && (*a.CanaryRevision < 1 || a.CurrentRevision == nil || *a.CanaryRevision == *a.CurrentRevision) {
+		return fmt.Errorf("%w: canary revision must be positive and differ from current revision", ErrInvalid)
 	}
 	return nil
 }

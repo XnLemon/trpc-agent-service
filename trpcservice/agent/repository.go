@@ -74,7 +74,9 @@ const (
 	// ChangeResumed records an application resume.
 	ChangeResumed ChangeEventType = "resumed"
 	// ChangeDisabled records an application disablement.
-	ChangeDisabled ChangeEventType = "disabled"
+	ChangeDisabled      ChangeEventType = "disabled"
+	ChangeCanaryStarted ChangeEventType = "canary_started"
+	ChangeCanaryStopped ChangeEventType = "canary_stopped"
 )
 
 // ChangeEvent is the complete immutable audit handoff returned atomically with
@@ -124,6 +126,16 @@ type RollbackInput struct {
 	AppID              string
 	TargetRevision     int64
 	ExpectedAppVersion int64
+	Metadata           ChangeMetadata
+}
+
+// SetCanaryInput selects or clears a published candidate revision.
+type SetCanaryInput struct {
+	TenantID           string
+	AppID              string
+	CandidateRevision  *int64
+	ExpectedAppVersion int64
+	TenantActive       bool
 	Metadata           ChangeMetadata
 }
 

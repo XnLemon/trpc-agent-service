@@ -50,6 +50,10 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 		"0004_runtime_session_delete_cascade.up.sql",
 		"0005_runtime_event_history.up.sql",
 		"0006_audit_usage.up.sql",
+		"0007_execution_audit_handoff.up.sql",
+		"0008_runtime_reply_target.up.sql",
+		"0009_runtime_reply_correlation.up.sql",
+		"0010_agent_app_canary.up.sql",
 	} {
 		path := filepath.Join(migrationDir, name)
 		contents, err := os.ReadFile(path) // #nosec G304 -- names are fixed migration files under the repository root.

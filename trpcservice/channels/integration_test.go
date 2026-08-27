@@ -352,6 +352,9 @@ func (r *singleAppRepository) Publish(context.Context, agent.PublishInput) (*age
 func (r *singleAppRepository) Rollback(context.Context, agent.RollbackInput) (*agent.App, agent.ChangeEvent, error) {
 	return nil, agent.ChangeEvent{}, errors.New("unsupported")
 }
+func (r *singleAppRepository) SetCanary(context.Context, agent.SetCanaryInput) (*agent.App, agent.ChangeEvent, error) {
+	return nil, agent.ChangeEvent{}, errors.New("unsupported")
+}
 func (r *singleAppRepository) TransitionStatus(context.Context, agent.TransitionStatusInput) (*agent.App, agent.ChangeEvent, error) {
 	return nil, agent.ChangeEvent{}, errors.New("unsupported")
 }

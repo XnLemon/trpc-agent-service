@@ -122,7 +122,11 @@ func (resolver *PlanResolver) resolveInputs(ctx context.Context, principal Princ
 	if err := ctx.Err(); err != nil {
 		return resolvedPlanInputs{}, err
 	}
-	revisionValue, err := resolver.apps.GetRevision(ctx, principal.TenantID(), principal.AppID(), *appValue.CurrentRevision)
+	selectedRevision := appValue.CurrentRevision
+	if appValue.CanaryRevision != nil {
+		selectedRevision = appValue.CanaryRevision
+	}
+	revisionValue, err := resolver.apps.GetRevision(ctx, principal.TenantID(), principal.AppID(), *selectedRevision)
 	if err != nil || revisionValue == nil {
 		return resolvedPlanInputs{}, resolver.planError(ctx)
 	}

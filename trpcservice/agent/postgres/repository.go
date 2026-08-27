@@ -415,6 +415,7 @@ func (r *AgentRepository) Rollback(ctx context.Context, input agent.RollbackInpu
 	updated := current.Clone()
 	previousRevision := cloneAgentInt64(updated.CurrentRevision)
 	updated.CurrentRevision = agentInt64(input.TargetRevision)
+	updated.CanaryRevision = nil
 	updated.Version++
 	updated.UpdatedAt = now
 	if err := updated.Validate(); err != nil {
@@ -452,6 +453,109 @@ func (r *AgentRepository) Rollback(ctx context.Context, input agent.RollbackInpu
 		return nil, agent.ChangeEvent{}, err
 	}
 	return stored, committed, nil
+}
+
+// SetCanary selects or clears a published candidate revision.
+func (r *AgentRepository) SetCanary(ctx context.Context, input agent.SetCanaryInput) (*agent.App, agent.ChangeEvent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, agent.ChangeEvent{}, err
+	}
+	if r == nil || r.db == nil {
+		return nil, agent.ChangeEvent{}, ErrStorage
+	}
+	if err := validateAgentMetadata(input.Metadata); err != nil {
+		return nil, agent.ChangeEvent{}, err
+	}
+	if !input.TenantActive {
+		return nil, agent.ChangeEvent{}, fmt.Errorf("%w: tenant must be active", agent.ErrInvalid)
+	}
+	tx, err := begin(ctx, r.db)
+	if err != nil {
+		return nil, agent.ChangeEvent{}, err
+	}
+	defer rollback(tx)
+	current, err := loadAgentApp(ctx, tx, input.TenantID, input.AppID, true)
+	if err != nil {
+		return nil, agent.ChangeEvent{}, mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
+	}
+	if err := mutableAgentApp(current, input.ExpectedAppVersion); err != nil {
+		return nil, agent.ChangeEvent{}, err
+	}
+	if current.Status != agent.StatusActive {
+		return nil, agent.ChangeEvent{}, fmt.Errorf("%w: canary requires an active app", agent.ErrInvalid)
+	}
+	if sameAgentRevision(current.CanaryRevision, input.CandidateRevision) {
+		return nil, agent.ChangeEvent{}, fmt.Errorf("%w: canary revision is unchanged", agent.ErrInvalid)
+	}
+	var candidate *agent.Revision
+	if input.CandidateRevision != nil {
+		if *input.CandidateRevision < 1 || current.CurrentRevision == nil || *input.CandidateRevision == *current.CurrentRevision {
+			return nil, agent.ChangeEvent{}, fmt.Errorf("%w: invalid canary revision", agent.ErrInvalid)
+		}
+		var getErr error
+		candidate, getErr = loadAgentRevision(ctx, tx, input.TenantID, input.AppID, *input.CandidateRevision, true)
+		if getErr != nil {
+			return nil, agent.ChangeEvent{}, mapDBError(ctx, getErr, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
+		}
+		if candidate.State != agent.RevisionStatePublished {
+			return nil, agent.ChangeEvent{}, fmt.Errorf("%w: canary revision must be published", agent.ErrInvalid)
+		}
+	}
+	now := monotonicNow(current.UpdatedAt)
+	updated := current.Clone()
+	updated.CanaryRevision = cloneAgentInt64(input.CandidateRevision)
+	updated.Version++
+	updated.UpdatedAt = now
+	if err := updated.Validate(); err != nil {
+		return nil, agent.ChangeEvent{}, err
+	}
+	digest := ""
+	if candidate != nil {
+		digest = candidate.ContentDigest
+	}
+	eventType := agent.ChangeCanaryStopped
+	if input.CandidateRevision != nil {
+		eventType = agent.ChangeCanaryStarted
+	}
+	event := agent.ChangeEvent{
+		EventType: eventType, TenantID: updated.TenantID, AppID: updated.AppID,
+		PreviousRevision: cloneAgentInt64(current.CanaryRevision), CurrentRevision: cloneAgentInt64(updated.CanaryRevision),
+		ContentDigest: digest, PreviousStatus: current.Status, CurrentStatus: updated.Status,
+		ActorType: strings.TrimSpace(input.Metadata.ActorType), ActorID: strings.TrimSpace(input.Metadata.ActorID),
+		Reason: strings.TrimSpace(input.Metadata.Reason), CorrelationID: strings.TrimSpace(input.Metadata.CorrelationID),
+		PreviousVersion: current.Version, NextVersion: updated.Version, OccurredAt: now,
+	}
+	var candidateRevision any
+	if input.CandidateRevision != nil {
+		candidateRevision = *input.CandidateRevision
+	}
+	var eventID int64
+	err = tx.QueryRowContext(ctx, `SELECT public.control_plane_set_agent_app_canary($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, input.TenantID, input.AppID, candidateRevision, *current.CurrentRevision, input.ExpectedAppVersion, updated.Version, updated.UpdatedAt, event.ContentDigest, event.PreviousRevision, event.CurrentRevision, event.EventType, event.ActorType, event.ActorID, event.Reason, event.CorrelationID).Scan(&eventID)
+	if err != nil {
+		return nil, agent.ChangeEvent{}, mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
+	}
+	stored, err := loadAgentApp(ctx, tx, input.TenantID, input.AppID, false)
+	if err != nil {
+		return nil, agent.ChangeEvent{}, mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
+	}
+	committed, err := scanAgentEvent(tx.QueryRowContext(ctx, agentEventSelect+` WHERE event_id = $1`, eventID))
+	if err != nil {
+		return nil, agent.ChangeEvent{}, mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
+	}
+	if err := commit(ctx, tx); err != nil {
+		return nil, agent.ChangeEvent{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, agent.ChangeEvent{}, err
+	}
+	return stored, committed, nil
+}
+
+func sameAgentRevision(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 // TransitionStatus changes an application status with optimistic concurrency.
@@ -532,7 +636,7 @@ func (r *AgentRepository) TransitionStatus(ctx context.Context, input agent.Tran
 }
 
 const agentAppSelect = `SELECT tenant_id, app_id, app_key, display_name, description,
-       status, current_revision, version, created_at, updated_at
+       status, current_revision, canary_revision, version, created_at, updated_at
 FROM public.agent_app`
 
 func loadAgentApp(ctx context.Context, q queryer, tenantID, appID string, forUpdate bool) (*agent.App, error) {
@@ -542,14 +646,15 @@ func loadAgentApp(ctx context.Context, q queryer, tenantID, appID string, forUpd
 	}
 	var value agent.App
 	var status string
-	var currentRevision sql.NullInt64
+	var currentRevision, canaryRevision sql.NullInt64
 	if err := q.QueryRowContext(ctx, query, tenantID, appID).Scan(&value.TenantID, &value.AppID,
-		&value.AppKey, &value.DisplayName, &value.Description, &status, &currentRevision,
+		&value.AppKey, &value.DisplayName, &value.Description, &status, &currentRevision, &canaryRevision,
 		&value.Version, &value.CreatedAt, &value.UpdatedAt); err != nil {
 		return nil, err
 	}
 	value.Status = agent.Status(status)
 	value.CurrentRevision = nullableInt(currentRevision)
+	value.CanaryRevision = nullableInt(canaryRevision)
 	value.CreatedAt = asUTC(value.CreatedAt)
 	value.UpdatedAt = asUTC(value.UpdatedAt)
 	if err := value.Validate(); err != nil {

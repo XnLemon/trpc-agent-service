@@ -90,11 +90,11 @@ For every execution selected through the candidate pointer, Gateway writes an `a
 
 ## Issue ledger and verification
 
-- [ ] Add a durable App candidate-revision pointer with PostgreSQL migration, repository support, and a tenant-authorized Admin operation.
-- [ ] Resolve an immutable candidate plan when configured, otherwise preserve stable-plan resolution and exact complete-key Runner reuse.
-- [ ] Invalidate only future tenant/App entries for canary changes and rollback; in-flight leases complete on their frozen revision.
-- [ ] Append durable control-plane canary facts and per-execution candidate-selection audit facts without exposing sensitive data.
-- [ ] Prove tenant isolation, optimistic conflicts, candidate validation, publish/promotion/rollback, in-flight leases, restart recovery, and stable-only compatibility with contract tests.
-- [ ] Update the README and documentation navigation only after the implemented behavior is covered by tests.
+- [x] Add a durable App candidate-revision pointer with PostgreSQL migration, repository support, and a tenant-authorized Admin operation.
+- [x] Resolve an immutable candidate plan when configured, otherwise preserve stable-plan resolution and exact complete-key Runner reuse.
+- [x] Invalidate only future tenant/App entries for canary changes and rollback; in-flight leases complete on their frozen revision.
+- [x] Append durable control-plane canary facts and per-execution candidate-selection audit facts without exposing sensitive data.
+- [x] Prove tenant isolation, optimistic conflicts, candidate validation, publish/promotion/rollback, in-flight leases, restart recovery, and stable-only compatibility with contract tests.
+- [x] Update the README and documentation navigation after the implemented behavior was covered by tests.
 
 Implementation validation will run focused Agent, Gateway, Admin, Bootstrap, migration, and audit tests first, then `go test ./... -count=1`, `go test -race ./... -count=1`, `go vet ./...`, formatting, and strict MkDocs build when their local dependencies are available.

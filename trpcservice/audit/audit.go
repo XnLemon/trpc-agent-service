@@ -34,13 +34,16 @@ type EventType string
 // Event type constants identify supported audit records.
 const (
 	// EventControlPlaneChanged records a control-plane mutation.
-	EventControlPlaneChanged      EventType = "control_plane.changed"
-	EventExecutionStarted         EventType = "execution.started"
-	EventExecutionCompleted       EventType = "execution.completed"
-	EventExecutionFailed          EventType = "execution.failed"
-	EventExecutionCanceled        EventType = "execution.canceled"
-	EventExecutionTimedOut        EventType = "execution.timed_out"
-	EventExecutionFallback        EventType = "execution.fallback"
+	EventControlPlaneChanged EventType = "control_plane.changed"
+	EventExecutionStarted    EventType = "execution.started"
+	EventExecutionCompleted  EventType = "execution.completed"
+	EventExecutionFailed     EventType = "execution.failed"
+	EventExecutionCanceled   EventType = "execution.canceled"
+	EventExecutionTimedOut   EventType = "execution.timed_out"
+	EventExecutionFallback   EventType = "execution.fallback"
+	// EventCanarySelected records that the App's tenant-wide candidate revision
+	// was selected for one execution before the execution-started fact.
+	EventCanarySelected           EventType = "execution.canary_selected"
 	EventToolAllowed              EventType = "tool.allowed"
 	EventToolDenied               EventType = "tool.denied"
 	EventToolApprovalRequired     EventType = "tool.approval_required"
@@ -559,7 +562,7 @@ func hasControl(value string) bool {
 }
 func validEventType(value EventType) bool {
 	switch value {
-	case EventControlPlaneChanged, EventExecutionStarted, EventExecutionCompleted, EventExecutionFailed, EventExecutionCanceled, EventExecutionTimedOut, EventExecutionFallback, EventToolAllowed, EventToolDenied, EventToolApprovalRequired, EventIMAuthorizationAllowed, EventIMAuthorizationDenied, EventIMIngressAccepted, EventIMIngressDuplicate, EventIMDeliverySent, EventIMDeliveryRetryScheduled, EventIMDeliveryDeadLettered, EventIMDeliveryReconciled, EventBudgetRejected, EventContentRedacted, EventAuditIncomplete:
+	case EventControlPlaneChanged, EventExecutionStarted, EventExecutionCompleted, EventExecutionFailed, EventExecutionCanceled, EventExecutionTimedOut, EventExecutionFallback, EventCanarySelected, EventToolAllowed, EventToolDenied, EventToolApprovalRequired, EventIMAuthorizationAllowed, EventIMAuthorizationDenied, EventIMIngressAccepted, EventIMIngressDuplicate, EventIMDeliverySent, EventIMDeliveryRetryScheduled, EventIMDeliveryDeadLettered, EventIMDeliveryReconciled, EventBudgetRejected, EventContentRedacted, EventAuditIncomplete:
 		return true
 	}
 	return false

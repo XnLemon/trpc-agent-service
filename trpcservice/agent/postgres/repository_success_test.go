@@ -24,9 +24,9 @@ func TestAgentRepositoryGetDecodesStoredApp(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	mock.ExpectQuery(".*").WithArgs(app.TenantID, app.AppID).WillReturnRows(sqlmock.NewRows([]string{
-		"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "version", "created_at", "updated_at",
+		"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "canary_revision", "version", "created_at", "updated_at",
 	}).AddRow(
-		app.TenantID, app.AppID, app.AppKey, app.DisplayName, app.Description, string(app.Status), nil, app.Version, app.CreatedAt, app.UpdatedAt,
+		app.TenantID, app.AppID, app.AppKey, app.DisplayName, app.Description, string(app.Status), nil, nil, app.Version, app.CreatedAt, app.UpdatedAt,
 	))
 
 	stored, err := NewRepository(db).Get(context.Background(), app.TenantID, app.AppID)
@@ -144,8 +144,8 @@ func TestAgentRepositoryCreatesApp(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(".*").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{
-		"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "version", "created_at", "updated_at",
-	}).AddRow(stored.TenantID, stored.AppID, stored.AppKey, stored.DisplayName, stored.Description, string(stored.Status), nil, stored.Version, stored.CreatedAt, stored.UpdatedAt))
+		"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "canary_revision", "version", "created_at", "updated_at",
+	}).AddRow(stored.TenantID, stored.AppID, stored.AppKey, stored.DisplayName, stored.Description, string(stored.Status), nil, nil, stored.Version, stored.CreatedAt, stored.UpdatedAt))
 	mock.ExpectCommit()
 
 	value, err := NewRepository(db).Create(context.Background(), input)
@@ -481,8 +481,8 @@ func expectAgentApp(mock sqlmock.Sqlmock, value *agent.App) {
 		currentRevision = *value.CurrentRevision
 	}
 	mock.ExpectQuery(".*").WithArgs(value.TenantID, value.AppID).WillReturnRows(sqlmock.NewRows([]string{
-		"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "version", "created_at", "updated_at",
-	}).AddRow(value.TenantID, value.AppID, value.AppKey, value.DisplayName, value.Description, string(value.Status), currentRevision, value.Version, value.CreatedAt, value.UpdatedAt))
+		"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "canary_revision", "version", "created_at", "updated_at",
+	}).AddRow(value.TenantID, value.AppID, value.AppKey, value.DisplayName, value.Description, string(value.Status), currentRevision, nil, value.Version, value.CreatedAt, value.UpdatedAt))
 }
 
 func expectAgentRevision(t *testing.T, mock sqlmock.Sqlmock, value *agent.Revision) {

@@ -180,6 +180,15 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		finishWithError(err)
 		return nil, err
 	}
+	planSnapshot := plan.AgentSnapshot()
+	planApp := planSnapshot.App()
+	if planApp.CanaryRevision != nil && planSnapshot.Revision().Revision == *planApp.CanaryRevision {
+		selectedRevision := planSnapshot.Revision().Revision
+		if err := dispatcher.writeExecutionAuditRevision(ctx, request.Principal, message, tenant.RunnerIdentity{}, requestID, traceID, audit.EventCanarySelected, "", &selectedRevision); err != nil {
+			finishWithError(err)
+			return nil, auditWriteFailure()
+		}
+	}
 	identity, err := dispatchRunnerIdentity(request.Principal, message)
 	if err != nil {
 		finishWithError(err)
@@ -639,6 +648,10 @@ func terminalAuditError(err error) string {
 }
 
 func (dispatcher *Dispatcher) writeExecutionAudit(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, requestID, traceID string, eventType audit.EventType, errorType string) error {
+	return dispatcher.writeExecutionAuditRevision(ctx, principal, message, identity, requestID, traceID, eventType, errorType, nil)
+}
+
+func (dispatcher *Dispatcher) writeExecutionAuditRevision(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, requestID, traceID string, eventType audit.EventType, errorType string, revision *int64) error {
 	if dispatcher.auditWriter == nil {
 		return nil
 	}
@@ -646,7 +659,7 @@ func (dispatcher *Dispatcher) writeExecutionAudit(ctx context.Context, principal
 	if target, ok := principal.RoutingTarget(); ok {
 		channel = string(target.Channel)
 	}
-	event := audit.Event{SchemaVersion: audit.SchemaVersion, EventID: audit.NewEventID(requestID, string(eventType)), EventType: eventType, TenantID: principal.TenantID(), Channel: channel, UserID: message.ExternalUserID, SessionID: identity.SessionID, AgentAppID: principal.AppID(), ErrorType: errorType, RequestID: requestID, TraceID: traceID, ActorType: string(principal.Kind()), ActorID: principal.SubjectID(), OccurredAt: time.Now().UTC()}
+	event := audit.Event{SchemaVersion: audit.SchemaVersion, EventID: audit.NewEventID(requestID, string(eventType)), EventType: eventType, TenantID: principal.TenantID(), Channel: channel, UserID: message.ExternalUserID, SessionID: identity.SessionID, AgentAppID: principal.AppID(), Revision: revision, ErrorType: errorType, RequestID: requestID, TraceID: traceID, ActorType: string(principal.Kind()), ActorID: principal.SubjectID(), OccurredAt: time.Now().UTC()}
 	if _, err := dispatcher.auditWriter.Append(ctx, event); err != nil {
 		return err
 	}
