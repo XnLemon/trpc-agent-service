@@ -489,6 +489,25 @@ func TestWeComHandlerFactoryIsWiredAndOwnedByRuntime(t *testing.T) {
 	}
 }
 
+func TestBootstrapBuildsRuntimeRegistryFromStorageFactory(t *testing.T) {
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	config.Sessions = nil
+	config.StorageFactory = backend.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+		return backend.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: inmemory.NewSessionService()})
+	})
+	graph, err := New(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Ready() {
+		t.Fatal("storage-factory bootstrap graph is not ready")
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func nilContextForTest() context.Context { return nil }
 
 func setRequiredEnvironment(t *testing.T) {

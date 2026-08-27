@@ -2,12 +2,17 @@ package bootstrap
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
 func TestParseEnvironmentAPIIdentities(t *testing.T) {
@@ -87,6 +92,79 @@ func TestEnvironmentCredentialResolversFailClosedByScope(t *testing.T) {
 	modelScope.SecretRef = "other"
 	if _, err := modelResolver.Resolve(context.Background(), modelScope); err == nil {
 		t.Fatal("foreign model scope was accepted")
+	}
+}
+
+func TestEnvironmentSessionCapabilityProviderBoundaries(t *testing.T) {
+	provider := environmentSessionCapabilityProvider{}
+	if _, err := provider.New(nil, backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000"}, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("nil provider context = %v", err)
+	}
+	store := runtimestorageinmemory.New()
+	delegate := inmemory.NewSessionService()
+	value, err := (environmentSessionCapabilityProvider{delegate: delegate, store: store}).New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000"}, backend.CapabilityBinding{}, modelprofile.SecretValue{})
+	if err != nil || value == nil {
+		t.Fatalf("session capability = %v, %v", value, err)
+	}
+	if err := value.(interface{ Close() error }).Close(); err != nil {
+		t.Fatal(err)
+	}
+	_ = delegate.Close()
+	_ = store.Close()
+}
+
+func TestNewFromEnvironmentMigrationAndReadinessFailures(t *testing.T) {
+	setRequiredEnvironment(t)
+	registerBootstrapPingDriver.Do(func() {
+		sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{})
+	})
+	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousVerify := verifyEnvironmentMigrations
+	defer func() {
+		openEnvironmentDatabase = previousOpen
+		applyEnvironmentMigrations = previousApply
+		verifyEnvironmentMigrations = previousVerify
+	}()
+	for _, test := range []struct {
+		name     string
+		applyErr error
+	}{
+		{name: "migration", applyErr: errors.New("migration failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, err := sql.Open("trpc-service-bootstrap-ping", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+			applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return test.applyErr }
+			verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+			if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("migration error = %v", err)
+			}
+			_ = db.Close()
+		})
+	}
+
+	db, err := sql.Open("trpc-service-bootstrap-ping", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return errors.New("verification failed") }
+	graph, err := NewFromEnvironment(context.Background())
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if graph.Ready() {
+		_ = graph.Close()
+		t.Fatal("graph reported ready with failed migration verification")
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
