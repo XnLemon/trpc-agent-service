@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 func TestStorageRejectsCancelledContextsBeforeQueries(t *testing.T) {
@@ -55,5 +57,36 @@ func TestMonotonicNowDoesNotMoveBeforePersistedTime(t *testing.T) {
 	previous := time.Now().UTC().Add(time.Hour)
 	if got := MonotonicNow(previous); !got.Equal(previous) {
 		t.Fatalf("MonotonicNow(%v) = %v, want persisted timestamp", previous, got)
+	}
+}
+
+func TestCommitRollsBackForNilAndCancelledContexts(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Commit(nil, tx); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Commit(nil) = %v", err)
+	}
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+	tx, err = db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := Commit(ctx, tx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Commit(cancelled) = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
