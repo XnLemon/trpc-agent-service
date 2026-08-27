@@ -27,6 +27,7 @@ import (
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -55,13 +56,15 @@ var (
 // a successful bootstrap always creates a real Resolver, Registry and HTTP
 // handler.
 type Config struct {
-	DB       *sql.DB
-	OwnDB    bool
-	Tenants  tenant.Repository
-	Apps     agent.Repository
-	Models   modelprofile.Repository
-	Backends backend.Repository
-	Channels channels.CandidateConsumer
+	// Observability is the process telemetry provider. A nil value selects a no-op provider.
+	Observability observability.Provider
+	DB            *sql.DB
+	OwnDB         bool
+	Tenants       tenant.Repository
+	Apps          agent.Repository
+	Models        modelprofile.Repository
+	Backends      backend.Repository
+	Channels      channels.CandidateConsumer
 
 	ModelCatalog   *modelprofile.ProviderCatalog
 	BackendCatalog *backend.ProviderCatalog
@@ -242,12 +245,13 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	registry, err := gateway.NewRuntimeRunnerRegistry(gateway.RuntimeRunnerRegistryConfig{
 		Registry: config.Registry, SecretResolver: config.SecretResolver,
 		ModelFactory: config.ModelFactory, Sessions: config.Sessions, StorageFactory: config.StorageFactory,
+		Observability: config.Observability,
 	})
 	if err != nil {
 		return nil, ErrInvalidConfig
 	}
 	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{
-		Resolver: resolver, Registry: registry, RuntimeStore: config.RuntimeStore, DrainTimeout: config.DrainTimeout, AuditWriter: config.AuditWriter,
+		Resolver: resolver, Registry: registry, RuntimeStore: config.RuntimeStore, DrainTimeout: config.DrainTimeout, AuditWriter: config.AuditWriter, Observability: config.Observability,
 	})
 	if err != nil {
 		_ = registry.Close()
@@ -334,7 +338,7 @@ func configureHandler(runtimeGraph *Runtime, config Config) error {
 	handler, err := gateway.NewHTTPHandler(gateway.HTTPConfig{
 		Dispatcher: runtimeGraph.Dispatcher, Authenticator: config.Authenticator, Admin: config.AdminHandler, WeCom: runtimeGraph.wecomHandler,
 		Ready: runtimeGraph.Ready, Limiter: config.HTTP.Limiter, Idempotency: config.HTTP.Idempotency,
-		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout,
+		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout, Observability: config.Observability,
 	})
 	if err != nil {
 		_ = runtimeGraph.Registry.Close()

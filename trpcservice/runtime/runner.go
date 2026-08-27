@@ -8,7 +8,9 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
@@ -27,6 +29,19 @@ func NewRunner(
 	resolver modelprofile.SecretResolver,
 	factory modelprofile.ModelFactory,
 	sessions session.Service,
+	storageFactories ...backend.StorageFactory,
+) (trpcrunner.Runner, error) {
+	return NewRunnerWithObservability(ctx, plan, resolver, factory, sessions, nil, storageFactories...)
+}
+
+// NewRunnerWithObservability is NewRunner with provider-neutral model and tool telemetry.
+func NewRunnerWithObservability(
+	ctx context.Context,
+	plan ExecutionPlan,
+	resolver modelprofile.SecretResolver,
+	factory modelprofile.ModelFactory,
+	sessions session.Service,
+	telemetry observability.Provider,
 	storageFactories ...backend.StorageFactory,
 ) (trpcrunner.Runner, error) {
 	if ctx == nil {
@@ -54,7 +69,22 @@ func NewRunner(
 		return nil, errors.New("invalid runner: storage factory is required")
 	}
 	if len(storageFactories) == 1 {
-		capabilities, err = storageFactories[0].New(ctx, mustStorageInput(plan))
+		storageCtx := ctx
+		started := time.Now()
+		var finishStorage func(error)
+		if telemetry != nil {
+			storageCtx, _, finishStorage = observability.StartOperation(ctx, telemetry, observability.OperationStorageOperation, "storage")
+			_ = metrics.New(telemetry).Request(storageCtx, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "status": "started"})
+		}
+		capabilities, err = storageFactories[0].New(storageCtx, mustStorageInput(plan))
+		if finishStorage != nil {
+			finishStorage(err)
+			status := "success"
+			if err != nil {
+				status = "error"
+			}
+			_ = metrics.New(telemetry).BackendDuration(storageCtx, observability.DurationMilliseconds(started), map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "status": status, "error_class": observability.ErrorClass(err)})
+		}
 		if err != nil {
 			return nil, fmt.Errorf("build runner: storage capability: %w", err)
 		}
@@ -78,7 +108,11 @@ func NewRunner(
 	if err != nil {
 		return nil, fmt.Errorf("build runner: model: %w", err)
 	}
-	llmAgent := llmagent.New(agentInput.Name, llmAgentOptions(agentInput, model)...)
+	llmOptions := llmAgentOptions(agentInput, model)
+	if telemetry != nil {
+		llmOptions = append(llmOptions, telemetryOptions(telemetry, modelInput.Provider, modelInput.Model)...)
+	}
+	llmAgent := llmagent.New(agentInput.Name, llmOptions...)
 	delegate := trpcrunner.NewRunner(
 		agentInput.AppID,
 		llmAgent,
@@ -107,6 +141,64 @@ func llmAgentOptions(input agent.LLMAgentFactoryInput, model trpcmodel.Model) []
 		llmagent.WithEnableParallelTools(input.Runtime.EnableParallelTools),
 		llmagent.WithToolConcurrencyConfig(trpctool.ConcurrencyConfig{MaxConcurrency: input.Runtime.MaxParallelTools}),
 	}
+}
+
+type callbackStateKey struct{}
+type callbackState struct {
+	finish  func(error)
+	started time.Time
+}
+
+func telemetryOptions(provider observability.Provider, providerName, modelFamily string) []llmagent.Option {
+	catalog := metrics.New(provider)
+	modelCallbacks := trpcmodel.NewCallbacks().RegisterBeforeModel(func(ctx context.Context, _ *trpcmodel.BeforeModelArgs) (*trpcmodel.BeforeModelResult, error) {
+		started := time.Now()
+		next, _, finish := observability.StartOperation(ctx, provider, observability.OperationModelCall, "model")
+		_ = catalog.Request(next, map[string]string{"component": "model", "operation": observability.OperationModelCall, "provider": providerName, "model_family": modelFamily, "status": "started"})
+		return &trpcmodel.BeforeModelResult{Context: context.WithValue(next, callbackStateKey{}, callbackState{finish: finish, started: started})}, nil
+	}).RegisterAfterModel(func(ctx context.Context, args *trpcmodel.AfterModelArgs) (*trpcmodel.AfterModelResult, error) {
+		state, _ := ctx.Value(callbackStateKey{}).(callbackState)
+		if state.finish != nil {
+			var err error
+			if args != nil {
+				err = args.Error
+				if args.Response != nil && args.Response.Usage != nil {
+					usage := args.Response.Usage
+					_ = catalog.Tokens(ctx, int64(usage.PromptTokens), map[string]string{"component": "model", "provider": providerName, "model_family": modelFamily})
+					_ = catalog.Tokens(ctx, int64(usage.CompletionTokens), map[string]string{"component": "model", "provider": providerName, "model_family": modelFamily})
+				}
+			}
+			state.finish(err)
+			status := "success"
+			if err != nil {
+				status = "error"
+			}
+			_ = catalog.Duration(ctx, observability.DurationMilliseconds(state.started), map[string]string{"component": "model", "operation": observability.OperationModelCall, "provider": providerName, "model_family": modelFamily, "status": status, "error_class": observability.ErrorClass(err)})
+		}
+		return nil, nil
+	})
+	toolCallbacks := trpctool.NewCallbacks().RegisterBeforeTool(func(ctx context.Context, _ *trpctool.BeforeToolArgs) (*trpctool.BeforeToolResult, error) {
+		started := time.Now()
+		next, _, finish := observability.StartOperation(ctx, provider, observability.OperationToolCall, "tool")
+		_ = catalog.Request(next, map[string]string{"component": "tool", "operation": observability.OperationToolCall, "status": "started"})
+		return &trpctool.BeforeToolResult{Context: context.WithValue(next, callbackStateKey{}, callbackState{finish: finish, started: started})}, nil
+	}).RegisterAfterTool(func(ctx context.Context, args *trpctool.AfterToolArgs) (*trpctool.AfterToolResult, error) {
+		state, _ := ctx.Value(callbackStateKey{}).(callbackState)
+		if state.finish != nil {
+			var err error
+			if args != nil {
+				err = args.Error
+			}
+			state.finish(err)
+			status := "success"
+			if err != nil {
+				status = "error"
+			}
+			_ = catalog.Duration(ctx, observability.DurationMilliseconds(state.started), map[string]string{"component": "tool", "operation": observability.OperationToolCall, "status": status, "error_class": observability.ErrorClass(err)})
+		}
+		return nil, nil
+	})
+	return []llmagent.Option{llmagent.WithModelCallbacks(modelCallbacks), llmagent.WithToolCallbacks(toolCallbacks)}
 }
 
 // policyRunner preserves the published Agent runtime policy at the Runner

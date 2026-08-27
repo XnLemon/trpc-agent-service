@@ -21,6 +21,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -99,6 +100,7 @@ type environmentConfig struct {
 	secretRef      string
 	runtimeStorage string
 	wecom          *environmentWeComConfig
+	telemetry      observability.Provider
 }
 
 type environmentWeComConfig struct {
@@ -183,6 +185,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	}
 	graph, err := NewWithDatabase(ctx, db, Config{
 		OwnDB:               true,
+		Observability:       config.telemetry,
 		Tenants:             tenantRepo,
 		Apps:                appRepo,
 		Channels:            channelRepo,
@@ -223,13 +226,13 @@ func environmentWeComComponents(config environmentConfig, channelsRepo *channelp
 	}
 	credentials := environmentWeComCredentialResolver{tenantID: config.tenantID, config: *config.wecom}
 	factory := func(dispatcher gateway.DispatchService) (http.Handler, error) {
-		return wecom.New(wecom.Config{Candidates: channelsRepo, Tenants: tenantsRepo, Apps: appsRepo, Credentials: credentials, Dispatcher: dispatcher, AuditWriter: auditWriter})
+		return wecom.New(wecom.Config{Candidates: channelsRepo, Tenants: tenantsRepo, Apps: appsRepo, Credentials: credentials, Dispatcher: dispatcher, AuditWriter: auditWriter, Observability: config.telemetry})
 	}
 	owner, err := environmentWeComOwnerFunc()
 	if err != nil {
 		return nil, nil, err
 	}
-	worker, err := newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelsRepo, Credentials: credentials}, TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second, AuditWriter: auditWriter})
+	worker, err := newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelsRepo, Credentials: credentials}, TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second, AuditWriter: auditWriter, Observability: config.telemetry})
 	return factory, worker, err
 }
 
@@ -264,6 +267,7 @@ func loadEnvironment() (environmentConfig, error) {
 		secretRef:      environmentOrDefault(envModelSecretRef, defaultModelSecretRef),
 		subjectID:      environmentOrDefault(envSubjectID, defaultSubjectID),
 		runtimeStorage: strings.ToLower(strings.TrimSpace(os.Getenv(envSessionBackend))),
+		telemetry:      observability.NewNoopProvider(),
 	}
 	loaders := []func() error{config.loadDatabase, config.loadIdentities, config.loadAdmin, config.loadModel, config.loadRuntime, config.loadWeCom}
 	for _, load := range loaders {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session"
@@ -128,6 +129,7 @@ type RuntimeRunnerRegistryConfig struct {
 	ModelFactory   model.ModelFactory
 	Sessions       session.Service
 	StorageFactory backend.StorageFactory
+	Observability  observability.Provider
 }
 
 // NewRuntimeRunnerRegistry creates a registry backed by runtime.NewRunner.
@@ -137,9 +139,9 @@ func NewRuntimeRunnerRegistry(config RuntimeRunnerRegistryConfig) (*RunnerRegist
 	}
 	config.Registry.Factory = func(ctx context.Context, plan runtime.ExecutionPlan) (Runner, error) {
 		if config.StorageFactory != nil {
-			return runtime.NewRunner(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions, config.StorageFactory)
+			return runtime.NewRunnerWithObservability(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability, config.StorageFactory)
 		}
-		return runtime.NewRunner(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions)
+		return runtime.NewRunnerWithObservability(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability)
 	}
 	return NewRunnerRegistry(config.Registry)
 }

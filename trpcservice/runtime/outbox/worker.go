@@ -287,6 +287,7 @@ func (w *Worker) recordDeliveryDuration(ctx context.Context, started time.Time, 
 func (w *Worker) acceptDelivery(ctx, operationCtx context.Context, claimed runtimestorage.ReplyOutbox, providerID string) error {
 	if w.telemetry != nil {
 		_ = w.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "success"})
+		_ = w.metrics.Delivery(operationCtx, map[string]string{"component": "channel", "channel": "outbox", "status": "success"})
 	}
 	_, err := w.store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: runtimestorage.ReplySent, Owner: w.owner, FencingToken: claimed.FencingToken, ProviderID: providerID})
 	if err == nil {
@@ -320,6 +321,9 @@ func (w *Worker) rejectDelivery(ctx, operationCtx context.Context, claimed runti
 	}
 	if w.telemetry != nil && to == runtimestorage.ReplyDeadLetter {
 		_ = w.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "status": "failure", "error_class": metricErrorClass(class)})
+		_ = w.metrics.Delivery(operationCtx, map[string]string{"component": "channel", "channel": "outbox", "status": "dead_letter", "error_class": metricErrorClass(class)})
+	} else if w.telemetry != nil && to == runtimestorage.ReplyRetryable {
+		_ = w.metrics.Delivery(operationCtx, map[string]string{"component": "channel", "channel": "outbox", "status": "retry", "error_class": metricErrorClass(class)})
 	}
 	return err
 }

@@ -25,6 +25,8 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	"github.com/google/uuid"
 )
@@ -70,6 +72,8 @@ type Config struct {
 	Credentials CredentialResolver
 	// AuditWriter receives mandatory accepted and duplicate ingress facts.
 	AuditWriter audit.Writer
+	// Observability supplies provider-neutral trace and metric hooks.
+	Observability observability.Provider
 }
 
 type callbackState struct {
@@ -99,6 +103,8 @@ type Handler struct {
 	maxBodyBytes     int64
 	executionTimeout time.Duration
 	auditWriter      audit.Writer
+	telemetry        observability.Provider
+	metrics          metrics.Catalog
 
 	mu      sync.Mutex
 	closing bool
@@ -130,7 +136,11 @@ func New(config Config) (*Handler, error) {
 		return nil, ErrInvalid
 	}
 	baseCtx, cancel := context.WithCancel(context.Background())
+	if config.Observability == nil {
+		config.Observability = observability.NewNoopProvider()
+	}
 	handler := &Handler{routeKey: strings.Trim(config.RouteKey, "/"), dispatcher: config.Dispatcher, maxBodyBytes: config.MaxBodyBytes, executionTimeout: config.ExecutionTimeout, auditWriter: config.AuditWriter, baseCtx: baseCtx, cancel: cancel}
+	handler.telemetry, handler.metrics = config.Observability, metrics.New(config.Observability)
 	if config.Candidates != nil || config.Tenants != nil || config.Apps != nil || config.Credentials != nil {
 		if config.Candidates == nil || config.Tenants == nil || config.Apps == nil || config.Credentials == nil || handler.routeKey != "" {
 			cancel()
@@ -212,6 +222,14 @@ func (h *Handler) handleChallenge(w http.ResponseWriter, r *http.Request) {
 
 //nolint:gocyclo // Callback handling intentionally keeps protocol validation and admission in one ordered boundary.
 func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	operationCtx, _, finish := observability.StartOperation(r.Context(), h.telemetry, observability.OperationChannelReceive, "channel")
+	_ = h.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "wecom", "status": "started"})
+	defer func() {
+		finish(nil)
+		_ = h.metrics.Duration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "wecom", "status": "complete"})
+	}()
+	r = r.WithContext(operationCtx)
 	defer func() { _ = r.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(r.Body, h.maxBodyBytes+1))
 	if err != nil {

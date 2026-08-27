@@ -228,8 +228,13 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		finishWithError(ErrRunnerUnavailable)
 		return nil, ErrRunnerUnavailable
 	}
-	runnerEvents, err := runnerValue.Run(ctx, identity.UserID, identity.SessionID, trpcmodel.NewUserMessage(message.Content), trpcagent.WithRequestID(requestID))
+	runnerStarted := time.Now()
+	runnerCtx, _, finishRunner := observability.StartOperation(ctx, dispatcher.telemetry, observability.OperationRunnerExecution, "runner")
+	_ = dispatcher.metrics.Request(runnerCtx, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution, "status": "started"})
+	runnerEvents, err := runnerValue.Run(runnerCtx, identity.UserID, identity.SessionID, trpcmodel.NewUserMessage(message.Content), trpcagent.WithRequestID(requestID))
 	if err != nil {
+		finishRunner(err)
+		_ = dispatcher.metrics.Duration(runnerCtx, observability.DurationMilliseconds(runnerStarted), map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution, "status": "error", "error_class": observability.ErrorClass(err)})
 		_ = lease.Release()
 		dispatcher.failDurable(durable, err)
 		eventType, errorType := audit.EventExecutionFailed, string(audit.ErrorUnavailable)
@@ -249,6 +254,8 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		return nil, ErrExecution
 	}
 	if runnerEvents == nil {
+		finishRunner(ErrExecution)
+		_ = dispatcher.metrics.Duration(runnerCtx, observability.DurationMilliseconds(runnerStarted), map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution, "status": "error", "error_class": "error"})
 		_ = lease.Release()
 		dispatcher.failDurable(durable, ErrExecution)
 		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
@@ -262,7 +269,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 
 	output := make(chan DispatchEvent, 32)
 	_ = dispatcher.metrics.Active(ctx, 1, map[string]string{"component": "runner"})
-	go dispatcher.forward(ctx, requestID, traceID, runnerEvents, lease, durable, output, span, started, request.Principal, message, identity)
+	go dispatcher.forward(runnerCtx, requestID, traceID, runnerEvents, lease, durable, output, span, started, request.Principal, message, identity, finishRunner, runnerStarted)
 	return output, nil
 }
 
@@ -306,6 +313,14 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 	if dispatcher.runtimeStore == nil || principal.Kind() != PrincipalChannel {
 		return nil, nil
 	}
+	started := time.Now()
+	operationCtx, _, finish := observability.StartOperation(ctx, dispatcher.telemetry, observability.OperationStorageOperation, "storage")
+	_ = dispatcher.metrics.Request(operationCtx, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "status": "started"})
+	defer func() {
+		finish(nil)
+		_ = dispatcher.metrics.BackendDuration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "status": "success"})
+	}()
+	ctx = operationCtx
 	target, ok := principal.RoutingTarget()
 	if !ok || message.ExternalMessageID == "" || len([]rune(message.ExternalMessageID)) > maxDurableExternalMessageIDRunes {
 		return nil, fmt.Errorf("%w: durable Channel messages require an external message ID", ErrInvalid)
@@ -434,7 +449,7 @@ func (dispatcher *Dispatcher) finishDurable(requestID, traceID string, durable *
 	})
 }
 
-func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time, principal Principal, message InboundMessage, identity tenant.RunnerIdentity) {
+func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, finishRunner func(error), runnerStarted time.Time) {
 	defer close(output)
 	defer func() { _ = lease.Release() }()
 	var terminalErr error
@@ -460,6 +475,14 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		return err
 	}
 	defer func() {
+		if finishRunner != nil {
+			finishRunner(terminalErr)
+			status := "complete"
+			if terminalErr != nil {
+				status = "error"
+			}
+			_ = dispatcher.metrics.Duration(ctx, observability.DurationMilliseconds(runnerStarted), map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution, "status": status, "error_class": observability.ErrorClass(terminalErr)})
+		}
 		terminalErr = dispatcher.finalizeForward(requestID, traceID, durable, principal, terminalErr, reply.String(), terminalEventType, terminalErrorType, finalizeAudit)
 		_ = dispatcher.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
 		status := "complete"

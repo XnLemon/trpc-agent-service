@@ -42,9 +42,10 @@ Dashboard 展示四组面板：请求与错误率、端到端/分阶段延迟、
 
 ## 验收台账
 
-- [ ] HTTP/IM callback 到 Gateway、Runner、Model、Tool、Storage、IM reply 的 trace context 连续且取消安全。
-- [ ] 目录指标覆盖 volume、latency、errors、IM success、tokens、cost 和 backend latency。
-- [ ] 标签白名单、脱敏和 tenant-authorized aggregate 查询有负向测试。
-- [ ] Prometheus/Grafana dashboard 与 alert rules 可加载，并不包含 secret 或无界 ID。
-- [ ] no-op provider 保持默认行为；exporter/shutdown 故障不阻塞业务路径。
+- [x] HTTP/IM callback 到 Gateway、Runner、Model、Tool、Storage、IM reply 的 trace context 连续且取消安全。
+- [x] 目录指标覆盖 volume、latency、errors、IM success、tokens、cost 和 backend latency。
+- [x] 标签白名单、脱敏和 tenant-authorized aggregate 查询有负向测试。
+- [x] Prometheus/Grafana dashboard 与 alert rules 可加载，并不包含 secret 或无界 ID。
+- [x] no-op provider 保持默认行为；exporter/shutdown 故障不阻塞业务路径。
 
+代码阶段的 Storage span 覆盖 RuntimeStore 入站 claim 与 StorageFactory capability construction；未来新增 Session/Memory/Artifact adapter 必须复用同一 operation hook。

@@ -57,3 +57,50 @@ func TestCatalogUsageUsesBoundedDimensions(t *testing.T) {
 		t.Fatal("high-cardinality labels must be rejected")
 	}
 }
+
+func TestCatalogUsageDoesNotMutateLabelsAndRecordsIssue79Signals(t *testing.T) {
+	catalog := New(observability.NewNoopProvider())
+	labels := map[string]string{"component": "model"}
+	total := audit.UsageTotal{Channel: "telegram", Provider: "openai", InputTokens: 4, OutputTokens: 3, ModelCostMinor: 2}
+	if err := catalog.Usage(context.Background(), total, labels); err != nil {
+		t.Fatal(err)
+	}
+	if len(labels) != 1 || labels["channel"] != "" || labels["provider"] != "" {
+		t.Fatalf("usage mutated labels: %#v", labels)
+	}
+	if err := catalog.Tokens(context.Background(), 1, map[string]string{"component": "model", "provider": "openai"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Cost(context.Background(), 1, map[string]string{"component": "model", "provider": "openai"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.BackendDuration(context.Background(), 2, map[string]string{"component": "storage", "status": "success"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Delivery(context.Background(), map[string]string{"component": "channel", "channel": "telegram", "status": "dead_letter"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestZeroCatalogIsSafe(t *testing.T) {
+	var catalog Catalog
+	ctx := context.Background()
+	if err := catalog.Request(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Duration(ctx, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Tokens(ctx, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Cost(ctx, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.BackendDuration(ctx, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Delivery(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+}
