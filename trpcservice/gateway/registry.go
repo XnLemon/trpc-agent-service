@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
@@ -126,14 +127,18 @@ type RuntimeRunnerRegistryConfig struct {
 	SecretResolver model.SecretResolver
 	ModelFactory   model.ModelFactory
 	Sessions       session.Service
+	StorageFactory backend.StorageFactory
 }
 
 // NewRuntimeRunnerRegistry creates a registry backed by runtime.NewRunner.
 func NewRuntimeRunnerRegistry(config RuntimeRunnerRegistryConfig) (*RunnerRegistry, error) {
-	if config.ModelFactory == nil || config.Sessions == nil {
+	if config.ModelFactory == nil || (config.Sessions == nil && config.StorageFactory == nil) {
 		return nil, fmt.Errorf("%w: runtime Runner dependencies are required", ErrInvalid)
 	}
 	config.Registry.Factory = func(ctx context.Context, plan runtime.ExecutionPlan) (Runner, error) {
+		if config.StorageFactory != nil {
+			return runtime.NewRunner(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions, config.StorageFactory)
+		}
 		return runtime.NewRunner(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions)
 	}
 	return NewRunnerRegistry(config.Registry)
@@ -297,6 +302,65 @@ func (registry *RunnerRegistry) Invalidate(key runtime.CacheKey) error {
 		return entry.close()
 	}
 	return nil
+}
+
+// InvalidateMatching invalidates only entries whose complete cache key matches
+// predicate. Borrowed leases keep their frozen Runner until Release.
+func (registry *RunnerRegistry) InvalidateMatching(predicate func(runtime.CacheKey) bool) error {
+	if registry == nil {
+		return ErrNotReady
+	}
+	if predicate == nil {
+		return fmt.Errorf("%w: invalidation predicate is required", ErrInvalid)
+	}
+	registry.mu.Lock()
+	if registry.closed {
+		registry.mu.Unlock()
+		return ErrClosed
+	}
+	toClose := make([]*runnerEntry, 0)
+	for key, build := range registry.pending {
+		if predicate(key) {
+			build.invalidated = true
+		}
+	}
+	for key, entry := range registry.entries {
+		if !predicate(key) {
+			continue
+		}
+		delete(registry.entries, key)
+		entry.invalidated = true
+		if entry.refs == 0 {
+			toClose = append(toClose, entry)
+		}
+	}
+	registry.mu.Unlock()
+	for _, entry := range toClose {
+		if err := entry.close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// InvalidateTenant removes future runners for one tenant.
+func (registry *RunnerRegistry) InvalidateTenant(tenantID string) error {
+	return registry.InvalidateMatching(func(key runtime.CacheKey) bool { return key.TenantID == tenantID })
+}
+
+// InvalidateApp removes future runners for one tenant/app pair.
+func (registry *RunnerRegistry) InvalidateApp(tenantID, appID string) error {
+	return registry.InvalidateMatching(func(key runtime.CacheKey) bool { return key.TenantID == tenantID && key.AppID == appID })
+}
+
+// InvalidateModelProfile removes future runners using one model profile.
+func (registry *RunnerRegistry) InvalidateModelProfile(tenantID, profileID string) error {
+	return registry.InvalidateMatching(func(key runtime.CacheKey) bool { return key.TenantID == tenantID && key.ModelProfileID == profileID })
+}
+
+// InvalidateBackendProfile removes future runners using one backend profile.
+func (registry *RunnerRegistry) InvalidateBackendProfile(tenantID, profileID string) error {
+	return registry.InvalidateMatching(func(key runtime.CacheKey) bool { return key.TenantID == tenantID && key.BackendProfileID == profileID })
 }
 
 // Close stops new acquisitions and waits a bounded time for borrowed leases.

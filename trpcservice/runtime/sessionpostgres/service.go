@@ -223,8 +223,18 @@ func (s *Service) GetSessionSummaryText(ctx context.Context, value *session.Sess
 	return s.delegate.GetSessionSummaryText(ctx, value, options...)
 }
 
-// Close delegates shutdown to the borrowed session service.
-func (s *Service) Close() error { return s.delegate.Close() }
+// Close releases only Service-owned state. The upstream session service is
+// borrowed from the caller and must remain available to other tenant runners;
+// its owner closes it separately during bootstrap shutdown.
+func (s *Service) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	clear(s.versions)
+	s.mu.Unlock()
+	return nil
+}
 
 func validateKey(key session.Key) error {
 	if key.AppName == "" {

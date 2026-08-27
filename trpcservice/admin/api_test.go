@@ -268,6 +268,95 @@ func TestAdminTenantAndAppMetadataUpdatesUsePathScopeAndExpectedVersion(t *testi
 	}
 }
 
+func TestAdminInvalidatesOnlyTheMutatedRuntimeScope(t *testing.T) {
+	handler, _ := testHandler(t)
+	invalidator := &recordingCacheInvalidator{}
+	handler.config.CacheInvalidator = invalidator
+	tenantValue, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "invalidate", DisplayName: "Invalidate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator, err := NewStaticAuthenticator("admin-token", []string{tenantValue.TenantID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.config.Authenticator = authenticator
+	app, err := handler.config.Apps.Create(context.Background(), agent.CreateInput{TenantID: tenantValue.TenantID, AppKey: "invalidate", DisplayName: "Invalidate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPatch, "/admin/v1/tenants/"+tenantValue.TenantID+"/apps/"+app.AppID, strings.NewReader(`{"expected_version":1,"display_name":"Invalidate v2"}`))
+	request.Header.Set("Authorization", "Bearer admin-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("app update status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if changes := invalidator.Changes(); len(changes) != 1 || changes[0] != (CacheInvalidation{TenantID: tenantValue.TenantID, AppID: app.AppID, Kind: CacheInvalidationApp}) {
+		t.Fatalf("invalidations = %#v", changes)
+	}
+}
+
+func TestAdminInvalidationScopeMatchesCommittedResource(t *testing.T) {
+	handler, _ := testHandler(t)
+	invalidator := &recordingCacheInvalidator{}
+	handler.config.CacheInvalidator = invalidator
+	const tenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	cases := []struct {
+		name   string
+		method string
+		parts  []string
+		want   CacheInvalidation
+	}{
+		{name: "tenant configuration", method: http.MethodPatch, parts: []string{"tenants", tenantID}, want: CacheInvalidation{TenantID: tenantID, Kind: CacheInvalidationTenant}},
+		{name: "tenant disable", method: http.MethodPost, parts: []string{"tenants", tenantID, "status"}, want: CacheInvalidation{TenantID: tenantID, Kind: CacheInvalidationTenant}},
+		{name: "app publish", method: http.MethodPost, parts: []string{"tenants", tenantID, "apps", "app-1", "revisions", "2", "publish"}, want: CacheInvalidation{TenantID: tenantID, AppID: "app-1", Kind: CacheInvalidationApp}},
+		{name: "app rollback", method: http.MethodPost, parts: []string{"tenants", tenantID, "apps", "app-1", "rollback"}, want: CacheInvalidation{TenantID: tenantID, AppID: "app-1", Kind: CacheInvalidationApp}},
+		{name: "model update", method: http.MethodPatch, parts: []string{"tenants", tenantID, "models", "model-1"}, want: CacheInvalidation{TenantID: tenantID, ProfileID: "model-1", Kind: CacheInvalidationModel}},
+		{name: "backend disable", method: http.MethodPost, parts: []string{"tenants", tenantID, "backends", "backend-1", "status"}, want: CacheInvalidation{TenantID: tenantID, ProfileID: "backend-1", Kind: CacheInvalidationBackend}},
+		{name: "binding update", method: http.MethodPatch, parts: []string{"tenants", tenantID, "bindings", "binding-1"}, want: CacheInvalidation{TenantID: tenantID, BindingID: "binding-1", Kind: CacheInvalidationBinding}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			invalidator.Reset()
+			handler.invalidateMutation(test.parts, test.method)
+			if changes := invalidator.Changes(); len(changes) != 1 || changes[0] != test.want {
+				t.Fatalf("invalidations = %#v, want %#v", changes, test.want)
+			}
+		})
+	}
+	for _, parts := range [][]string{{"tenants", tenantID, "models"}, {"tenants", tenantID, "apps", "app-1", "revisions", "2"}} {
+		invalidator.Reset()
+		handler.invalidateMutation(parts, http.MethodPost)
+		if changes := invalidator.Changes(); len(changes) != 0 {
+			t.Fatalf("unpublished change invalidated runtime: %#v", changes)
+		}
+	}
+}
+
+type recordingCacheInvalidator struct {
+	mu      sync.Mutex
+	changes []CacheInvalidation
+}
+
+func (invalidator *recordingCacheInvalidator) Invalidate(change CacheInvalidation) {
+	invalidator.mu.Lock()
+	defer invalidator.mu.Unlock()
+	invalidator.changes = append(invalidator.changes, change)
+}
+
+func (invalidator *recordingCacheInvalidator) Changes() []CacheInvalidation {
+	invalidator.mu.Lock()
+	defer invalidator.mu.Unlock()
+	return append([]CacheInvalidation(nil), invalidator.changes...)
+}
+
+func (invalidator *recordingCacheInvalidator) Reset() {
+	invalidator.mu.Lock()
+	defer invalidator.mu.Unlock()
+	invalidator.changes = nil
+}
+
 func TestDecodeBodyPreservesProviderOptionKeys(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants/t_01ARZ3NDEKTSV4RRFFQ69G5FAV/models", strings.NewReader(`{"profile_key":"support","display_name":"Support","configuration":{"provider":"openai","model":"gpt-4o-mini","secret_ref":"env/key","options":{"x_custom_option":"keep"}}}`))
 	var input modelprofile.CreateInput
