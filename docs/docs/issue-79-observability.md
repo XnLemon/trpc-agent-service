@@ -36,7 +36,7 @@ Storage telemetry 覆盖实际 RuntimeStore/Session service 的读写方法（Ge
 
 ## Dashboard 与访问控制
 
-发布包提供 deploy/observability/ 下的 Prometheus recording/alert rules 和 Grafana dashboard JSON。Prometheus telemetry 本身是进程级低基数聚合，不含 tenant label；tenant dashboard 的 query adapter 只对 AuditEvent usage aggregate 提供租户维度，并返回经授权的 scope（短 hash 列表），而对请求/延迟/交付面板明确返回 process aggregate。Adapter 先通过平台的 tenant authorization，再构造固定查询模板；客户端不能提交任意 PromQL 或把原始 tenant label 拼进查询。跨租户管理员只能访问其授权租户集合，普通租户只能访问自身聚合，匿名或超出基数预算的维度归入 aggregate 桶。Grafana JSON 只引用 adapter 暴露的受控变量，不把 dashboard 当作授权边界。
+发布包提供 deploy/observability/ 下的 Prometheus recording/alert rules 和 Grafana dashboard JSON。Prometheus telemetry 本身是进程级低基数聚合，不含 tenant label，因此 query adapter 固定区分两种视图：`platform` 视图只对平台运维管理员开放，显示请求/延迟/交付等进程聚合；`tenant` 视图只返回经授权的 AuditEvent usage aggregate（token/cost）和该租户的 scope 元数据，不返回跨租户的 process telemetry。普通租户只能访问自身 usage 聚合，跨租户管理员只能访问其授权租户集合；匿名或超出基数预算的维度归入 aggregate 桶。Adapter 先通过平台的 tenant authorization，再构造固定查询模板；客户端不能提交任意 PromQL 或把原始 tenant label 拼进查询。Grafana JSON 只引用 adapter 暴露的受控视图，不把 dashboard 当作授权边界。
 
 Dashboard 展示四组面板：请求与错误率、端到端/分阶段延迟、Runner/队列/IM 交付、token/cost 与后端延迟。审计详情、原始消息和 provider 错误必须跳转到受权限保护的审计查询，不从 telemetry 反推。
 

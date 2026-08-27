@@ -2,7 +2,7 @@ groups:
   - name: trpcservice-runtime
     rules:
       - alert: TRPCServiceHighErrorRate
-        expr: sum(rate(trpcservice_requests_total{status=~"error|failure"}[5m])) / clamp_min(sum(rate(trpcservice_requests_total[5m])), 1) > 0.05
+        expr: sum(rate(trpcservice_requests_total{status=~"error|failure|canceled|timeout"}[5m])) / clamp_min(sum(rate(trpcservice_requests_total{status=~"complete|success|error|failure|canceled|timeout"}[5m])), 1) > 0.05
         for: 10m
         labels:
           severity: warning
@@ -23,7 +23,7 @@ groups:
         annotations:
           summary: trpcservice backend p95 latency is above 500 milliseconds
       - alert: TRPCServiceChannelDeliveryFailures
-        expr: sum(rate(trpcservice_channel_deliveries_total{status=~"failure|dead_letter"}[5m])) > 0
+        expr: sum(rate(trpcservice_channel_deliveries_total{status=~"retry|failure|dead_letter"}[5m])) / clamp_min(sum(rate(trpcservice_channel_deliveries_total{status=~"success|retry|failure|dead_letter"}[5m])), 1) > 0.01
         for: 5m
         labels:
           severity: warning

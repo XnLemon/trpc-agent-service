@@ -2,12 +2,13 @@
   "title": "tRPC-Agent-Service runtime",
   "schemaVersion": 39,
   "version": 1,
+  "description": "Process telemetry is exposed only through the platform adapter; tenant views use its authorized AuditEvent usage scope and never accept raw PromQL or tenant labels.",
   "templating": {"list": []},
   "panels": [
     {"type": "timeseries", "title": "Request rate", "targets": [{"expr": "sum(rate(trpcservice_requests_total[5m]))"}]},
-    {"type": "timeseries", "title": "Error rate", "targets": [{"expr": "sum(rate(trpcservice_requests_total{status=~\"error|failure\"}[5m])) / clamp_min(sum(rate(trpcservice_requests_total[5m])), 1)"}]},
+    {"type": "timeseries", "title": "Error rate", "targets": [{"expr": "sum(rate(trpcservice_requests_total{status=~\"error|failure|canceled|timeout\"}[5m])) / clamp_min(sum(rate(trpcservice_requests_total{status=~\"complete|success|error|failure|canceled|timeout\"}[5m])), 1)"}]},
     {"type": "timeseries", "title": "Operation p95 (ms)", "targets": [{"expr": "histogram_quantile(0.95, sum by (le, operation) (rate(trpcservice_operation_duration_ms_bucket[5m])))"}]},
-    {"type": "timeseries", "title": "Channel delivery", "targets": [{"expr": "sum by (channel, status) (rate(trpcservice_channel_deliveries_total[5m]))"}]},
+    {"type": "timeseries", "title": "Channel delivery failure ratio", "targets": [{"expr": "sum(rate(trpcservice_channel_deliveries_total{status=~\"retry|failure|dead_letter\"}[5m])) / clamp_min(sum(rate(trpcservice_channel_deliveries_total{status=~\"success|retry|failure|dead_letter\"}[5m])), 1)"}]},
     {"type": "timeseries", "title": "Token and cost", "targets": [{"expr": "sum by (provider, model_family) (rate(trpcservice_tokens_total[5m]))"}, {"expr": "sum by (provider, model_family) (rate(trpcservice_cost_minor_total[5m]))"}]},
     {"type": "timeseries", "title": "Backend p95 (ms)", "targets": [{"expr": "histogram_quantile(0.95, sum by (le, provider) (rate(trpcservice_backend_operation_duration_ms_bucket[5m])))"}]}
   ]

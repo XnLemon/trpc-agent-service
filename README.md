@@ -199,7 +199,7 @@
 - [x] 接入运行时 OpenTelemetry tracing、metrics 和结构化日志（Issue #45 阶段 A）
 - [ ] 串联 HTTP/IM callback、Gateway、Runner、Model、Tool、Storage 和 IM reply 的 trace（Issue #79；含流式模型调用、创建流失败和 WeCom context 继承）
 - [ ] 采集请求量、延迟、终态错误率、IM 成功/重试/死信、token、成本和实际 Session/Storage 后端延迟指标（Issue #79）
-- [ ] 提供通过授权 query adapter 的租户 dashboard、告警规则并控制 provider/channel/model label 基数（Issue #79）
+- [ ] 提供通过授权 query adapter 的租户 usage dashboard、平台运维 process dashboard、告警规则并控制 provider/channel/model label 基数（Issue #79）
 
 ### 可靠性、运维与测试
 
