@@ -447,6 +447,44 @@ func TestRunnerRegistryConfigurationAndBoundaryErrors(t *testing.T) {
 	}
 }
 
+func TestRunnerRegistryInvalidationWrappersAndPredicateBoundaries(t *testing.T) {
+	plan := testExecutionPlan(t)
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+		return &testRunner{}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = registry.Close() }()
+	if err := registry.InvalidateMatching(nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil predicate = %v", err)
+	}
+	lease, err := registry.Acquire(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := plan.CacheKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.InvalidateApp(key.TenantID, key.AppID); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.InvalidateModelProfile(key.TenantID, key.ModelProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.InvalidateBackendProfile(key.TenantID, key.BackendProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	var nilRegistry *RunnerRegistry
+	if err := nilRegistry.InvalidateMatching(func(runtime.CacheKey) bool { return true }); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("nil registry matching = %v", err)
+	}
+}
+
 type stage2ModelFactory struct{}
 
 func (stage2ModelFactory) New(context.Context, model.ModelFactoryInput, model.SecretValue) (trpcmodel.Model, error) {

@@ -41,6 +41,40 @@ func TestSecretManagerResolverValidatesScopeRedactsFailuresAndHonorsCancellation
 	}
 }
 
+func TestSecretManagerResolverMapsManagerFailureAndLateCancellation(t *testing.T) {
+	scope := SecretScope{TenantID: registryTenant, SecretRef: "secret/manager"}
+	manager := secretManagerFunc(func(context.Context, SecretScope) (SecretValue, error) {
+		return SecretValue{}, errors.New("transport secret detail")
+	})
+	resolver, err := NewSecretManagerResolver(manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Resolve(context.Background(), scope); !errors.Is(err, ErrSecretUnavailable) {
+		t.Fatalf("manager failure Resolve() = %v", err)
+	}
+	empty := secretManagerFunc(func(context.Context, SecretScope) (SecretValue, error) { return SecretValue{}, nil })
+	resolver, err = NewSecretManagerResolver(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Resolve(context.Background(), scope); !errors.Is(err, ErrSecretUnavailable) {
+		t.Fatalf("empty secret Resolve() = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	late := secretManagerFunc(func(context.Context, SecretScope) (SecretValue, error) {
+		cancel()
+		return NewSecretValue("value")
+	})
+	resolver, err = NewSecretManagerResolver(late)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Resolve(ctx, scope); !errors.Is(err, context.Canceled) {
+		t.Fatalf("late cancellation Resolve() = %v", err)
+	}
+}
+
 type secretManagerFunc func(context.Context, SecretScope) (SecretValue, error)
 
 func (function secretManagerFunc) Read(ctx context.Context, scope SecretScope) (SecretValue, error) {

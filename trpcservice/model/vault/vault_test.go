@@ -43,3 +43,72 @@ func TestManagerReadsTenantScopedKVAndRedactsFailures(t *testing.T) {
 		t.Fatal("Vault secret leaked in String")
 	}
 }
+
+func TestManagerReadFailureBoundaries(t *testing.T) {
+	validScope := modelprofile.SecretScope{TenantID: "t_00000000000000000000000000", SecretRef: "secret/model"}
+	for name, status := range map[string]int{"unauthorized": http.StatusUnauthorized, "forbidden": http.StatusForbidden, "not-found": http.StatusNotFound, "server": http.StatusInternalServerError} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(status) }))
+			defer server.Close()
+			manager, err := New(Config{BaseURL: server.URL, Token: "token", Mount: "secret", HTTPClient: server.Client()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = manager.Read(context.Background(), validScope)
+			if name == "unauthorized" || name == "forbidden" {
+				if !errors.Is(err, ErrUnauthorized) {
+					t.Fatalf("Read() = %v", err)
+				}
+			} else if !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("Read() = %v", err)
+			}
+		})
+	}
+	for name, body := range map[string]string{"malformed": "not-json", "missing-value": "{\"data\":{\"data\":{}}}", "numeric-value": "{\"data\":{\"data\":{\"value\":12}}}", "empty-value": "{\"data\":{\"data\":{\"value\":\"\"}}}"} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { _, _ = writer.Write([]byte(body)) }))
+			defer server.Close()
+			manager, err := New(Config{BaseURL: server.URL, Token: "token", Mount: "secret", HTTPClient: server.Client()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.Read(context.Background(), validScope); !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("Read() = %v", err)
+			}
+		})
+	}
+	manager, err := New(Config{BaseURL: "https://127.0.0.1:1", Token: "token", Mount: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Read(context.Background(), validScope); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("transport Read() = %v", err)
+	}
+	if _, err := manager.Read(nil, validScope); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil context Read() = %v", err)
+	}
+	if _, err := manager.Read(context.Background(), modelprofile.SecretScope{}); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("invalid scope Read() = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := manager.Read(canceled, validScope); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Read() = %v", err)
+	}
+}
+
+func TestManagerNewValidationBoundaries(t *testing.T) {
+	for name, config := range map[string]Config{
+		"empty url":     {Token: "token", Mount: "secret"},
+		"invalid url":   {BaseURL: "://bad", Token: "token", Mount: "secret"},
+		"missing token": {BaseURL: "https://vault.example", Mount: "secret"},
+		"missing mount": {BaseURL: "https://vault.example", Token: "token"},
+		"empty host":    {BaseURL: "https://", Token: "token", Mount: "secret"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := New(config); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("New() = %v", err)
+			}
+		})
+	}
+}

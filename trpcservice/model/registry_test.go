@@ -54,6 +54,45 @@ func TestSecretRegistryCancellationAndClose(t *testing.T) {
 	}
 }
 
+func TestSecretRegistryRegistrationAndRemovalBoundaries(t *testing.T) {
+	var nilRegistry *SecretRegistry
+	scope := SecretScope{TenantID: registryTenant, SecretRef: "secret/model"}
+	if err := nilRegistry.RegisterValue(scope, "value"); !errors.Is(err, ErrSecretUnavailable) {
+		t.Fatalf("nil RegisterValue() = %v", err)
+	}
+	if _, err := nilRegistry.Resolve(context.Background(), scope); !errors.Is(err, ErrSecretUnavailable) {
+		t.Fatalf("nil Resolve() = %v", err)
+	}
+	if err := NewSecretRegistry().RegisterValue(scope, ""); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty RegisterValue() = %v", err)
+	}
+
+	registry := NewSecretRegistry()
+	invalid := scope
+	invalid.SecretRef = ""
+	if err := registry.RegisterValue(invalid, "value"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid RegisterValue() = %v", err)
+	}
+	if err := registry.RegisterValue(scope, "value"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Remove(scope); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Resolve(context.Background(), scope); !errors.Is(err, ErrSecretUnavailable) {
+		t.Fatalf("removed Resolve() = %v", err)
+	}
+	if _, err := registry.Resolve(context.Background(), invalid); !errors.Is(err, ErrSecretUnavailable) {
+		t.Fatalf("invalid Resolve() = %v", err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Remove(scope); !errors.Is(err, ErrRegistryClosed) {
+		t.Fatalf("closed Remove() = %v", err)
+	}
+}
+
 func TestModelProviderRegistryScopesAndClonesInput(t *testing.T) {
 	registry := NewModelProviderRegistry()
 	factory := &registryModelFactory{}
@@ -97,9 +136,62 @@ func TestModelProviderRegistryHonorsCancellationAfterFactoryReturns(t *testing.T
 	}
 }
 
+func TestModelProviderRegistryFailureAndLifecycleBoundaries(t *testing.T) {
+	secret, err := NewSecretValue("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := ModelFactoryInput{TenantID: registryTenant, Provider: "fake", Model: "chat"}
+	registry := NewProviderRegistry()
+	if err := registry.Register(registryTenant, "", &registryModelFactory{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty provider Register() = %v", err)
+	}
+	if err := registry.Register("", "fake", &registryModelFactory{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty tenant Register() = %v", err)
+	}
+	if err := registry.Register(registryTenant, "fake", modelFactoryFunc(func(context.Context, ModelFactoryInput, SecretValue) (trpcmodel.Model, error) {
+		return nil, errors.New("provider detail")
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.New(context.Background(), input, secret); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("factory failure New() = %v", err)
+	}
+	if err := registry.Register(registryTenant, "fake", modelFactoryFunc(func(context.Context, ModelFactoryInput, SecretValue) (trpcmodel.Model, error) {
+		return nil, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.New(context.Background(), input, secret); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("nil model New() = %v", err)
+	}
+	if err := registry.Remove(registryTenant, "fake"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.New(context.Background(), input, secret); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("removed provider New() = %v", err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Remove(registryTenant, "fake"); !errors.Is(err, ErrRegistryClosed) {
+		t.Fatalf("closed Remove() = %v", err)
+	}
+	var nilRegistry *ModelProviderRegistry
+	if _, err := nilRegistry.New(context.Background(), input, secret); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("nil registry New() = %v", err)
+	}
+}
+
 type registryModelFactory struct {
 	options string
 	cancel  context.CancelFunc
+}
+
+type modelFactoryFunc func(context.Context, ModelFactoryInput, SecretValue) (trpcmodel.Model, error)
+
+func (function modelFactoryFunc) New(ctx context.Context, input ModelFactoryInput, secret SecretValue) (trpcmodel.Model, error) {
+	return function(ctx, input, secret)
 }
 
 func (factory *registryModelFactory) New(_ context.Context, input ModelFactoryInput, _ SecretValue) (trpcmodel.Model, error) {

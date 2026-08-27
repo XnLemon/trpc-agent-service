@@ -193,6 +193,47 @@ func TestNewRunnerRejectsInvalidInputsAndFactoryFailures(t *testing.T) {
 	}
 }
 
+func TestNewRunnerValidatesAndClosesStorageCapabilities(t *testing.T) {
+	fixture := runtimeFixture(t)
+	plan := newExecutionPlanForRunner(t, fixture)
+	if _, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{}, nil, nil); err == nil {
+		t.Fatal("nil storage factory unexpectedly succeeded")
+	}
+	if _, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{}, nil, backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) { return nil, nil }), backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) { return nil, nil })); err == nil {
+		t.Fatal("multiple storage factories unexpectedly succeeded")
+	}
+
+	closed := &runtimeCloseTrackingSession{Service: inmemory.NewSessionService()}
+	factory := backend.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+		if input.TenantID != fixture.root.TenantID {
+			t.Fatalf("storage input tenant = %q", input.TenantID)
+		}
+		return backend.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: closed})
+	})
+	if _, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{err: errors.New("model unavailable")}, nil, factory); err == nil {
+		t.Fatal("model setup failure unexpectedly succeeded")
+	}
+	if closed.calls != 1 {
+		t.Fatalf("storage capability close calls = %d", closed.calls)
+	}
+}
+
+func TestPolicyRunnerCloseReleasesDelegateAndCapabilities(t *testing.T) {
+	delegate := &runtimeClosingRunner{err: errors.New("delegate close failure")}
+	capability := &runtimeCloseTrackingSession{Service: inmemory.NewSessionService(), err: errors.New("capability close failure")}
+	set, err := backend.NewCapabilitySet("t_00000000000000000000000000", map[backend.Capability]any{backend.CapabilitySession: capability})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &policyRunner{delegate: delegate, capabilities: set}
+	if err := runner.Close(); err == nil || !strings.Contains(err.Error(), "delegate close failure") || !strings.Contains(err.Error(), "backend storage factory failed") {
+		t.Fatalf("Close() = %v", err)
+	}
+	if delegate.calls != 1 || capability.calls != 1 {
+		t.Fatalf("close calls delegate=%d capability=%d", delegate.calls, capability.calls)
+	}
+}
+
 func TestNewRunnerCarriesPublishedRuntimePolicy(t *testing.T) {
 	fixture := runtimeFixture(t)
 	policy := agent.DefaultRuntimePolicy()
@@ -702,6 +743,34 @@ type runtimeModelFactory struct {
 	secret    modelprofile.SecretValue
 	err       error
 	returnNil bool
+}
+
+type runtimeCloseTrackingSession struct {
+	session.Service
+	err   error
+	calls int
+}
+
+func (service *runtimeCloseTrackingSession) Close() error {
+	service.calls++
+	if service.Service != nil {
+		_ = service.Service.Close()
+	}
+	return service.err
+}
+
+type runtimeClosingRunner struct {
+	err   error
+	calls int
+}
+
+func (runner *runtimeClosingRunner) Run(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+	return nil, errors.New("unused test runner")
+}
+
+func (runner *runtimeClosingRunner) Close() error {
+	runner.calls++
+	return runner.err
 }
 
 func (factory *runtimeModelFactory) New(_ context.Context, input modelprofile.ModelFactoryInput, secret modelprofile.SecretValue) (trpcmodel.Model, error) {

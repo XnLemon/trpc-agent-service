@@ -135,6 +135,103 @@ func TestRegistryStorageFactoryBuildsTenantCapabilitiesConcurrently(t *testing.T
 	}
 }
 
+func TestCapabilitySetOwnsValuesAndAggregatesCloseFailures(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	if _, err := NewCapabilitySet("", map[Capability]any{CapabilitySession: struct{}{}}); !errors.Is(err, ErrStorageFactory) {
+		t.Fatalf("empty tenant set = %v", err)
+	}
+	if _, err := NewCapabilitySet(tenantID, nil); !errors.Is(err, ErrStorageFactory) {
+		t.Fatalf("empty set = %v", err)
+	}
+	if _, err := NewCapabilitySet(tenantID, map[Capability]any{"": struct{}{}}); !errors.Is(err, ErrStorageFactory) {
+		t.Fatalf("invalid capability set = %v", err)
+	}
+
+	closer := &failingCapabilityCloser{}
+	values := map[Capability]any{CapabilityMemory: closer}
+	set, err := NewCapabilitySet(tenantID, values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values[CapabilitySession] = inmemory.NewSessionService()
+	if _, ok := set.Capability(CapabilitySession); ok {
+		t.Fatal("capability set retained caller map")
+	}
+	if err := set.Close(); !errors.Is(err, ErrStorageFactory) {
+		t.Fatalf("Close() = %v", err)
+	}
+	if err := set.Close(); !errors.Is(err, ErrStorageFactory) || closer.calls != 1 {
+		t.Fatalf("second Close() = %v, calls=%d", err, closer.calls)
+	}
+	if _, ok := set.Capability(CapabilityMemory); ok {
+		t.Fatal("closed set exposed capability")
+	}
+}
+
+func TestRegistryStorageFactoryClosesEarlierCapabilityAndScopesSecrets(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	providers := NewProviderRegistry()
+	secrets := modelprofile.NewSecretRegistry()
+	if err := secrets.RegisterValue(modelprofile.SecretScope{TenantID: tenantID, SecretRef: "secret/session"}, "session-secret"); err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan struct{})
+	first := capabilityProviderFunc(func(_ context.Context, input StorageFactoryInput, binding CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
+		if input.TenantID != tenantID || binding.SecretRef != "secret/session" || secret.Value() != "session-secret" {
+			t.Fatalf("provider input = %+v, %+v, %q", input, binding, secret.Value())
+		}
+		return &closeTrackingSession{Service: inmemory.NewSessionService(), closed: closed}, nil
+	})
+	second := capabilityProviderFunc(func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
+		return nil, errors.New("provider detail")
+	})
+	if err := providers.Register(tenantID, CapabilitySession, "session", first); err != nil {
+		t.Fatal(err)
+	}
+	if err := providers.Register(tenantID, CapabilityMemory, "broken", second); err != nil {
+		t.Fatal(err)
+	}
+	factory, err := NewRegistryStorageFactory(providers, secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{
+		{Capability: CapabilitySession, Provider: "session", SecretRef: "secret/session"},
+		{Capability: CapabilityMemory, Provider: "broken"},
+	}})
+	if !errors.Is(err, ErrStorageFactory) {
+		t.Fatalf("New() = %v", err)
+	}
+	select {
+	case <-closed:
+	default:
+		t.Fatal("earlier capability was not closed")
+	}
+}
+
+func TestRegistryStorageFactoryValidationAndResolverFailures(t *testing.T) {
+	if _, err := NewRegistryStorageFactory(nil, modelprofile.NewSecretRegistry()); !errors.Is(err, ErrStorageFactory) {
+		t.Fatalf("nil providers factory = %v", err)
+	}
+	providers := NewProviderRegistry()
+	factory, err := NewRegistryStorageFactory(providers, modelprofile.NewSecretRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := factory.New(context.Background(), StorageFactoryInput{}); !errors.Is(err, ErrStorageFactory) {
+		t.Fatalf("invalid input New() = %v", err)
+	}
+	const tenantID = "t_00000000000000000000000000"
+	if err := providers.Register(tenantID, CapabilitySession, "session", capabilityProviderFunc(func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
+		return inmemory.NewSessionService(), nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session", SecretRef: "missing"}}}); !errors.Is(err, ErrStorageFactory) {
+		t.Fatalf("missing secret New() = %v", err)
+	}
+}
+
 type sessionCapabilityProvider struct {
 	cancel context.CancelFunc
 	closed chan struct{}
@@ -165,6 +262,19 @@ func (service *closeTrackingSession) Close() error {
 type recordingSessionCapabilityProvider struct {
 	mu    sync.Mutex
 	calls map[string]int
+}
+
+type failingCapabilityCloser struct{ calls int }
+
+func (closer *failingCapabilityCloser) Close() error {
+	closer.calls++
+	return errors.New("close detail")
+}
+
+type capabilityProviderFunc func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error)
+
+func (function capabilityProviderFunc) New(ctx context.Context, input StorageFactoryInput, binding CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
+	return function(ctx, input, binding, secret)
 }
 
 func (provider *recordingSessionCapabilityProvider) New(_ context.Context, input StorageFactoryInput, _ CapabilityBinding, _ modelprofile.SecretValue) (any, error) {

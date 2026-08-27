@@ -49,6 +49,33 @@ func TestProviderRegistryCancellationAndClose(t *testing.T) {
 	}
 }
 
+func TestProviderRegistryRemovalAndValidationBoundaries(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	registry := NewProviderRegistry()
+	if err := registry.Register(tenantID, ChannelWeCom, "corp", registryProviderFactory{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Remove(tenantID, ChannelWeCom, "corp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register(tenantID, ChannelWeCom, "", registryProviderFactory{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty account Register() = %v", err)
+	}
+	if err := registry.Remove("", ChannelWeCom, "corp"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty tenant Remove() = %v", err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Remove(tenantID, ChannelWeCom, "corp"); !errors.Is(err, ErrProviderRegistryClosed) {
+		t.Fatalf("closed Remove() = %v", err)
+	}
+	var nilRegistry *ProviderRegistry
+	if _, err := nilRegistry.Resolve(context.Background(), Binding{}); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("nil registry Resolve() = %v", err)
+	}
+}
+
 type registryProviderFactory struct{}
 
 func (registryProviderFactory) New(context.Context, Binding) (outbox.Provider, error) {

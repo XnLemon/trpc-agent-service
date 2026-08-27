@@ -42,6 +42,38 @@ func TestProviderRegistryCloseFailsClosed(t *testing.T) {
 	}
 }
 
+func TestProviderRegistryRemovalAndValidationBoundaries(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	registry := NewProviderRegistry()
+	binding := CapabilityBinding{Capability: CapabilitySession, Provider: "memory"}
+	input := StorageFactoryInput{TenantID: tenantID}
+	if err := registry.Register(tenantID, CapabilitySession, "memory", &registryCapabilityProvider{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Remove(tenantID, CapabilitySession, "memory"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Resolve(context.Background(), input, binding); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("removed Resolve() = %v", err)
+	}
+	if err := registry.Register(tenantID, CapabilitySession, "", &registryCapabilityProvider{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty provider Register() = %v", err)
+	}
+	if err := registry.Remove("", CapabilitySession, "memory"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty tenant Remove() = %v", err)
+	}
+	var nilRegistry *ProviderRegistry
+	if _, err := nilRegistry.Resolve(context.Background(), input, binding); !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("nil registry Resolve() = %v", err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Remove(tenantID, CapabilitySession, "memory"); !errors.Is(err, ErrRegistryClosed) {
+		t.Fatalf("closed Remove() = %v", err)
+	}
+}
+
 type registryCapabilityProvider struct{}
 
 func (registryCapabilityProvider) New(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
