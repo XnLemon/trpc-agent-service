@@ -75,6 +75,24 @@ func TestTelemetryOptionsRecordsModelAndToolOutcomes(t *testing.T) {
 		assertTelemetryMetric(t, provider, metrics.OperationDuration, -1, map[string]string{"component": "tool", "operation": observability.OperationToolCall, "status": "success", "error_class": ""})
 		assertTelemetryMetric(t, provider, metrics.OperationDuration, -1, map[string]string{"component": "tool", "operation": observability.OperationToolCall, "status": "error", "error_class": "timeout"})
 	})
+
+	t.Run("nil callback args are ignored safely", func(t *testing.T) {
+		provider := &runtimeTelemetryProvider{}
+		options := applyTelemetryOptions(t, provider)
+		modelBefore, err := options.ModelCallbacks.RunBeforeModel(context.Background(), &trpcmodel.BeforeModelArgs{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := options.ModelCallbacks.RunAfterModel(modelBefore.Context, nil); err != nil {
+			t.Fatal(err)
+		}
+		if len(provider.spans) != 1 {
+			t.Fatalf("spans = %d, want 1", len(provider.spans))
+		}
+		if span := provider.spans[0]; span.status != observability.StatusOK || !span.ended || span.recordedError != nil {
+			t.Fatalf("nil args span = %+v", span)
+		}
+	})
 }
 
 func applyTelemetryOptions(t *testing.T, provider observability.Provider) llmagent.Options {
