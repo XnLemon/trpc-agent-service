@@ -118,11 +118,13 @@ jobs:
       - name: Provision MySQL migration and application accounts
         run: |
           mysql --protocol=tcp -h 127.0.0.1 -P 3306 -uroot -pmysql -e "
+            SET GLOBAL log_bin_trust_function_creators = 1;
             CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
             CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
             GRANT ALL PRIVILEGES ON trpc_agent_mysql_migration_test.* TO 'trpc_migration'@'%';
             FLUSH PRIVILEGES;"
           mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "
+            SET GLOBAL log_bin_trust_function_creators = 1;
             CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
             CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
             GRANT ALL PRIVILEGES ON trpc_agent_mysql_repository_test.* TO 'trpc_migration'@'%';
@@ -239,11 +241,13 @@ jobs:
       - name: Provision MySQL migration and application accounts
         run: |
           mysql --protocol=tcp -h 127.0.0.1 -P 3306 -uroot -pmysql -e "
+            SET GLOBAL log_bin_trust_function_creators = 1;
             CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
             CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
             GRANT ALL PRIVILEGES ON trpc_agent_mysql_migration_test.* TO 'trpc_migration'@'%';
             FLUSH PRIVILEGES;"
           mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "
+            SET GLOBAL log_bin_trust_function_creators = 1;
             CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
             CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
             GRANT ALL PRIVILEGES ON trpc_agent_mysql_repository_test.* TO 'trpc_migration'@'%';
