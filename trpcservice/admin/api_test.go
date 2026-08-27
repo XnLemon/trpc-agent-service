@@ -525,6 +525,21 @@ func TestAdminHappyPathCoversResourceMutations(t *testing.T) {
 	assertAdminBindingMutation(t, fixture, app)
 }
 
+func TestAdminCanaryRouteBuildsTenantScopedMutation(t *testing.T) {
+	fixture := newAdminMutationFixture(t)
+	app := createAndPublishAdminRevision(t, fixture)
+	stored, err := fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, app.AppID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := "{\"expected_app_version\":" + strconv.FormatInt(stored.Version, 10) + ",\"reason\":\"clear canary\",\"correlation_id\":\"admin-canary\"}"
+	request := fixture.request(http.MethodPost, body)
+	status, value, err := fixture.handler.apps(context.Background(), request, fixture.principal, fixture.root.TenantID, []string{app.AppID, "canary"})
+	if status != http.StatusOK || value == nil || !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("canary route = status %d value %#v err %v", status, value, err)
+	}
+}
+
 type adminMutationFixture struct {
 	handler   *Handler
 	root      *tenant.Tenant
