@@ -332,6 +332,26 @@ func TestBootstrapCoversConstructionFailureBoundaries(t *testing.T) {
 	closeDependencies()
 }
 
+func TestBootstrapRoutesAdminCacheInvalidationsToRuntimeRegistry(t *testing.T) {
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	graph, err := New(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = graph.Close() }()
+	const tenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	for _, change := range []admin.CacheInvalidation{
+		{TenantID: tenantID, Kind: admin.CacheInvalidationTenant},
+		{TenantID: tenantID, AppID: "app-1", Kind: admin.CacheInvalidationApp},
+		{TenantID: tenantID, ProfileID: "model-1", Kind: admin.CacheInvalidationModel},
+		{TenantID: tenantID, ProfileID: "backend-1", Kind: admin.CacheInvalidationBackend},
+		{TenantID: tenantID, BindingID: "binding-1", Kind: admin.CacheInvalidationBinding},
+	} {
+		invalidateRuntimeCache(graph.Registry, change)
+	}
+}
+
 func TestNewUnavailableUsesRealGraphButReturns503(t *testing.T) {
 	graph, err := NewUnavailable()
 	if err != nil {
