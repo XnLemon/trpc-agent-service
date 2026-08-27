@@ -111,3 +111,272 @@ func TestCapabilitiesRejectCanceledContext(t *testing.T) {
 		t.Fatalf("DeleteVector = %v", err)
 	}
 }
+
+func TestMemoryIndexUsesDurableRecordAndSeparateVectorNamespaces(t *testing.T) {
+	store := inmemory.New()
+	defer store.Close()
+
+	memory, err := store.PutMemory(context.Background(), runtimestorage.MemoryInput{
+		TenantID: "tenant-a", MemoryID: "shared-id", UserID: "user", Content: "durable memory", Embedding: []float64{1, 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := store.WaitForMemoryIndex(ctx, "tenant-a", memory.MemoryID, memory.Version); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteVector(context.Background(), "tenant-a", memory.MemoryID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutKnowledge(context.Background(), runtimestorage.KnowledgeDocument{
+		TenantID: "tenant-a", DocumentID: "shared-id", Content: "knowledge document", Embedding: []float64{1, 0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnqueueMemoryIndex(context.Background(), runtimestorage.MemoryRecord{
+		TenantID: "tenant-a", MemoryID: memory.MemoryID, Version: memory.Version, Content: "forged", Embedding: []float64{0, 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WaitForMemoryIndex(ctx, "tenant-a", memory.MemoryID, memory.Version); err != nil {
+		t.Fatal(err)
+	}
+	results, err := store.SearchVectors(ctx, "tenant-a", []float64{1, 0}, 10)
+	if err != nil || len(results) != 2 {
+		t.Fatalf("namespaced vectors = %+v, %v", results, err)
+	}
+	seen := map[runtimestorage.VectorSource]string{}
+	for _, result := range results {
+		seen[result.Record.Source] = result.Record.Content
+	}
+	if seen[runtimestorage.VectorSourceMemory] != "durable memory" || seen[runtimestorage.VectorSourceKnowledge] != "knowledge document" {
+		t.Fatalf("vector contents = %+v", seen)
+	}
+}
+
+func TestInMemoryVectorUpsertRejectsStaleVersion(t *testing.T) {
+	store := inmemory.New()
+	defer store.Close()
+	value := runtimestorage.VectorRecord{TenantID: "tenant-a", DocumentID: "doc", Version: 2, Embedding: []float64{1, 0}}
+	if err := store.UpsertVector(context.Background(), value); err != nil {
+		t.Fatal(err)
+	}
+	value.Version = 1
+	value.Embedding = []float64{0, 1}
+	if err := store.UpsertVector(context.Background(), value); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("stale vector upsert = %v", err)
+	}
+}
+
+//nolint:gocyclo // one contract test intentionally exercises the complete capability surface.
+func TestInMemoryRemainingCapabilityContracts(t *testing.T) {
+	store := inmemory.New()
+	defer store.Close()
+	ctx := context.Background()
+
+	first, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "m-a", UserID: "user", Content: "coffee tea"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "m-b", UserID: "user", Content: "coffee"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "m-other", UserID: "other", Content: "coffee"}); err != nil {
+		t.Fatal(err)
+	}
+	memories, err := store.ListMemories(ctx, "tenant-a", "user", 1)
+	if err != nil || len(memories) != 1 {
+		t.Fatalf("ListMemories = %+v, %v", memories, err)
+	}
+	results, err := store.SearchMemories(ctx, "tenant-a", "user", "coffee tea", 10)
+	if err != nil || len(results) != 2 || results[0].Memory.MemoryID != first.MemoryID || results[0].Score != 1 {
+		t.Fatalf("SearchMemories = %+v, %v", results, err)
+	}
+	if err := store.DeleteMemory(ctx, "tenant-a", first.MemoryID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetMemory(ctx, "tenant-a", first.MemoryID); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("deleted memory = %v", err)
+	}
+
+	if _, err := store.CreateSession(ctx, "tenant-a", "session", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnqueueSummary(ctx, runtimestorage.SummaryRecord{TenantID: "tenant-a", SessionID: "session", FilterKey: "default", Text: "summary", EventSeq: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetSummary(ctx, "tenant-a", "session", "default"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetKnowledge(ctx, "tenant-a", "missing"); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing knowledge = %v", err)
+	}
+	if _, err := store.PutKnowledge(ctx, runtimestorage.KnowledgeDocument{TenantID: "tenant-a", DocumentID: "doc-a", Content: "knowledge", Metadata: map[string]any{"a": true}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetKnowledge(ctx, "tenant-a", "doc-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteKnowledge(ctx, "tenant-a", "doc-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	artifact := runtimestorage.ArtifactRecord{TenantID: "tenant-a", ArtifactID: "artifact", Content: []byte("data")}
+	if _, err := store.PutArtifact(ctx, artifact); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetArtifact(ctx, "tenant-a", artifact.ArtifactID); err != nil {
+		t.Fatal(err)
+	}
+	if listed, err := store.ListArtifacts(ctx, "tenant-a", ""); err != nil || len(listed) != 1 {
+		t.Fatalf("ListArtifacts = %+v, %v", listed, err)
+	}
+	if err := store.DeleteArtifact(ctx, "tenant-a", artifact.ArtifactID); err != nil {
+		t.Fatal(err)
+	}
+
+	audit, err := store.AppendAudit(ctx, runtimestorage.AuditRecord{TenantID: "tenant-a", AuditID: "audit", EventType: "memory.updated", Payload: map[string]any{"ok": true}})
+	if err != nil || audit.AuditID != "audit" {
+		t.Fatalf("AppendAudit = %+v, %v", audit, err)
+	}
+	if rows, err := store.ListAudit(ctx, "tenant-a", time.Time{}, 10); err != nil || len(rows) != 1 {
+		t.Fatalf("ListAudit = %+v, %v", rows, err)
+	}
+
+	if _, err := store.PutObject(ctx, "tenant-a", "key", strings.NewReader("object"), "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteObject(ctx, "tenant-a", "key"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.GetObject(ctx, "tenant-a", "key"); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("deleted object = %v", err)
+	}
+}
+
+//nolint:gocyclo // branch coverage for the tenant-scoped contract is table-shaped but explicit.
+func TestInMemoryCapabilityValidationAndVersionBranches(t *testing.T) {
+	store := inmemory.New()
+	defer store.Close()
+	ctx := context.Background()
+	if _, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "m", UserID: "user", Content: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "m", UserID: "user", Content: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetMemory(ctx, "tenant-a", "missing"); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing memory = %v", err)
+	}
+	if _, err := store.ListMemories(ctx, "", "user", 1); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid ListMemories = %v", err)
+	}
+	if _, err := store.SearchMemories(ctx, "tenant-a", "user", "missing", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnqueueMemoryIndex(ctx, runtimestorage.MemoryRecord{TenantID: "tenant-a", MemoryID: "m", Version: 1}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("stale EnqueueMemoryIndex = %v", err)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, time.Millisecond)
+	defer cancel()
+	if err := store.WaitForMemoryIndex(waitCtx, "tenant-a", "missing", 1); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("missing index wait = %v", err)
+	}
+	if _, err := store.CreateSession(ctx, "tenant-a", "session", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutSummary(ctx, runtimestorage.SummaryRecord{TenantID: "tenant-a", SessionID: "session", Text: "new", EventSeq: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutSummary(ctx, runtimestorage.SummaryRecord{TenantID: "tenant-a", SessionID: "session", Text: "old", EventSeq: 1}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("stale summary = %v", err)
+	}
+	if _, err := store.GetSummary(ctx, "tenant-a", "session", "missing"); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing summary = %v", err)
+	}
+	if _, err := store.PutKnowledge(ctx, runtimestorage.KnowledgeDocument{TenantID: "tenant-a", DocumentID: "doc", Content: "text"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutKnowledge(ctx, runtimestorage.KnowledgeDocument{TenantID: "tenant-a", DocumentID: "doc", Content: "updated", Embedding: []float64{1}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SearchKnowledge(ctx, "tenant-a", []float64{1, 0}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteKnowledge(ctx, "tenant-a", "missing"); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing knowledge delete = %v", err)
+	}
+	if _, err := store.PutArtifact(ctx, runtimestorage.ArtifactRecord{TenantID: "tenant-a", ArtifactID: "a", Content: []byte("a")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutArtifact(ctx, runtimestorage.ArtifactRecord{TenantID: "tenant-a", ArtifactID: "a", Content: []byte("b")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteArtifact(ctx, "tenant-a", "missing"); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing artifact delete = %v", err)
+	}
+	if _, err := store.AppendAudit(ctx, runtimestorage.AuditRecord{TenantID: "tenant-a", AuditID: "audit", EventType: "event", Payload: map[string]any{"v": 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendAudit(ctx, runtimestorage.AuditRecord{TenantID: "tenant-a", AuditID: "audit", EventType: "different"}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("conflicting audit = %v", err)
+	}
+	if err := store.DeleteObject(ctx, "tenant-a", "missing"); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing object delete = %v", err)
+	}
+}
+
+func TestInMemoryPutMemoryReportsClosedIndexer(t *testing.T) {
+	store := inmemory.New()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.PutMemory(context.Background(), runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "closed", UserID: "user", Content: "durable"})
+	if !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("PutMemory after Close = %v", err)
+	}
+	if err := store.WaitForMemoryIndex(context.Background(), "tenant-a", "closed", 1); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("WaitForMemoryIndex after Close = %v", err)
+	}
+}
+
+func TestInMemoryCapabilityErrorBranches(t *testing.T) {
+	store := inmemory.New()
+	ctx := context.Background()
+	if _, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "bad", UserID: "user", Content: "x", Metadata: map[string]any{"function": func() {}}}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid memory metadata = %v", err)
+	}
+	if err := store.EnqueueMemoryIndex(ctx, runtimestorage.MemoryRecord{TenantID: "tenant-a", MemoryID: "missing", Version: 1}); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing memory index = %v", err)
+	}
+	if _, err := store.PutSummary(ctx, runtimestorage.SummaryRecord{TenantID: "tenant-a", SessionID: "missing", Text: "x"}); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing summary session = %v", err)
+	}
+	if _, err := store.SearchKnowledge(ctx, "tenant-a", nil, 1); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid knowledge search = %v", err)
+	}
+	if _, err := store.AppendAudit(ctx, runtimestorage.AuditRecord{TenantID: "tenant-a", AuditID: "audit", EventType: "event", Payload: map[string]any{"function": func() {}}}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid audit payload = %v", err)
+	}
+	if _, err := store.AppendAudit(ctx, runtimestorage.AuditRecord{TenantID: "tenant-a", AuditID: "audit", EventType: "event", Payload: map[string]any{"ok": true}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendAudit(ctx, runtimestorage.AuditRecord{TenantID: "tenant-a", AuditID: "audit", EventType: "event", Payload: map[string]any{"ok": true}}); err != nil {
+		t.Fatalf("idempotent audit = %v", err)
+	}
+	if _, err := store.ListAudit(ctx, "tenant-a", time.Now().UTC().Add(time.Hour), 1); err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "closed", UserID: "user", Content: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnqueueMemoryIndex(ctx, value); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("closed memory index = %v", err)
+	}
+}

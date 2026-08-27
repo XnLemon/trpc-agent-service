@@ -75,13 +75,14 @@ CREATE INDEX runtime_audit_time_idx ON public.runtime_audit_log (tenant_id, occu
 
 CREATE TABLE public.runtime_vector_index (
     tenant_id   TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'generic' CHECK (length(btrim(source)) BETWEEN 1 AND 128),
     document_id TEXT NOT NULL CHECK (length(btrim(document_id)) BETWEEN 1 AND 256),
     content     TEXT NOT NULL DEFAULT '',
     metadata    JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
     embedding   JSONB NOT NULL CHECK (jsonb_typeof(embedding) = 'array'),
     version     BIGINT NOT NULL DEFAULT 1 CHECK (version >= 1),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, document_id),
+    PRIMARY KEY (tenant_id, source, document_id),
     FOREIGN KEY (tenant_id) REFERENCES public.tenant(tenant_id)
 );
 

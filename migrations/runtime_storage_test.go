@@ -67,3 +67,19 @@ func TestRuntimeEventHistoryMigrationIsTenantScopedAndCascades(t *testing.T) {
 		t.Fatal("runtime event history is missing the narrow idempotent update grant")
 	}
 }
+
+func TestRuntimeCapabilityMigrationNamespacesVectors(t *testing.T) {
+	contents, err := os.ReadFile("0011_runtime_capabilities.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, fragment := range []string{
+		"source      TEXT NOT NULL DEFAULT 'generic'",
+		"PRIMARY KEY (tenant_id, source, document_id)",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("migration missing %q", fragment)
+		}
+	}
+}

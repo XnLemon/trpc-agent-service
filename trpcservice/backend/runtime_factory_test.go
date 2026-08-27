@@ -240,6 +240,45 @@ func TestRegistryStorageFactoryClosesEarlierCapabilityAndScopesSecrets(t *testin
 	}
 }
 
+func TestRegistryStorageFactoryRejectsDuplicateCapabilities(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	providers := NewProviderRegistry()
+	closed := make(chan struct{})
+	first := capabilityProviderFunc(func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
+		return &closeTrackingSession{Service: inmemory.NewSessionService(), closed: closed}, nil
+	})
+	called := false
+	second := capabilityProviderFunc(func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
+		called = true
+		return inmemory.NewSessionService(), nil
+	})
+	if err := providers.Register(tenantID, CapabilitySession, "one", first); err != nil {
+		t.Fatal(err)
+	}
+	if err := providers.Register(tenantID, CapabilitySession, "two", second); err != nil {
+		t.Fatal(err)
+	}
+	factory, err := NewRegistryStorageFactory(providers, modelprofile.NewSecretRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{
+		{Capability: CapabilitySession, Provider: "one"},
+		{Capability: CapabilitySession, Provider: "two"},
+	}})
+	if !errors.Is(err, ErrStorageFactory) {
+		t.Fatalf("duplicate capability New() = %v", err)
+	}
+	if called {
+		t.Fatal("duplicate capability was materialized")
+	}
+	select {
+	case <-closed:
+	default:
+		t.Fatal("materialized capability was not closed")
+	}
+}
+
 func TestRegistryStorageFactoryValidationAndResolverFailures(t *testing.T) {
 	if _, err := NewRegistryStorageFactory(nil, modelprofile.NewSecretRegistry()); !errors.Is(err, ErrStorageFactory) {
 		t.Fatalf("nil providers factory = %v", err)

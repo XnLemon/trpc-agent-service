@@ -32,18 +32,21 @@ func (s *Store) PutMemory(ctx context.Context, input runtimestorage.MemoryInput)
 	}
 	now := time.Now().UTC()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	k := key(input.TenantID, input.MemoryID)
 	if existing, ok := s.memories[k]; ok {
 		existing.Content, existing.Topics, existing.Metadata = input.Content, append([]string(nil), input.Topics...), cloneMap(input.Metadata)
 		existing.Embedding = append([]float64(nil), input.Embedding...)
 		existing.UserID, existing.SessionID, existing.Version, existing.UpdatedAt, existing.DeletedAt = input.UserID, input.SessionID, existing.Version+1, now, nil
 		s.memories[k] = existing
-		return cloneMemory(existing), s.enqueueIndexLocked(existing)
+		value := cloneMemory(existing)
+		s.mu.Unlock()
+		return value, s.enqueueIndex(ctx, existing)
 	}
 	value := runtimestorage.MemoryRecord{TenantID: input.TenantID, MemoryID: input.MemoryID, UserID: input.UserID, SessionID: input.SessionID, Content: input.Content, Topics: append([]string(nil), input.Topics...), Metadata: cloneMap(input.Metadata), Embedding: append([]float64(nil), input.Embedding...), Version: 1, CreatedAt: now, UpdatedAt: now}
 	s.memories[k] = value
-	return cloneMemory(value), s.enqueueIndexLocked(value)
+	result := cloneMemory(value)
+	s.mu.Unlock()
+	return result, s.enqueueIndex(ctx, value)
 }
 
 // GetMemory implements the tenant-scoped runtime storage contract.
@@ -148,7 +151,7 @@ func (s *Store) DeleteMemory(ctx context.Context, tenantID, memoryID string) err
 	now := time.Now().UTC()
 	value.DeletedAt, value.UpdatedAt, value.Version = &now, now, value.Version+1
 	s.memories[k] = value
-	delete(s.vectors, k)
+	delete(s.vectors, key(tenantID, string(runtimestorage.VectorSourceMemory), memoryID))
 	return nil
 }
 
@@ -161,17 +164,15 @@ func (s *Store) EnqueueMemoryIndex(ctx context.Context, value runtimestorage.Mem
 		return runtimestorage.ErrInvalid
 	}
 	s.mu.RLock()
-	_, exists := s.memories[key(value.TenantID, value.MemoryID)]
+	current, exists := s.memories[key(value.TenantID, value.MemoryID)]
 	s.mu.RUnlock()
-	if !exists {
+	if !exists || current.DeletedAt != nil {
 		return runtimestorage.ErrNotFound
 	}
-	select {
-	case <-s.indexDone:
-		return runtimestorage.ErrStorage
-	case s.indexQueue <- cloneMemory(value):
-		return nil
+	if current.Version != value.Version {
+		return runtimestorage.ErrConflict
 	}
+	return s.enqueueIndex(ctx, current)
 }
 
 // WaitForMemoryIndex waits until the specified memory version is visible in
@@ -187,7 +188,7 @@ func (s *Store) WaitForMemoryIndex(ctx context.Context, tenantID, memoryID strin
 	defer ticker.Stop()
 	for {
 		s.mu.RLock()
-		indexed, ok := s.vectors[key(tenantID, memoryID)]
+		indexed, ok := s.vectors[key(tenantID, string(runtimestorage.VectorSourceMemory), memoryID)]
 		ready := ok && indexed.Version >= version
 		s.mu.RUnlock()
 		if ready {
@@ -203,13 +204,20 @@ func (s *Store) WaitForMemoryIndex(ctx context.Context, tenantID, memoryID strin
 	}
 }
 
-func (s *Store) enqueueIndexLocked(value runtimestorage.MemoryRecord) error {
+func (s *Store) enqueueIndex(ctx context.Context, value runtimestorage.MemoryRecord) error {
+	s.indexMu.RLock()
+	defer s.indexMu.RUnlock()
 	select {
 	case <-s.indexDone:
 		return runtimestorage.ErrStorage
-	case s.indexQueue <- cloneMemory(value):
-		return nil
 	default:
+	}
+	select {
+	case <-s.indexDone:
+		return runtimestorage.ErrStorage
+	case <-ctx.Done():
+		return ctx.Err()
+	case s.indexQueue <- cloneMemory(value):
 		return nil
 	}
 }
@@ -226,11 +234,11 @@ func (s *Store) indexWorker() {
 			s.mu.Lock()
 			current, exists := s.memories[key(value.TenantID, value.MemoryID)]
 			if exists && current.Version == value.Version && current.DeletedAt == nil {
-				vectorKey := key(value.TenantID, value.MemoryID)
-				if len(value.Embedding) == 0 {
+				vectorKey := key(value.TenantID, string(runtimestorage.VectorSourceMemory), value.MemoryID)
+				if len(current.Embedding) == 0 {
 					delete(s.vectors, vectorKey)
 				} else {
-					s.vectors[vectorKey] = runtimestorage.VectorRecord{TenantID: value.TenantID, DocumentID: value.MemoryID, Content: value.Content, Metadata: cloneMap(value.Metadata), Embedding: append([]float64(nil), value.Embedding...), Version: value.Version, UpdatedAt: value.UpdatedAt}
+					s.vectors[vectorKey] = runtimestorage.VectorRecord{TenantID: current.TenantID, Source: runtimestorage.VectorSourceMemory, DocumentID: current.MemoryID, Content: current.Content, Metadata: cloneMap(current.Metadata), Embedding: append([]float64(nil), current.Embedding...), Version: current.Version, UpdatedAt: current.UpdatedAt}
 				}
 			}
 			s.mu.Unlock()
@@ -316,9 +324,9 @@ func (s *Store) PutKnowledge(ctx context.Context, value runtimestorage.Knowledge
 	value.Metadata, value.Embedding = cloneMap(value.Metadata), append([]float64(nil), value.Embedding...)
 	s.knowledge[k] = value
 	if len(value.Embedding) > 0 {
-		s.vectors[k] = runtimestorage.VectorRecord{TenantID: value.TenantID, DocumentID: value.DocumentID, Content: value.Content, Metadata: cloneMap(value.Metadata), Embedding: append([]float64(nil), value.Embedding...), Version: value.Version, UpdatedAt: value.UpdatedAt}
+		s.vectors[key(value.TenantID, string(runtimestorage.VectorSourceKnowledge), value.DocumentID)] = runtimestorage.VectorRecord{TenantID: value.TenantID, Source: runtimestorage.VectorSourceKnowledge, DocumentID: value.DocumentID, Content: value.Content, Metadata: cloneMap(value.Metadata), Embedding: append([]float64(nil), value.Embedding...), Version: value.Version, UpdatedAt: value.UpdatedAt}
 	} else {
-		delete(s.vectors, k)
+		delete(s.vectors, key(value.TenantID, string(runtimestorage.VectorSourceKnowledge), value.DocumentID))
 	}
 	return cloneKnowledge(value), nil
 }
@@ -387,7 +395,7 @@ func (s *Store) DeleteKnowledge(ctx context.Context, tenantID, documentID string
 		return runtimestorage.ErrNotFound
 	}
 	delete(s.knowledge, k)
-	delete(s.vectors, k)
+	delete(s.vectors, key(tenantID, string(runtimestorage.VectorSourceKnowledge), documentID))
 	return nil
 }
 
@@ -548,7 +556,17 @@ func (s *Store) UpsertVector(ctx context.Context, value runtimestorage.VectorRec
 	if value.UpdatedAt.IsZero() {
 		value.UpdatedAt = time.Now().UTC()
 	}
-	s.vectors[key(value.TenantID, value.DocumentID)] = value
+	if value.Source == "" {
+		value.Source = runtimestorage.VectorSourceGeneric
+	}
+	if strings.TrimSpace(string(value.Source)) == "" {
+		return runtimestorage.ErrInvalid
+	}
+	k := key(value.TenantID, string(value.Source), value.DocumentID)
+	if existing, ok := s.vectors[k]; ok && existing.Version > value.Version {
+		return runtimestorage.ErrConflict
+	}
+	s.vectors[k] = value
 	return nil
 }
 
@@ -574,6 +592,9 @@ func (s *Store) SearchVectors(ctx context.Context, tenantID string, embedding []
 	s.mu.RUnlock()
 	sort.Slice(values, func(i, j int) bool {
 		if values[i].Score == values[j].Score {
+			if values[i].Record.DocumentID == values[j].Record.DocumentID {
+				return values[i].Record.Source < values[j].Record.Source
+			}
 			return values[i].Record.DocumentID < values[j].Record.DocumentID
 		}
 		return values[i].Score > values[j].Score
@@ -594,11 +615,16 @@ func (s *Store) DeleteVector(ctx context.Context, tenantID, documentID string) e
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k := key(tenantID, documentID)
-	if _, ok := s.vectors[k]; !ok {
+	found := false
+	for k, value := range s.vectors {
+		if value.TenantID == tenantID && value.DocumentID == documentID {
+			delete(s.vectors, k)
+			found = true
+		}
+	}
+	if !found {
 		return runtimestorage.ErrNotFound
 	}
-	delete(s.vectors, k)
 	return nil
 }
 

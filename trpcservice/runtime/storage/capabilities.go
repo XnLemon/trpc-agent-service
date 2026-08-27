@@ -136,10 +136,28 @@ type AuditStore interface {
 	ListAudit(context.Context, string, time.Time, int) ([]AuditRecord, error)
 }
 
-// VectorRecord is an indexed vector document. The source tenant remains part
-// of the key even when the underlying provider supports namespaces.
+// VectorSource identifies the producer namespace of an indexed vector.
+//
+// A document identifier is only unique within a source namespace; keeping the
+// namespace explicit prevents memory and knowledge records with the same ID
+// from overwriting one another.
+type VectorSource string
+
+const (
+	// VectorSourceGeneric is the default namespace for callers that do not
+	// need a more specific source.
+	VectorSourceGeneric VectorSource = "generic"
+	// VectorSourceMemory contains projections of durable memory records.
+	VectorSourceMemory VectorSource = "memory"
+	// VectorSourceKnowledge contains projections of knowledge documents.
+	VectorSourceKnowledge VectorSource = "knowledge"
+)
+
+// VectorRecord is an indexed vector document. The source and tenant remain
+// part of the key even when the underlying provider supports namespaces.
 type VectorRecord struct {
 	TenantID   string
+	Source     VectorSource
 	DocumentID string
 	Content    string
 	Metadata   map[string]any

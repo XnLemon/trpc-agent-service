@@ -239,6 +239,10 @@ func (factory *RegistryStorageFactory) New(ctx context.Context, input StorageFac
 			_ = set.Close()
 			return nil, err
 		}
+		if _, exists := set.capabilities[binding.Capability]; exists {
+			_ = set.Close()
+			return nil, fmt.Errorf("%w: duplicate capability", ErrStorageFactory)
+		}
 		value, err := factory.materializeBinding(ctx, input, binding)
 		if err != nil {
 			_ = set.Close()

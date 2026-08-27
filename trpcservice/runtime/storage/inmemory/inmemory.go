@@ -32,6 +32,7 @@ type Store struct {
 	objectData   map[string][]byte
 	indexQueue   chan runtimestorage.MemoryRecord
 	indexDone    chan struct{}
+	indexMu      sync.RWMutex
 	closeOnce    sync.Once
 }
 
@@ -42,7 +43,9 @@ type Backend struct{ store *Store }
 // NewBackend creates an isolated shared in-memory backend.
 func NewBackend() *Backend { return &Backend{store: New()} }
 
-// NewWithBackend creates a store view over an existing shared backend.
+// NewWithBackend creates a store view over an existing shared backend. Views
+// share the backend worker lifecycle; close the views only after all workers
+// using the backend have stopped.
 func NewWithBackend(backend *Backend) *Store {
 	if backend == nil {
 		return New()
@@ -609,7 +612,9 @@ func (s *Store) Close() error {
 		return nil
 	}
 	s.closeOnce.Do(func() {
+		s.indexMu.Lock()
 		close(s.indexDone)
+		s.indexMu.Unlock()
 	})
 	return nil
 }

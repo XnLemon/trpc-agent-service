@@ -43,8 +43,10 @@ Knowledge, Artifact, Audit, Vector Index, and Object rows. Every table has a
 composite primary key beginning with tenant_id, explicit tenant foreign keys,
 bounded fields, JSON shape checks, and grants limited to the runtime role.
 
-The vector index is an eventually consistent projection. Knowledge documents
-remain the source of truth; migration or reindexing can rebuild the projection
-by document ID and digest without changing tenant authorization. Object content
-is returned through an io.ReadCloser and is never mixed into control-plane
-configuration or execution snapshots.
+The vector index is an eventually consistent projection. Its composite key is
+tenant_id, source, document_id, so memory and knowledge records may safely use
+the same document identifier. Knowledge documents remain the source of truth;
+migration or reindexing can rebuild the projection by source, document ID, and
+digest without changing tenant authorization. Object content is returned
+through an io.ReadCloser and is never mixed into control-plane configuration or
+execution snapshots.
