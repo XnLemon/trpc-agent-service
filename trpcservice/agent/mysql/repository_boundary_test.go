@@ -85,3 +85,21 @@ func TestReplaceRevisionToolsClearsEmptySet(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSetCanaryRejectsInactiveTenantBeforeTransaction(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	_, _, err = NewRepository(db).SetCanary(context.Background(), agent.SetCanaryInput{
+		TenantID: "tenant", AppID: "app", TenantActive: false,
+		Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "inactive", CorrelationID: "inactive-tenant"},
+	})
+	if !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("inactive tenant error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

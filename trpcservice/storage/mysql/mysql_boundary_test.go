@@ -90,3 +90,23 @@ func TestCommitRollsBackForNilAndCancelledContexts(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCommitRedactsDatabaseFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectBegin()
+	mock.ExpectCommit().WillReturnError(errors.New("driver details"))
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Commit(context.Background(), tx); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Commit(driver failure) = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
