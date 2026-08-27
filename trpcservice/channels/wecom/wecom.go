@@ -355,7 +355,7 @@ func (h *Handler) beginDrain(parent context.Context) (context.Context, context.C
 	// Keep the verified receive context as the trace parent while also making
 	// handler shutdown cancel every accepted drain. A request context alone is
 	// insufficient because Close must join in-flight dispatches immediately.
-	merged, mergeCancel := context.WithCancel(parent)
+	merged, mergeCancel := context.WithCancel(context.WithoutCancel(parent))
 	base := h.baseCtx
 	if base == nil {
 		base = context.Background()
