@@ -538,53 +538,51 @@ func TestAgentRepositoryPersistenceErrorBranches(t *testing.T) {
 		}
 		return db, tx, mock
 	}
-	db, tx, mock := newTx(t)
+	_, tx, mock := newTx(t)
 	mock.ExpectExec(".*").WillReturnError(errors.New("revision update"))
 	mock.ExpectRollback()
 	if _, err := persistPublishedAgent(context.Background(), tx, input, published, updatedApp, event); !errors.Is(err, ErrStorage) {
 		t.Fatalf("published revision error = %v", err)
 	}
-	_ = db
-	db, tx, mock = newTx(t)
+	_, tx, mock = newTx(t)
 	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectRollback()
 	if _, err := persistPublishedAgent(context.Background(), tx, input, published, updatedApp, event); !errors.Is(err, agent.ErrConflict) {
 		t.Fatalf("published revision conflict = %v", err)
 	}
-	db, tx, mock = newTx(t)
+	_, tx, mock = newTx(t)
 	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(".*").WillReturnError(errors.New("app update"))
 	mock.ExpectRollback()
 	if _, err := persistPublishedAgent(context.Background(), tx, input, published, updatedApp, event); !errors.Is(err, ErrStorage) {
 		t.Fatalf("published app error = %v", err)
 	}
-	db, tx, mock = newTx(t)
+	_, tx, mock = newTx(t)
 	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectRollback()
 	if _, err := persistPublishedAgent(context.Background(), tx, input, published, updatedApp, event); !errors.Is(err, agent.ErrConflict) {
 		t.Fatalf("published app conflict = %v", err)
 	}
-	db, tx, mock = newTx(t)
+	_, tx, mock = newTx(t)
 	mock.ExpectExec(".*").WillReturnError(errors.New("event"))
 	mock.ExpectRollback()
 	if _, err := insertAgentEvent(context.Background(), tx, event); !errors.Is(err, ErrStorage) {
 		t.Fatalf("event insert error = %v", err)
 	}
-	db, tx, mock = newTx(t)
+	_, tx, mock = newTx(t)
 	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewErrorResult(errors.New("last id")))
 	mock.ExpectRollback()
 	if _, err := insertAgentEvent(context.Background(), tx, event); !errors.Is(err, ErrStorage) {
 		t.Fatalf("event id error = %v", err)
 	}
 	rollbackInput := agent.RollbackInput{TenantID: app.TenantID, AppID: app.AppID, TargetRevision: draft.Revision, ExpectedAppVersion: app.Version}
-	db, tx, mock = newTx(t)
+	_, tx, mock = newTx(t)
 	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectRollback()
 	if _, err := persistAgentRollback(context.Background(), tx, rollbackInput, updatedApp, event); !errors.Is(err, agent.ErrConflict) {
 		t.Fatalf("rollback conflict = %v", err)
 	}
-	_ = db
 }
 
 func TestAgentRepositoryDraftAndPublishGuardBranches(t *testing.T) {
@@ -742,15 +740,14 @@ func TestAgentRepositoryPublishStateGuardBranches(t *testing.T) {
 		return db, tx, mock
 	}
 	_ = newTx
-	db, tx, mock := newTx(t)
+	_, tx, mock := newTx(t)
 	mock.ExpectQuery("SELECT status FROM tenant").WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("active"))
 	mock.ExpectQuery(".*").WillReturnError(errors.New("app read"))
 	mock.ExpectRollback()
 	if _, _, err := loadPublishState(context.Background(), tx, input); !errors.Is(err, ErrStorage) {
 		t.Fatalf("publish app read error = %v", err)
 	}
-	_ = db
-	db, tx, mock = newTx(t)
+	_, tx, mock = newTx(t)
 	mock.ExpectQuery("SELECT status FROM tenant").WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("active"))
 	staleApp := app.Clone()
 	staleApp.Version++
@@ -759,7 +756,7 @@ func TestAgentRepositoryPublishStateGuardBranches(t *testing.T) {
 	if _, _, err := loadPublishState(context.Background(), tx, input); !errors.Is(err, agent.ErrConflict) {
 		t.Fatalf("publish app conflict = %v", err)
 	}
-	db, tx, mock = newTx(t)
+	_, tx, mock = newTx(t)
 	mock.ExpectQuery("SELECT status FROM tenant").WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("active"))
 	expectAgentApp(mock, app)
 	mock.ExpectQuery("SELECT tenant_id, app_id, revision").WillReturnError(errors.New("revision read"))
@@ -768,7 +765,7 @@ func TestAgentRepositoryPublishStateGuardBranches(t *testing.T) {
 		t.Fatalf("publish revision read error = %v", err)
 	}
 	published := newStoredAgentRevision(t, app, 1, true)
-	db, tx, mock = newTx(t)
+	_, tx, mock = newTx(t)
 	mock.ExpectQuery("SELECT status FROM tenant").WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("active"))
 	expectAgentApp(mock, app)
 	expectAgentRevision(t, mock, published)
@@ -778,7 +775,7 @@ func TestAgentRepositoryPublishStateGuardBranches(t *testing.T) {
 	}
 	staleDraft := draft.Clone()
 	staleDraft.DraftVersion++
-	db, tx, mock = newTx(t)
+	_, tx, mock = newTx(t)
 	mock.ExpectQuery("SELECT status FROM tenant").WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("active"))
 	expectAgentApp(mock, app)
 	expectAgentRevision(t, mock, &staleDraft)
@@ -786,7 +783,6 @@ func TestAgentRepositoryPublishStateGuardBranches(t *testing.T) {
 	if _, _, err := loadPublishState(context.Background(), tx, input); !errors.Is(err, agent.ErrConflict) {
 		t.Fatalf("publish draft version conflict = %v", err)
 	}
-	_ = db
 }
 
 func TestAgentRepositoryReadAndToolErrorBranches(t *testing.T) {

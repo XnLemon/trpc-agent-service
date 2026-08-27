@@ -12,6 +12,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 )
 
+//nolint:gocyclo // Boundary coverage intentionally exercises each storage helper outcome.
 func TestAgentMySQLBoundaryHelpers(t *testing.T) {
 	if err := validateAgentMetadata(agent.ChangeMetadata{ActorType: "a", ActorID: "b", Reason: "c", CorrelationID: "d"}); err != nil {
 		t.Fatal(err)

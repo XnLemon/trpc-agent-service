@@ -202,12 +202,8 @@ func prepareDatabaseConfig(ctx context.Context, config *Config) error {
 	if config.DB == nil {
 		return nil
 	}
-	driver := config.ControlPlaneDriver
-	if driver == "" {
-		driver = ControlPlaneDriverPostgres
-		config.ControlPlaneDriver = driver
-	}
-	if driver != ControlPlaneDriverPostgres && driver != ControlPlaneDriverMySQL {
+	driver, err := resolveControlPlaneDriver(config)
+	if err != nil {
 		return ErrInvalidConfig
 	}
 	if err := config.DB.PingContext(ctx); err != nil {
@@ -216,6 +212,25 @@ func prepareDatabaseConfig(ctx context.Context, config *Config) error {
 		}
 		return postgres.ErrStorage
 	}
+	if driver == ControlPlaneDriverMySQL {
+		return prepareMySQLDatabaseConfig(ctx, config)
+	}
+	return preparePostgresDatabaseConfig(ctx, config)
+}
+
+func resolveControlPlaneDriver(config *Config) (ControlPlaneDriver, error) {
+	driver := config.ControlPlaneDriver
+	if driver == "" {
+		driver = ControlPlaneDriverPostgres
+		config.ControlPlaneDriver = driver
+	}
+	if driver != ControlPlaneDriverPostgres && driver != ControlPlaneDriverMySQL {
+		return "", ErrInvalidConfig
+	}
+	return driver, nil
+}
+
+func prepareMySQLDatabaseConfig(ctx context.Context, config *Config) error {
 	if config.Migrate != nil {
 		if err := config.Migrate(ctx, config.DB); err != nil {
 			return ErrInvalidConfig
@@ -223,36 +238,35 @@ func prepareDatabaseConfig(ctx context.Context, config *Config) error {
 	}
 	if config.VerifyMigrations != nil {
 		if err := config.VerifyMigrations(ctx, config.DB); err != nil {
-			// PostgreSQL verification is also performed by Runtime.Ready so a
-			// transient or incomplete schema keeps the graph unready. MySQL
-			// requires fail-closed bootstrap before restricted repositories exist.
-			if driver == ControlPlaneDriverMySQL {
-				return ErrInvalidConfig
-			}
-		}
-	}
-	if driver == ControlPlaneDriverMySQL {
-		if err := mysql.VerifyApplicationPrivileges(ctx, config.DB); err != nil {
 			return ErrInvalidConfig
 		}
 	}
-	if driver == ControlPlaneDriverMySQL {
-		if config.Tenants == nil {
-			config.Tenants = tenantmysql.NewRepository(config.DB)
+	if err := mysql.VerifyApplicationPrivileges(ctx, config.DB); err != nil {
+		return ErrInvalidConfig
+	}
+	if config.Tenants == nil {
+		config.Tenants = tenantmysql.NewRepository(config.DB)
+	}
+	if config.Apps == nil {
+		config.Apps = agentmysql.NewRepository(config.DB)
+	}
+	if config.Models == nil {
+		config.Models = modelmysql.NewRepository(config.DB, config.ModelCatalog)
+	}
+	if config.Backends == nil {
+		config.Backends = backendmysql.NewRepository(config.DB, config.BackendCatalog)
+	}
+	if config.Channels == nil {
+		config.Channels = channelmysql.NewRepository(config.DB)
+	}
+	return nil
+}
+
+func preparePostgresDatabaseConfig(ctx context.Context, config *Config) error {
+	if config.Migrate != nil {
+		if err := config.Migrate(ctx, config.DB); err != nil {
+			return ErrInvalidConfig
 		}
-		if config.Apps == nil {
-			config.Apps = agentmysql.NewRepository(config.DB)
-		}
-		if config.Models == nil {
-			config.Models = modelmysql.NewRepository(config.DB, config.ModelCatalog)
-		}
-		if config.Backends == nil {
-			config.Backends = backendmysql.NewRepository(config.DB, config.BackendCatalog)
-		}
-		if config.Channels == nil {
-			config.Channels = channelmysql.NewRepository(config.DB)
-		}
-		return nil
 	}
 	if config.Tenants == nil {
 		config.Tenants = tenantpostgres.NewRepository(config.DB)

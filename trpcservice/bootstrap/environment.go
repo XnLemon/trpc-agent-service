@@ -145,62 +145,9 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: Admin authenticator configuration is invalid", ErrInvalidConfig)
 	}
-	var db *sql.DB
-	applyMigrations := applyEnvironmentMigrations
-	verifyMigrations := verifyEnvironmentMigrations
-	if config.driver == ControlPlaneDriverMySQL {
-		migrationDB, migrationErr := openMySQLEnvironmentDatabase(ctx, config.migrationDSN, mysql.Options{MaxOpenConns: 4, MaxIdleConns: 4})
-		var migrationUser, migrationDatabase string
-		if migrationErr == nil {
-			migrationUser, migrationErr = mysql.CurrentUser(ctx, migrationDB)
-		}
-		if migrationErr == nil {
-			migrationDatabase, migrationErr = mysql.CurrentDatabase(ctx, migrationDB)
-		}
-		if migrationErr == nil {
-			migrationErr = applyMySQLEnvironmentMigrations(ctx, migrationDB)
-		}
-		if migrationErr == nil {
-			migrationErr = verifyMySQLEnvironmentMigrations(ctx, migrationDB)
-		}
-		if migrationDB != nil {
-			if closeErr := migrationDB.Close(); migrationErr == nil {
-				migrationErr = closeErr
-			}
-		}
-		if migrationErr != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, fmt.Errorf("%w: MySQL migrations are not ready", ErrInvalidConfig)
-		}
-		db, err = openMySQLEnvironmentDatabase(ctx, config.dsn, mysql.Options{MaxOpenConns: 8, MaxIdleConns: 8})
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, fmt.Errorf("%w: mysql control plane is unavailable", ErrInvalidConfig)
-		}
-		// Migrations and trigger metadata require the separately provisioned account.
-		applyMigrations = nil
-		verifyMigrations = nil
-		applicationUser, userErr := mysql.CurrentUser(ctx, db)
-		applicationDatabase, databaseErr := mysql.CurrentDatabase(ctx, db)
-		if userErr != nil || databaseErr != nil || applicationUser == migrationUser || applicationDatabase != migrationDatabase {
-			_ = db.Close()
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, fmt.Errorf("%w: MySQL migration and application accounts/databases are invalid", ErrInvalidConfig)
-		}
-	} else {
-		db, err = openEnvironmentDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
-	}
+	db, applyMigrations, verifyMigrations, err := openEnvironmentDatabaseForConfig(ctx, config)
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("%w: %s control plane is unavailable", ErrInvalidConfig, config.driver)
+		return nil, err
 	}
 	delegateSessions := inmemory.NewSessionService()
 	runtimeStore, err := environmentRuntimeStore(config.runtimeStorage, db)
@@ -209,24 +156,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	var tenantRepo tenant.Repository
-	var appRepo agent.Repository
-	var channelRepo channels.CandidateConsumer
-	var auditWriter audit.Writer
-	if config.driver == ControlPlaneDriverMySQL {
-		tenantRepo = tenantmysql.NewRepository(db)
-		appRepo = agentmysql.NewRepository(db)
-		channelRepo = channelmysql.NewRepository(db)
-	} else {
-		tenantRepo = tenantpostgres.NewRepository(db)
-		appRepo = agentpostgres.NewRepository(db)
-		channelRepo = channelpostgres.NewRepository(db)
-		if len(config.apiIdentities) > 1 {
-			auditWriter = auditpostgres.NewMultiTenant(db)
-		} else {
-			auditWriter, err = auditpostgres.New(db, config.tenantID)
-		}
-	}
+	tenantRepo, appRepo, channelRepo, auditWriter, err := environmentRepositories(config, db)
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = runtimeStore.Close()
@@ -292,6 +222,80 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, err
 	}
 	return graph, nil
+}
+
+func openEnvironmentDatabaseForConfig(ctx context.Context, config environmentConfig) (*sql.DB, func(context.Context, *sql.DB) error, func(context.Context, *sql.DB) error, error) {
+	if config.driver != ControlPlaneDriverMySQL {
+		db, err := openEnvironmentDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, nil, ctx.Err()
+			}
+			return nil, nil, nil, fmt.Errorf("%w: %s control plane is unavailable", ErrInvalidConfig, config.driver)
+		}
+		return db, applyEnvironmentMigrations, verifyEnvironmentMigrations, nil
+	}
+	migrationDB, migrationErr := openMySQLEnvironmentDatabase(ctx, config.migrationDSN, mysql.Options{MaxOpenConns: 4, MaxIdleConns: 4})
+	var migrationUser, migrationDatabase string
+	if migrationErr == nil {
+		migrationUser, migrationErr = mysql.CurrentUser(ctx, migrationDB)
+	}
+	if migrationErr == nil {
+		migrationDatabase, migrationErr = mysql.CurrentDatabase(ctx, migrationDB)
+	}
+	if migrationErr == nil {
+		migrationErr = applyMySQLEnvironmentMigrations(ctx, migrationDB)
+	}
+	if migrationErr == nil {
+		migrationErr = verifyMySQLEnvironmentMigrations(ctx, migrationDB)
+	}
+	if migrationDB != nil {
+		if closeErr := migrationDB.Close(); migrationErr == nil {
+			migrationErr = closeErr
+		}
+	}
+	if migrationErr != nil {
+		if ctx.Err() != nil {
+			return nil, nil, nil, ctx.Err()
+		}
+		return nil, nil, nil, fmt.Errorf("%w: MySQL migrations are not ready", ErrInvalidConfig)
+	}
+	db, err := openMySQLEnvironmentDatabase(ctx, config.dsn, mysql.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, nil, ctx.Err()
+		}
+		return nil, nil, nil, fmt.Errorf("%w: mysql control plane is unavailable", ErrInvalidConfig)
+	}
+	applicationUser, userErr := mysql.CurrentUser(ctx, db)
+	applicationDatabase, databaseErr := mysql.CurrentDatabase(ctx, db)
+	if userErr != nil || databaseErr != nil || applicationUser == migrationUser || applicationDatabase != migrationDatabase {
+		_ = db.Close()
+		if ctx.Err() != nil {
+			return nil, nil, nil, ctx.Err()
+		}
+		return nil, nil, nil, fmt.Errorf("%w: MySQL migration and application accounts/databases are invalid", ErrInvalidConfig)
+	}
+	// The application account is verification-only during bootstrap; migrations
+	// and trigger metadata are handled through the migration account above.
+	return db, nil, nil, nil
+}
+
+func environmentRepositories(config environmentConfig, db *sql.DB) (tenant.Repository, agent.Repository, channels.CandidateConsumer, audit.Writer, error) {
+	if config.driver == ControlPlaneDriverMySQL {
+		return tenantmysql.NewRepository(db), agentmysql.NewRepository(db), channelmysql.NewRepository(db), nil, nil
+	}
+	tenantRepo := tenantpostgres.NewRepository(db)
+	appRepo := agentpostgres.NewRepository(db)
+	channelRepo := channelpostgres.NewRepository(db)
+	var auditWriter audit.Writer
+	var err error
+	if len(config.apiIdentities) > 1 {
+		auditWriter = auditpostgres.NewMultiTenant(db)
+	} else {
+		auditWriter, err = auditpostgres.New(db, config.tenantID)
+	}
+	return tenantRepo, appRepo, channelRepo, auditWriter, err
 }
 
 func environmentWeComComponents(config environmentConfig, channelsRepo channels.CandidateConsumer, tenantsRepo tenant.Repository, appsRepo agent.Repository, runtimeStore runtimestorage.RuntimeStore, auditWriter audit.Writer) (func(gateway.DispatchService) (http.Handler, error), *outbox.Worker, error) {

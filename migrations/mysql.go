@@ -522,6 +522,8 @@ func isMySQLAlreadyApplied(err error) bool {
 // quoted strings, identifiers, SQL comments, and compound trigger bodies. The
 // runner still executes one statement at a time rather than enabling
 // multiStatements on the DSN.
+//
+//nolint:gocyclo // The scanner keeps quote, comment, and compound-body state in one pass.
 func splitMySQLStatements(script string) []string {
 	var statements []string
 	start := 0
@@ -546,8 +548,15 @@ func splitMySQLStatements(script string) []string {
 				skipCompoundKeyword = false
 			} else {
 				switch word {
-				case "BEGIN", "IF", "CASE", "LOOP", "WHILE", "REPEAT":
+				case "BEGIN":
 					compoundDepth++
+				case "IF", "CASE", "LOOP", "WHILE", "REPEAT":
+					// IF NOT EXISTS and similar top-level DDL clauses are
+					// not compound blocks. Only count control-flow keywords
+					// after a compound statement has started.
+					if compoundDepth > 0 {
+						compoundDepth++
+					}
 				case "END":
 					compoundDepth--
 					if compoundDepth < 0 {

@@ -47,6 +47,15 @@ CREATE TABLE after_trigger (id INT);`
 	}
 }
 
+func TestSplitMySQLStatementsDoesNotTreatDDLIfAsCompound(t *testing.T) {
+	script := `CREATE TABLE IF NOT EXISTS example (id INT);
+ALTER TABLE example ADD COLUMN value_text VARCHAR(8);`
+	statements := splitMySQLStatements(script)
+	if len(statements) != 2 || !strings.HasPrefix(statements[0], "CREATE TABLE IF NOT EXISTS") || !strings.HasPrefix(statements[1], "ALTER TABLE") {
+		t.Fatalf("DDL statements = %#v", statements)
+	}
+}
+
 func TestMySQLMigrationSetUsesBinaryIdentityAndRecoveryMarkers(t *testing.T) {
 	files, err := orderedMySQLFiles()
 	if err != nil {
