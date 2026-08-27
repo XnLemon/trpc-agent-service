@@ -223,6 +223,18 @@ func CurrentUser(ctx context.Context, db *sql.DB) (string, error) {
 	return user, nil
 }
 
+func currentGranteeIdentity(user string) (string, error) {
+	user = strings.TrimSpace(user)
+	separator := strings.LastIndexByte(user, '@')
+	if separator < 0 || separator == len(user)-1 {
+		return "", ErrStorage
+	}
+	escape := func(value string) string {
+		return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+	}
+	return escape(user[:separator]) + "@" + escape(user[separator+1:]), nil
+}
+
 // CurrentDatabase returns the selected MySQL schema for the current session.
 // Bootstrap compares the migration and application sessions so a successful
 // migration can never be mistaken for readiness of a different database.
@@ -258,12 +270,17 @@ func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
 	if _, err := CurrentDatabase(ctx, db); err != nil {
 		return err
 	}
+	currentUser, err := CurrentUser(ctx, db)
+	if err != nil {
+		return err
+	}
+	currentGrantee, err := currentGranteeIdentity(currentUser)
+	if err != nil {
+		return err
+	}
 	var forbidden int
-	if err := db.QueryRowContext(ctx, `WITH current_grantee (grantee, user_name, host_name) AS (
-			SELECT CONCAT(CHAR(39), REPLACE(CURRENT_USER(), '@', CONCAT(CHAR(39), '@', CHAR(39))), CHAR(39)),
-				SUBSTRING_INDEX(CURRENT_USER(), '@', 1), SUBSTRING_INDEX(CURRENT_USER(), '@', -1)
-		), effective_grantees (grantee) AS (
-			SELECT grantee FROM current_grantee
+	if err := db.QueryRowContext(ctx, `WITH effective_grantees (grantee) AS (
+			SELECT ?
 			UNION
 			SELECT CONCAT(CHAR(39), role_name, CHAR(39), '@', CHAR(39), role_host, CHAR(39))
 			FROM information_schema.enabled_roles
@@ -313,9 +330,7 @@ func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
 			WHERE CONCAT(CHAR(39), grantee, CHAR(39), '@', CHAR(39), grantee_host, CHAR(39)) IN (SELECT grantee FROM effective_grantees)
 			UNION ALL
 			SELECT role_name FROM information_schema.applicable_roles
-			WHERE grantee = (SELECT user_name FROM current_grantee)
-			  AND grantee_host = (SELECT host_name FROM current_grantee)
-		) AS violations`).Scan(&forbidden); err != nil {
+		) AS violations`, currentGrantee).Scan(&forbidden); err != nil {
 		return MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
 	}
 	if forbidden != 0 {

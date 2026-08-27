@@ -51,7 +51,7 @@ TRPC_MYSQL_MIGRATION_DSN=migrator:password@tcp(host:3306)/db?parseTime=true&char
 
 ## SQL 语义映射
 
-| PostgreSQL 契约 | MySQL 8.0 实现 | 兼容约束 |
+| PostgreSQL 契约 | MySQL 8.0.19+ 实现 | 兼容约束 |
 | --- | --- | --- |
 | `$1` 参数 | `?` 参数 | 只由 MySQL 包生成，禁止拼接用户输入 |
 | `public.table` | 当前数据库中的 `table` | DSN 选定的数据库是唯一控制面 schema |
@@ -110,7 +110,7 @@ JSON 字段仍只接受受信 Repository 产生的无密钥对象；`secret_ref`
   `tenant_id + binding_id + version`。
 - active provider account 的唯一 owner 约束是 `(channel, provider_account_id)`，只对
   `status='active'` 生效；候选发现另建 `(channel, public_route_key_digest)` 索引，不能把 route
-  digest 加入 active-owner 唯一键。MySQL 8.0 用一个 inactive 为 `NULL` 的 stored generated
+  digest 加入 active-owner 唯一键。MySQL 8.0.19+ 用一个 inactive 为 `NULL` 的 stored generated
   column（例如 `active_provider_account_id`）加唯一键表达 PostgreSQL 的 partial unique index。
   候选索引只返回不含 Tenant/Secret 的短期上下文。
 - Candidate capability 继续是进程内一次性消费；重启后由持久化 version/digest 校验
@@ -124,7 +124,7 @@ conflict/deadlock`、`1451/1452 foreign-key`、`1264/1406 invalid` 等类别归�
 ## MySQL Migration 与权限
 
 MySQL 维护独立的有序 migration 集合和 `schema_migrations` 历史表，版本号与 PostgreSQL
-保持一致但摘要分别计算。由于 MySQL 8.0 的表/索引 DDL 会隐式提交，迁移协议是
+保持一致但摘要分别计算。由于 MySQL 8.0.19+ 的表/索引 DDL 会隐式提交，迁移协议是
 forward-only、幂等且可恢复的，不能承诺通过用户 `ROLLBACK` 撤销 DDL。每次迁移：
 
 1. 在固定连接上执行独立的 migration-history `GET_LOCK`，检查历史摘要和连续版本；
@@ -161,13 +161,13 @@ Session/Memory/Knowledge/Artifact 仍不在本 Issue 的 MySQL 适配范围内�
 | --- | --- |
 | 契约 | 五类 MySQL Repository 编译实现领域接口，零值、nil DB、取消和错误分类测试 |
 | SQL 单元 | `sqlmock` 覆盖 `?` 参数、事务提交/回滚、版本冲突、重复键、跨租户谓词和防御性副本 |
-| Migration | `MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN` 使用 migration 账号指向干净 MySQL 8 服务，执行全量 migration、Verify、重启 Verify；摘要/大小写/DDL 后失败恢复由 sqlmock 契约覆盖 |
+| Migration | `MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN` 使用 migration 账号指向干净 MySQL 8.0.19+ 服务，执行全量 migration、Verify、重启 Verify；摘要/大小写/DDL 后失败恢复由 sqlmock 契约覆盖 |
 | Repository 集成 | `MYSQL_CONTROL_PLANE_TEST_DSN` 使用仅 DML 的应用账号执行五类 Repository 的创建、更新、发布、Backend 生命周期、候选消费和双租户隔离；migration 账号通过独立 DSN 完成该数据库初始化 |
-| 并发/race | `go test -race ./...` 在 CI 的 MySQL 8 服务上运行 live smoke 与 SQL 契约测试；optimistic-lock、同 App revision、候选消费和 Context 取消由 Repository 单测覆盖 |
+| 并发/race | `go test -race ./...` 在 CI 的 MySQL 8.0.19+ 服务上运行 live smoke 与 SQL 契约测试；optimistic-lock、同 App revision、候选消费和 Context 取消由 Repository 单测覆盖 |
 | Bootstrap | `TRPC_CONTROL_PLANE_DRIVER=mysql` 选择 MySQL；双 DSN 账号/数据库分离校验、表级 DML 白名单权限校验、未知驱动、缺 DSN、迁移失败和重启 rediscovery 由 Bootstrap/sqlmock 契约 fail-closed，live job 验证受限应用账号可运行 Repository |
 
 未设置 MySQL DSN 时，live 测试必须显式 `Skip`，不能把 skip 记为 MySQL 证据。CI 提供
-独立 MySQL 8 服务运行 migration、Repository 和 race smoke；PostgreSQL 现有 job 不变。
+独立 MySQL 8.0.19+ 服务运行 migration、Repository 和 race smoke；PostgreSQL 现有 job 不变。
 
 ## Issue ledger
 
@@ -175,9 +175,9 @@ Session/Memory/Knowledge/Artifact 仍不在本 Issue 的 MySQL 适配范围内�
 | --- | --- |
 | Tenant、Agent、Model、Backend、Channel MySQL Repository | 已完成：`trpcservice/*/mysql` |
 | 事务、乐观锁、生命周期、Outbox 和租户隔离语义 | 已完成：事务/复合键/候选消费集成验证 |
-| MySQL migration、摘要校验、权限和重启恢复 | 已完成：`migrations/mysql.go` 与 MySQL 8 migration |
+| MySQL migration、摘要校验、权限和重启恢复 | 已完成：`migrations/mysql.go` 与 MySQL 8.0.19+ migration |
 | Bootstrap 驱动选择与错误脱敏 | 已完成：`TRPC_CONTROL_PLANE_DRIVER` 与 fail-closed 测试 |
-| MySQL unit/integration/race 测试及 CI 服务 | 已完成：sqlmock 失败/恢复契约、MySQL 8 live migration/repository smoke、双账号权限初始化与 race job；未配置服务时 live 测试显式 Skip |
+| MySQL unit/integration/race 测试及 CI 服务 | 已完成：sqlmock 失败/恢复契约、MySQL 8.0.19+ live migration/repository smoke、双账号权限初始化与 race job；未配置服务时 live 测试显式 Skip |
 
 ## Issue #81、README 与验收对照
 
@@ -185,5 +185,5 @@ Session/Memory/Knowledge/Artifact 仍不在本 Issue 的 MySQL 适配范围内�
 | --- | --- | --- |
 | Tenant、Agent、Model、Backend、Channel Repository 支持 MySQL | 多租户控制面中的 MySQL Repository 条目 | 五个 `trpcservice/*/mysql` 包、接口编译断言、sqlmock 与 CI live smoke |
 | 事务、乐观锁、生命周期、租户隔离与 PostgreSQL 契约一致 | 控制面隔离/并发/生命周期条目 | 共享领域校验、复合键/显式租户谓词、Repository 单测；MySQL Backend 的 disabled provisioning 仅是引擎内部顺序 |
-| Migration、restart、race 运行在 MySQL 服务 | CI 与测试清单 | CI 两个 MySQL 8 服务、migration/repository 双账号、重启 Verify 与 `go test -race ./...` |
+| Migration、restart、race 运行在 MySQL 服务 | CI 与测试清单 | CI 两个 MySQL 8.0.19+ 服务、migration/repository 双账号、重启 Verify 与 `go test -race ./...` |
 | Bootstrap 选择适配器且不泄露 Secret/API | Bootstrap、readiness 和错误脱敏条目 | 双 DSN、应用权限/身份校验、fail-closed 路径与错误脱敏测试 |

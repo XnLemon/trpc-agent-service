@@ -576,6 +576,7 @@ func TestNewFromEnvironmentBootstrapsMySQLWithSeparateMigrationAccount(t *testin
 	appMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
 	appMock.ExpectPing()
 	appMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
+	appMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
 	appMock.ExpectQuery("SELECT COUNT\\(\\*\\)").WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
 	appMock.ExpectPing()
 	appMock.ExpectClose()
@@ -800,6 +801,7 @@ func TestPrepareDatabaseConfigBuildsMySQLRepositories(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	mock.ExpectPing()
 	mock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
+	mock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
 	config := Config{DB: db, ControlPlaneDriver: ControlPlaneDriverMySQL}
 	if err := prepareDatabaseConfig(context.Background(), &config); err != nil {

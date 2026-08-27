@@ -155,6 +155,7 @@ func TestVerifyApplicationPrivilegesFailsClosed(t *testing.T) {
 			}
 			defer func() { _ = db.Close() }()
 			mock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
+			mock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
 			expectation := mock.ExpectQuery("SELECT COUNT")
 			if test.queryErr != nil {
 				expectation.WillReturnError(test.queryErr)
@@ -205,6 +206,7 @@ func TestVerifyApplicationPrivilegesQueryEnforcesFullAllowlist(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	mock.ExpectQuery("SELECT DATABASE").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
+	mock.ExpectQuery("SELECT CURRENT_USER").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
 	mock.ExpectQuery("PRIVILEGE_QUERY").WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
 	if err := VerifyApplicationPrivileges(context.Background(), db); err != nil {
 		t.Fatal(err)
@@ -219,7 +221,6 @@ func TestVerifyApplicationPrivilegesQueryEnforcesFullAllowlist(t *testing.T) {
 		"information_schema.role_table_grants",
 		"information_schema.role_column_grants",
 		"information_schema.applicable_roles",
-		"grantee_host = (SELECT host_name FROM current_grantee)",
 	} {
 		if !strings.Contains(privilegeQuery, fragment) {
 			t.Fatalf("privilege query missing %q:\n%s", fragment, privilegeQuery)
@@ -230,6 +231,26 @@ func TestVerifyApplicationPrivilegesQueryEnforcesFullAllowlist(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCurrentGranteeIdentityUsesLastAtAndEscapes(t *testing.T) {
+	for _, test := range []struct {
+		input, want string
+	}{
+		{input: "app@%", want: "'app'@'%'"},
+		{input: "u@v@%", want: "'u@v'@'%'"},
+		{input: "o\u0027conn@localhost", want: "'o\u0027\u0027conn'@'localhost'"},
+	} {
+		got, err := currentGranteeIdentity(test.input)
+		if err != nil || got != test.want {
+			t.Fatalf("currentGranteeIdentity(%q) = %q, %v; want %q", test.input, got, err, test.want)
+		}
+	}
+	for _, input := range []string{"", "app", "app@"} {
+		if _, err := currentGranteeIdentity(input); !errors.Is(err, ErrStorage) {
+			t.Fatalf("currentGranteeIdentity(%q) error = %v, want ErrStorage", input, err)
+		}
 	}
 }
 
