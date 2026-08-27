@@ -25,6 +25,7 @@ const (
 	// UsageCostTotal counts aggregated usage cost.
 	UsageCostTotal = "trpcservice_usage_cost_minor_total"
 	// TokensTotal counts aggregated model and tool tokens.
+	// #nosec G101 -- this is a metric name, not a credential.
 	TokensTotal = "trpcservice_tokens_total"
 	// CostMinorTotal counts authorized cost aggregates in minor currency units.
 	CostMinorTotal = "trpcservice_cost_minor_total"
