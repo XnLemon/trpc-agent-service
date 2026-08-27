@@ -33,15 +33,17 @@ Repository 继续使用 `database/sql` 的 `*sql.DB`，因此调用方可以复�
 ```text
 TRPC_CONTROL_PLANE_DRIVER=postgres | mysql
 TRPC_POSTGRES_DSN=postgres://...       # driver=postgres
-TRPC_MYSQL_DSN=user:password@tcp(host:3306)/db?parseTime=true&charset=utf8mb4              # app/runtime account
+TRPC_MYSQL_DSN=user:password@tcp(host:3306)/db?parseTime=true&charset=utf8mb4              # app account
 TRPC_MYSQL_MIGRATION_DSN=migrator:password@tcp(host:3306)/db?parseTime=true&charset=utf8mb4  # migration account
 ```
 
 默认仍为 PostgreSQL，已有 `TRPC_POSTGRES_DSN` 配置和 API 保持兼容。`mysql` 模式必须
-同时提供应用/运行时账号的 `TRPC_MYSQL_DSN` 和仅用于迁移的
+同时提供应用账号的 `TRPC_MYSQL_DSN` 和仅用于迁移的
 `TRPC_MYSQL_MIGRATION_DSN`；Bootstrap 先在独立迁移连接上 Apply + Verify，再以应用连接
-读取当前账号和权限信息并装配 Repository；迁移账号负责 schema/trigger 校验，应用账号不
-需要 `TRIGGER` 元数据权限。缺失驱动、任一 DSN、迁移版本、必需权限或
+读取当前账号、数据库和权限信息并装配 Repository；迁移账号负责 schema/trigger 校验，应用账号不
+需要 `TRIGGER` 元数据权限。应用账号仅允许当前数据库控制面 14 张表的表级
+`SELECT/INSERT/UPDATE/DELETE`；全局、schema 级、列级、启用角色的越权权限和 grant option
+都会使 Bootstrap fail-closed；两个 DSN 的 `DATABASE()` 也必须相同且非空。缺失驱动、任一 DSN、迁移版本、必需权限或
 连接 Ping 失败时，在绑定 HTTP 端口前 fail-closed。DSN 只存在于 Bootstrap 的短生命周期
 配置中，不能写入运行时快照、Repository 错误或 telemetry。测试可以传入已经打开的
 `*sql.DB`，不要求 Repository 自己关闭借用的连接池；Bootstrap 只有在 `OwnDB=true` 时
@@ -142,7 +144,8 @@ Change Outbox 表，并保留 `runtime_*`/audit 表所需的同租户复合键�
 `utf8mb4`、`utf8mb4_bin`、InnoDB；`tenant_id`、各类 `*_id`、`*_key`、
 `provider_account_id`、route digest 和所有参与唯一键/外键/精确查找的列在列级固定该 binary
 collation（不得依赖服务器默认的 `utf8mb4_0900_ai_ci`）。外键显式包含 `tenant_id`。迁移账号与
-应用/运行时账号分离；应用连接不拥有任意 schema DDL 权限。运行时
+应用账号分离；应用连接只拥有控制面 14 张表的表级 DML，不拥有任意全局/schema/列级权限
+或 schema DDL 权限。运行时
 Session/Memory/Knowledge/Artifact 仍不在本 Issue 的 MySQL 适配范围内，不能把控制面
 应用账号误当作这些运行时存储的迁移账号。
 
@@ -161,7 +164,7 @@ Session/Memory/Knowledge/Artifact 仍不在本 Issue 的 MySQL 适配范围内�
 | Migration | `MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN` 使用 migration 账号指向干净 MySQL 8 服务，执行全量 migration、Verify、重启 Verify；摘要/大小写/DDL 后失败恢复由 sqlmock 契约覆盖 |
 | Repository 集成 | `MYSQL_CONTROL_PLANE_TEST_DSN` 使用仅 DML 的应用账号执行五类 Repository 的创建、更新、发布、Backend 生命周期、候选消费和双租户隔离；migration 账号通过独立 DSN 完成该数据库初始化 |
 | 并发/race | `go test -race ./...` 在 CI 的 MySQL 8 服务上运行 live smoke 与 SQL 契约测试；optimistic-lock、同 App revision、候选消费和 Context 取消由 Repository 单测覆盖 |
-| Bootstrap | `TRPC_CONTROL_PLANE_DRIVER=mysql` 选择 MySQL；双 DSN 账号分离、权限校验、未知驱动、缺 DSN、迁移失败和重启 rediscovery 由 Bootstrap/sqlmock 契约 fail-closed，live job 验证受限应用账号可运行 Repository |
+| Bootstrap | `TRPC_CONTROL_PLANE_DRIVER=mysql` 选择 MySQL；双 DSN 账号/数据库分离校验、表级 DML 白名单权限校验、未知驱动、缺 DSN、迁移失败和重启 rediscovery 由 Bootstrap/sqlmock 契约 fail-closed，live job 验证受限应用账号可运行 Repository |
 
 未设置 MySQL DSN 时，live 测试必须显式 `Skip`，不能把 skip 记为 MySQL 证据。CI 提供
 独立 MySQL 8 服务运行 migration、Repository 和 race smoke；PostgreSQL 现有 job 不变。

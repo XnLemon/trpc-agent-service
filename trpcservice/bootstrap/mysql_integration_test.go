@@ -108,6 +108,11 @@ func openMySQLControlPlaneTestDB(t *testing.T, ctx context.Context, dsn, migrati
 		_ = migrationDB.Close()
 		t.Fatal(err)
 	}
+	migrationDatabase, err := storage.CurrentDatabase(ctx, migrationDB)
+	if err != nil {
+		_ = migrationDB.Close()
+		t.Fatal(err)
+	}
 	if err := migrationDB.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -120,9 +125,14 @@ func openMySQLControlPlaneTestDB(t *testing.T, ctx context.Context, dsn, migrati
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	if appUser == migrationUser {
+	appDatabase, err := storage.CurrentDatabase(ctx, db)
+	if err != nil {
 		_ = db.Close()
-		t.Fatalf("migration and application accounts are shared: %q", appUser)
+		t.Fatal(err)
+	}
+	if appUser == migrationUser || appDatabase != migrationDatabase {
+		_ = db.Close()
+		t.Fatalf("migration and application identities are invalid: users %q/%q databases %q/%q", migrationUser, appUser, migrationDatabase, appDatabase)
 	}
 	if err := storage.VerifyApplicationPrivileges(ctx, db); err != nil {
 		_ = db.Close()

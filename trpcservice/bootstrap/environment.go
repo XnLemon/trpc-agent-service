@@ -146,9 +146,12 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	verifyMigrations := verifyEnvironmentMigrations
 	if config.driver == ControlPlaneDriverMySQL {
 		migrationDB, migrationErr := openMySQLEnvironmentDatabase(ctx, config.migrationDSN, mysql.Options{MaxOpenConns: 4, MaxIdleConns: 4})
-		var migrationUser string
+		var migrationUser, migrationDatabase string
 		if migrationErr == nil {
 			migrationUser, migrationErr = mysql.CurrentUser(ctx, migrationDB)
+		}
+		if migrationErr == nil {
+			migrationDatabase, migrationErr = mysql.CurrentDatabase(ctx, migrationDB)
 		}
 		if migrationErr == nil {
 			migrationErr = applyMySQLEnvironmentMigrations(ctx, migrationDB)
@@ -182,14 +185,15 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		// verified the shared schema before it is closed.
 		verifyMigrations = nil
 		applicationUser, userErr := mysql.CurrentUser(ctx, db)
-		if userErr != nil || applicationUser == migrationUser {
+		applicationDatabase, databaseErr := mysql.CurrentDatabase(ctx, db)
+		if userErr != nil || databaseErr != nil || applicationUser == migrationUser || applicationDatabase != migrationDatabase {
 			if db != nil {
 				_ = db.Close()
 			}
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			return nil, fmt.Errorf("%w: MySQL migration and application accounts must be distinct", ErrInvalidConfig)
+			return nil, fmt.Errorf("%w: MySQL migration and application accounts/databases are invalid", ErrInvalidConfig)
 		}
 	} else {
 		db, err = openDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})

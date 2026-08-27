@@ -570,9 +570,12 @@ func TestNewFromEnvironmentBootstrapsMySQLWithSeparateMigrationAccount(t *testin
 		_ = appDB.Close()
 	})
 	migrationMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("migration@%"))
+	migrationMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
 	migrationMock.ExpectClose()
 	appMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
+	appMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
 	appMock.ExpectPing()
+	appMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
 	appMock.ExpectQuery("SELECT COUNT\\(\\*\\)").WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
 	appMock.ExpectPing()
 	appMock.ExpectClose()
@@ -654,8 +657,10 @@ func TestNewFromEnvironmentRejectsSharedMySQLAccount(t *testing.T) {
 		_ = appDB.Close()
 	})
 	migrationMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("shared@%"))
+	migrationMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
 	migrationMock.ExpectClose()
 	appMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("shared@%"))
+	appMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
 	appMock.ExpectClose()
 
 	previousOpen := openMySQLEnvironmentDatabase
@@ -679,6 +684,63 @@ func TestNewFromEnvironmentRejectsSharedMySQLAccount(t *testing.T) {
 
 	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("shared MySQL account error = %v", err)
+	}
+	if err := migrationMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if err := appMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewFromEnvironmentRejectsDifferentMySQLDatabase(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envControlPlaneDriver, "mysql")
+	t.Setenv(envPostgresDSN, "")
+	t.Setenv(envMySQLDSN, "app:password@tcp(mysql)/application_db")
+	t.Setenv(envMySQLMigrationDSN, "migration:password@tcp(mysql)/control_plane")
+
+	migrationDB, migrationMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	appDB, appMock, err := sqlmock.New()
+	if err != nil {
+		_ = migrationDB.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = migrationDB.Close()
+		_ = appDB.Close()
+	})
+	migrationMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("migration@%"))
+	migrationMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
+	migrationMock.ExpectClose()
+	appMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
+	appMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("application_db"))
+	appMock.ExpectClose()
+
+	previousOpen := openMySQLEnvironmentDatabase
+	previousApply := applyMySQLEnvironmentMigrations
+	previousVerify := verifyMySQLEnvironmentMigrations
+	openCalls := 0
+	openMySQLEnvironmentDatabase = func(_ context.Context, _ string, _ mysql.Options) (*sql.DB, error) {
+		openCalls++
+		if openCalls == 1 {
+			return migrationDB, nil
+		}
+		return appDB, nil
+	}
+	applyMySQLEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	verifyMySQLEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	t.Cleanup(func() {
+		openMySQLEnvironmentDatabase = previousOpen
+		applyMySQLEnvironmentMigrations = previousApply
+		verifyMySQLEnvironmentMigrations = previousVerify
+	})
+
+	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("different MySQL database error = %v", err)
 	}
 	if err := migrationMock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -737,6 +799,7 @@ func TestPrepareDatabaseConfigBuildsMySQLRepositories(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	mock.ExpectPing()
+	mock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
 	config := Config{DB: db, ControlPlaneDriver: ControlPlaneDriverMySQL}
 	if err := prepareDatabaseConfig(context.Background(), &config); err != nil {

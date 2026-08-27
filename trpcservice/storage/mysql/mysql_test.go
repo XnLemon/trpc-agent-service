@@ -153,6 +153,7 @@ func TestVerifyApplicationPrivilegesFailsClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = db.Close() }()
+			mock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
 			expectation := mock.ExpectQuery("SELECT COUNT")
 			if test.queryErr != nil {
 				expectation.WillReturnError(test.queryErr)
@@ -237,6 +238,58 @@ func TestCurrentUserRedactsFailuresAndRejectsBlankIdentity(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	if _, err := CurrentUser(canceled, db); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled identity lookup = %v", err)
+	}
+}
+
+func TestCurrentDatabaseRejectsMissingSchemaAndRedactsFailures(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		row       any
+		queryErr  error
+		wantError bool
+	}{
+		{name: "valid", row: "control_plane"},
+		{name: "blank", row: "  ", wantError: true},
+		{name: "null", row: nil, wantError: true},
+		{name: "query failure", queryErr: errors.New("database unavailable"), wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			expectation := mock.ExpectQuery("SELECT DATABASE\\(\\)")
+			if test.queryErr != nil {
+				expectation.WillReturnError(test.queryErr)
+			} else {
+				expectation.WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow(test.row))
+			}
+			got, err := CurrentDatabase(context.Background(), db)
+			if test.wantError {
+				if !errors.Is(err, ErrStorage) || got != "" {
+					t.Fatalf("database result = %q, err=%v", got, err)
+				}
+			} else if err != nil || got != "control_plane" {
+				t.Fatalf("database result = %q, err=%v", got, err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	if _, err := CurrentDatabase(context.Background(), nil); !errors.Is(err, ErrStorage) {
+		t.Fatal("nil database was accepted")
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := CurrentDatabase(canceled, db); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled database lookup = %v", err)
 	}
 }
 

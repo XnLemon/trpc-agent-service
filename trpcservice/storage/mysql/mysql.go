@@ -223,14 +223,39 @@ func CurrentUser(ctx context.Context, db *sql.DB) (string, error) {
 	return user, nil
 }
 
+// CurrentDatabase returns the selected MySQL schema for the current session.
+// Bootstrap compares the migration and application sessions so a successful
+// migration can never be mistaken for readiness of a different database.
+func CurrentDatabase(ctx context.Context, db *sql.DB) (string, error) {
+	if db == nil || ctx == nil {
+		return "", ErrStorage
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	var database sql.NullString
+	if err := db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&database); err != nil {
+		return "", MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
+	}
+	if !database.Valid || strings.TrimSpace(database.String) == "" {
+		return "", ErrStorage
+	}
+	return database.String, nil
+}
+
 // VerifyApplicationPrivileges fails closed when the connected MySQL account
-// still carries schema-changing privileges. Migrations run through a separate
-// account; the application account is limited to control-plane DML and reads.
+// does not exactly match the control-plane table-level DML allowlist.
+// Migrations run through a separate account; the application account is not
+// allowed any global/schema/column grant, role grant, grant option, or table
+// outside the selected control-plane database.
 func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
 	if db == nil || ctx == nil {
 		return ErrStorage
 	}
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := CurrentDatabase(ctx, db); err != nil {
 		return err
 	}
 	var forbidden int
@@ -239,23 +264,47 @@ func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
 			UNION
 			SELECT CONCAT(CHAR(39), role_name, CHAR(39), '@', CHAR(39), role_host, CHAR(39))
 			FROM information_schema.enabled_roles
+		), allowed_tables (table_name) AS (
+			SELECT 'tenant' UNION ALL
+			SELECT 'model_profile' UNION ALL
+			SELECT 'agent_app' UNION ALL
+			SELECT 'agent_app_revision' UNION ALL
+			SELECT 'agent_app_revision_tool' UNION ALL
+			SELECT 'backend_profile' UNION ALL
+			SELECT 'backend_profile_binding' UNION ALL
+			SELECT 'channel_binding' UNION ALL
+			SELECT 'tenant_status_change_outbox' UNION ALL
+			SELECT 'model_profile_change_outbox' UNION ALL
+			SELECT 'backend_profile_change_outbox' UNION ALL
+			SELECT 'agent_app_change_outbox' UNION ALL
+			SELECT 'channel_binding_change_outbox' UNION ALL
+			SELECT 'tenant_configuration_outbox'
 		)
 		SELECT COUNT(*)
 		FROM (
 			SELECT privilege_type FROM information_schema.user_privileges
 			WHERE grantee IN (SELECT grantee FROM effective_grantees)
+			  AND (privilege_type <> 'USAGE' OR is_grantable <> 'NO')
 			UNION ALL
 			SELECT privilege_type FROM information_schema.schema_privileges
 			WHERE grantee IN (SELECT grantee FROM effective_grantees)
 			UNION ALL
 			SELECT privilege_type FROM information_schema.table_privileges
 			WHERE grantee IN (SELECT grantee FROM effective_grantees)
+			  AND (table_schema <> DATABASE()
+			       OR table_name NOT IN (SELECT table_name FROM allowed_tables)
+			       OR privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
+			       OR is_grantable <> 'NO')
 			UNION ALL
 			SELECT privilege_type FROM information_schema.column_privileges
 			WHERE grantee IN (SELECT grantee FROM effective_grantees)
 			UNION ALL
 			SELECT privilege_type FROM information_schema.role_table_grants
 			WHERE CONCAT(CHAR(39), grantee, CHAR(39), '@', CHAR(39), grantee_host, CHAR(39)) IN (SELECT grantee FROM effective_grantees)
+			  AND (table_schema <> DATABASE()
+			       OR table_name NOT IN (SELECT table_name FROM allowed_tables)
+			       OR privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
+			       OR is_grantable <> 'NO')
 			UNION ALL
 			SELECT privilege_type FROM information_schema.role_column_grants
 			WHERE CONCAT(CHAR(39), grantee, CHAR(39), '@', CHAR(39), grantee_host, CHAR(39)) IN (SELECT grantee FROM effective_grantees)

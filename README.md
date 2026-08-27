@@ -306,7 +306,7 @@
 
 - **Format & Lint**：`gofmt` 校验、`go vet`、`golangci-lint`
 - **Build, Test & Coverage**：构建、单测覆盖率、上传 [Codecov](https://codecov.io)、清理
-- **Race Tests**：在临时 PostgreSQL 与 MySQL 8 依赖上执行 `go test -race ./...`；MySQL migration/repository live 测试使用独立 migration 账号和仅 DML 的应用账号
+- **Race Tests**：在临时 PostgreSQL 与 MySQL 8 依赖上执行 `go test -race ./...`；MySQL migration/repository live 测试使用独立 migration 账号和表级 DML 白名单应用账号
 
 Codecov 对 project 和 patch 状态均使用 **85%**、零容差的报告目标。它会将状态发布到 PR；要使已发布的
 状态成为合并门禁，仓库管理员还需在 GitHub 分支保护或 ruleset 中要求对应的状态（当前仓库尚未配置该规则）。
@@ -326,8 +326,10 @@ cd trpc-agent-service
 控制面默认使用 PostgreSQL；切换 MySQL 时必须同时提供应用账号
 `TRPC_MYSQL_DSN` 和迁移账号 `TRPC_MYSQL_MIGRATION_DSN`，Bootstrap 会在绑定 HTTP
 端口前完成迁移、schema 和权限校验。迁移账号需要目标数据库的 DDL 权限；应用账号只
-授予控制面所需的表级 `SELECT/INSERT/UPDATE/DELETE`，不授予 `CREATE/ALTER/DROP/TRIGGER`
-等 schema 权限，且两个 DSN 必须实际登录为不同 MySQL 账号。
+授予控制面 14 张表各自的表级 `SELECT/INSERT/UPDATE/DELETE`，不授予全局、schema 级或
+列级权限，也不授予 `CREATE/ALTER/DROP/TRIGGER` 等 DDL 权限。两个 DSN 必须实际登录为
+不同 MySQL 账号并指向同一个数据库；Bootstrap 会拒绝超出白名单的直接权限、启用角色
+权限或 grant option。
 
 首次使用 PostgreSQL 时，先按 [Issue #67 首次运行初始化](https://xnlemon.github.io/trpc-agent-service/issue-67-first-run-init/) 生成 `TRPC_TENANT_ID` 和 `TRPC_APP_ID`，再启动服务。正常启动不会自动创建 Tenant 或 Agent App。
 
