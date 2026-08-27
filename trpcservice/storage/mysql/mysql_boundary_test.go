@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestStorageRejectsCancelledContextsBeforeQueries(t *testing.T) {
@@ -47,5 +48,12 @@ func TestStorageNilContextsFailClosed(t *testing.T) {
 	}
 	if err := ReleaseLock(nil, nil, "name"); !errors.Is(err, ErrStorage) {
 		t.Fatalf("ReleaseLock(nil) = %v", err)
+	}
+}
+
+func TestMonotonicNowDoesNotMoveBeforePersistedTime(t *testing.T) {
+	previous := time.Now().UTC().Add(time.Hour)
+	if got := MonotonicNow(previous); !got.Equal(previous) {
+		t.Fatalf("MonotonicNow(%v) = %v, want persisted timestamp", previous, got)
 	}
 }

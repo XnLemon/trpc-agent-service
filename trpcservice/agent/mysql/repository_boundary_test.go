@@ -35,3 +35,25 @@ func TestAgentRepositoryRejectsCancelledContextsBeforeStorage(t *testing.T) {
 		})
 	}
 }
+
+func TestSameAgentRevisionHandlesNilAndValuePairs(t *testing.T) {
+	value := int64(7)
+	other := int64(8)
+	for _, tc := range []struct {
+		name        string
+		left, right *int64
+		want        bool
+	}{
+		{"both nil", nil, nil, true},
+		{"left nil", nil, &value, false},
+		{"right nil", &value, nil, false},
+		{"equal", &value, &value, true},
+		{"different", &value, &other, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sameAgentRevision(tc.left, tc.right); got != tc.want {
+				t.Fatalf("sameAgentRevision() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

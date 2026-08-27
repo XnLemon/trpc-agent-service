@@ -24,7 +24,7 @@ func TestMySQLMigrationEntryPointsRejectInvalidContexts(t *testing.T) {
 }
 
 func TestSplitMySQLStatementsHandlesTrailingQuotesAndComments(t *testing.T) {
-	for _, script := range []string{"SELECT 'unterminated", "SELECT \\\"unterminated", "-- comment", "/* comment"} {
+	for _, script := range []string{"SELECT 'unterminated", "SELECT \\\"unterminated", "SELECT 'escaped\\\\quote'", "SELECT 'doubled''quote'", "-- comment", "/* comment"} {
 		_ = splitMySQLStatements(script)
 	}
 }
