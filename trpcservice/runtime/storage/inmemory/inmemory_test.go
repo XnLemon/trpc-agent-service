@@ -90,6 +90,9 @@ func TestStoreReplyCorrelationIsIdempotentAndConflictSafe(t *testing.T) {
 	if err != nil || got != value {
 		t.Fatalf("correlation = %+v, %v", got, err)
 	}
+	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), runtimestorage.ReplyCorrelation{}, nil); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid atomic enqueue = %v", err)
+	}
 }
 
 func TestStoreDuplicateMessageAndConcurrentSequence(t *testing.T) {
