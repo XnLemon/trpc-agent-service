@@ -76,6 +76,149 @@ func TestTelemetryModelMarksEarlyStreamCloseAndGenerationError(t *testing.T) {
 	}
 }
 
+func TestTelemetryIterModelClosesOperationForTerminalAndIncompleteSequences(t *testing.T) {
+	tests := []struct {
+		name       string
+		responses  []*trpcmodel.Response
+		cancel     bool
+		wantStatus observability.Status
+		wantError  bool
+	}{
+		{name: "terminal response", responses: []*trpcmodel.Response{{Done: true, Usage: &trpcmodel.Usage{PromptTokens: 3, CompletionTokens: 4}}}, wantStatus: observability.StatusOK},
+		{name: "incomplete sequence", responses: []*trpcmodel.Response{{IsPartial: true}}, wantStatus: observability.StatusError, wantError: true},
+		{name: "canceled sequence", cancel: true, wantStatus: observability.StatusError, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &runtimeTelemetryProvider{}
+			options := applyTelemetryOptions(t, provider)
+			before, err := options.ModelCallbacks.RunBeforeModel(context.Background(), &trpcmodel.BeforeModelArgs{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := before.Context
+			var cancel context.CancelFunc
+			if test.cancel {
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			wrapped := wrapTelemetryModel(telemetryIterTestModel{responses: test.responses})
+			iterModel, ok := wrapped.(trpcmodel.IterModel)
+			if !ok {
+				t.Fatal("wrapped model does not implement IterModel")
+			}
+			seq, err := iterModel.GenerateContentIter(ctx, &trpcmodel.Request{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			seq(func(*trpcmodel.Response) bool { return true })
+			if len(provider.spans) != 1 || provider.spans[0].status != test.wantStatus || !provider.spans[0].ended || (provider.spans[0].recordedError != nil) != test.wantError {
+				t.Fatalf("iter span = %+v", provider.spans)
+			}
+		})
+	}
+}
+
+func TestTelemetryIterModelHandlesCreationFailures(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		model telemetryIterTestModel
+		want  error
+	}{
+		{name: "generation error", model: telemetryIterTestModel{err: errors.New("provider failure")}, want: errors.New("provider failure")},
+		{name: "nil sequence", model: telemetryIterTestModel{nilSeq: true}, want: errModelResponseIncomplete},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &runtimeTelemetryProvider{}
+			options := applyTelemetryOptions(t, provider)
+			before, err := options.ModelCallbacks.RunBeforeModel(context.Background(), &trpcmodel.BeforeModelArgs{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wrapped := wrapTelemetryModel(test.model)
+			iterModel, ok := wrapped.(trpcmodel.IterModel)
+			if !ok {
+				t.Fatal("wrapped model does not implement IterModel")
+			}
+			seq, gotErr := iterModel.GenerateContentIter(before.Context, &trpcmodel.Request{})
+			if seq != nil || gotErr == nil || gotErr.Error() != test.want.Error() {
+				t.Fatalf("iter result = %v, %v; want error %v", seq, gotErr, test.want)
+			}
+			if len(provider.spans) != 1 || provider.spans[0].status != observability.StatusError || !provider.spans[0].ended || provider.spans[0].recordedError == nil {
+				t.Fatalf("failed iter span = %+v", provider.spans)
+			}
+		})
+	}
+}
+
+func TestTelemetryModelWithModelRetryCallbacksDelegatesWhenSupported(t *testing.T) {
+	ctx := context.WithValue(context.Background(), struct{}{}, "input")
+	before := func(context.Context, *trpcmodel.Request) (context.Context, *trpcmodel.Response, error) {
+		return nil, nil, nil
+	}
+	after := func(context.Context, *trpcmodel.Request, *trpcmodel.Response) (context.Context, error) {
+		return nil, nil
+	}
+	binder := &telemetryRetryBinderModel{result: context.WithValue(ctx, struct{}{}, "bound")}
+	model := telemetryModel{delegate: binder}
+	if got := model.WithModelRetryCallbacks(ctx, before, after); got != binder.result || binder.before == nil || binder.after == nil {
+		t.Fatalf("retry callback binding = %v, before set=%t, after set=%t", got, binder.before != nil, binder.after != nil)
+	}
+	if got := (telemetryModel{delegate: streamingModel{}}).WithModelRetryCallbacks(ctx, before, after); got != ctx {
+		t.Fatalf("unsupported retry callback binding = %v, want original context", got)
+	}
+}
+
+type telemetryIterTestModel struct {
+	responses []*trpcmodel.Response
+	err       error
+	nilSeq    bool
+}
+
+func (model telemetryIterTestModel) Info() trpcmodel.Info { return trpcmodel.Info{Name: "iter-test"} }
+
+func (model telemetryIterTestModel) GenerateContent(context.Context, *trpcmodel.Request) (<-chan *trpcmodel.Response, error) {
+	return nil, nil
+}
+
+func (model telemetryIterTestModel) GenerateContentIter(context.Context, *trpcmodel.Request) (trpcmodel.Seq[*trpcmodel.Response], error) {
+	if model.err != nil {
+		return nil, model.err
+	}
+	if model.nilSeq {
+		return nil, nil
+	}
+	return func(yield func(*trpcmodel.Response) bool) {
+		for _, response := range model.responses {
+			if !yield(response) {
+				return
+			}
+		}
+	}, nil
+}
+
+type telemetryRetryBinderModel struct {
+	result context.Context
+	before func(context.Context, *trpcmodel.Request) (context.Context, *trpcmodel.Response, error)
+	after  func(context.Context, *trpcmodel.Request, *trpcmodel.Response) (context.Context, error)
+}
+
+func (model *telemetryRetryBinderModel) Info() trpcmodel.Info {
+	return trpcmodel.Info{Name: "retry-test"}
+}
+
+func (model *telemetryRetryBinderModel) GenerateContent(context.Context, *trpcmodel.Request) (<-chan *trpcmodel.Response, error) {
+	return nil, nil
+}
+
+func (model *telemetryRetryBinderModel) WithModelRetryCallbacks(ctx context.Context, before func(context.Context, *trpcmodel.Request) (context.Context, *trpcmodel.Response, error), after func(context.Context, *trpcmodel.Request, *trpcmodel.Response) (context.Context, error)) context.Context {
+	model.before, model.after = before, after
+	if model.result == nil {
+		return ctx
+	}
+	return model.result
+}
+
 func countTelemetryMetrics(provider *runtimeTelemetryProvider, name string) int {
 	count := 0
 	for _, metric := range provider.metrics {
