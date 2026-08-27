@@ -67,8 +67,8 @@ func TestMySQLMigrationSetUsesBinaryIdentityAndRecoveryMarkers(t *testing.T) {
 	script := files[0].statements
 	joined := strings.Join(script, "\n")
 	canaryScript := strings.Join(files[1].statements, "\n")
-	if !strings.Contains(canaryScript, "ADD COLUMN IF NOT EXISTS canary_revision") {
-		t.Fatalf("canary migration is not replay-safe: %q", canaryScript)
+	if !strings.Contains(canaryScript, "ADD COLUMN canary_revision") || len(files[1].statements) != 4 {
+		t.Fatalf("canary migration is not checkpointed for replay: %q", canaryScript)
 	}
 	for _, fragment := range []string{"utf8mb4_bin", "active_provider_account_id", "channel_binding_candidate_idx", "ENGINE=InnoDB"} {
 		if !strings.Contains(joined, fragment) {
@@ -122,7 +122,7 @@ func TestMySQLAlreadyAppliedErrors(t *testing.T) {
 	if isMySQLAlreadyApplied(nil) || isMySQLAlreadyApplied(errors.New("ordinary")) {
 		t.Fatal("ordinary errors were treated as already applied")
 	}
-	for _, number := range []uint16{1022, 1050, 1061, 1359, 1826} {
+	for _, number := range []uint16{1022, 1050, 1060, 1061, 1359, 1826} {
 		err := fmt.Errorf("wrapped: %w", &mysqldriver.MySQLError{Number: number, Message: "duplicate"})
 		if !isMySQLAlreadyApplied(err) {
 			t.Fatalf("MySQL error %d was not recognized", number)

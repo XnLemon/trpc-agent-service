@@ -513,7 +513,7 @@ func isMySQLAlreadyApplied(err error) bool {
 		return false
 	}
 	switch mysqlErr.Number {
-	case 1022, 1050, 1061, 1359, 1826:
+	case 1022, 1050, 1060, 1061, 1359, 1826:
 		return true
 	default:
 		return false

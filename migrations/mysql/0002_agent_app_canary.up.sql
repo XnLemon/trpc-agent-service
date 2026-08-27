@@ -1,5 +1,5 @@
 ALTER TABLE agent_app
-    ADD COLUMN IF NOT EXISTS canary_revision BIGINT NULL AFTER current_revision;
+    ADD COLUMN canary_revision BIGINT NULL AFTER current_revision;
 
 ALTER TABLE agent_app
     ADD KEY agent_app_canary_revision_idx (tenant_id, app_id, canary_revision);
