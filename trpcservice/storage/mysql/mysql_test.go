@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,6 +188,46 @@ func TestVerifyApplicationPrivilegesFailsClosed(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	if !errors.Is(VerifyApplicationPrivileges(canceled, db), context.Canceled) {
 		t.Fatal("canceled context was not preserved")
+	}
+}
+
+func TestVerifyApplicationPrivilegesQueryEnforcesFullAllowlist(t *testing.T) {
+	var privilegeQuery string
+	matcher := sqlmock.QueryMatcherFunc(func(expected, actual string) error {
+		if expected == "PRIVILEGE_QUERY" {
+			privilegeQuery = actual
+		}
+		return nil
+	})
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(matcher))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectQuery("SELECT DATABASE").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
+	mock.ExpectQuery("PRIVILEGE_QUERY").WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
+	if err := VerifyApplicationPrivileges(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{
+		"allowed_tables",
+		"table_schema <> DATABASE()",
+		"table_name NOT IN (SELECT table_name FROM allowed_tables)",
+		"privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')",
+		"is_grantable <> 'NO'",
+		"information_schema.column_privileges",
+		"information_schema.role_table_grants",
+		"information_schema.role_column_grants",
+	} {
+		if !strings.Contains(privilegeQuery, fragment) {
+			t.Fatalf("privilege query missing %q:\n%s", fragment, privilegeQuery)
+		}
+	}
+	if strings.Contains(privilegeQuery, "WHERE privilege_type IN ('ALL PRIVILEGES'") {
+		t.Fatal("privilege query still applies the obsolete DDL-only outer filter")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 

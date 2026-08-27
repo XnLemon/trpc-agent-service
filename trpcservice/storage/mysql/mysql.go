@@ -308,8 +308,7 @@ func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
 			UNION ALL
 			SELECT privilege_type FROM information_schema.role_column_grants
 			WHERE CONCAT(CHAR(39), grantee, CHAR(39), '@', CHAR(39), grantee_host, CHAR(39)) IN (SELECT grantee FROM effective_grantees)
-		) AS ddl_privileges
-		WHERE privilege_type IN ('ALL PRIVILEGES', 'ALTER', 'CREATE', 'CREATE VIEW', 'DROP', 'EVENT', 'INDEX', 'REFERENCES', 'TRIGGER')`).Scan(&forbidden); err != nil {
+		) AS violations`).Scan(&forbidden); err != nil {
 		return MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
 	}
 	if forbidden != 0 {
