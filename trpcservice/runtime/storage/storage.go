@@ -219,7 +219,6 @@ type ReplyBatchCorrelationEnqueuer interface {
 // ReplyCorrelationStore persists request/trace identifiers for reply delivery
 // audit and recovery. It is optional for legacy runtime stores.
 type ReplyCorrelationStore interface {
-	SaveReplyCorrelation(context.Context, ReplyCorrelation) error
 	GetReplyCorrelation(context.Context, string, string) (ReplyCorrelation, error)
 }
 

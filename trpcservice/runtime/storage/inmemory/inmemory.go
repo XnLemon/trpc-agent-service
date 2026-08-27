@@ -29,27 +29,6 @@ func New() *Store {
 	return &Store{sessions: map[string]runtimestorage.Session{}, events: map[string]runtimestorage.MessageEvent{}, histories: map[string][]runtimestorage.EventPayload{}, messages: map[string]string{}, replies: map[string]runtimestorage.ReplyOutbox{}, correlations: map[string]runtimestorage.ReplyCorrelation{}}
 }
 
-// SaveReplyCorrelation stores an idempotent execution-to-reply correlation.
-func (s *Store) SaveReplyCorrelation(ctx context.Context, value runtimestorage.ReplyCorrelation) error {
-	if err := check(ctx); err != nil {
-		return err
-	}
-	if value.TenantID == "" || value.EventID == "" || value.RequestID == "" {
-		return runtimestorage.ErrInvalid
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	k := key(value.TenantID, value.EventID)
-	if existing, ok := s.correlations[k]; ok {
-		if existing != value {
-			return runtimestorage.ErrConflict
-		}
-		return nil
-	}
-	s.correlations[k] = value
-	return nil
-}
-
 // GetReplyCorrelation loads a durable execution-to-reply correlation.
 func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID string) (runtimestorage.ReplyCorrelation, error) {
 	if err := check(ctx); err != nil {

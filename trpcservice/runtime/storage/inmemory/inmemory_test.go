@@ -77,13 +77,20 @@ func TestStoreTenantIsolationAndCAS(t *testing.T) {
 func TestStoreReplyCorrelationIsIdempotentAndConflictSafe(t *testing.T) {
 	store := inmemory.New()
 	value := runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event-a", RequestID: "request-a", TraceID: "trace-a"}
-	if err := store.SaveReplyCorrelation(context.Background(), value); err != nil {
+	if _, err := store.CreateSession(context.Background(), value.TenantID, "session-correlation", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SaveReplyCorrelation(context.Background(), value); err != nil {
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: value.TenantID, EventID: value.EventID, SessionID: "session-correlation", BindingID: "binding-correlation", ExternalMessageID: "external-correlation"}); err != nil {
+		t.Fatal(err)
+	}
+	batch := []runtimestorage.ReplyOutbox{{TenantID: value.TenantID, ReplyID: "reply-correlation", EventID: value.EventID, SegmentIndex: 0, SegmentCount: 1, Payload: "payload"}}
+	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), value, batch); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), value, batch); err != nil {
 		t.Fatalf("idempotent save = %v", err)
 	}
-	if err := store.SaveReplyCorrelation(context.Background(), runtimestorage.ReplyCorrelation{TenantID: value.TenantID, EventID: value.EventID, RequestID: "other"}); !errors.Is(err, runtimestorage.ErrConflict) {
+	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), runtimestorage.ReplyCorrelation{TenantID: value.TenantID, EventID: value.EventID, RequestID: "other"}, batch); !errors.Is(err, runtimestorage.ErrConflict) {
 		t.Fatalf("conflicting save = %v", err)
 	}
 	got, err := store.GetReplyCorrelation(context.Background(), value.TenantID, value.EventID)

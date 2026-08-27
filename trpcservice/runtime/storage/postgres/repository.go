@@ -21,24 +21,6 @@ const replyColumns = "tenant_id,reply_id,event_id,segment_index,segment_count,pa
 // New creates a PostgreSQL runtime store over db.
 func New(db *sql.DB) *Store { return &Store{db: db} }
 
-// SaveReplyCorrelation stores an idempotent execution-to-reply correlation.
-func (s *Store) SaveReplyCorrelation(ctx context.Context, value runtimestorage.ReplyCorrelation) error {
-	if err := check(ctx); err != nil {
-		return err
-	}
-	if value.TenantID == "" || value.EventID == "" || value.RequestID == "" {
-		return runtimestorage.ErrInvalid
-	}
-	err := s.db.QueryRowContext(ctx, "INSERT INTO public.runtime_reply_correlation (tenant_id,event_id,request_id,trace_id) VALUES ($1,$2,$3,$4) ON CONFLICT (tenant_id,event_id) DO UPDATE SET request_id=public.runtime_reply_correlation.request_id, trace_id=public.runtime_reply_correlation.trace_id WHERE public.runtime_reply_correlation.request_id=EXCLUDED.request_id AND public.runtime_reply_correlation.trace_id=EXCLUDED.trace_id RETURNING tenant_id", value.TenantID, value.EventID, value.RequestID, value.TraceID).Scan(new(string))
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		return runtimestorage.ErrConflict
-	}
-	return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
-}
-
 // GetReplyCorrelation loads the durable execution-to-reply correlation.
 func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID string) (runtimestorage.ReplyCorrelation, error) {
 	if err := check(ctx); err != nil {

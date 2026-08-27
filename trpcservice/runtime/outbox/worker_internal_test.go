@@ -461,10 +461,7 @@ func TestWorkerDeliveryAuditUsesPersistedCorrelation(t *testing.T) {
 	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", EventID: "event-audit-correlation", SessionID: "session-audit-correlation", BindingID: "binding-audit-correlation", ExternalMessageID: "external-audit-correlation"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-audit-correlation", EventID: "event-audit-correlation", SegmentCount: 1, Payload: "payload"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SaveReplyCorrelation(context.Background(), runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event-audit-correlation", RequestID: "request-audit", TraceID: "trace-audit"}); err != nil {
+	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event-audit-correlation", RequestID: "request-audit", TraceID: "trace-audit"}, []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "reply-audit-correlation", EventID: "event-audit-correlation", SegmentIndex: 0, SegmentCount: 1, Payload: "payload"}}); err != nil {
 		t.Fatal(err)
 	}
 	auditStore, err := audit.NewInMemory("tenant-a")

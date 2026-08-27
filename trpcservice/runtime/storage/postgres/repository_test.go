@@ -670,7 +670,7 @@ func TestRuntimeStoreEnqueueRepliesWithCorrelationIsAtomic(t *testing.T) {
 	}
 }
 
-func TestRuntimeStoreReplyCorrelationMethods(t *testing.T) {
+func TestRuntimeStoreReplyCorrelationGet(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -678,17 +678,6 @@ func TestRuntimeStoreReplyCorrelationMethods(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	store := runtimepostgres.New(db)
 	value := runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event", RequestID: "request", TraceID: "trace"}
-	if err := store.SaveReplyCorrelation(context.Background(), runtimestorage.ReplyCorrelation{}); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("invalid save = %v", err)
-	}
-	mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs(value.TenantID, value.EventID, value.RequestID, value.TraceID).WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(value.TenantID))
-	if err := store.SaveReplyCorrelation(context.Background(), value); err != nil {
-		t.Fatalf("save = %v", err)
-	}
-	mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs(value.TenantID, value.EventID, value.RequestID, value.TraceID).WillReturnError(sql.ErrNoRows)
-	if err := store.SaveReplyCorrelation(context.Background(), value); !errors.Is(err, runtimestorage.ErrConflict) {
-		t.Fatalf("conflicting save = %v", err)
-	}
 	mock.ExpectQuery("SELECT tenant_id,event_id,request_id,trace_id FROM public.runtime_reply_correlation").WithArgs(value.TenantID, value.EventID).WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "event_id", "request_id", "trace_id"}).AddRow(value.TenantID, value.EventID, value.RequestID, value.TraceID))
 	if got, err := store.GetReplyCorrelation(context.Background(), value.TenantID, value.EventID); err != nil || got != value {
 		t.Fatalf("get = %+v, %v", got, err)
