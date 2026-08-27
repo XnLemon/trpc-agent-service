@@ -18,7 +18,7 @@ import (
 
 // Files is the ordered, immutable migration set owned by bootstrap.
 //
-//go:embed 000*_*.sql
+//go:embed 0*_*.sql
 var Files embed.FS
 
 var (
@@ -36,7 +36,7 @@ type file struct {
 }
 
 func orderedFiles() ([]file, error) {
-	entries, err := fs.Glob(Files, "000*_*.sql")
+	entries, err := fs.Glob(Files, "0*_*.sql")
 	if err != nil {
 		return nil, fmt.Errorf("%w: list files", ErrMigration)
 	}

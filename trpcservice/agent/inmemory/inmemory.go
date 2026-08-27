@@ -262,6 +262,7 @@ func (r *InMemoryRepository) Publish(ctx context.Context, input agent.PublishInp
 	previousStatus := updated.Status
 	previousRevision := cloneInt64(updated.CurrentRevision)
 	updated.CurrentRevision = int64Pointer(input.Revision)
+	updated.CanaryRevision = nil
 	if updated.Status == agent.StatusDraft {
 		updated.Status = agent.StatusActive
 	}
@@ -313,6 +314,7 @@ func (r *InMemoryRepository) Rollback(ctx context.Context, input agent.RollbackI
 	updated := app.Clone()
 	previous := cloneInt64(updated.CurrentRevision)
 	updated.CurrentRevision = int64Pointer(input.TargetRevision)
+	updated.CanaryRevision = nil
 	updated.Version++
 	updated.UpdatedAt = now
 	if err := updated.Validate(); err != nil {
@@ -324,6 +326,82 @@ func (r *InMemoryRepository) Rollback(ctx context.Context, input agent.RollbackI
 	}
 	r.storeAppLocked(&updated)
 	return cloneApp(&updated), event.Clone(), nil
+}
+
+// SetCanary selects or clears a published candidate revision for all future
+// executions of one tenant-scoped App. Existing execution snapshots remain
+// unchanged.
+func (r *InMemoryRepository) SetCanary(ctx context.Context, input agent.SetCanaryInput) (*agent.App, agent.ChangeEvent, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, agent.ChangeEvent{}, err
+	}
+	if err := validateChange(input.Metadata); err != nil {
+		return nil, agent.ChangeEvent{}, err
+	}
+	if !input.TenantActive {
+		return nil, agent.ChangeEvent{}, fmt.Errorf("%w: tenant must be active", agent.ErrInvalid)
+	}
+	if err := r.mu.lock(ctx); err != nil {
+		return nil, agent.ChangeEvent{}, err
+	}
+	defer r.mu.unlock()
+	if err := checkContext(ctx); err != nil {
+		return nil, agent.ChangeEvent{}, err
+	}
+	app, err := r.mutableAppLocked(input.TenantID, input.AppID, input.ExpectedAppVersion)
+	if err != nil {
+		return nil, agent.ChangeEvent{}, err
+	}
+	if app.Status != agent.StatusActive {
+		return nil, agent.ChangeEvent{}, fmt.Errorf("%w: canary requires an active app", agent.ErrInvalid)
+	}
+	var candidate *agent.Revision
+	if input.CandidateRevision != nil {
+		if *input.CandidateRevision < 1 {
+			return nil, agent.ChangeEvent{}, fmt.Errorf("%w: candidate revision must be positive", agent.ErrInvalid)
+		}
+		var getErr error
+		candidate, getErr = r.revisionLocked(input.TenantID, input.AppID, *input.CandidateRevision)
+		if getErr != nil {
+			return nil, agent.ChangeEvent{}, getErr
+		}
+		if candidate.State != agent.RevisionStatePublished {
+			return nil, agent.ChangeEvent{}, fmt.Errorf("%w: canary revision must be published", agent.ErrInvalid)
+		}
+		if app.CurrentRevision == nil || *app.CurrentRevision == *input.CandidateRevision {
+			return nil, agent.ChangeEvent{}, fmt.Errorf("%w: canary revision must differ from current revision", agent.ErrInvalid)
+		}
+	}
+	previous := cloneInt64(app.CanaryRevision)
+	if sameRevision(previous, input.CandidateRevision) {
+		return nil, agent.ChangeEvent{}, fmt.Errorf("%w: canary revision is unchanged", agent.ErrInvalid)
+	}
+	now := nextTime(app.UpdatedAt)
+	updated := app.Clone()
+	updated.CanaryRevision = cloneInt64(input.CandidateRevision)
+	updated.Version++
+	updated.UpdatedAt = now
+	if err := updated.Validate(); err != nil {
+		return nil, agent.ChangeEvent{}, err
+	}
+	digest := ""
+	if candidate != nil {
+		digest = candidate.ContentDigest
+	}
+	eventType := agent.ChangeCanaryStopped
+	if updated.CanaryRevision != nil {
+		eventType = agent.ChangeCanaryStarted
+	}
+	event := newCanaryEvent(eventType, &updated, app.CanaryRevision, digest, input.Metadata, app.Version, now)
+	r.storeAppLocked(&updated)
+	return cloneApp(&updated), event.Clone(), nil
+}
+
+func sameRevision(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 // TransitionStatus changes an application status with optimistic concurrency.
@@ -432,6 +510,12 @@ func newEvent(eventType agent.ChangeEventType, app *agent.App, previousStatus ag
 		Reason: strings.TrimSpace(metadata.Reason), CorrelationID: strings.TrimSpace(metadata.CorrelationID),
 		PreviousVersion: previousVersion, NextVersion: app.Version, OccurredAt: at,
 	}
+}
+
+func newCanaryEvent(eventType agent.ChangeEventType, app *agent.App, previousRevision *int64, digest string, metadata agent.ChangeMetadata, previousVersion int64, at time.Time) agent.ChangeEvent {
+	event := newEvent(eventType, app, app.Status, previousRevision, digest, metadata, previousVersion, at)
+	event.CurrentRevision = cloneInt64(app.CanaryRevision)
+	return event
 }
 
 func statusEventType(next agent.Status) agent.ChangeEventType {

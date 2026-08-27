@@ -101,7 +101,7 @@ func validateExecutionState(tenantValue tenant.Tenant, app *App, revision *Revis
 	if tenantValue.TenantID != app.TenantID || tenantValue.TenantID != revision.TenantID || app.AppID != revision.AppID {
 		return fmt.Errorf("%w: Tenant, App, and Revision scopes must match", ErrInvalid)
 	}
-	if app.CurrentRevision == nil || *app.CurrentRevision != revision.Revision {
+	if app.CurrentRevision == nil || (*app.CurrentRevision != revision.Revision && (app.CanaryRevision == nil || *app.CanaryRevision != revision.Revision)) {
 		return fmt.Errorf("%w: Revision is not the App current revision", ErrInvalid)
 	}
 	return nil

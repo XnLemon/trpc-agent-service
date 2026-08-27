@@ -39,6 +39,7 @@ nav:
       - "Issue #71 Provider Registries": issue-71-provider-registries.md
       - "Issue #69 Multi-tenant Bootstrap": issue-69-multi-tenant-bootstrap.md
       - "Issue #72 Cache Invalidation": issue-72-cache-invalidation.md
+      - "Issue #82 Agent App Registry and Tenant Canary": issue-82-agent-app-registry.md
       - Gateway、Execution Plan 与 HTTP/SSE: gateway.md
       - Telegram 长轮询 Adapter: telegram.md
       - 企业微信自建应用 Text Webhook: wecom.md

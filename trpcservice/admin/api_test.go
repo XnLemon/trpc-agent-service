@@ -525,6 +525,78 @@ func TestAdminHappyPathCoversResourceMutations(t *testing.T) {
 	assertAdminBindingMutation(t, fixture, app)
 }
 
+func TestAdminCanaryRouteBuildsTenantScopedMutation(t *testing.T) {
+	fixture := newAdminMutationFixture(t)
+	app := createAndPublishAdminRevision(t, fixture)
+	stored, err := fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, app.AppID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := fixture.handler.config.Apps.CreateDraft(context.Background(), agent.CreateDraftInput{
+		TenantID: fixture.root.TenantID, AppID: app.AppID, ExpectedAppVersion: stored.Version, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1,
+		Configuration: agent.DraftConfiguration{Instruction: "candidate", ModelProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", Runtime: agent.DefaultRuntimePolicy()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err = fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, app.AppID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err = fixture.handler.config.Apps.Publish(context.Background(), agent.PublishInput{
+		TenantID: fixture.root.TenantID, AppID: app.AppID, Revision: candidate.Revision, ExpectedAppVersion: stored.Version, ExpectedDraftVersion: candidate.DraftVersion, TenantActive: true,
+		Metadata: agent.ChangeMetadata{ActorType: "admin", ActorID: fixture.principal.SubjectID, Reason: "publish candidate", CorrelationID: "admin-canary-publish"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err = fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, app.AppID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stableRevision := int64(1)
+	body := "{\"expected_app_version\":" + strconv.FormatInt(stored.Version, 10) + ",\"candidate_revision\":" + strconv.FormatInt(stableRevision, 10) + ",\"reason\":\"start canary\",\"correlation_id\":\"admin-canary\"}"
+	request := fixture.request(http.MethodPost, body)
+	status, value, err := fixture.handler.apps(context.Background(), request, fixture.principal, fixture.root.TenantID, []string{app.AppID, "canary"})
+	if status != http.StatusOK || value == nil || err != nil {
+		t.Fatalf("canary route = status %d value %#v err %v", status, value, err)
+	}
+	selected, err := fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, app.AppID)
+	if err != nil || selected.CanaryRevision == nil || *selected.CanaryRevision != stableRevision {
+		t.Fatalf("canary selection = app=%+v err=%v", selected, err)
+	}
+	clearBody := "{\"expected_app_version\":" + strconv.FormatInt(selected.Version, 10) + ",\"reason\":\"clear canary\",\"correlation_id\":\"admin-canary-clear\"}"
+	status, value, err = fixture.handler.apps(context.Background(), fixture.request(http.MethodPost, clearBody), fixture.principal, fixture.root.TenantID, []string{app.AppID, "canary"})
+	if status != http.StatusOK || value == nil || err != nil {
+		t.Fatalf("canary clear route = status %d value %#v err %v", status, value, err)
+	}
+}
+
+func TestAdminCanaryRouteRejectsMalformedAndUnsupportedRequests(t *testing.T) {
+	fixture := newAdminMutationFixture(t)
+	app := createAndPublishAdminRevision(t, fixture)
+	tests := []struct {
+		name     string
+		method   string
+		body     string
+		tenantID string
+		parts    []string
+		wantErr  error
+	}{
+		{name: "wrong method", method: http.MethodPatch, body: `{}`, tenantID: fixture.root.TenantID, parts: []string{app.AppID, "canary"}, wantErr: errNotFound},
+		{name: "malformed body", method: http.MethodPost, body: `{`, tenantID: fixture.root.TenantID, parts: []string{app.AppID, "canary"}, wantErr: errInvalidRequest},
+		{name: "unknown tenant", method: http.MethodPost, body: `{}`, tenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", parts: []string{app.AppID, "canary"}, wantErr: tenant.ErrNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			status, _, err := fixture.handler.apps(context.Background(), fixture.request(tc.method, tc.body), fixture.principal, tc.tenantID, tc.parts)
+			if status != 0 || !errors.Is(err, tc.wantErr) {
+				t.Fatalf("canary route status=%d err=%v, want %v", status, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 type adminMutationFixture struct {
 	handler   *Handler
 	root      *tenant.Tenant

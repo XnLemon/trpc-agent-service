@@ -125,6 +125,37 @@ func TestInboundMessageNormalizesTextAndRejectsUnsupportedInput(t *testing.T) {
 	}
 }
 
+func TestPlanResolverUsesTenantCanaryRevision(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	current, candidate := int64(1), int64(2)
+	app := fixture.app.Clone()
+	app.CurrentRevision = &current
+	app.CanaryRevision = &candidate
+	if err := app.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	config := resolverTestConfig(fixture)
+	candidateRevision := fixture.revision.Clone()
+	candidateRevision.Revision = candidate
+	config.Apps = resolverAgentRepository{Repository: fixture.apps, getFn: func(context.Context, string, string) (*agent.App, error) { return &app, nil }, getRevisionFn: func(_ context.Context, _ string, _ string, revision int64) (*agent.Revision, error) {
+		if revision == candidate {
+			return &candidateRevision, nil
+		}
+		return fixture.revision, nil
+	}}
+	resolver, err := NewPlanResolver(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := resolver.Resolve(context.Background(), mustAPIPrincipal(t, fixture.tenant.TenantID, app.AppID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plan.AgentSnapshot().Revision().Revision; got != candidate {
+		t.Fatalf("resolved revision = %d, want %d", got, candidate)
+	}
+}
+
 func TestPlanResolverBuildsFixedPlanFromRepositoryInterfaces(t *testing.T) {
 	fixture := newGatewayFixture(t)
 	resolver, err := NewPlanResolver(PlanResolverConfig{

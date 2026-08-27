@@ -461,7 +461,18 @@ func runRepositoryMigrations(ctx context.Context, dsn string) error {
 		return errors.New("locate repository migration test source")
 	}
 	migrationDir := filepath.Join(filepath.Dir(sourceFile), "..", "..", "..", "migrations")
-	for _, name := range []string{"0001_control_plane.up.sql", "0002_control_plane_repository_functions.up.sql"} {
+	for _, name := range []string{
+		"0001_control_plane.up.sql",
+		"0002_control_plane_repository_functions.up.sql",
+		"0003_runtime_storage.up.sql",
+		"0004_runtime_session_delete_cascade.up.sql",
+		"0005_runtime_event_history.up.sql",
+		"0006_audit_usage.up.sql",
+		"0007_execution_audit_handoff.up.sql",
+		"0008_runtime_reply_target.up.sql",
+		"0009_runtime_reply_correlation.up.sql",
+		"0010_agent_app_canary.up.sql",
+	} {
 		contents, err := os.ReadFile(filepath.Join(migrationDir, name)) // #nosec G304 -- names are fixed migration files under the repository root.
 		if err != nil {
 			return err
