@@ -578,6 +578,7 @@ func TestNewFromEnvironmentBootstrapsMySQLWithSeparateMigrationAccount(t *testin
 	appMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
 	appMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
 	appMock.ExpectQuery("SELECT COUNT\\(\\*\\)").WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
+	appMock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for app@%"}).AddRow("GRANT USAGE ON *.* TO 'app'@'%'"))
 	appMock.ExpectPing()
 	appMock.ExpectClose()
 
@@ -803,6 +804,7 @@ func TestPrepareDatabaseConfigBuildsMySQLRepositories(t *testing.T) {
 	mock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
 	mock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
+	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for app@%"}).AddRow("GRANT USAGE ON *.* TO 'app'@'%'"))
 	config := Config{DB: db, ControlPlaneDriver: ControlPlaneDriverMySQL}
 	if err := prepareDatabaseConfig(context.Background(), &config); err != nil {
 		t.Fatal(err)

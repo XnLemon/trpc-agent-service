@@ -146,6 +146,7 @@ func TestVerifyApplicationPrivilegesFailsClosed(t *testing.T) {
 	}{
 		{name: "no DDL privileges", row: 0},
 		{name: "DDL privilege", row: 1, wantError: true},
+		{name: "missing required DML privilege", row: 1, wantError: true},
 		{name: "query failure", queryErr: errors.New("privileges unavailable"), wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -156,11 +157,14 @@ func TestVerifyApplicationPrivilegesFailsClosed(t *testing.T) {
 			defer func() { _ = db.Close() }()
 			mock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
 			mock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
-			expectation := mock.ExpectQuery("SELECT COUNT")
+			expectation := mock.ExpectQuery("SELECT COUNT").WithArgs("'app'@'%'")
 			if test.queryErr != nil {
 				expectation.WillReturnError(test.queryErr)
 			} else {
 				expectation.WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(test.row))
+			}
+			if test.row == 0 && test.queryErr == nil {
+				mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for app@%"}).AddRow("GRANT USAGE ON *.* TO 'app'@'%'"))
 			}
 			err = VerifyApplicationPrivileges(context.Background(), db)
 			if test.wantError && !errors.Is(err, ErrStorage) {
@@ -207,12 +211,17 @@ func TestVerifyApplicationPrivilegesQueryEnforcesFullAllowlist(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	mock.ExpectQuery("SELECT DATABASE").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
 	mock.ExpectQuery("SELECT CURRENT_USER").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
-	mock.ExpectQuery("PRIVILEGE_QUERY").WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
+	mock.ExpectQuery("PRIVILEGE_QUERY").WithArgs("'app'@'%'").WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
+	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for app@%"}).AddRow("GRANT USAGE ON *.* TO 'app'@'%'"))
 	if err := VerifyApplicationPrivileges(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
 	for _, fragment := range []string{
 		"allowed_tables",
+		"required_privilege_types",
+		"required_privileges",
+		"effective_table_privileges",
+		"NOT EXISTS",
 		"table_schema <> DATABASE()",
 		"table_name NOT IN (SELECT table_name FROM allowed_tables)",
 		"privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')",
@@ -220,6 +229,7 @@ func TestVerifyApplicationPrivilegesQueryEnforcesFullAllowlist(t *testing.T) {
 		"information_schema.column_privileges",
 		"information_schema.role_table_grants",
 		"information_schema.role_column_grants",
+		"information_schema.role_routine_grants",
 		"information_schema.applicable_roles",
 	} {
 		if !strings.Contains(privilegeQuery, fragment) {
@@ -241,6 +251,7 @@ func TestCurrentGranteeIdentityUsesLastAtAndEscapes(t *testing.T) {
 		{input: "app@%", want: "'app'@'%'"},
 		{input: "u@v@%", want: "'u@v'@'%'"},
 		{input: "o\u0027conn@localhost", want: "'o\u0027\u0027conn'@'localhost'"},
+		{input: " app@% ", want: "' app'@'% '"},
 	} {
 		got, err := currentGranteeIdentity(test.input)
 		if err != nil || got != test.want {
@@ -251,6 +262,24 @@ func TestCurrentGranteeIdentityUsesLastAtAndEscapes(t *testing.T) {
 		if _, err := currentGranteeIdentity(input); !errors.Is(err, ErrStorage) {
 			t.Fatalf("currentGranteeIdentity(%q) error = %v, want ErrStorage", input, err)
 		}
+	}
+}
+
+func TestVerifyApplicationPrivilegesRejectsDirectRoutineGrant(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
+	mock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
+	mock.ExpectQuery("SELECT COUNT").WithArgs("'app'@'%'").WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
+	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for app@%"}).AddRow("GRANT EXECUTE ON PROCEDURE `control_plane`.`unsafe` TO 'app'@'%'").AddRow("GRANT USAGE ON *.* TO 'app'@'%'"))
+	if err := VerifyApplicationPrivileges(context.Background(), db); !errors.Is(err, ErrStorage) {
+		t.Fatalf("routine grant verification error = %v, want ErrStorage", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 

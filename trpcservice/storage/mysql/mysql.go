@@ -224,15 +224,40 @@ func CurrentUser(ctx context.Context, db *sql.DB) (string, error) {
 }
 
 func currentGranteeIdentity(user string) (string, error) {
-	user = strings.TrimSpace(user)
 	separator := strings.LastIndexByte(user, '@')
-	if separator < 0 || separator == len(user)-1 {
+	if user == "" || separator < 0 || separator == len(user)-1 {
 		return "", ErrStorage
 	}
 	escape := func(value string) string {
 		return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 	}
 	return escape(user[:separator]) + "@" + escape(user[separator+1:]), nil
+}
+
+// verifyNoDirectRoutinePrivileges checks the grants visible to the current
+// account without requiring SELECT access to mysql.procs_priv. SHOW GRANTS is
+// always available for the authenticated account and is the only portable way
+// for the restricted application connection to detect a direct routine grant.
+func verifyNoDirectRoutinePrivileges(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, "SHOW GRANTS")
+	if err != nil {
+		return MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
+	}
+	defer func() { _ = rows.Close() }()
+	var grant string
+	for rows.Next() {
+		if err := rows.Scan(&grant); err != nil {
+			return MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
+		}
+		normalized := strings.ToUpper(grant)
+		if strings.Contains(normalized, " ON PROCEDURE ") || strings.Contains(normalized, " ON FUNCTION ") {
+			return ErrStorage
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
+	}
+	return nil
 }
 
 // CurrentDatabase returns the selected MySQL schema for the current session.
@@ -258,8 +283,8 @@ func CurrentDatabase(ctx context.Context, db *sql.DB) (string, error) {
 // VerifyApplicationPrivileges fails closed when the connected MySQL account
 // does not exactly match the control-plane table-level DML allowlist.
 // Migrations run through a separate account; the application account is not
-// allowed any global/schema/column grant, role grant, grant option, or table
-// outside the selected control-plane database.
+// allowed any global/schema/column grant, routine grant, role grant, grant
+// option, or table outside the selected control-plane database.
 func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
 	if db == nil || ctx == nil {
 		return ErrStorage
@@ -299,6 +324,22 @@ func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
 			SELECT 'agent_app_change_outbox' UNION ALL
 			SELECT 'channel_binding_change_outbox' UNION ALL
 			SELECT 'tenant_configuration_outbox'
+		), required_privilege_types (privilege_type) AS (
+			SELECT 'SELECT' UNION ALL
+			SELECT 'INSERT' UNION ALL
+			SELECT 'UPDATE' UNION ALL
+			SELECT 'DELETE'
+		), required_privileges (table_name, privilege_type) AS (
+			SELECT allowed_tables.table_name, required_privilege_types.privilege_type
+			FROM allowed_tables CROSS JOIN required_privilege_types
+		), effective_table_privileges (table_schema, table_name, privilege_type, is_grantable) AS (
+			SELECT table_schema, table_name, privilege_type, is_grantable
+			FROM information_schema.table_privileges
+			WHERE grantee IN (SELECT grantee FROM effective_grantees)
+			UNION ALL
+			SELECT table_schema, table_name, privilege_type, is_grantable
+			FROM information_schema.role_table_grants
+			WHERE CONCAT(CHAR(39), grantee, CHAR(39), '@', CHAR(39), grantee_host, CHAR(39)) IN (SELECT grantee FROM effective_grantees)
 		)
 		SELECT COUNT(*)
 		FROM (
@@ -309,34 +350,40 @@ func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
 			SELECT privilege_type FROM information_schema.schema_privileges
 			WHERE grantee IN (SELECT grantee FROM effective_grantees)
 			UNION ALL
-			SELECT privilege_type FROM information_schema.table_privileges
-			WHERE grantee IN (SELECT grantee FROM effective_grantees)
-			  AND (table_schema <> DATABASE()
-			       OR table_name NOT IN (SELECT table_name FROM allowed_tables)
-			       OR privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
-			       OR is_grantable <> 'NO')
+			SELECT privilege_type FROM effective_table_privileges
+			WHERE table_schema <> DATABASE()
+			   OR table_name NOT IN (SELECT table_name FROM allowed_tables)
+			   OR privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
+			   OR is_grantable <> 'NO'
 			UNION ALL
 			SELECT privilege_type FROM information_schema.column_privileges
 			WHERE grantee IN (SELECT grantee FROM effective_grantees)
-			UNION ALL
-			SELECT privilege_type FROM information_schema.role_table_grants
-			WHERE CONCAT(CHAR(39), grantee, CHAR(39), '@', CHAR(39), grantee_host, CHAR(39)) IN (SELECT grantee FROM effective_grantees)
-			  AND (table_schema <> DATABASE()
-			       OR table_name NOT IN (SELECT table_name FROM allowed_tables)
-			       OR privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
-			       OR is_grantable <> 'NO')
 			UNION ALL
 			SELECT privilege_type FROM information_schema.role_column_grants
 			WHERE CONCAT(CHAR(39), grantee, CHAR(39), '@', CHAR(39), grantee_host, CHAR(39)) IN (SELECT grantee FROM effective_grantees)
 			UNION ALL
 			SELECT role_name FROM information_schema.applicable_roles
+			UNION ALL
+			SELECT rp.table_name
+			FROM required_privileges AS rp
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM effective_table_privileges AS etp
+				WHERE etp.table_schema = DATABASE()
+				  AND etp.table_name = rp.table_name
+				  AND etp.privilege_type = rp.privilege_type
+				  AND etp.is_grantable = 'NO'
+			)
+			UNION ALL
+			SELECT privilege_type FROM information_schema.role_routine_grants
+			WHERE CONCAT(CHAR(39), grantee, CHAR(39), '@', CHAR(39), grantee_host, CHAR(39)) IN (SELECT grantee FROM effective_grantees)
 		) AS violations`, currentGrantee).Scan(&forbidden); err != nil {
 		return MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
 	}
 	if forbidden != 0 {
 		return ErrStorage
 	}
-	return nil
+	return verifyNoDirectRoutinePrivileges(ctx, db)
 }
 
 // Rollback makes a best-effort rollback for a transaction that did not
