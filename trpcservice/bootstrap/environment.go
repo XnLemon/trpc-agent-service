@@ -46,7 +46,8 @@ const (
 	envAdminTenants = "TRPC_ADMIN_TENANTS"
 	envSubjectID    = "TRPC_SUBJECT_ID"
 	// #nosec G101 -- environment variable name, not a credential.
-	envModelAPIKey       = "TRPC_MODEL_API_KEY"
+	envModelAPIKey = "TRPC_MODEL_API_KEY"
+	// #nosec G101 -- environment variable name, not a credential.
 	envModelAPIKeys      = "TRPC_MODEL_API_KEYS"
 	envModelProvider     = "TRPC_MODEL_PROVIDER"
 	envModelNames        = "TRPC_MODEL_NAMES"
@@ -159,60 +160,19 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, ErrInvalidConfig
 	}
-	var wecomFactory func(gateway.DispatchService) (http.Handler, error)
-	var wecomWorker *outbox.Worker
-	if config.wecom != nil {
-		credentials := environmentWeComCredentialResolver{tenantID: config.tenantID, config: *config.wecom}
-		wecomFactory = func(dispatcher gateway.DispatchService) (http.Handler, error) {
-			return wecom.New(wecom.Config{Candidates: channelRepo, Tenants: tenantRepo, Apps: appRepo, Credentials: credentials, Dispatcher: dispatcher, AuditWriter: auditWriter})
-		}
-		owner, ownerErr := environmentWeComOwnerFunc()
-		if ownerErr != nil {
-			_ = delegateSessions.Close()
-			_ = runtimeStore.Close()
-			_ = db.Close()
-			return nil, ErrInvalidConfig
-		}
-		wecomWorker, err = newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelRepo, Credentials: credentials}, TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second, AuditWriter: auditWriter})
-		if err != nil {
-			_ = delegateSessions.Close()
-			_ = runtimeStore.Close()
-			_ = db.Close()
-			return nil, ErrInvalidConfig
-		}
+	wecomFactory, wecomWorker, err := environmentWeComComponents(config, channelRepo, tenantRepo, appRepo, runtimeStore, auditWriter)
+	if err != nil {
+		_ = delegateSessions.Close()
+		_ = runtimeStore.Close()
+		_ = db.Close()
+		return nil, ErrInvalidConfig
 	}
-	secretRegistry := modelprofile.NewSecretRegistry()
-	modelRegistry := modelprofile.NewModelProviderRegistry()
-	backendRegistry := backend.NewProviderRegistry()
-	for _, identity := range config.apiIdentities {
-		modelAPIKey := config.modelAPIKey
-		if len(config.modelAPIKeys) != 0 {
-			modelAPIKey = config.modelAPIKeys[identity.TenantID]
-		}
-		if modelAPIKey == "" {
-			_ = delegateSessions.Close()
-			_ = runtimeStore.Close()
-			_ = db.Close()
-			return nil, ErrInvalidConfig
-		}
-		if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.secretRef}, modelAPIKey); err != nil {
-			_ = delegateSessions.Close()
-			_ = runtimeStore.Close()
-			_ = db.Close()
-			return nil, ErrInvalidConfig
-		}
-		if err := modelRegistry.Register(identity.TenantID, config.modelProvider, environmentModelFactory{}); err != nil {
-			_ = delegateSessions.Close()
-			_ = runtimeStore.Close()
-			_ = db.Close()
-			return nil, ErrInvalidConfig
-		}
-		if err := backendRegistry.Register(identity.TenantID, backend.CapabilitySession, "inmemory", environmentSessionCapabilityProvider{delegate: delegateSessions, store: runtimeStore}); err != nil {
-			_ = delegateSessions.Close()
-			_ = runtimeStore.Close()
-			_ = db.Close()
-			return nil, ErrInvalidConfig
-		}
+	secretRegistry, modelRegistry, backendRegistry, err := environmentRegistries(config, delegateSessions, runtimeStore)
+	if err != nil {
+		_ = delegateSessions.Close()
+		_ = runtimeStore.Close()
+		_ = db.Close()
+		return nil, ErrInvalidConfig
 	}
 	storageFactory, err := backend.NewRegistryStorageFactory(backendRegistry, secretRegistry)
 	if err != nil {
@@ -255,6 +215,47 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, err
 	}
 	return graph, nil
+}
+
+func environmentWeComComponents(config environmentConfig, channelsRepo *channelpostgres.ChannelRepository, tenantsRepo *tenantpostgres.TenantRepository, appsRepo *agentpostgres.AgentRepository, runtimeStore runtimestorage.RuntimeStore, auditWriter audit.Writer) (func(gateway.DispatchService) (http.Handler, error), *outbox.Worker, error) {
+	if config.wecom == nil {
+		return nil, nil, nil
+	}
+	credentials := environmentWeComCredentialResolver{tenantID: config.tenantID, config: *config.wecom}
+	factory := func(dispatcher gateway.DispatchService) (http.Handler, error) {
+		return wecom.New(wecom.Config{Candidates: channelsRepo, Tenants: tenantsRepo, Apps: appsRepo, Credentials: credentials, Dispatcher: dispatcher, AuditWriter: auditWriter})
+	}
+	owner, err := environmentWeComOwnerFunc()
+	if err != nil {
+		return nil, nil, err
+	}
+	worker, err := newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelsRepo, Credentials: credentials}, TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second, AuditWriter: auditWriter})
+	return factory, worker, err
+}
+
+func environmentRegistries(config environmentConfig, delegateSessions session.Service, runtimeStore runtimestorage.RuntimeStore) (*modelprofile.SecretRegistry, *modelprofile.ModelProviderRegistry, *backend.ProviderRegistry, error) {
+	secretRegistry := modelprofile.NewSecretRegistry()
+	modelRegistry := modelprofile.NewModelProviderRegistry()
+	backendRegistry := backend.NewProviderRegistry()
+	for _, identity := range config.apiIdentities {
+		modelAPIKey := config.modelAPIKey
+		if len(config.modelAPIKeys) != 0 {
+			modelAPIKey = config.modelAPIKeys[identity.TenantID]
+		}
+		if modelAPIKey == "" {
+			return nil, nil, nil, ErrInvalidConfig
+		}
+		if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.secretRef}, modelAPIKey); err != nil {
+			return nil, nil, nil, err
+		}
+		if err := modelRegistry.Register(identity.TenantID, config.modelProvider, environmentModelFactory{}); err != nil {
+			return nil, nil, nil, err
+		}
+		if err := backendRegistry.Register(identity.TenantID, backend.CapabilitySession, "inmemory", environmentSessionCapabilityProvider{delegate: delegateSessions, store: runtimeStore}); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	return secretRegistry, modelRegistry, backendRegistry, nil
 }
 
 func loadEnvironment() (environmentConfig, error) {
