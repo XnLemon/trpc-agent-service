@@ -103,3 +103,314 @@ func TestSetCanaryRejectsInactiveTenantBeforeTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSetCanaryGuardsStateAndCandidateBoundaries(t *testing.T) {
+	base := newStoredAgentApp(t)
+	currentRevision := int64(1)
+	base.Status, base.CurrentRevision, base.Version = agent.StatusActive, &currentRevision, 2
+	metadata := agent.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "guard", CorrelationID: "canary-guard"}
+	tests := []struct {
+		name      string
+		app       *agent.App
+		candidate *int64
+		setup     func(sqlmock.Sqlmock, *agent.App)
+		want      error
+	}{
+		{"disabled app", func() *agent.App { v := base.Clone(); v.Status = agent.StatusSuspended; return &v }(), agentInt64(2), func(m sqlmock.Sqlmock, a *agent.App) { m.ExpectBegin(); expectAgentApp(m, a); m.ExpectRollback() }, agent.ErrInvalid},
+		{"unchanged canary", func() *agent.App { v := base.Clone(); return &v }(), nil, func(m sqlmock.Sqlmock, a *agent.App) { m.ExpectBegin(); expectAgentApp(m, a); m.ExpectRollback() }, agent.ErrInvalid},
+		{"current revision candidate", func() *agent.App { v := base.Clone(); return &v }(), &currentRevision, func(m sqlmock.Sqlmock, a *agent.App) { m.ExpectBegin(); expectAgentApp(m, a); m.ExpectRollback() }, agent.ErrInvalid},
+		{"candidate load error", func() *agent.App { v := base.Clone(); return &v }(), agentInt64(2), func(m sqlmock.Sqlmock, a *agent.App) {
+			m.ExpectBegin()
+			expectAgentApp(m, a)
+			m.ExpectQuery("SELECT tenant_id, app_id, revision").WillReturnError(errors.New("candidate"))
+			m.ExpectRollback()
+		}, ErrStorage},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			tc.setup(mock, tc.app)
+			_, _, err = NewRepository(db).SetCanary(context.Background(), agent.SetCanaryInput{TenantID: tc.app.TenantID, AppID: tc.app.AppID, CandidateRevision: tc.candidate, ExpectedAppVersion: tc.app.Version, TenantActive: true, Metadata: metadata})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRollbackRejectsUnpublishedAndUnchangedTargets(t *testing.T) {
+	app := newStoredAgentApp(t)
+	currentRevision := int64(2)
+	app.Status, app.CurrentRevision, app.Version = agent.StatusActive, &currentRevision, 3
+	metadata := agent.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "guard", CorrelationID: "rollback-guard"}
+	for _, tc := range []struct {
+		name           string
+		target         *agent.Revision
+		targetRevision int64
+		want           error
+	}{
+		{"unpublished", newStoredAgentRevision(t, app, 1, false), 1, agent.ErrInvalid},
+		{"unchanged", newStoredAgentRevision(t, app, 2, true), 2, agent.ErrInvalid},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			mock.ExpectBegin()
+			expectAgentApp(mock, app)
+			expectAgentRevision(t, mock, tc.target)
+			mock.ExpectRollback()
+			_, _, err = NewRepository(db).Rollback(context.Background(), agent.RollbackInput{TenantID: app.TenantID, AppID: app.AppID, TargetRevision: tc.targetRevision, ExpectedAppVersion: app.Version, Metadata: metadata})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestSetCanaryPersistenceErrorBranches(t *testing.T) {
+	app := newStoredAgentApp(t)
+	currentRevision := int64(1)
+	app.Status, app.CurrentRevision, app.Version = agent.StatusActive, &currentRevision, 2
+	candidate := newStoredAgentRevision(t, app, 2, true)
+	updated := app.Clone()
+	updated.CanaryRevision = agentInt64(2)
+	updated.Version++
+	metadata := agent.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "workflow", CorrelationID: "correlation"}
+	common := func(m sqlmock.Sqlmock) {
+		m.ExpectBegin()
+		expectAgentApp(m, app)
+		expectAgentRevision(t, m, candidate)
+	}
+	cases := []struct {
+		name  string
+		setup func(sqlmock.Sqlmock)
+		want  error
+	}{
+		{"update error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET canary_revision").WillReturnError(errors.New("update"))
+			m.ExpectRollback()
+		}, ErrStorage},
+		{"update conflict", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET canary_revision").WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectRollback()
+		}, agent.ErrConflict},
+		{"event insert error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET canary_revision").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("INSERT INTO agent_app_change_outbox").WillReturnError(errors.New("event"))
+			m.ExpectRollback()
+		}, ErrStorage},
+		{"readback error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET canary_revision").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("INSERT INTO agent_app_change_outbox").WillReturnResult(sqlmock.NewResult(7, 1))
+			m.ExpectQuery("SELECT tenant_id, app_id, app_key").WillReturnError(errors.New("readback"))
+			m.ExpectRollback()
+		}, ErrStorage},
+		{"event scan error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET canary_revision").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("INSERT INTO agent_app_change_outbox").WillReturnResult(sqlmock.NewResult(7, 1))
+			expectAgentApp(m, &updated)
+			m.ExpectQuery("SELECT event_type").WillReturnRows(sqlmock.NewRows([]string{"event_type"}).AddRow("bad"))
+			m.ExpectRollback()
+		}, ErrStorage},
+		{"commit error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET canary_revision").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("INSERT INTO agent_app_change_outbox").WillReturnResult(sqlmock.NewResult(7, 1))
+			expectAgentApp(m, &updated)
+			expectAgentEvent(m, &updated, agent.ChangeCanaryStarted, agent.StatusActive, agent.StatusActive, nil, updated.CanaryRevision, candidate.ContentDigest, app.Version, updated.Version, updated.UpdatedAt)
+			m.ExpectCommit().WillReturnError(errors.New("commit"))
+		}, ErrStorage},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			tc.setup(mock)
+			_, _, err = NewRepository(db).SetCanary(context.Background(), agent.SetCanaryInput{TenantID: app.TenantID, AppID: app.AppID, CandidateRevision: agentInt64(2), ExpectedAppVersion: app.Version, TenantActive: true, Metadata: metadata})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestRollbackPersistenceErrorBranches(t *testing.T) {
+	app := newStoredAgentApp(t)
+	currentRevision := int64(2)
+	app.Status, app.CurrentRevision, app.Version = agent.StatusActive, &currentRevision, 3
+	target := newStoredAgentRevision(t, app, 1, true)
+	updated := app.Clone()
+	updated.CurrentRevision = agentInt64(1)
+	updated.CanaryRevision = nil
+	updated.Version++
+	metadata := agent.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "workflow", CorrelationID: "correlation"}
+	common := func(m sqlmock.Sqlmock) {
+		m.ExpectBegin()
+		expectAgentApp(m, app)
+		expectAgentRevision(t, m, target)
+	}
+	cases := []struct {
+		name  string
+		setup func(sqlmock.Sqlmock)
+		want  error
+	}{
+		{"update error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET current_revision").WillReturnError(errors.New("update"))
+			m.ExpectRollback()
+		}, ErrStorage},
+		{"update conflict", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET current_revision").WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectRollback()
+		}, agent.ErrConflict},
+		{"event insert error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET current_revision").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("INSERT INTO agent_app_change_outbox").WillReturnError(errors.New("event"))
+			m.ExpectRollback()
+		}, ErrStorage},
+		{"readback error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET current_revision").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("INSERT INTO agent_app_change_outbox").WillReturnResult(sqlmock.NewResult(8, 1))
+			m.ExpectQuery("SELECT tenant_id, app_id, app_key").WillReturnError(errors.New("readback"))
+			m.ExpectRollback()
+		}, ErrStorage},
+		{"event scan error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET current_revision").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("INSERT INTO agent_app_change_outbox").WillReturnResult(sqlmock.NewResult(8, 1))
+			expectAgentApp(m, &updated)
+			m.ExpectQuery("SELECT event_type").WillReturnRows(sqlmock.NewRows([]string{"event_type"}).AddRow("bad"))
+			m.ExpectRollback()
+		}, ErrStorage},
+		{"commit error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET current_revision").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("INSERT INTO agent_app_change_outbox").WillReturnResult(sqlmock.NewResult(8, 1))
+			expectAgentApp(m, &updated)
+			expectAgentEvent(m, &updated, agent.ChangeRolledBack, agent.StatusActive, agent.StatusActive, app.CurrentRevision, updated.CurrentRevision, target.ContentDigest, app.Version, updated.Version, updated.UpdatedAt)
+			m.ExpectCommit().WillReturnError(errors.New("commit"))
+		}, ErrStorage},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			tc.setup(mock)
+			_, _, err = NewRepository(db).Rollback(context.Background(), agent.RollbackInput{TenantID: app.TenantID, AppID: app.AppID, TargetRevision: 1, ExpectedAppVersion: app.Version, Metadata: metadata})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestTransitionStatusPersistenceErrorBranches(t *testing.T) {
+	app := newStoredAgentApp(t)
+	currentRevision := int64(1)
+	app.Status, app.CurrentRevision, app.Version = agent.StatusActive, &currentRevision, 2
+	revision := newStoredAgentRevision(t, app, 1, true)
+	updated := app.Clone()
+	updated.Status = agent.StatusSuspended
+	updated.Version++
+	metadata := agent.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "workflow", CorrelationID: "correlation"}
+	common := func(m sqlmock.Sqlmock) {
+		m.ExpectBegin()
+		expectAgentApp(m, app)
+		expectAgentRevision(t, m, revision)
+	}
+	cases := []struct {
+		name  string
+		setup func(sqlmock.Sqlmock)
+		want  error
+	}{
+		{"update error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET status").WillReturnError(errors.New("update"))
+			m.ExpectRollback()
+		}, ErrStorage},
+		{"update conflict", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET status").WillReturnResult(sqlmock.NewResult(0, 0))
+			m.ExpectRollback()
+		}, agent.ErrConflict},
+		{"event insert error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET status").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("INSERT INTO agent_app_change_outbox").WillReturnError(errors.New("event"))
+			m.ExpectRollback()
+		}, ErrStorage},
+		{"event id error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET status").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("INSERT INTO agent_app_change_outbox").WillReturnResult(sqlmock.NewErrorResult(errors.New("last id")))
+			m.ExpectRollback()
+		}, ErrStorage},
+		{"readback error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET status").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("INSERT INTO agent_app_change_outbox").WillReturnResult(sqlmock.NewResult(9, 1))
+			m.ExpectQuery("SELECT tenant_id, app_id, app_key").WillReturnError(errors.New("readback"))
+			m.ExpectRollback()
+		}, ErrStorage},
+		{"event scan error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET status").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("INSERT INTO agent_app_change_outbox").WillReturnResult(sqlmock.NewResult(9, 1))
+			expectAgentApp(m, &updated)
+			m.ExpectQuery("SELECT event_type").WillReturnRows(sqlmock.NewRows([]string{"event_type"}).AddRow("bad"))
+			m.ExpectRollback()
+		}, ErrStorage},
+		{"commit error", func(m sqlmock.Sqlmock) {
+			common(m)
+			m.ExpectExec("UPDATE agent_app SET status").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("INSERT INTO agent_app_change_outbox").WillReturnResult(sqlmock.NewResult(9, 1))
+			expectAgentApp(m, &updated)
+			expectAgentEvent(m, &updated, agent.ChangeSuspended, agent.StatusActive, agent.StatusSuspended, app.CurrentRevision, updated.CurrentRevision, revision.ContentDigest, app.Version, updated.Version, updated.UpdatedAt)
+			m.ExpectCommit().WillReturnError(errors.New("commit"))
+		}, ErrStorage},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			tc.setup(mock)
+			_, _, err = NewRepository(db).TransitionStatus(context.Background(), agent.TransitionStatusInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: agent.StatusSuspended, Metadata: metadata})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

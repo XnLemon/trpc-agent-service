@@ -53,6 +53,23 @@ func TestStorageNilContextsFailClosed(t *testing.T) {
 	}
 }
 
+func TestStorageNilContextsFailClosedWithDatabase(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := Ping(nil, db); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Ping(nil, db) = %v", err)
+	}
+	if _, err := Begin(nil, db); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Begin(nil, db) = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMonotonicNowDoesNotMoveBeforePersistedTime(t *testing.T) {
 	previous := time.Now().UTC().Add(time.Hour)
 	if got := MonotonicNow(previous); !got.Equal(previous) {
