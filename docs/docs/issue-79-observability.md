@@ -36,13 +36,13 @@ Storage telemetry 覆盖实际 RuntimeStore/Session service 的读写方法（Ge
 
 ## Dashboard 与访问控制
 
-发布包提供 deploy/observability/ 下的 Prometheus recording/alert rules 和 Grafana dashboard JSON。Prometheus telemetry 本身是进程级低基数聚合，不含 tenant label，因此 query adapter 固定区分两种视图：`platform` 视图只对平台运维管理员开放，显示请求/延迟/交付等进程聚合；`tenant` 视图只返回经授权的 AuditEvent usage aggregate（token/cost）和该租户的 scope 元数据，不返回跨租户的 process telemetry。普通租户只能访问自身 usage 聚合，跨租户管理员只能访问其授权租户集合；匿名或超出基数预算的维度归入 aggregate 桶。Adapter 先通过平台的 tenant authorization，再构造固定查询模板；客户端不能提交任意 PromQL 或把原始 tenant label 拼进查询。Grafana JSON 只引用 adapter 暴露的受控视图，不把 dashboard 当作授权边界。
+发布包提供 deploy/observability/ 下的 Prometheus recording/alert rules 和 Grafana dashboard JSON。Prometheus telemetry 本身是进程级低基数聚合，不含 tenant label，因此 query adapter 固定区分两种视图：`platform` 视图只对平台运维管理员开放，显示请求/延迟/Runner/交付等进程聚合；`tenant` 视图只返回经授权的 AuditEvent usage aggregate（token/cost）和该租户的 scope 元数据，不返回跨租户的 process telemetry。普通租户只能访问自身 usage 聚合，跨租户管理员只能访问其授权租户集合；匿名或超出基数预算的维度归入 aggregate 桶。Adapter 先通过平台的 tenant authorization，再构造固定查询模板；客户端不能提交任意 PromQL 或把原始 tenant label 拼进查询。随仓库提供的 Grafana JSON 是 platform-only 的进程级示例资源，使用固定 PromQL，不能直接作为 tenant authorization boundary；生产 tenant dashboard 必须经 adapter 返回的授权 usage view 渲染。
 
-Dashboard 展示四组面板：请求与错误率、端到端/分阶段延迟、Runner/队列/IM 交付、token/cost 与后端延迟。审计详情、原始消息和 provider 错误必须跳转到受权限保护的审计查询，不从 telemetry 反推。
+Dashboard 展示四组面板：请求与错误率、端到端/分阶段延迟、Runner lease/active execution/队列重试/IM 交付、token/cost 与后端延迟。审计详情、原始消息和 provider 错误必须跳转到受权限保护的审计查询，不从 telemetry 反推。
 
 ## 告警初始规则
 
-初始阈值是可调的起始值，不是容量承诺：5 分钟终态错误率 > 5%；P95 gateway/runner 延迟 > 2s；IM delivery retryable/dead-letter failure > 1%；backend P95 > 500ms。终态集合固定为 `complete|success|error|failure|canceled|timeout`，错误分子为 `error|failure|canceled|timeout`，分母只取上述终态（`started` 不进入分母）。Delivery 比率按投递尝试计数：分母为 `success|retry|failure|dead_letter`，分子为 `retry|failure|dead_letter`；dead-letter 是最终结果，retry 是当前尝试结果。token/cost 预算由同一个授权 query adapter 从 AuditEvent aggregate 计算 80%/100% 阈值，不把 tenant_id 放进 Prometheus label；如果部署方需要 Prometheus 告警，使用 adapter 发布的受控 aggregate gauge。告警 payload 只带 component、operation、channel、provider、error_class 和受控聚合标识。
+初始阈值是可调的起始值，不是容量承诺：5 分钟终态错误率 > 5%；P95 gateway/runner 延迟 > 2s；IM delivery retryable/dead-letter failure > 1%；backend P95 > 500ms。终态集合固定为 `complete|success|error|failure|canceled|timeout`，错误分子为 `error|failure|canceled|timeout`，分母只取上述终态（`started` 不进入分母）。Delivery 比率按投递尝试计数：分母为 `success|retry|failure|dead_letter`，分子为 `retry|failure|dead_letter`；dead-letter 是最终结果，retry 是当前尝试结果。token/cost 预算由同一个授权 query adapter 从 AuditEvent aggregate 计算 80%/100% 阈值，不把 tenant_id 放进 Prometheus label；本仓库不把租户预算伪装成 Prometheus 指标，部署方如需 Prometheus 告警，必须由 adapter 发布受控 aggregate gauge 后自行接入。告警 payload 只带 component、operation、channel、provider、error_class 和受控聚合标识。
 
 ## 验收台账
 
