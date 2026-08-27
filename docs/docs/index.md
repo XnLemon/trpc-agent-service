@@ -28,6 +28,8 @@
   Issue #33 的真实 Bot API 传输冒烟测试和手动 CI 运行说明。
 - [PostgreSQL 控制面与启动装配](postgresql-control-plane.md)：Issue #37 的实现契约，
   复用既有表设计并统一 migration、Repository 事务边界、bootstrap、readiness 和 shutdown。
+- [Issue #81：MySQL 控制面 Repository](issue-81-mysql-control-plane.md)：MySQL 与 PostgreSQL
+  的 SQL 语义映射、事务/锁、迁移、Bootstrap 选择和验证矩阵。
 - [Issue #41：可重启控制面与 Admin API](issue-41-runtime-bootstrap-admin-api.md)：已合并的实现契约，
   固定真实 Bootstrap、readiness、最小 Admin API、重启恢复和验收矩阵。
 - [Issue #67：首次运行初始化](issue-67-first-run-init.md)：显式 `trpc-service init`、数据库状态判定、
@@ -64,6 +66,8 @@ cd trpc-agent-service
   Dispatch、健康检查、优雅停机和普通/流式 API
 - [PostgreSQL 控制面与启动装配](postgresql-control-plane.md) — 六类控制面表的 migration 顺序、
   SQL Repository 事务和真实运行时启动装配
+- [Issue #81：MySQL 控制面 Repository](issue-81-mysql-control-plane.md) — MySQL 适配器、迁移、
+  Bootstrap 驱动选择和租户隔离验证
 - [Issue #41：可重启控制面与 Admin API](issue-41-runtime-bootstrap-admin-api.md) — Bootstrap/readiness、
   管理 API、重启恢复和测试矩阵
 - [Issue #67：首次运行初始化](issue-67-first-run-init.md) — 显式首租户/App 初始化命令、幂等并发和部署流程

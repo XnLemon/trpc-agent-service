@@ -131,7 +131,7 @@
 - [x] 实现不可变运行时配置快照和带租户命名空间的 Runner 用户/会话身份
 - [x] 覆盖租户隔离、并发更新、Context 取消和运行时边界测试
 - [x] 实现 PostgreSQL Tenant、Agent、Model、Backend、Channel Binding Repository（Issue #37）
-- [ ] 实现 MySQL 租户及控制面 Repository
+- [ ] 实现 MySQL 租户及控制面 Repository（Issue #81；先行契约见 `docs/docs/issue-81-mysql-control-plane.md`）
 - [x] 实现租户级 Agent App 根模型和生命周期
 - [x] 实现 LLMAgent Revision 版本模型、草稿、不可变发布和内容摘要
 - [x] 定义 Agent Repository 并提供租户隔离、并发安全的 InMemory 实现
