@@ -535,8 +535,20 @@ func TestDynamicHandlerRoutesOnlyVerifiedBinding(t *testing.T) {
 
 func assertIngressAudit(t *testing.T, writer audit.Reader, count int, eventType audit.EventType, decision audit.Decision, errorType, requestID, traceID string) {
 	t.Helper()
-	events, err := writer.List(context.Background(), audit.Query{})
-	if err != nil || len(events) != count {
+	var events []audit.Event
+	var err error
+	deadline := time.Now().Add(time.Second)
+	for {
+		events, err = writer.List(context.Background(), audit.Query{})
+		if err != nil {
+			t.Fatalf("ingress audit = %+v, err=%v", events, err)
+		}
+		if len(events) == count || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(events) != count {
 		t.Fatalf("ingress audit = %+v, err=%v", events, err)
 	}
 	var event audit.Event
