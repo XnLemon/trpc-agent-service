@@ -141,14 +141,14 @@
 - [x] 实现 Model Profile 控制面、Secret Resolver 契约和最小 Runner 链路
 - [x] 实现租户、Agent、通道和后端配置的 Admin API（Issue #41）
 - [x] 实现 Agent App 草稿更新、原子发布和版本回滚
-- [ ] 实现配置缓存失效、租户级灰度和租户配置版本回滚（当前已实现 Runner/Provider 精确失效；灰度与配置版本回滚另行跟踪）
+- [ ] 实现配置缓存失效、租户级灰度和租户配置版本回滚（当前已实现 Runner/Provider 精确失效；租户级灰度与版本回滚由 Issue #82 实现）
 - [x] 接入 KMS/Secret Manager，禁止密钥进入运行时快照、日志和 trace（SecretManager 契约与 Vault KV v2 adapter；租户级灰度仍需独立治理能力）
 
 ### Gateway 与 Agent Worker
 
 - [x] 引入并初始化 tRPC-Agent-Go，建立可执行的 `runner.Runner`
 - [x] 将 Tenant、Agent Revision、Model Profile 和 Backend Profile 组合成 Execution Plan
-- [ ] 实现 Agent Registry，按 `tenant_id + agent_app_id + version` 加载 Agent
+- [ ] 实现 Agent Registry，按 `tenant_id + agent_app_id + version` 加载 Agent（Issue #82）
 - [x] 实现 Tenant + App + Revision 不可变执行快照、Factory Cache Key 和无密钥 Factory 输入契约
 - [x] 实现 Gateway 的鉴权、租户解析、Agent 路由、限流和请求去重
 - [x] 实现普通及流式对话 API，并贯穿 `request_id` / `trace_id`

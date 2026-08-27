@@ -20,6 +20,7 @@
 - [Issue #69：Multi-tenant Bootstrap](issue-69-multi-tenant-bootstrap.md)：多租户 API identity、动态 Session capability 和按租户审计路由。
 - [Issue #72：Precise Cache Invalidation](issue-72-cache-invalidation.md)：按 tenant/app/profile 精确失效，并保持 in-flight Runner 快照。
   固定模型解析、密钥边界、Execution Plan 和 tRPC-Agent-Go Runner 的纵向契约。
+- [Issue #82：Agent App Registry 与租户灰度](issue-82-agent-app-registry.md)：实例内按租户选择不可变 candidate revision、授权变更、审计事实和 lease-safe 回滚。
 - [生产架构设计](architecture.md)：Issue #24 的控制面/数据面拓扑、可信 Channel Binding、
   企业微信全链路、幂等、迁移和能力边界设计。文档交付不等于对应生产代码已实现。
 - [Gateway、Execution Plan 与 HTTP/SSE](gateway.md)：对齐 PR #25 架构验收与 Issue #26
