@@ -345,6 +345,9 @@ func (r *InMemoryRepository) SetCanary(ctx context.Context, input agent.SetCanar
 		return nil, agent.ChangeEvent{}, err
 	}
 	defer r.mu.unlock()
+	if err := checkContext(ctx); err != nil {
+		return nil, agent.ChangeEvent{}, err
+	}
 	app, err := r.mutableAppLocked(input.TenantID, input.AppID, input.ExpectedAppVersion)
 	if err != nil {
 		return nil, agent.ChangeEvent{}, err

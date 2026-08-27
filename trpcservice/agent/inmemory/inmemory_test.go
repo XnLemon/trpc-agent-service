@@ -590,6 +590,10 @@ func TestEveryOperationChecksAlreadyCancelledContext(t *testing.T) {
 			_, _, err := r.TransitionStatus(ctx, agent.TransitionStatusInput{TenantID: tenantOne, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: agent.StatusDisabled, Metadata: changeMetadata()})
 			return err
 		}},
+		{name: "canary", run: func() error {
+			_, _, err := r.SetCanary(ctx, agent.SetCanaryInput{TenantID: tenantOne, AppID: app.AppID, ExpectedAppVersion: app.Version, TenantActive: true, Metadata: changeMetadata()})
+			return err
+		}},
 	}
 	for _, operation := range operations {
 		t.Run(operation.name, func(t *testing.T) {
