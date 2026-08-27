@@ -12,7 +12,7 @@
 
 所有入口接受 W3C-compatible correlation（当前 HTTP 兼容 X-Request-ID/X-Trace-ID），缺失 request ID 时生成受界限 ID。子操作必须继承同一 context.Context；取消和 deadline 分别归类为 canceled/timeout。span 名称稳定且只允许下列受控属性：component、operation、status、error_class、tenant_hash、app_hash、model_family、provider、channel。
 
-每个 operation 只能有一个终态：开始时可记录 `status=started`，但必须在成功、业务错误、取消或超时时记录恰好一个终态并结束 span。Model callback 以一次模型调用为边界：流式 partial response 不能提前结束 span 或重复累计 token；`GenerateContent` 在创建响应流前返回的错误也必须结束同一 span。企业微信 receive 创建的 context 必须作为 Gateway/Runner dispatch 的 parent，不能从独立的 handler 根 context 重新开始链路。
+每个 operation 只能有一个终态：开始时可记录 `status=started`，但必须在成功、业务错误、取消或超时时记录恰好一个终态并结束 span。HTTP/SSE 请求的终态由整个协议生命周期决定：客户端断开、写入失败、request context 取消、空 stream 或没有 `done` 的不完整 stream 不能被记为成功；已经写出 HTTP 200 后只能在 telemetry/audit 中记录失败或取消，不能再写第二个 HTTP status。Model callback 以一次模型调用为边界：流式 partial response 不能提前结束 span 或重复累计 token；`GenerateContent` 在创建响应流前返回的错误也必须结束同一 span。企业微信 receive 创建的 context 必须作为 Gateway/Runner dispatch 的 parent，不能从独立的 handler 根 context 重新开始链路。
 
 Storage telemetry 覆盖实际 RuntimeStore/Session service 的读写方法（Get/Create/Update/Delete Session、Append/List event、message/reply lifecycle），而不只覆盖 capability factory construction 或 inbound claim；新增 adapter 必须复用同一 hook。
 
@@ -38,6 +38,8 @@ Storage telemetry 覆盖实际 RuntimeStore/Session service 的读写方法（Ge
 
 发布包提供 deploy/observability/ 下的 Prometheus recording/alert rules 和 Grafana dashboard JSON。Prometheus telemetry 本身是进程级低基数聚合，不含 tenant label，因此 query adapter 固定区分两种视图：`platform` 视图只对平台运维管理员开放，显示请求/延迟/Runner/交付等进程聚合；`tenant` 视图只返回经授权的 AuditEvent usage aggregate（token/cost）和该租户的 scope 元数据，不返回跨租户的 process telemetry。普通租户只能访问自身 usage 聚合，跨租户管理员只能访问其授权租户集合；匿名或未获授权请求拒绝，经授权但超出基数预算的维度归入 aggregate 桶。Adapter 先通过平台的 tenant authorization，再构造固定查询模板；客户端不能提交任意 PromQL 或把原始 tenant label 拼进查询。随仓库提供的 Grafana JSON 是 platform-only 的进程级示例资源，使用固定 PromQL，不能直接作为 tenant authorization boundary；生产 tenant dashboard 必须经 adapter 返回的授权 usage view 渲染。
 
+生产进程通过标准 OpenTelemetry 环境变量启用 OTLP/HTTP：`OTEL_EXPORTER_OTLP_ENDPOINT`（host:port 或完整 URL）为空时使用 no-op provider；可选 `OTEL_EXPORTER_OTLP_HEADERS`（逗号分隔的 `key=value`）、`OTEL_EXPORTER_OTLP_INSECURE` 和 `OTEL_SERVICE_NAME`。Endpoint 配置错误使 bootstrap fail closed；exporter shutdown/发送失败只丢 telemetry，不阻塞业务、lease 或进程关闭。Header 值只传给 exporter，不能写入 span、metric 或日志。
+
 Dashboard 展示四组面板：请求与错误率、端到端/分阶段延迟、Runner lease/active execution/队列重试/IM 交付、token/cost 与后端延迟。审计详情、原始消息和 provider 错误必须跳转到受权限保护的审计查询，不从 telemetry 反推。
 
 ## 告警初始规则
@@ -46,10 +48,10 @@ Dashboard 展示四组面板：请求与错误率、端到端/分阶段延迟、
 
 ## 验收台账
 
-- [ ] HTTP/IM callback 到 Gateway、Runner、Model、Tool、Storage、IM reply 的 trace context 连续且取消安全；每个模型调用只有一个终态（含流式和创建流失败）。
+- [ ] HTTP/IM callback 到 Gateway、Runner、Model、Tool、Storage、IM reply 的 trace context 连续且取消安全；每个模型调用和 HTTP/SSE 请求只有一个终态（含流式、断连、空 stream 和创建流失败）。
 - [ ] 目录指标覆盖 volume、latency、终态 errors、IM success/retry/dead-letter、tokens、cost 和 backend latency。
 - [ ] 标签白名单、上述固定低基数映射、脱敏和 tenant-authorized aggregate query adapter 有负向测试。
 - [ ] Prometheus/Grafana dashboard 与 alert rules 可加载，并不包含 secret、原始租户标识或无界 ID。
-- [ ] no-op provider 保持默认行为；trace/metric exporter 的 shutdown 故障不阻塞业务路径。
+- [ ] no-op provider 保持默认行为；生产 bootstrap 按 OTLP 环境变量构造 exporter，trace/metric exporter 的 shutdown 故障不阻塞业务路径。
 
 代码阶段必须把本页所有 `[ ]` 变为有代码和测试证据的 `[x]`，并在 PR 描述中列出验证命令与 dashboard/query adapter 的授权边界。
