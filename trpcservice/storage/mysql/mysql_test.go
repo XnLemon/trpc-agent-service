@@ -219,6 +219,7 @@ func TestVerifyApplicationPrivilegesQueryEnforcesFullAllowlist(t *testing.T) {
 		"information_schema.role_table_grants",
 		"information_schema.role_column_grants",
 		"information_schema.applicable_roles",
+		"grantee_host = (SELECT host_name FROM current_grantee)",
 	} {
 		if !strings.Contains(privilegeQuery, fragment) {
 			t.Fatalf("privilege query missing %q:\n%s", fragment, privilegeQuery)
