@@ -87,6 +87,7 @@ type Config struct {
 	BackendCatalog *backend.ProviderCatalog
 	SecretResolver modelprofile.SecretResolver
 	ModelFactory   modelprofile.ModelFactory
+	StorageFactory backend.StorageFactory
 	Sessions       session.Service
 	// RuntimeStore is the tenant-scoped Session/Event/Outbox capability. It is
 	// separate from upstream session.Service while the runtime adapter evolves.
@@ -222,7 +223,12 @@ func prepareDatabaseConfig(ctx context.Context, config *Config) error {
 	}
 	if config.VerifyMigrations != nil {
 		if err := config.VerifyMigrations(ctx, config.DB); err != nil {
-			return ErrInvalidConfig
+			// PostgreSQL verification is also performed by Runtime.Ready so a
+			// transient or incomplete schema keeps the graph unready. MySQL
+			// requires fail-closed bootstrap before restricted repositories exist.
+			if driver == ControlPlaneDriverMySQL {
+				return ErrInvalidConfig
+			}
 		}
 	}
 	if driver == ControlPlaneDriverMySQL {
@@ -270,12 +276,15 @@ func validateConfig(config Config) error {
 	dependencies := []any{
 		config.Tenants, config.Apps, config.Models, config.Backends, config.Channels,
 		config.ModelCatalog, config.BackendCatalog, config.SecretResolver, config.ModelFactory,
-		config.Sessions, config.Authenticator,
+		config.Authenticator,
 	}
 	for _, dependency := range dependencies {
 		if dependency == nil {
 			return ErrInvalidConfig
 		}
+	}
+	if config.Sessions == nil && config.StorageFactory == nil {
+		return ErrInvalidConfig
 	}
 	return nil
 }
@@ -305,7 +314,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	}
 	registry, err := gateway.NewRuntimeRunnerRegistry(gateway.RuntimeRunnerRegistryConfig{
 		Registry: config.Registry, SecretResolver: config.SecretResolver,
-		ModelFactory: config.ModelFactory, Sessions: config.Sessions,
+		ModelFactory: config.ModelFactory, Sessions: config.Sessions, StorageFactory: config.StorageFactory,
 	})
 	if err != nil {
 		return nil, ErrInvalidConfig
@@ -363,6 +372,9 @@ func configureAdmin(config *Config, registry *gateway.RunnerRegistry) error {
 		Backends: config.Backends, Bindings: bindingRepository,
 		Authenticator: config.AdminAuthenticator,
 		ModelCatalog:  config.ModelCatalog, BackendCatalog: config.BackendCatalog,
+		CacheInvalidator: admin.CacheInvalidatorFunc(func(change admin.CacheInvalidation) {
+			invalidateRuntimeCache(registry, change)
+		}),
 	})
 	if err != nil {
 		_ = registry.Close()
@@ -370,6 +382,25 @@ func configureAdmin(config *Config, registry *gateway.RunnerRegistry) error {
 	}
 	config.AdminHandler = adminHandler
 	return nil
+}
+
+func invalidateRuntimeCache(registry *gateway.RunnerRegistry, change admin.CacheInvalidation) {
+	// A closed registry cannot admit a future execution. Other errors are
+	// impossible for Admin-derived non-empty IDs, so a committed control-
+	// plane mutation remains successful during shutdown.
+	switch change.Kind {
+	case admin.CacheInvalidationTenant:
+		_ = registry.InvalidateTenant(change.TenantID)
+	case admin.CacheInvalidationApp:
+		_ = registry.InvalidateApp(change.TenantID, change.AppID)
+	case admin.CacheInvalidationModel:
+		_ = registry.InvalidateModelProfile(change.TenantID, change.ProfileID)
+	case admin.CacheInvalidationBackend:
+		_ = registry.InvalidateBackendProfile(change.TenantID, change.ProfileID)
+	case admin.CacheInvalidationBinding:
+		// Bindings are resolved and verified on every channel request. They
+		// do not key a Runner or provider cache in this process.
+	}
 }
 
 func configureHandler(runtimeGraph *Runtime, config Config) error {

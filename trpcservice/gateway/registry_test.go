@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
@@ -173,6 +174,107 @@ func TestRunnerRegistryInvalidationDefersCloseUntilRelease(t *testing.T) {
 	}
 	if err := newLease.Release(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunnerRegistrySelectiveInvalidationPreservesUnrelatedTenant(t *testing.T) {
+	planOne := testExecutionPlan(t)
+	planTwo := testExecutionPlan(t)
+	var calls atomic.Int32
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+		calls.Add(1)
+		return &testRunner{}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = registry.Close() }()
+	first, err := registry.Acquire(context.Background(), planOne)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := registry.Acquire(context.Background(), planTwo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRunner := second.Runner()
+	if err := registry.InvalidateTenant(planOne.Tenant().TenantID); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Release(); err != nil {
+		t.Fatal(err)
+	}
+	reused, err := registry.Acquire(context.Background(), planTwo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reused.Release() }()
+	if reused.Runner() != secondRunner || calls.Load() != 2 {
+		t.Fatalf("unrelated tenant entry was evicted: runner=%p want=%p calls=%d", reused.Runner(), secondRunner, calls.Load())
+	}
+}
+
+func TestRunnerRegistrySeparatesBackendProfileVersions(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	resolver, err := NewPlanResolver(PlanResolverConfig{
+		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
+		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := mustAPIPrincipal(t, fixture.tenant.TenantID, fixture.app.AppID)
+	firstPlan, err := resolver.Resolve(context.Background(), principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, _, err := fixture.backends.UpdateConfiguration(context.Background(), backend.UpdateConfigurationInput{
+		TenantID: fixture.backend.TenantID, ProfileID: fixture.backend.ProfileID, ExpectedVersion: fixture.backend.Version,
+		DisplayName: fixture.backend.DisplayName, Description: fixture.backend.Description, SchemaVersion: fixture.backend.SchemaVersion,
+		Bindings: fixture.backend.Bindings, Metadata: backend.ChangeMetadata{ActorType: "test", ActorID: "registry", Reason: "version separation", CorrelationID: "registry-version"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPlan, err := resolver.Resolve(context.Background(), principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstKey, err := firstPlan.CacheKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondKey, err := secondPlan.CacheKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstKey.BackendProfileID != secondKey.BackendProfileID || firstKey.BackendProfileVersion == secondKey.BackendProfileVersion || secondKey.BackendProfileVersion != updated.Version {
+		t.Fatalf("backend cache keys = %+v, %+v; updated=%+v", firstKey, secondKey, updated)
+	}
+	var calls atomic.Int32
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+		calls.Add(1)
+		return &testRunner{}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = registry.Close() }()
+	first, err := registry.Acquire(context.Background(), firstPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Release() }()
+	second, err := registry.Acquire(context.Background(), secondPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Release() }()
+	if first.Runner() == second.Runner() || calls.Load() != 2 {
+		t.Fatalf("backend profile versions shared a Runner: first=%p second=%p calls=%d", first.Runner(), second.Runner(), calls.Load())
 	}
 }
 
@@ -345,6 +447,60 @@ func TestRunnerRegistryConfigurationAndBoundaryErrors(t *testing.T) {
 	}
 }
 
+func TestRunnerRegistryInvalidationWrappersAndPredicateBoundaries(t *testing.T) {
+	plan := testExecutionPlan(t)
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+		return &testRunner{}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = registry.Close() }()
+	if err := registry.InvalidateMatching(nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil predicate = %v", err)
+	}
+	lease, err := registry.Acquire(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.InvalidateTenant("other-tenant"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.InvalidateApp("other-tenant", "other-app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.InvalidateModelProfile("other-tenant", "other-model"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.InvalidateBackendProfile("other-tenant", "other-backend"); err != nil {
+		t.Fatal(err)
+	}
+	key, err := plan.CacheKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.InvalidateApp(key.TenantID, key.AppID); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.InvalidateModelProfile(key.TenantID, key.ModelProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.InvalidateBackendProfile(key.TenantID, key.BackendProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	var nilRegistry *RunnerRegistry
+	if err := nilRegistry.InvalidateMatching(func(runtime.CacheKey) bool { return true }); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("nil registry matching = %v", err)
+	}
+	var nilLease *RunnerLease
+	if nilLease.Runner() != nil || nilLease.Release() != nil {
+		t.Fatal("nil lease boundary was not harmless")
+	}
+}
+
 type stage2ModelFactory struct{}
 
 func (stage2ModelFactory) New(context.Context, model.ModelFactoryInput, model.SecretValue) (trpcmodel.Model, error) {
@@ -366,6 +522,18 @@ func TestRuntimeRunnerRegistryWiresBorrowedDependencies(t *testing.T) {
 		t.Fatal("runtime registry is not ready")
 	}
 	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	storageRegistry, err := NewRuntimeRunnerRegistry(RuntimeRunnerRegistryConfig{
+		ModelFactory: stage2ModelFactory{},
+		StorageFactory: backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+			return nil, backend.ErrStorageFactory
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storageRegistry.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -443,6 +611,53 @@ func TestRunnerRegistryFactoryAndPendingCancellationEdges(t *testing.T) {
 	}
 	close(release)
 	lease := <-first
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunnerRegistryInvalidatesPendingBuildAndRetries(t *testing.T) {
+	plan := testExecutionPlan(t)
+	key, err := plan.CacheKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(ctx context.Context, _ runtime.ExecutionPlan) (Runner, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return &testRunner{}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = registry.Close() }()
+	result := make(chan *RunnerLease, 1)
+	go func() {
+		lease, acquireErr := registry.Acquire(context.Background(), plan)
+		if acquireErr != nil {
+			t.Errorf("Acquire() = %v", acquireErr)
+			return
+		}
+		result <- lease
+	}()
+	<-started
+	if err := registry.Invalidate(key); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	lease := <-result
+	if calls.Load() != 2 {
+		t.Fatalf("invalidated pending build calls = %d, want 2", calls.Load())
+	}
 	if err := lease.Release(); err != nil {
 		t.Fatal(err)
 	}

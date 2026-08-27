@@ -141,8 +141,8 @@
 - [x] 实现 Model Profile 控制面、Secret Resolver 契约和最小 Runner 链路
 - [x] 实现租户、Agent、通道和后端配置的 Admin API（Issue #41）
 - [x] 实现 Agent App 草稿更新、原子发布和版本回滚
-- [ ] 实现配置缓存失效、租户级灰度和租户配置版本回滚
-- [ ] 接入 KMS/Secret Manager，禁止密钥进入运行时快照、日志和 trace
+- [ ] 实现配置缓存失效、租户级灰度和租户配置版本回滚（当前已实现 Runner/Provider 精确失效；灰度与配置版本回滚另行跟踪）
+- [x] 接入 KMS/Secret Manager，禁止密钥进入运行时快照、日志和 trace（SecretManager 契约与 Vault KV v2 adapter；租户级灰度仍需独立治理能力）
 
 ### Gateway 与 Agent Worker
 
@@ -177,7 +177,7 @@
 ### IM Channel Adapter
 
 - [x] 定义统一 Channel Adapter 生命周期、共享入站消息和持久化出站回复契约（Issue #60）
-- [ ] 实现外部消息到 `model.Message` / `runner.Runner.Run` 的转换
+- [x] 实现外部消息到 `model.Message` / `runner.Runner.Run` 的转换
 - [ ] 实现 Runner Event 到文本、流式消息和卡片消息的转换
 - [x] 接入企业微信自建应用文本 webhook（Issue #60；仅直聊文本）
 - [x] 接入 Telegram long polling 文本通道（Issue #31；单 Binding、Gateway Dispatch、进程内幂等）

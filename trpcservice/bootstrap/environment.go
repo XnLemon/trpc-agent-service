@@ -25,6 +25,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
@@ -35,6 +36,7 @@ import (
 	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
+	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
@@ -44,15 +46,18 @@ const (
 	envMySQLDSN           = "TRPC_MYSQL_DSN"
 	envMySQLMigrationDSN  = "TRPC_MYSQL_MIGRATION_DSN"
 	// #nosec G101 -- environment variable name, not a credential.
-	envAPIToken = "TRPC_API_TOKEN"
-	envTenantID = "TRPC_TENANT_ID"
-	envAppID    = "TRPC_APP_ID"
+	envAPIToken      = "TRPC_API_TOKEN"
+	envAPIIdentities = "TRPC_API_IDENTITIES"
+	envTenantID      = "TRPC_TENANT_ID"
+	envAppID         = "TRPC_APP_ID"
 	// #nosec G101 -- environment variable name, not a credential.
 	envAdminToken   = "TRPC_ADMIN_TOKEN"
 	envAdminTenants = "TRPC_ADMIN_TENANTS"
 	envSubjectID    = "TRPC_SUBJECT_ID"
 	// #nosec G101 -- environment variable name, not a credential.
-	envModelAPIKey       = "TRPC_MODEL_API_KEY"
+	envModelAPIKey = "TRPC_MODEL_API_KEY"
+	// #nosec G101 -- environment variable name, not a credential.
+	envModelAPIKeys      = "TRPC_MODEL_API_KEYS"
 	envModelProvider     = "TRPC_MODEL_PROVIDER"
 	envModelNames        = "TRPC_MODEL_NAMES"
 	envModelEndpointHost = "TRPC_MODEL_ENDPOINT_HOSTS"
@@ -94,12 +99,14 @@ type environmentConfig struct {
 	dsn            string
 	migrationDSN   string
 	apiToken       string
+	apiIdentities  map[string]gateway.APIIdentity
 	adminToken     string
 	adminTenants   []string
 	tenantID       string
 	appID          string
 	subjectID      string
 	modelAPIKey    string
+	modelAPIKeys   map[string]string
 	modelProvider  string
 	modelNames     []string
 	endpointHosts  []string
@@ -130,9 +137,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	authenticator, err := gateway.NewStaticAPIAuthenticator(map[string]gateway.APIIdentity{
-		config.apiToken: {TenantID: config.tenantID, AppID: config.appID, SubjectID: config.subjectID},
-	})
+	authenticator, err := gateway.NewStaticAPIAuthenticator(config.apiIdentities)
 	if err != nil {
 		return nil, fmt.Errorf("%w: API authenticator configuration is invalid", ErrInvalidConfig)
 	}
@@ -141,7 +146,6 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, fmt.Errorf("%w: Admin authenticator configuration is invalid", ErrInvalidConfig)
 	}
 	var db *sql.DB
-	openDatabase := openEnvironmentDatabase
 	applyMigrations := applyEnvironmentMigrations
 	verifyMigrations := verifyEnvironmentMigrations
 	if config.driver == ControlPlaneDriverMySQL {
@@ -177,26 +181,20 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 			}
 			return nil, fmt.Errorf("%w: mysql control plane is unavailable", ErrInvalidConfig)
 		}
-		// The application DSN is deliberately verification-only during bootstrap;
-		// migration DDL is executed through the separately provisioned account.
+		// Migrations and trigger metadata require the separately provisioned account.
 		applyMigrations = nil
-		// VerifyMySQL reads trigger metadata, which is intentionally unavailable to
-		// the restricted application account. The migration connection has already
-		// verified the shared schema before it is closed.
 		verifyMigrations = nil
 		applicationUser, userErr := mysql.CurrentUser(ctx, db)
 		applicationDatabase, databaseErr := mysql.CurrentDatabase(ctx, db)
 		if userErr != nil || databaseErr != nil || applicationUser == migrationUser || applicationDatabase != migrationDatabase {
-			if db != nil {
-				_ = db.Close()
-			}
+			_ = db.Close()
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			return nil, fmt.Errorf("%w: MySQL migration and application accounts/databases are invalid", ErrInvalidConfig)
 		}
 	} else {
-		db, err = openDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+		db, err = openEnvironmentDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
 	}
 	if err != nil {
 		if ctx.Err() != nil {
@@ -223,35 +221,38 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		tenantRepo = tenantpostgres.NewRepository(db)
 		appRepo = agentpostgres.NewRepository(db)
 		channelRepo = channelpostgres.NewRepository(db)
-		auditWriter, err = auditpostgres.New(db, config.tenantID)
-		if err != nil {
-			_ = delegateSessions.Close()
-			_ = runtimeStore.Close()
-			_ = db.Close()
-			return nil, ErrInvalidConfig
+		if len(config.apiIdentities) > 1 {
+			auditWriter = auditpostgres.NewMultiTenant(db)
+		} else {
+			auditWriter, err = auditpostgres.New(db, config.tenantID)
 		}
 	}
-	var wecomFactory func(gateway.DispatchService) (http.Handler, error)
-	var wecomWorker *outbox.Worker
-	if config.wecom != nil {
-		credentials := environmentWeComCredentialResolver{tenantID: config.tenantID, config: *config.wecom}
-		wecomFactory = func(dispatcher gateway.DispatchService) (http.Handler, error) {
-			return wecom.New(wecom.Config{Candidates: channelRepo, Tenants: tenantRepo, Apps: appRepo, Credentials: credentials, Dispatcher: dispatcher, AuditWriter: auditWriter})
-		}
-		owner, ownerErr := environmentWeComOwnerFunc()
-		if ownerErr != nil {
-			_ = delegateSessions.Close()
-			_ = runtimeStore.Close()
-			_ = db.Close()
-			return nil, ErrInvalidConfig
-		}
-		wecomWorker, err = newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelRepo, Credentials: credentials}, TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second, AuditWriter: auditWriter})
-		if err != nil {
-			_ = delegateSessions.Close()
-			_ = runtimeStore.Close()
-			_ = db.Close()
-			return nil, ErrInvalidConfig
-		}
+	if err != nil {
+		_ = delegateSessions.Close()
+		_ = runtimeStore.Close()
+		_ = db.Close()
+		return nil, ErrInvalidConfig
+	}
+	wecomFactory, wecomWorker, err := environmentWeComComponents(config, channelRepo, tenantRepo, appRepo, runtimeStore, auditWriter)
+	if err != nil {
+		_ = delegateSessions.Close()
+		_ = runtimeStore.Close()
+		_ = db.Close()
+		return nil, ErrInvalidConfig
+	}
+	secretRegistry, modelRegistry, backendRegistry, err := environmentRegistries(config, delegateSessions, runtimeStore)
+	if err != nil {
+		_ = delegateSessions.Close()
+		_ = runtimeStore.Close()
+		_ = db.Close()
+		return nil, ErrInvalidConfig
+	}
+	storageFactory, err := backend.NewRegistryStorageFactory(backendRegistry, secretRegistry)
+	if err != nil {
+		_ = delegateSessions.Close()
+		_ = runtimeStore.Close()
+		_ = db.Close()
+		return nil, ErrInvalidConfig
 	}
 	graph, err := NewWithDatabase(ctx, db, Config{
 		OwnDB:               true,
@@ -261,11 +262,12 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		Channels:            channelRepo,
 		ModelCatalog:        modelCatalog,
 		BackendCatalog:      backendCatalog,
-		SecretResolver:      environmentSecretResolver{reference: config.secretRef, value: config.modelAPIKey},
-		ModelFactory:        environmentModelFactory{},
+		SecretResolver:      secretRegistry,
+		ModelFactory:        modelRegistry,
+		StorageFactory:      storageFactory,
 		Sessions:            delegateSessions,
 		RuntimeStore:        runtimeStore,
-		RuntimeTenantID:     config.tenantID,
+		RuntimeTenantID:     "",
 		Authenticator:       authenticator,
 		AdminAuthenticator:  adminAuthenticator,
 		WeComHandlerFactory: wecomFactory,
@@ -292,76 +294,119 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	return graph, nil
 }
 
-func loadEnvironment() (environmentConfig, error) {
-	config := baseEnvironmentConfig()
-	for _, load := range []func(*environmentConfig) error{
-		selectEnvironmentDatabase,
-		loadEnvironmentCredentials,
-		loadEnvironmentModelConfig,
-		validateEnvironmentRuntime,
-	} {
-		if err := load(&config); err != nil {
-			return environmentConfig{}, err
-		}
+func environmentWeComComponents(config environmentConfig, channelsRepo channels.CandidateConsumer, tenantsRepo tenant.Repository, appsRepo agent.Repository, runtimeStore runtimestorage.RuntimeStore, auditWriter audit.Writer) (func(gateway.DispatchService) (http.Handler, error), *outbox.Worker, error) {
+	if config.wecom == nil {
+		return nil, nil, nil
 	}
-	wecom, err := loadEnvironmentWeCom()
+	credentials := environmentWeComCredentialResolver{tenantID: config.tenantID, config: *config.wecom}
+	factory := func(dispatcher gateway.DispatchService) (http.Handler, error) {
+		return wecom.New(wecom.Config{Candidates: channelsRepo, Tenants: tenantsRepo, Apps: appsRepo, Credentials: credentials, Dispatcher: dispatcher, AuditWriter: auditWriter})
+	}
+	owner, err := environmentWeComOwnerFunc()
 	if err != nil {
-		return environmentConfig{}, err
+		return nil, nil, err
 	}
-	config.wecom = wecom
-	return config, nil
+	worker, err := newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelsRepo, Credentials: credentials}, TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second, AuditWriter: auditWriter})
+	return factory, worker, err
 }
 
-func baseEnvironmentConfig() environmentConfig {
-	return environmentConfig{
+func environmentRegistries(config environmentConfig, delegateSessions session.Service, runtimeStore runtimestorage.RuntimeStore) (*modelprofile.SecretRegistry, *modelprofile.ModelProviderRegistry, *backend.ProviderRegistry, error) {
+	secretRegistry := modelprofile.NewSecretRegistry()
+	modelRegistry := modelprofile.NewModelProviderRegistry()
+	backendRegistry := backend.NewProviderRegistry()
+	for _, identity := range config.apiIdentities {
+		modelAPIKey := config.modelAPIKey
+		if len(config.modelAPIKeys) != 0 {
+			modelAPIKey = config.modelAPIKeys[identity.TenantID]
+		}
+		if modelAPIKey == "" {
+			return nil, nil, nil, ErrInvalidConfig
+		}
+		if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.secretRef}, modelAPIKey); err != nil {
+			return nil, nil, nil, err
+		}
+		if err := modelRegistry.Register(identity.TenantID, config.modelProvider, environmentModelFactory{}); err != nil {
+			return nil, nil, nil, err
+		}
+		if err := backendRegistry.Register(identity.TenantID, backend.CapabilitySession, "inmemory", environmentSessionCapabilityProvider{delegate: delegateSessions, store: runtimeStore}); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	return secretRegistry, modelRegistry, backendRegistry, nil
+}
+
+func loadEnvironment() (environmentConfig, error) {
+	config := environmentConfig{
 		driver:         ControlPlaneDriver(strings.ToLower(strings.TrimSpace(environmentOrDefault(envControlPlaneDriver, string(ControlPlaneDriverPostgres))))),
 		modelProvider:  environmentOrDefault(envModelProvider, defaultModelProvider),
 		secretRef:      environmentOrDefault(envModelSecretRef, defaultModelSecretRef),
 		subjectID:      environmentOrDefault(envSubjectID, defaultSubjectID),
 		runtimeStorage: strings.ToLower(strings.TrimSpace(os.Getenv(envSessionBackend))),
 	}
+	loaders := []func() error{config.loadDatabase, config.loadIdentities, config.loadAdmin, config.loadModel, config.loadRuntime, config.loadWeCom}
+	for _, load := range loaders {
+		if err := load(); err != nil {
+			return environmentConfig{}, err
+		}
+	}
+	return config, nil
 }
 
-func selectEnvironmentDatabase(config *environmentConfig) error {
+func (config *environmentConfig) loadDatabase() error {
 	if config.driver != ControlPlaneDriverPostgres && config.driver != ControlPlaneDriverMySQL {
 		return fmt.Errorf("%w: %s must be postgres or mysql", ErrInvalidConfig, envControlPlaneDriver)
 	}
-	name := envPostgresDSN
+	dsnName := envPostgresDSN
 	if config.driver == ControlPlaneDriverMySQL {
-		name = envMySQLDSN
+		dsnName = envMySQLDSN
 	}
-	dsn, err := requiredEnvironment(name)
+	dsn, err := requiredEnvironment(dsnName)
 	if err != nil {
 		return err
 	}
 	config.dsn = dsn
 	if config.driver == ControlPlaneDriverMySQL {
-		migrationDSN, err := requiredEnvironment(envMySQLMigrationDSN)
+		config.migrationDSN, err = requiredEnvironment(envMySQLMigrationDSN)
 		if err != nil {
 			return err
 		}
-		config.migrationDSN = migrationDSN
 	}
 	return nil
 }
 
-func loadEnvironmentCredentials(config *environmentConfig) error {
-	values := []struct {
-		name   string
-		target *string
-	}{
-		{name: envAPIToken, target: &config.apiToken},
-		{name: envTenantID, target: &config.tenantID},
-		{name: envAppID, target: &config.appID},
-		{name: envAdminToken, target: &config.adminToken},
-		{name: envModelAPIKey, target: &config.modelAPIKey},
-	}
-	for _, value := range values {
-		loaded, err := requiredEnvironment(value.name)
+func (config *environmentConfig) loadIdentities() error {
+	identities := strings.TrimSpace(os.Getenv(envAPIIdentities))
+	if identities != "" {
+		var err error
+		config.apiIdentities, err = parseEnvironmentAPIIdentities(identities)
 		if err != nil {
 			return err
 		}
-		*value.target = loaded
+		if len(config.apiIdentities) == 1 {
+			for _, identity := range config.apiIdentities {
+				config.tenantID, config.appID = identity.TenantID, identity.AppID
+			}
+		}
+		return nil
+	}
+	var err error
+	if config.apiToken, err = requiredEnvironment(envAPIToken); err != nil {
+		return err
+	}
+	if config.tenantID, err = requiredEnvironment(envTenantID); err != nil {
+		return err
+	}
+	if config.appID, err = requiredEnvironment(envAppID); err != nil {
+		return err
+	}
+	config.apiIdentities = map[string]gateway.APIIdentity{config.apiToken: {TenantID: config.tenantID, AppID: config.appID, SubjectID: config.subjectID}}
+	return nil
+}
+
+func (config *environmentConfig) loadAdmin() error {
+	var err error
+	if config.adminToken, err = requiredEnvironment(envAdminToken); err != nil {
+		return err
 	}
 	adminTenantValue, err := requiredEnvironment(envAdminTenants)
 	if err != nil {
@@ -371,26 +416,68 @@ func loadEnvironmentCredentials(config *environmentConfig) error {
 	return err
 }
 
-func loadEnvironmentModelConfig(config *environmentConfig) error {
+func (config *environmentConfig) loadModel() error {
+	var err error
+	if mapped := strings.TrimSpace(os.Getenv(envModelAPIKeys)); mapped != "" {
+		config.modelAPIKeys, err = parseEnvironmentModelAPIKeys(mapped)
+		if err != nil {
+			return err
+		}
+		for _, identity := range config.apiIdentities {
+			if config.modelAPIKeys[identity.TenantID] == "" {
+				return fmt.Errorf("%w: %s has no key for tenant", ErrInvalidConfig, envModelAPIKeys)
+			}
+		}
+	} else {
+		if len(config.apiIdentities) > 1 {
+			return fmt.Errorf("%w: %s is required for multi-tenant bootstrap", ErrInvalidConfig, envModelAPIKeys)
+		}
+		config.modelAPIKey = strings.TrimSpace(os.Getenv(envModelAPIKey))
+		if config.modelAPIKey == "" {
+			return fmt.Errorf("%w: %s is required", ErrInvalidConfig, envModelAPIKey)
+		}
+	}
 	config.modelProvider = strings.ToLower(strings.TrimSpace(config.modelProvider))
 	config.secretRef = strings.TrimSpace(config.secretRef)
 	if config.modelProvider == "" || config.secretRef == "" {
 		return fmt.Errorf("%w: model provider and secret reference are required", ErrInvalidConfig)
 	}
-	var err error
-	config.modelNames, err = environmentList(envModelNames, environmentOrDefault(envModelNames, defaultModelNames), true)
-	if err != nil {
+	if config.modelNames, err = environmentList(envModelNames, environmentOrDefault(envModelNames, defaultModelNames), true); err != nil {
 		return err
 	}
 	config.endpointHosts, err = environmentList(envModelEndpointHost, environmentOrDefault(envModelEndpointHost, defaultEndpointHost), true)
-	if err != nil {
-		return err
-	}
-	config.subjectID = strings.TrimSpace(config.subjectID)
-	return nil
+	return err
 }
 
-func validateEnvironmentRuntime(config *environmentConfig) error {
+func parseEnvironmentModelAPIKeys(value string) (map[string]string, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, fmt.Errorf("%w: %s is required", ErrInvalidConfig, envModelAPIKeys)
+	}
+	keys := make(map[string]string)
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" || strings.ContainsAny(item, "\r\n") {
+			return nil, fmt.Errorf("%w: %s contains an empty entry", ErrInvalidConfig, envModelAPIKeys)
+		}
+		separator := strings.IndexByte(item, '=')
+		if separator < 1 || separator == len(item)-1 {
+			return nil, fmt.Errorf("%w: %s entries must be tenant_id=api_key", ErrInvalidConfig, envModelAPIKeys)
+		}
+		tenantID := strings.TrimSpace(item[:separator])
+		apiKey := strings.TrimSpace(item[separator+1:])
+		if tenantID == "" || strings.ContainsAny(tenantID, "\r\n") || apiKey == "" {
+			return nil, fmt.Errorf("%w: %s contains an invalid tenant entry", ErrInvalidConfig, envModelAPIKeys)
+		}
+		if _, exists := keys[tenantID]; exists {
+			return nil, fmt.Errorf("%w: %s contains duplicate tenant entries", ErrInvalidConfig, envModelAPIKeys)
+		}
+		keys[tenantID] = apiKey
+	}
+	return keys, nil
+}
+
+func (config *environmentConfig) loadRuntime() error {
+	config.subjectID = strings.TrimSpace(config.subjectID)
 	if config.runtimeStorage != "postgres" && config.runtimeStorage != "inmemory" {
 		return fmt.Errorf("%w: %s must be explicitly set to postgres or inmemory", ErrInvalidConfig, envSessionBackend)
 	}
@@ -400,7 +487,7 @@ func validateEnvironmentRuntime(config *environmentConfig) error {
 	return nil
 }
 
-func loadEnvironmentWeCom() (*environmentWeComConfig, error) {
+func (config *environmentConfig) loadWeCom() error {
 	values := []string{strings.TrimSpace(os.Getenv(envWeComCallbackToken)), strings.TrimSpace(os.Getenv(envWeComEncodingAESKey)), strings.TrimSpace(os.Getenv(envWeComAppSecret)), strings.TrimSpace(os.Getenv(envWeComSecretRef))}
 	configured := 0
 	for _, value := range values {
@@ -409,12 +496,15 @@ func loadEnvironmentWeCom() (*environmentWeComConfig, error) {
 		}
 	}
 	if configured != 0 && configured != len(values) {
-		return nil, fmt.Errorf("%w: WeCom credentials must be configured together", ErrInvalidConfig)
+		return fmt.Errorf("%w: WeCom credentials must be configured together", ErrInvalidConfig)
 	}
-	if configured == 0 {
-		return nil, nil
+	if configured == len(values) {
+		config.wecom = &environmentWeComConfig{callbackToken: values[0], encodingAESKey: values[1], appSecret: values[2], secretRef: values[3]}
 	}
-	return &environmentWeComConfig{callbackToken: values[0], encodingAESKey: values[1], appSecret: values[2], secretRef: values[3]}, nil
+	if config.wecom != nil && len(config.apiIdentities) != 1 {
+		return fmt.Errorf("%w: WeCom credentials require exactly one API identity", ErrInvalidConfig)
+	}
+	return nil
 }
 
 func environmentRuntimeStore(kind string, db *sql.DB) (runtimestorage.RuntimeStore, error) {
@@ -490,6 +580,31 @@ func environmentList(name, value string, lowercase bool) ([]string, error) {
 	return result, nil
 }
 
+// parseEnvironmentAPIIdentities accepts comma-separated token|tenant|app|subject
+// entries. Tokens are used only as map keys and never included in errors.
+func parseEnvironmentAPIIdentities(value string) (map[string]gateway.APIIdentity, error) {
+	result := make(map[string]gateway.APIIdentity)
+	for _, entry := range strings.Split(value, ",") {
+		parts := strings.Split(entry, "|")
+		if len(parts) != 4 {
+			return nil, fmt.Errorf("%w: %s must use token|tenant|app|subject entries", ErrInvalidConfig, envAPIIdentities)
+		}
+		token := strings.TrimSpace(parts[0])
+		identity := gateway.APIIdentity{TenantID: strings.TrimSpace(parts[1]), AppID: strings.TrimSpace(parts[2]), SubjectID: strings.TrimSpace(parts[3])}
+		if token == "" || identity.TenantID == "" || identity.AppID == "" || identity.SubjectID == "" {
+			return nil, fmt.Errorf("%w: %s contains an incomplete identity", ErrInvalidConfig, envAPIIdentities)
+		}
+		if _, exists := result[token]; exists {
+			return nil, fmt.Errorf("%w: %s contains duplicate tokens", ErrInvalidConfig, envAPIIdentities)
+		}
+		result[token] = identity
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("%w: %s is empty", ErrInvalidConfig, envAPIIdentities)
+	}
+	return result, nil
+}
+
 type environmentSecretResolver struct {
 	reference string
 	value     string
@@ -538,6 +653,18 @@ func (resolver environmentSecretResolver) Resolve(ctx context.Context, scope mod
 }
 
 type environmentModelFactory struct{}
+
+type environmentSessionCapabilityProvider struct {
+	delegate session.Service
+	store    runtimestorage.RuntimeStore
+}
+
+func (provider environmentSessionCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, _ backend.CapabilityBinding, _ modelprofile.SecretValue) (any, error) {
+	if ctx == nil {
+		return nil, context.Canceled
+	}
+	return runtimesessionpostgres.New(input.TenantID, provider.delegate, provider.store)
+}
 
 func (environmentModelFactory) New(ctx context.Context, input modelprofile.ModelFactoryInput, secret modelprofile.SecretValue) (trpcmodel.Model, error) {
 	if ctx == nil {

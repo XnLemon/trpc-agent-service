@@ -301,6 +301,12 @@ func TestServiceForwardsUpstreamCapabilities(t *testing.T) {
 	if err := service.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := delegate.CreateSession(context.Background(), session.Key{AppName: "app", UserID: "user", SessionID: "after-close"}, nil); err != nil {
+		t.Fatalf("borrowed delegate was closed by Service.Close: %v", err)
+	}
+	if err := delegate.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestServiceUpdateAndAppendErrorEdges(t *testing.T) {
