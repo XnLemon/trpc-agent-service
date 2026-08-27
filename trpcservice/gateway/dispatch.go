@@ -187,17 +187,18 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	}
 	planSnapshot := plan.AgentSnapshot()
 	planApp := planSnapshot.App()
-	if planApp.CanaryRevision != nil && planSnapshot.Revision().Revision == *planApp.CanaryRevision {
-		selectedRevision := planSnapshot.Revision().Revision
-		if err := dispatcher.writeExecutionAuditRevision(ctx, request.Principal, message, identity, requestID, traceID, audit.EventCanarySelected, "", &selectedRevision); err != nil {
-			finishWithError(err)
-			return nil, auditWriteFailure()
-		}
-	}
 	durable, err := dispatcher.claimInbound(ctx, request.Principal, message, identity)
 	if err != nil {
 		finishWithError(err)
 		return nil, err
+	}
+	if planApp.CanaryRevision != nil && planSnapshot.Revision().Revision == *planApp.CanaryRevision {
+		selectedRevision := planSnapshot.Revision().Revision
+		if err := dispatcher.writeExecutionAuditRevision(ctx, request.Principal, message, identity, requestID, traceID, audit.EventCanarySelected, "", &selectedRevision); err != nil {
+			dispatcher.failDurable(durable, err)
+			finishWithError(err)
+			return nil, auditWriteFailure()
+		}
 	}
 	if err := dispatcher.writeExecutionAudit(ctx, request.Principal, message, identity, requestID, traceID, audit.EventExecutionStarted, ""); err != nil {
 		dispatcher.failDurable(durable, err)
