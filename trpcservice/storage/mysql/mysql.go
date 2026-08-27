@@ -259,8 +259,10 @@ func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	var forbidden int
-	if err := db.QueryRowContext(ctx, `WITH effective_grantees (grantee) AS (
+	if err := db.QueryRowContext(ctx, `WITH current_grantee (grantee) AS (
 			SELECT CONCAT(CHAR(39), REPLACE(CURRENT_USER(), '@', CONCAT(CHAR(39), '@', CHAR(39))), CHAR(39))
+		), effective_grantees (grantee) AS (
+			SELECT grantee FROM current_grantee
 			UNION
 			SELECT CONCAT(CHAR(39), role_name, CHAR(39), '@', CHAR(39), role_host, CHAR(39))
 			FROM information_schema.enabled_roles
@@ -308,6 +310,9 @@ func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
 			UNION ALL
 			SELECT privilege_type FROM information_schema.role_column_grants
 			WHERE CONCAT(CHAR(39), grantee, CHAR(39), '@', CHAR(39), grantee_host, CHAR(39)) IN (SELECT grantee FROM effective_grantees)
+			UNION ALL
+			SELECT role_name FROM information_schema.applicable_roles
+			WHERE grantee IN (SELECT grantee FROM current_grantee)
 		) AS violations`).Scan(&forbidden); err != nil {
 		return MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
 	}
