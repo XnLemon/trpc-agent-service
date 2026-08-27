@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 )
@@ -55,5 +56,16 @@ func TestSameAgentRevisionHandlesNilAndValuePairs(t *testing.T) {
 				t.Fatalf("sameAgentRevision() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestMaxTimeChoosesLatestTimestamp(t *testing.T) {
+	first := time.Unix(10, 0).UTC()
+	second := time.Unix(20, 0).UTC()
+	if got := maxTime(first, second); !got.Equal(second) {
+		t.Fatalf("maxTime(first, second) = %v, want second", got)
+	}
+	if got := maxTime(second, first); !got.Equal(second) {
+		t.Fatalf("maxTime(second, first) = %v, want second", got)
 	}
 }
