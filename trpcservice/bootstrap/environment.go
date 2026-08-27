@@ -334,10 +334,10 @@ func (config *environmentConfig) loadModel() error {
 			}
 		}
 	} else {
-		config.modelAPIKey = strings.TrimSpace(os.Getenv(envModelAPIKey))
-		if config.modelAPIKey == "" && len(config.apiIdentities) > 1 {
+		if len(config.apiIdentities) > 1 {
 			return fmt.Errorf("%w: %s is required for multi-tenant bootstrap", ErrInvalidConfig, envModelAPIKeys)
 		}
+		config.modelAPIKey = strings.TrimSpace(os.Getenv(envModelAPIKey))
 		if config.modelAPIKey == "" {
 			return fmt.Errorf("%w: %s is required", ErrInvalidConfig, envModelAPIKey)
 		}

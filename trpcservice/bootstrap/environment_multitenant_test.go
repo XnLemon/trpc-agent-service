@@ -37,6 +37,8 @@ func TestLoadEnvironmentSupportsIdentityListWithoutFixedTenantFields(t *testing.
 	t.Setenv(envAPIToken, "")
 	t.Setenv(envTenantID, "")
 	t.Setenv(envAppID, "")
+	t.Setenv(envModelAPIKey, "")
+	t.Setenv(envModelAPIKeys, "t_00000000000000000000000000=key-a,t_00000000000000000000000001=key-b")
 	t.Setenv(envAPIIdentities, "token-a|t_00000000000000000000000000|app_00000000000000000000000000|service-a,token-b|t_00000000000000000000000001|app_00000000000000000000000001|service-b")
 	config, err := loadEnvironment()
 	if err != nil || len(config.apiIdentities) != 2 {
@@ -89,6 +91,19 @@ func TestLoadEnvironmentRequiresEveryTenantModelAPIKey(t *testing.T) {
 	t.Setenv(envModelAPIKeys, "t_00000000000000000000000000=key-a")
 	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("incomplete tenant model keys error = %v", err)
+	}
+}
+
+func TestLoadEnvironmentRejectsGlobalModelKeyForMultipleIdentities(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envAPIIdentities, "token-a|t_00000000000000000000000000|app_00000000000000000000000000|service-a,token-b|t_00000000000000000000000001|app_00000000000000000000000001|service-b")
+	t.Setenv(envAPIToken, "")
+	t.Setenv(envTenantID, "")
+	t.Setenv(envAppID, "")
+	t.Setenv(envModelAPIKey, "shared-key")
+	t.Setenv(envModelAPIKeys, "")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("global model key in multi-tenant mode error = %v", err)
 	}
 }
 
