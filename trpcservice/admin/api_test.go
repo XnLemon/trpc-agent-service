@@ -572,6 +572,31 @@ func TestAdminCanaryRouteBuildsTenantScopedMutation(t *testing.T) {
 	}
 }
 
+func TestAdminCanaryRouteRejectsMalformedAndUnsupportedRequests(t *testing.T) {
+	fixture := newAdminMutationFixture(t)
+	app := createAndPublishAdminRevision(t, fixture)
+	tests := []struct {
+		name     string
+		method   string
+		body     string
+		tenantID string
+		parts    []string
+		wantErr  error
+	}{
+		{name: "wrong method", method: http.MethodPatch, body: `{}`, tenantID: fixture.root.TenantID, parts: []string{app.AppID, "canary"}, wantErr: errNotFound},
+		{name: "malformed body", method: http.MethodPost, body: `{`, tenantID: fixture.root.TenantID, parts: []string{app.AppID, "canary"}, wantErr: errInvalidRequest},
+		{name: "unknown tenant", method: http.MethodPost, body: `{}`, tenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", parts: []string{app.AppID, "canary"}, wantErr: tenant.ErrNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			status, _, err := fixture.handler.apps(context.Background(), fixture.request(tc.method, tc.body), fixture.principal, tc.tenantID, tc.parts)
+			if status != 0 || !errors.Is(err, tc.wantErr) {
+				t.Fatalf("canary route status=%d err=%v, want %v", status, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 type adminMutationFixture struct {
 	handler   *Handler
 	root      *tenant.Tenant
