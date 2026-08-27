@@ -88,7 +88,9 @@ func (r *AgentRepository) UpdateMetadata(ctx context.Context, input agent.Update
 		return nil, err
 	}
 	defer rollback(tx)
-	current, err := loadAgentApp(ctx, tx, input.TenantID, input.AppID, true)
+	// Keep preflight reads unlocked; the SECURITY DEFINER function acquires
+	// tenant and app together in the canonical order before writing.
+	current, err := loadAgentApp(ctx, tx, input.TenantID, input.AppID, false)
 	if err != nil {
 		return nil, mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
 	}
@@ -495,7 +497,7 @@ func (r *AgentRepository) SetCanary(ctx context.Context, input agent.SetCanaryIn
 			return nil, agent.ChangeEvent{}, fmt.Errorf("%w: invalid canary revision", agent.ErrInvalid)
 		}
 		var getErr error
-		candidate, getErr = loadAgentRevision(ctx, tx, input.TenantID, input.AppID, *input.CandidateRevision, true)
+		candidate, getErr = loadAgentRevision(ctx, tx, input.TenantID, input.AppID, *input.CandidateRevision, false)
 		if getErr != nil {
 			return nil, agent.ChangeEvent{}, mapDBError(ctx, getErr, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
 		}
