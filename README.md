@@ -323,6 +323,10 @@ cd trpc-agent-service
 ./scripts/start.sh
 ```
 
+控制面默认使用 PostgreSQL；切换 MySQL 时必须同时提供应用账号
+`TRPC_MYSQL_DSN` 和迁移账号 `TRPC_MYSQL_MIGRATION_DSN`，Bootstrap 会在绑定 HTTP
+端口前完成迁移、schema 和权限校验。
+
 首次使用 PostgreSQL 时，先按 [Issue #67 首次运行初始化](https://xnlemon.github.io/trpc-agent-service/issue-67-first-run-init/) 生成 `TRPC_TENANT_ID` 和 `TRPC_APP_ID`，再启动服务。正常启动不会自动创建 Tenant 或 Agent App。
 
 停止服务：

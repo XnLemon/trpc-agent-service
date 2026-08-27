@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 )
@@ -46,15 +47,20 @@ func (r *BackendRepository) Create(ctx context.Context, input backend.CreateInpu
 	}
 	defer rollback(tx)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO backend_profile (
-		tenant_id, profile_id, profile_key, display_name, description, status, schema_version,
-		content_digest, version, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, value.TenantID, value.ProfileID, value.ProfileKey,
-		value.DisplayName, value.Description, string(value.Status), value.SchemaVersion, value.ContentDigest,
+			tenant_id, profile_id, profile_key, display_name, description, status, schema_version,
+			content_digest, version, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, 'disabled', ?, ?, ?, ?, ?)`, value.TenantID, value.ProfileID, value.ProfileKey,
+		value.DisplayName, value.Description, value.SchemaVersion, value.ContentDigest,
 		value.Version, value.CreatedAt, value.UpdatedAt); err != nil {
 		return nil, backend.ChangeEvent{}, mapDBError(ctx, err, backend.ErrNotFound, backend.ErrDuplicateKey, backend.ErrConflict, backend.ErrInvalid)
 	}
 	if err := replaceBackendBindings(ctx, tx, *value); err != nil {
 		return nil, backend.ChangeEvent{}, err
+	}
+	if value.Status != backend.StatusDisabled {
+		if _, err := tx.ExecContext(ctx, `UPDATE backend_profile SET status = ? WHERE tenant_id = ? AND profile_id = ?`, string(value.Status), value.TenantID, value.ProfileID); err != nil {
+			return nil, backend.ChangeEvent{}, mapDBError(ctx, err, backend.ErrNotFound, backend.ErrDuplicateKey, backend.ErrConflict, backend.ErrInvalid)
+		}
 	}
 	eventResult, err := tx.ExecContext(ctx, `INSERT INTO backend_profile_change_outbox (
 		event_type, tenant_id, profile_id, previous_status, current_status, previous_digest,
@@ -229,9 +235,6 @@ func (r *BackendRepository) TransitionStatus(ctx context.Context, input backend.
 }
 
 func replaceBackendBindings(ctx context.Context, q queryer, profile backend.Profile) error {
-	if _, err := q.ExecContext(ctx, "DELETE FROM backend_profile_binding WHERE tenant_id = ? AND profile_id = ?", profile.TenantID, profile.ProfileID); err != nil {
-		return mapDBError(ctx, err, backend.ErrNotFound, backend.ErrDuplicateKey, backend.ErrConflict, backend.ErrInvalid)
-	}
 	for _, binding := range profile.Bindings {
 		options, err := encodeJSON(binding.Options)
 		if err != nil {
@@ -241,11 +244,28 @@ func replaceBackendBindings(ctx context.Context, q queryer, profile backend.Prof
 			options = []byte("{}")
 		}
 		if _, err := q.ExecContext(ctx, `INSERT INTO backend_profile_binding (
-			tenant_id, profile_id, capability, provider, endpoint, options, secret_ref
-		) VALUES (?, ?, ?, ?, ?, ?, ?)`, profile.TenantID, profile.ProfileID, string(binding.Capability),
+				tenant_id, profile_id, capability, provider, endpoint, options, secret_ref
+			) VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON DUPLICATE KEY UPDATE provider = VALUES(provider), endpoint = VALUES(endpoint), options = VALUES(options), secret_ref = VALUES(secret_ref)`, profile.TenantID, profile.ProfileID, string(binding.Capability),
 			binding.Provider, binding.Endpoint, options, binding.SecretRef); err != nil {
 			return mapDBError(ctx, err, backend.ErrNotFound, backend.ErrDuplicateKey, backend.ErrConflict, backend.ErrInvalid)
 		}
+	}
+	if len(profile.Bindings) == 0 {
+		if _, err := q.ExecContext(ctx, "DELETE FROM backend_profile_binding WHERE tenant_id = ? AND profile_id = ?", profile.TenantID, profile.ProfileID); err != nil {
+			return mapDBError(ctx, err, backend.ErrNotFound, backend.ErrDuplicateKey, backend.ErrConflict, backend.ErrInvalid)
+		}
+		return nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(profile.Bindings)), ",")
+	args := make([]any, 0, 2+len(profile.Bindings))
+	args = append(args, profile.TenantID, profile.ProfileID)
+	for _, binding := range profile.Bindings {
+		args = append(args, string(binding.Capability))
+	}
+	deleteQuery := fmt.Sprintf("DELETE FROM backend_profile_binding WHERE tenant_id = ? AND profile_id = ? AND capability NOT IN (%s)", placeholders)
+	if _, err := q.ExecContext(ctx, deleteQuery, args...); err != nil {
+		return mapDBError(ctx, err, backend.ErrNotFound, backend.ErrDuplicateKey, backend.ErrConflict, backend.ErrInvalid)
 	}
 	return nil
 }

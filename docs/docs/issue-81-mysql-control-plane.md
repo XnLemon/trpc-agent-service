@@ -33,14 +33,18 @@ Repository 继续使用 `database/sql` 的 `*sql.DB`，因此调用方可以复�
 ```text
 TRPC_CONTROL_PLANE_DRIVER=postgres | mysql
 TRPC_POSTGRES_DSN=postgres://...       # driver=postgres
-TRPC_MYSQL_DSN=user:password@tcp(host:3306)/db?parseTime=true&charset=utf8mb4
+TRPC_MYSQL_DSN=user:password@tcp(host:3306)/db?parseTime=true&charset=utf8mb4              # app/runtime account
+TRPC_MYSQL_MIGRATION_DSN=migrator:password@tcp(host:3306)/db?parseTime=true&charset=utf8mb4  # migration account
 ```
 
-默认仍为 PostgreSQL，已有 `TRPC_POSTGRES_DSN` 配置和 API 保持兼容。`mysql` 模式只
-读取 `TRPC_MYSQL_DSN`；缺失驱动、DSN、迁移版本或连接 Ping 失败时在绑定 HTTP 端口前
-fail-closed。DSN 只存在于 Bootstrap 的短生命周期配置中，不能写入运行时快照、Repository
-错误或 telemetry。测试可以传入已经打开的 `*sql.DB`，不要求 Repository 自己关闭借用的
-连接池；Bootstrap 只有在 `OwnDB=true` 时负责关闭它。
+默认仍为 PostgreSQL，已有 `TRPC_POSTGRES_DSN` 配置和 API 保持兼容。`mysql` 模式必须
+同时提供应用/运行时账号的 `TRPC_MYSQL_DSN` 和仅用于迁移的
+`TRPC_MYSQL_MIGRATION_DSN`；Bootstrap 先在独立迁移连接上 Apply + Verify，再以应用连接
+执行只读 schema/权限校验和 Repository 装配。缺失驱动、任一 DSN、迁移版本、必需权限或
+连接 Ping 失败时，在绑定 HTTP 端口前 fail-closed。DSN 只存在于 Bootstrap 的短生命周期
+配置中，不能写入运行时快照、Repository 错误或 telemetry。测试可以传入已经打开的
+`*sql.DB`，不要求 Repository 自己关闭借用的连接池；Bootstrap 只有在 `OwnDB=true` 时
+负责关闭它。
 
 ## SQL 语义映射
 
@@ -148,7 +152,7 @@ collation（不得依赖服务器默认的 `utf8mb4_0900_ai_ci`）。外键显�
 | Migration | `MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN` 指向干净 MySQL 8 服务，执行全量 migration、Verify、摘要不匹配、DDL 后失败/重启恢复和大小写变体 |
 | Repository 集成 | `MYSQL_CONTROL_PLANE_TEST_DSN` 执行五类 Repository 的创建、更新、发布/回滚、生命周期、候选消费、双租户隔离和大小写敏感身份 |
 | 并发/race | MySQL 服务上的 optimistic-lock、同 App revision、候选消费和 Context 取消测试；本地继续运行 `go test -race ./...` |
-| Bootstrap | `TRPC_CONTROL_PLANE_DRIVER=mysql` 选择 MySQL；未知驱动、缺 DSN、迁移失败和重启 rediscovery 均 fail-closed |
+| Bootstrap | `TRPC_CONTROL_PLANE_DRIVER=mysql` 选择 MySQL；双 DSN 账号分离、权限校验、未知驱动、缺 DSN、迁移失败和重启 rediscovery 均 fail-closed |
 
 未设置 MySQL DSN 时，live 测试必须显式 `Skip`，不能把 skip 记为 MySQL 证据。CI 提供
 独立 MySQL 8 服务运行 migration、Repository 和 race smoke；PostgreSQL 现有 job 不变。

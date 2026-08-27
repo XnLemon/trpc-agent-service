@@ -220,6 +220,16 @@ func prepareDatabaseConfig(ctx context.Context, config *Config) error {
 			return ErrInvalidConfig
 		}
 	}
+	if config.VerifyMigrations != nil {
+		if err := config.VerifyMigrations(ctx, config.DB); err != nil {
+			return ErrInvalidConfig
+		}
+	}
+	if driver == ControlPlaneDriverMySQL {
+		if err := mysql.VerifyApplicationPrivileges(ctx, config.DB); err != nil {
+			return ErrInvalidConfig
+		}
+	}
 	if driver == ControlPlaneDriverMySQL {
 		if config.Tenants == nil {
 			config.Tenants = tenantmysql.NewRepository(config.DB)

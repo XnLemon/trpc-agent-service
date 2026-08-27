@@ -200,6 +200,57 @@ func ReleaseLock(ctx context.Context, conn *sql.Conn, name string) error {
 	return nil
 }
 
+// CurrentUser returns the authenticated MySQL account identity without
+// exposing driver diagnostics. Bootstrap uses it to prove that migration and
+// application connections are not the same account.
+func CurrentUser(ctx context.Context, db *sql.DB) (string, error) {
+	if db == nil || ctx == nil {
+		return "", ErrStorage
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	var user string
+	if err := db.QueryRowContext(ctx, "SELECT CURRENT_USER()").Scan(&user); err != nil {
+		return "", MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
+	}
+	if strings.TrimSpace(user) == "" {
+		return "", ErrStorage
+	}
+	return user, nil
+}
+
+// VerifyApplicationPrivileges fails closed when the connected MySQL account
+// still carries schema-changing privileges. Migrations run through a separate
+// account; the application account is limited to control-plane DML and reads.
+func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
+	if db == nil || ctx == nil {
+		return ErrStorage
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var forbidden int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*)
+		FROM (
+			SELECT privilege_type FROM information_schema.user_privileges
+			WHERE grantee = CURRENT_USER()
+			UNION ALL
+			SELECT privilege_type FROM information_schema.schema_privileges
+			WHERE grantee = CURRENT_USER()
+			UNION ALL
+			SELECT privilege_type FROM information_schema.table_privileges
+			WHERE grantee = CURRENT_USER()
+		) AS ddl_privileges
+		WHERE privilege_type IN ('ALL PRIVILEGES', 'ALTER', 'CREATE', 'CREATE VIEW', 'DROP', 'EVENT', 'INDEX', 'REFERENCES', 'TRIGGER')`).Scan(&forbidden); err != nil {
+		return MapError(ctx, err, ErrStorage, ErrStorage, ErrStorage, ErrStorage)
+	}
+	if forbidden != 0 {
+		return ErrStorage
+	}
+	return nil
+}
+
 // Rollback makes a best-effort rollback for a transaction that did not
 // commit.
 func Rollback(tx *sql.Tx) {
@@ -251,7 +302,7 @@ func MapError(ctx context.Context, err error, notFound, duplicate, conflict, inv
 			return duplicate
 		case 1205, 1213:
 			return conflict
-		case 1048, 1264, 1366, 1406, 1451, 1452:
+		case 1048, 1264, 1366, 1406, 1451, 1452, 3819:
 			return invalid
 		}
 	}

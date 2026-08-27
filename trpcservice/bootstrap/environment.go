@@ -42,6 +42,7 @@ const (
 	envControlPlaneDriver = "TRPC_CONTROL_PLANE_DRIVER"
 	envPostgresDSN        = "TRPC_POSTGRES_DSN"
 	envMySQLDSN           = "TRPC_MYSQL_DSN"
+	envMySQLMigrationDSN  = "TRPC_MYSQL_MIGRATION_DSN"
 	// #nosec G101 -- environment variable name, not a credential.
 	envAPIToken = "TRPC_API_TOKEN"
 	envTenantID = "TRPC_TENANT_ID"
@@ -91,6 +92,7 @@ var (
 type environmentConfig struct {
 	driver         ControlPlaneDriver
 	dsn            string
+	migrationDSN   string
 	apiToken       string
 	adminToken     string
 	adminTenants   []string
@@ -143,9 +145,41 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	applyMigrations := applyEnvironmentMigrations
 	verifyMigrations := verifyEnvironmentMigrations
 	if config.driver == ControlPlaneDriverMySQL {
+		migrationDB, migrationErr := openMySQLEnvironmentDatabase(ctx, config.migrationDSN, mysql.Options{MaxOpenConns: 4, MaxIdleConns: 4})
+		var migrationUser string
+		if migrationErr == nil {
+			migrationUser, migrationErr = mysql.CurrentUser(ctx, migrationDB)
+		}
+		if migrationErr == nil {
+			migrationErr = applyMySQLEnvironmentMigrations(ctx, migrationDB)
+		}
+		if migrationErr == nil {
+			migrationErr = verifyMySQLEnvironmentMigrations(ctx, migrationDB)
+		}
+		if migrationDB != nil {
+			if closeErr := migrationDB.Close(); migrationErr == nil {
+				migrationErr = closeErr
+			}
+		}
+		if migrationErr != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, fmt.Errorf("%w: MySQL migrations are not ready", ErrInvalidConfig)
+		}
 		db, err = openMySQLEnvironmentDatabase(ctx, config.dsn, mysql.Options{MaxOpenConns: 8, MaxIdleConns: 8})
-		applyMigrations = applyMySQLEnvironmentMigrations
+		// The application DSN is deliberately verification-only during bootstrap;
+		// migration DDL is executed through the separately provisioned account.
+		applyMigrations = nil
 		verifyMigrations = verifyMySQLEnvironmentMigrations
+		applicationUser, userErr := mysql.CurrentUser(ctx, db)
+		if userErr != nil || applicationUser == migrationUser {
+			_ = db.Close()
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, fmt.Errorf("%w: MySQL migration and application accounts must be distinct", ErrInvalidConfig)
+		}
 	} else {
 		db, err = openDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
 	}
@@ -286,6 +320,13 @@ func selectEnvironmentDatabase(config *environmentConfig) error {
 		return err
 	}
 	config.dsn = dsn
+	if config.driver == ControlPlaneDriverMySQL {
+		migrationDSN, err := requiredEnvironment(envMySQLMigrationDSN)
+		if err != nil {
+			return err
+		}
+		config.migrationDSN = migrationDSN
+	}
 	return nil
 }
 

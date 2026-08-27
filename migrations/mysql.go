@@ -190,16 +190,36 @@ var requiredMySQLTables = []mysqlSchemaTable{
 type mysqlSchemaIndex struct {
 	table, name string
 	unique      bool
+	columns     []string
 }
 
 var requiredMySQLIndexes = []mysqlSchemaIndex{
-	{table: "tenant", name: "tenant_key_idx", unique: true},
-	{table: "model_profile", name: "model_profile_key_idx", unique: true},
-	{table: "agent_app", name: "agent_app_key_idx", unique: true},
-	{table: "backend_profile", name: "backend_profile_key_idx", unique: true},
-	{table: "channel_binding", name: "channel_binding_key_idx", unique: true},
-	{table: "channel_binding", name: "channel_binding_active_account_idx", unique: true},
-	{table: "channel_binding", name: "channel_binding_candidate_idx", unique: false},
+	{table: "tenant", name: "tenant_key_idx", unique: true, columns: []string{"tenant_key"}},
+	{table: "model_profile", name: "model_profile_key_idx", unique: true, columns: []string{"tenant_id", "profile_key"}},
+	{table: "agent_app", name: "agent_app_key_idx", unique: true, columns: []string{"tenant_id", "app_key"}},
+	{table: "backend_profile", name: "backend_profile_key_idx", unique: true, columns: []string{"tenant_id", "profile_key"}},
+	{table: "channel_binding", name: "channel_binding_key_idx", unique: true, columns: []string{"tenant_id", "binding_key"}},
+	{table: "channel_binding", name: "channel_binding_active_account_idx", unique: true, columns: []string{"channel", "active_provider_account_id"}},
+	{table: "channel_binding", name: "channel_binding_candidate_idx", unique: false, columns: []string{"channel", "public_route_key_digest", "status"}},
+}
+
+var requiredMySQLTriggers = []string{
+	"agent_app_revision_guard_ins",
+	"agent_app_revision_guard_upd",
+	"agent_revision_immutable_upd",
+	"agent_revision_immutable_del",
+	"agent_revision_tool_guard_ins",
+	"agent_revision_tool_guard_upd",
+	"agent_revision_tool_guard_del",
+	"tenant_identity_immutable_upd",
+	"model_profile_identity_immutable_upd",
+	"agent_app_identity_immutable_upd",
+	"backend_profile_insert_guard",
+	"backend_profile_lifecycle_guard",
+	"backend_profile_identity_guard",
+	"backend_binding_identity_guard",
+	"backend_binding_delete_guard",
+	"channel_binding_identity_guard",
 }
 
 func verifyMySQLSchema(ctx context.Context, conn *sql.Conn) error {
@@ -229,11 +249,14 @@ func verifyMySQLSchema(ctx context.Context, conn *sql.Conn) error {
 			return ErrInvalidHistory
 		}
 	}
-	return verifyMySQLIndexes(ctx, conn)
+	if err := verifyMySQLIndexes(ctx, conn); err != nil {
+		return err
+	}
+	return verifyMySQLTriggers(ctx, conn)
 }
 
 func verifyMySQLIndexes(ctx context.Context, conn *sql.Conn) error {
-	rows, err := conn.QueryContext(ctx, `SELECT DISTINCT table_name, index_name, non_unique
+	rows, err := conn.QueryContext(ctx, `SELECT table_name, index_name, non_unique, seq_in_index, column_name, sub_part
 		FROM information_schema.statistics
 		WHERE table_schema = DATABASE() AND
 		((table_name = ? AND index_name = ?) OR (table_name = ? AND index_name = ?) OR
@@ -244,21 +267,73 @@ func verifyMySQLIndexes(ctx context.Context, conn *sql.Conn) error {
 		return ErrInvalidHistory
 	}
 	defer func() { _ = rows.Close() }()
-	found := make(map[string]bool, len(requiredMySQLIndexes))
+	type foundIndex struct {
+		unique  bool
+		columns map[int]string
+	}
+	found := make(map[string]foundIndex, len(requiredMySQLIndexes))
 	for rows.Next() {
 		var table, name string
-		var nonUnique int
-		if err := rows.Scan(&table, &name, &nonUnique); err != nil {
+		var nonUnique, sequence int
+		var column string
+		var subPart sql.NullInt64
+		if err := rows.Scan(&table, &name, &nonUnique, &sequence, &column, &subPart); err != nil {
 			return ErrInvalidHistory
 		}
-		found[table+"/"+name] = nonUnique == 0
+		if subPart.Valid || sequence < 1 || (nonUnique != 0 && nonUnique != 1) {
+			return ErrInvalidHistory
+		}
+		key := table + "/" + name
+		entry := found[key]
+		if entry.columns == nil {
+			entry.columns = make(map[int]string)
+			entry.unique = nonUnique == 0
+		}
+		if entry.unique != (nonUnique == 0) || entry.columns[sequence] != "" {
+			return ErrInvalidHistory
+		}
+		entry.columns[sequence] = column
+		found[key] = entry
 	}
 	if err := rows.Err(); err != nil {
 		return ErrInvalidHistory
 	}
 	for _, index := range requiredMySQLIndexes {
 		key := index.table + "/" + index.name
-		if unique, ok := found[key]; !ok || unique != index.unique {
+		entry, ok := found[key]
+		if !ok || entry.unique != index.unique || len(entry.columns) != len(index.columns) {
+			return ErrInvalidHistory
+		}
+		for sequence, column := range index.columns {
+			if entry.columns[sequence+1] != column {
+				return ErrInvalidHistory
+			}
+		}
+	}
+	return nil
+}
+
+func verifyMySQLTriggers(ctx context.Context, conn *sql.Conn) error {
+	rows, err := conn.QueryContext(ctx, `SELECT trigger_name
+		FROM information_schema.triggers
+		WHERE trigger_schema = DATABASE() AND trigger_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, mysqlTriggerArgs()...)
+	if err != nil {
+		return ErrInvalidHistory
+	}
+	defer func() { _ = rows.Close() }()
+	found := make(map[string]bool, len(requiredMySQLTriggers))
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return ErrInvalidHistory
+		}
+		found[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return ErrInvalidHistory
+	}
+	for _, name := range requiredMySQLTriggers {
+		if !found[name] {
 			return ErrInvalidHistory
 		}
 	}
@@ -277,6 +352,14 @@ func mysqlIndexArgs() []any {
 	args := make([]any, 0, len(requiredMySQLIndexes)*2)
 	for _, index := range requiredMySQLIndexes {
 		args = append(args, index.table, index.name)
+	}
+	return args
+}
+
+func mysqlTriggerArgs() []any {
+	args := make([]any, 0, len(requiredMySQLTriggers))
+	for _, trigger := range requiredMySQLTriggers {
+		args = append(args, trigger)
 	}
 	return args
 }
@@ -407,7 +490,7 @@ func isMySQLAlreadyApplied(err error) bool {
 		return false
 	}
 	switch mysqlErr.Number {
-	case 1022, 1050, 1061, 1826:
+	case 1022, 1050, 1061, 1359, 1826:
 		return true
 	default:
 		return false
@@ -415,12 +498,14 @@ func isMySQLAlreadyApplied(err error) bool {
 }
 
 // splitMySQLStatements separates ordinary DDL statements while respecting
-// quoted strings, identifiers, and SQL comments. The control-plane migration
-// deliberately contains no stored-program bodies, so this remains a small
-// deterministic parser rather than enabling multiStatements on the DSN.
+// quoted strings, identifiers, SQL comments, and compound trigger bodies. The
+// runner still executes one statement at a time rather than enabling
+// multiStatements on the DSN.
 func splitMySQLStatements(script string) []string {
 	var statements []string
 	start := 0
+	compoundDepth := 0
+	skipCompoundKeyword := false
 	for i := 0; i < len(script); {
 		if end, ok := skipMySQLComment(script, i); ok {
 			i = end
@@ -430,11 +515,42 @@ func splitMySQLStatements(script string) []string {
 			i = end
 			continue
 		}
-		if script[i] == ';' {
-			if statement := strings.TrimSpace(script[start:i]); statement != "" {
-				statements = append(statements, statement)
+		if isMySQLIdentifierStart(script[i]) {
+			end := i + 1
+			for end < len(script) && isMySQLIdentifierPart(script[end]) {
+				end++
 			}
-			start = i + 1
+			word := strings.ToUpper(script[i:end])
+			if skipCompoundKeyword {
+				skipCompoundKeyword = false
+			} else {
+				switch word {
+				case "BEGIN", "IF", "CASE", "LOOP", "WHILE", "REPEAT":
+					compoundDepth++
+				case "END":
+					compoundDepth--
+					if compoundDepth < 0 {
+						compoundDepth = 0
+					}
+					next, nextEnd := nextMySQLWord(script, end)
+					if next == "IF" || next == "CASE" || next == "LOOP" || next == "WHILE" || next == "REPEAT" {
+						// Do not count the qualifier in END IF/CASE/LOOP/
+						// WHILE/REPEAT as a new opening block.
+						skipCompoundKeyword = true
+						_ = nextEnd
+					}
+				}
+			}
+			i = end
+			continue
+		}
+		if script[i] == ';' {
+			if compoundDepth == 0 {
+				if statement := strings.TrimSpace(script[start:i]); statement != "" {
+					statements = append(statements, statement)
+				}
+				start = i + 1
+			}
 			i++
 			continue
 		}
@@ -444,6 +560,32 @@ func splitMySQLStatements(script string) []string {
 		statements = append(statements, statement)
 	}
 	return statements
+}
+
+func isMySQLIdentifierStart(ch byte) bool {
+	return ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch == '_'
+}
+
+func isMySQLIdentifierPart(ch byte) bool {
+	return isMySQLIdentifierStart(ch) || ch >= '0' && ch <= '9' || ch == '$'
+}
+
+func nextMySQLWord(script string, start int) (string, int) {
+	for start < len(script) {
+		if script[start] == ' ' || script[start] == '\t' || script[start] == '\n' || script[start] == '\r' {
+			start++
+			continue
+		}
+		if !isMySQLIdentifierStart(script[start]) {
+			return "", start
+		}
+		end := start + 1
+		for end < len(script) && isMySQLIdentifierPart(script[end]) {
+			end++
+		}
+		return strings.ToUpper(script[start:end]), end
+	}
+	return "", start
 }
 
 func skipMySQLComment(script string, start int) (int, bool) {
