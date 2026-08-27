@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 )
 
@@ -67,5 +68,20 @@ func TestMaxTimeChoosesLatestTimestamp(t *testing.T) {
 	}
 	if got := maxTime(second, first); !got.Equal(second) {
 		t.Fatalf("maxTime(second, first) = %v, want second", got)
+	}
+}
+
+func TestReplaceRevisionToolsClearsEmptySet(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectExec("DELETE FROM agent_app_revision_tool").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := replaceRevisionTools(context.Background(), db, agent.Revision{TenantID: "tenant", AppID: "app", Revision: 1}); err != nil {
+		t.Fatalf("replace empty tools = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
