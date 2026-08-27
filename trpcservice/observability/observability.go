@@ -14,9 +14,11 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/metric"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
@@ -172,8 +174,31 @@ func NewOTLPProvider(ctx context.Context, config OTLPConfig) (Provider, error) {
 		_ = exporter.Shutdown(ctx)
 		return NewNoopProvider(), err
 	}
+	metricOptions := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpoint(config.Endpoint)}
+	if config.Insecure {
+		metricOptions = append(metricOptions, otlpmetrichttp.WithInsecure())
+	}
+	if len(config.Headers) > 0 {
+		headers := make(map[string]string, len(config.Headers))
+		for key, value := range config.Headers {
+			headers[key] = value
+		}
+		metricOptions = append(metricOptions, otlpmetrichttp.WithHeaders(headers))
+	}
+	metricExporter, err := otlpmetrichttp.New(ctx, metricOptions...)
+	if err != nil {
+		_ = exporter.Shutdown(ctx)
+		return NewNoopProvider(), err
+	}
 	tracerProvider := sdktrace.NewTracerProvider(sdktrace.WithBatcher(exporter), sdktrace.WithResource(resourceValue))
-	return NewProvider(Config{ServiceName: config.ServiceName, TracerProvider: tracerProvider, Shutdown: tracerProvider.Shutdown}), nil
+	meterProvider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter)),
+		sdkmetric.WithResource(resourceValue),
+	)
+	shutdown := func(shutdownCtx context.Context) error {
+		return errors.Join(tracerProvider.Shutdown(shutdownCtx), meterProvider.Shutdown(shutdownCtx))
+	}
+	return NewProvider(Config{ServiceName: config.ServiceName, TracerProvider: tracerProvider, MeterProvider: meterProvider, Shutdown: shutdown}), nil
 }
 
 type provider struct {
@@ -330,9 +355,18 @@ func (l slogLogger) Log(ctx context.Context, level Level, msg string, attrs ...A
 var sensitivePattern = regexp.MustCompile(`(?i)(bearer\s+|api[_-]?key\s*[=:]\s*|token\s*[=:]\s*|authorization\s*[=:]\s*|secret(?:[_-]?ref)?\s*[=:]\s*|password\s*[=:]\s*)[^\s,;]+`)
 var dsnPattern = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)([^/@\s]+):([^/@\s]+)@`)
 var bearerPattern = regexp.MustCompile(`(?i)Bearer\s+[^\s,;]+`)
+var attributeHighCardinalityPattern = regexp.MustCompile(`(?i)(session|user|message|request|trace|[0-9a-f]{16,}|https?://)`)
 var allowedAttributeKeys = map[string]struct{}{
 	"component": {}, "operation": {}, "status": {}, "error_class": {},
-	"tenant_hash": {}, "app_hash": {}, "model_family": {}, "provider": {}, "channel": {},
+	"tenant_hash": {}, "app_hash": {}, "model_family": {}, "provider": {}, "channel": {}, "currency": {},
+}
+var allowedAttributeValues = map[string]map[string]struct{}{
+	"component":    {"http": {}, "gateway": {}, "runner": {}, "model": {}, "tool": {}, "storage": {}, "channel": {}},
+	"status":       {"started": {}, "active": {}, "complete": {}, "ok": {}, "error": {}, "success": {}, "failure": {}, "canceled": {}, "timeout": {}, "retry": {}, "dead_letter": {}},
+	"error_class":  {"": {}, "error": {}, "canceled": {}, "timeout": {}, "invalid": {}, "unauthenticated": {}, "not_ready": {}, "rate_limited": {}, "duplicate": {}, "unavailable": {}, "storage": {}, "model": {}, "tool": {}},
+	"provider":     {"openai": {}, "postgres": {}, "inmemory": {}, "other": {}},
+	"channel":      {"api": {}, "telegram": {}, "wecom": {}, "outbox": {}, "other": {}},
+	"model_family": {"gpt": {}, "claude": {}, "gemini": {}, "other": {}},
 }
 var allowedOperations = map[string]struct{}{
 	OperationHTTPRequest: {}, OperationGatewayDispatch: {}, OperationRunnerExecution: {},
@@ -350,6 +384,20 @@ func sanitizeAttributes(attrs []Attribute) []Attribute {
 			if _, ok := allowedOperations[attr.Value]; !ok {
 				continue
 			}
+		} else if values, ok := allowedAttributeValues[attr.Key]; ok {
+			if _, allowed := values[attr.Value]; !allowed {
+				continue
+			}
+		} else if attr.Key == "tenant_hash" || attr.Key == "app_hash" {
+			if len(attr.Value) != 16 || strings.Trim(attr.Value, "0123456789abcdef") != "" {
+				continue
+			}
+		} else if attr.Key == "currency" {
+			if len(attr.Value) != 3 || attr.Value != strings.ToLower(attr.Value) || attr.Value == "xxx" || strings.Trim(attr.Value, "abcdefghijklmnopqrstuvwxyz") != "" {
+				continue
+			}
+		} else if len(attr.Value) > 64 || strings.ContainsAny(attr.Value, "\r\n") || attributeHighCardinalityPattern.MatchString(attr.Value) {
+			continue
 		}
 		out = append(out, Attribute{Key: attr.Key, Value: RedactString(attr.Value)})
 	}
@@ -435,20 +483,26 @@ func DurationMilliseconds(start time.Time) float64 {
 // adapters. The returned finish function records a stable status/error class
 // and always ends the span; it never exposes provider error text.
 func StartOperation(ctx context.Context, provider Provider, operation, component string) (context.Context, Span, func(error)) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if provider == nil {
 		provider = NewNoopProvider()
 	}
 	started, span := provider.Tracer("trpcservice.operations").Start(ctx, operation, Attribute{Key: "component", Value: component}, Attribute{Key: "operation", Value: operation})
+	var once sync.Once
 	finish := func(err error) {
-		if err != nil {
-			class := ErrorClass(err)
-			span.SetAttributes(Attribute{Key: "error_class", Value: class})
-			span.SetStatus(StatusError, class)
-			span.RecordError(err)
-		} else {
-			span.SetStatus(StatusOK, "")
-		}
-		span.End()
+		once.Do(func() {
+			if err != nil {
+				class := ErrorClass(err)
+				span.SetAttributes(Attribute{Key: "error_class", Value: class})
+				span.SetStatus(StatusError, class)
+				span.RecordError(err)
+			} else {
+				span.SetStatus(StatusOK, "")
+			}
+			span.End()
+		})
 	}
 	return started, span, finish
 }

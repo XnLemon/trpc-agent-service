@@ -235,11 +235,7 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 			outcome = errors.New("wecom callback failed")
 		}
 		finish(outcome)
-		status := "success"
-		if outcome != nil {
-			status = "error"
-		}
-		_ = h.metrics.Duration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "wecom", "status": status, "error_class": observability.ErrorClass(outcome)})
+		_ = h.metrics.Operation(operationCtx, started, map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "wecom"}, outcome)
 	}()
 	r = r.WithContext(operationCtx)
 	defer func() { _ = r.Body.Close() }()
@@ -273,7 +269,7 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	executionCtx, cancel, ok := h.beginDrain()
+	executionCtx, cancel, ok := h.beginDrain(operationCtx)
 	if !ok {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
@@ -344,15 +340,35 @@ func (h *Handler) recordIngress(ctx context.Context, principal gateway.Principal
 	return err
 }
 
-func (h *Handler) beginDrain() (context.Context, context.CancelFunc, bool) {
+func (h *Handler) beginDrain(parent context.Context) (context.Context, context.CancelFunc, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closing {
 		return nil, nil, false
 	}
-	ctx, cancel := context.WithTimeout(h.baseCtx, h.executionTimeout)
+	if parent == nil {
+		parent = h.baseCtx
+		if parent == nil {
+			parent = context.Background()
+		}
+	}
+	// Keep the verified receive context as the trace parent while also making
+	// handler shutdown cancel every accepted drain. A request context alone is
+	// insufficient because Close must join in-flight dispatches immediately.
+	merged, mergeCancel := context.WithCancel(parent)
+	base := h.baseCtx
+	if base == nil {
+		base = context.Background()
+	}
+	stopBase := context.AfterFunc(base, mergeCancel)
+	withTimeout, timeoutCancel := context.WithTimeout(merged, h.executionTimeout)
+	cancel := func() {
+		timeoutCancel()
+		mergeCancel()
+		stopBase()
+	}
 	h.drains.Add(1)
-	return ctx, cancel, true
+	return withTimeout, cancel, true
 }
 
 // BeginShutdown prevents accepting new execution drains and cancels drains already owned by this Handler.

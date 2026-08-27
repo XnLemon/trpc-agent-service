@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
@@ -10,6 +11,99 @@ import (
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
+
+func TestTelemetryModelClosesStreamingOperationOnce(t *testing.T) {
+	provider := &runtimeTelemetryProvider{}
+	options := applyTelemetryOptions(t, provider)
+	before, err := options.ModelCallbacks.RunBeforeModel(context.Background(), &trpcmodel.BeforeModelArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped := wrapTelemetryModel(streamingModel{responses: []*trpcmodel.Response{
+		{IsPartial: true, Usage: &trpcmodel.Usage{PromptTokens: 1, CompletionTokens: 2}},
+		{Done: true, Usage: &trpcmodel.Usage{PromptTokens: 5, CompletionTokens: 7}},
+	}})
+	responses, err := wrapped.GenerateContent(before.Context, &trpcmodel.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range responses {
+	}
+	if _, err := options.ModelCallbacks.RunAfterModel(before.Context, &trpcmodel.AfterModelArgs{Response: &trpcmodel.Response{Done: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.spans) != 1 || provider.spans[0].status != observability.StatusOK || !provider.spans[0].ended {
+		t.Fatalf("stream span = %+v", provider.spans)
+	}
+	assertTelemetryMetric(t, provider, metrics.TokensTotal, 5, map[string]string{"component": "model", "provider": "openai", "model_family": "gpt"})
+	assertTelemetryMetric(t, provider, metrics.TokensTotal, 7, map[string]string{"component": "model", "provider": "openai", "model_family": "gpt"})
+	if countTelemetryMetrics(provider, metrics.OperationDuration) != 1 || countTelemetryMetrics(provider, metrics.RequestsTotal) != 2 {
+		t.Fatalf("terminal model metrics = %#v", provider.metrics)
+	}
+}
+
+func TestTelemetryModelMarksEarlyStreamCloseAndGenerationError(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		model trpcmodel.Model
+	}{
+		{name: "early close", model: streamingModel{responses: []*trpcmodel.Response{{IsPartial: true}}}},
+		{name: "generation error", model: streamingModel{err: errors.New("provider failure")}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &runtimeTelemetryProvider{}
+			options := applyTelemetryOptions(t, provider)
+			before, err := options.ModelCallbacks.RunBeforeModel(context.Background(), &trpcmodel.BeforeModelArgs{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			responses, generationErr := wrapTelemetryModel(test.model).GenerateContent(before.Context, &trpcmodel.Request{})
+			if test.name == "generation error" {
+				if generationErr == nil || responses != nil {
+					t.Fatalf("generation result = %v/%v", responses, generationErr)
+				}
+			} else {
+				if generationErr != nil {
+					t.Fatal(generationErr)
+				}
+				for range responses {
+				}
+			}
+			if len(provider.spans) != 1 || provider.spans[0].status != observability.StatusError || !provider.spans[0].ended || provider.spans[0].recordedError == nil {
+				t.Fatalf("failed stream span = %+v", provider.spans)
+			}
+		})
+	}
+}
+
+func countTelemetryMetrics(provider *runtimeTelemetryProvider, name string) int {
+	count := 0
+	for _, metric := range provider.metrics {
+		if metric.name == name {
+			count++
+		}
+	}
+	return count
+}
+
+type streamingModel struct {
+	responses []*trpcmodel.Response
+	err       error
+}
+
+func (model streamingModel) Info() trpcmodel.Info { return trpcmodel.Info{Name: "test"} }
+
+func (model streamingModel) GenerateContent(context.Context, *trpcmodel.Request) (<-chan *trpcmodel.Response, error) {
+	if model.err != nil {
+		return nil, model.err
+	}
+	responses := make(chan *trpcmodel.Response, len(model.responses))
+	for _, response := range model.responses {
+		responses <- response
+	}
+	close(responses)
+	return responses, nil
+}
 
 //nolint:gocyclo // Table-like callback contract coverage intentionally exercises all telemetry outcomes.
 func TestTelemetryOptionsRecordsModelAndToolOutcomes(t *testing.T) {
@@ -25,10 +119,11 @@ func TestTelemetryOptionsRecordsModelAndToolOutcomes(t *testing.T) {
 		}
 
 		assertTelemetrySpan(t, provider, observability.OperationModelCall, observability.StatusOK, false)
-		assertTelemetryMetric(t, provider, metrics.RequestsTotal, 1, map[string]string{"component": "model", "operation": observability.OperationModelCall, "provider": "openai", "model_family": "gpt-family", "status": "started"})
-		assertTelemetryMetric(t, provider, metrics.TokensTotal, 7, map[string]string{"component": "model", "provider": "openai", "model_family": "gpt-family"})
-		assertTelemetryMetric(t, provider, metrics.TokensTotal, 11, map[string]string{"component": "model", "provider": "openai", "model_family": "gpt-family"})
-		assertTelemetryMetric(t, provider, metrics.OperationDuration, -1, map[string]string{"component": "model", "operation": observability.OperationModelCall, "provider": "openai", "model_family": "gpt-family", "status": "success", "error_class": ""})
+		assertTelemetryMetric(t, provider, metrics.RequestsTotal, 1, map[string]string{"component": "model", "operation": observability.OperationModelCall, "provider": "openai", "model_family": "gpt", "status": "started"})
+		assertTelemetryMetric(t, provider, metrics.RequestsTotal, 1, map[string]string{"component": "model", "operation": observability.OperationModelCall, "provider": "openai", "model_family": "gpt", "status": "success", "error_class": ""})
+		assertTelemetryMetric(t, provider, metrics.TokensTotal, 7, map[string]string{"component": "model", "provider": "openai", "model_family": "gpt"})
+		assertTelemetryMetric(t, provider, metrics.TokensTotal, 11, map[string]string{"component": "model", "provider": "openai", "model_family": "gpt"})
+		assertTelemetryMetric(t, provider, metrics.OperationDuration, -1, map[string]string{"component": "model", "operation": observability.OperationModelCall, "provider": "openai", "model_family": "gpt", "status": "success", "error_class": ""})
 	})
 
 	t.Run("model error records status", func(t *testing.T) {
@@ -42,7 +137,8 @@ func TestTelemetryOptionsRecordsModelAndToolOutcomes(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertTelemetrySpan(t, provider, observability.OperationModelCall, observability.StatusError, true)
-		assertTelemetryMetric(t, provider, metrics.OperationDuration, -1, map[string]string{"component": "model", "operation": observability.OperationModelCall, "provider": "openai", "model_family": "gpt-family", "status": "error", "error_class": "canceled"})
+		assertTelemetryMetric(t, provider, metrics.RequestsTotal, 1, map[string]string{"component": "model", "operation": observability.OperationModelCall, "provider": "openai", "model_family": "gpt", "status": "canceled", "error_class": "canceled"})
+		assertTelemetryMetric(t, provider, metrics.OperationDuration, -1, map[string]string{"component": "model", "operation": observability.OperationModelCall, "provider": "openai", "model_family": "gpt", "status": "canceled", "error_class": "canceled"})
 	})
 
 	t.Run("tool success and error record outcomes", func(t *testing.T) {
@@ -74,7 +170,7 @@ func TestTelemetryOptionsRecordsModelAndToolOutcomes(t *testing.T) {
 		}
 		assertTelemetryMetric(t, provider, metrics.RequestsTotal, 1, map[string]string{"component": "tool", "operation": observability.OperationToolCall, "status": "started"})
 		assertTelemetryMetric(t, provider, metrics.OperationDuration, -1, map[string]string{"component": "tool", "operation": observability.OperationToolCall, "status": "success", "error_class": ""})
-		assertTelemetryMetric(t, provider, metrics.OperationDuration, -1, map[string]string{"component": "tool", "operation": observability.OperationToolCall, "status": "error", "error_class": "timeout"})
+		assertTelemetryMetric(t, provider, metrics.OperationDuration, -1, map[string]string{"component": "tool", "operation": observability.OperationToolCall, "status": "timeout", "error_class": "timeout"})
 	})
 
 	t.Run("nil callback args are ignored safely", func(t *testing.T) {
@@ -90,7 +186,7 @@ func TestTelemetryOptionsRecordsModelAndToolOutcomes(t *testing.T) {
 		if len(provider.spans) != 1 {
 			t.Fatalf("spans = %d, want 1", len(provider.spans))
 		}
-		if span := provider.spans[0]; span.status != observability.StatusOK || !span.ended || span.recordedError != nil {
+		if span := provider.spans[0]; span.status != observability.StatusError || !span.ended || span.recordedError == nil {
 			t.Fatalf("nil args span = %+v", span)
 		}
 	})

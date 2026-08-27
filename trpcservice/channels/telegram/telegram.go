@@ -381,11 +381,7 @@ func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update)
 	_ = adapter.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "telegram", "status": "started"})
 	defer func() {
 		finish(err)
-		status := "success"
-		if err != nil {
-			status = "error"
-		}
-		_ = adapter.metrics.Duration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "telegram", "status": status, "error_class": observability.ErrorClass(err)})
+		_ = adapter.metrics.Operation(operationCtx, started, map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "telegram"}, err)
 	}()
 	ctx = operationCtx
 	if err := ctx.Err(); err != nil {
@@ -559,11 +555,7 @@ func (adapter *Adapter) sendText(ctx context.Context, message *models.Message, t
 	operationCtx, _, finish := observability.StartOperation(ctx, adapter.telemetry, observability.OperationChannelSend, "channel")
 	defer func() {
 		finish(err)
-		status := "success"
-		if err != nil {
-			status = "error"
-		}
-		_ = adapter.metrics.Duration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "channel": "telegram", "status": status, "error_class": observability.ErrorClass(err)})
+		_ = adapter.metrics.Operation(operationCtx, started, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "channel": "telegram", "provider": "other"}, err)
 	}()
 	ctx = operationCtx
 	chunks := splitText(text, maximumReplyRunes)
@@ -575,8 +567,10 @@ func (adapter *Adapter) sendText(ctx context.Context, message *models.Message, t
 			ChatID: message.Chat.ID, MessageThreadID: message.MessageThreadID, Text: chunk,
 		})
 		if err != nil {
+			_ = adapter.metrics.Delivery(ctx, map[string]string{"component": "channel", "channel": "telegram", "provider": "other", "status": "failure", "error_class": "error"})
 			return ErrSendMessage
 		}
+		_ = adapter.metrics.Delivery(ctx, map[string]string{"component": "channel", "channel": "telegram", "provider": "other", "status": "success", "error_class": ""})
 	}
 	return nil
 }

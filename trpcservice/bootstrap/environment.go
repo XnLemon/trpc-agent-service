@@ -20,6 +20,7 @@ import (
 	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
@@ -162,6 +163,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, ErrInvalidConfig
 	}
+	auditWriter = metrics.WrapAuditWriter(auditWriter, config.telemetry)
 	wecomFactory, wecomWorker, err := environmentWeComComponents(config, channelRepo, tenantRepo, appRepo, runtimeStore, auditWriter)
 	if err != nil {
 		_ = delegateSessions.Close()
@@ -232,7 +234,7 @@ func environmentWeComComponents(config environmentConfig, channelsRepo *channelp
 	if err != nil {
 		return nil, nil, err
 	}
-	worker, err := newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelsRepo, Credentials: credentials}, TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second, AuditWriter: auditWriter, Observability: config.telemetry})
+	worker, err := newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelsRepo, Credentials: credentials}, Channel: "wecom", ProviderName: "wecom", TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second, AuditWriter: auditWriter, Observability: config.telemetry})
 	return factory, worker, err
 }
 
@@ -254,7 +256,7 @@ func environmentRegistries(config environmentConfig, delegateSessions session.Se
 		if err := modelRegistry.Register(identity.TenantID, config.modelProvider, environmentModelFactory{}); err != nil {
 			return nil, nil, nil, err
 		}
-		if err := backendRegistry.Register(identity.TenantID, backend.CapabilitySession, "inmemory", environmentSessionCapabilityProvider{delegate: delegateSessions, store: runtimeStore}); err != nil {
+		if err := backendRegistry.Register(identity.TenantID, backend.CapabilitySession, "inmemory", environmentSessionCapabilityProvider{delegate: delegateSessions, store: runtimeStore, telemetry: config.telemetry, backend: config.runtimeStorage}); err != nil {
 			return nil, nil, nil, err
 		}
 	}
@@ -562,15 +564,17 @@ func (resolver environmentSecretResolver) Resolve(ctx context.Context, scope mod
 type environmentModelFactory struct{}
 
 type environmentSessionCapabilityProvider struct {
-	delegate session.Service
-	store    runtimestorage.RuntimeStore
+	delegate  session.Service
+	store     runtimestorage.RuntimeStore
+	telemetry observability.Provider
+	backend   string
 }
 
 func (provider environmentSessionCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, _ backend.CapabilityBinding, _ modelprofile.SecretValue) (any, error) {
 	if ctx == nil {
 		return nil, context.Canceled
 	}
-	return runtimesessionpostgres.New(input.TenantID, provider.delegate, provider.store)
+	return runtimesessionpostgres.NewWithObservability(input.TenantID, provider.delegate, provider.store, provider.telemetry, provider.backend)
 }
 
 func (environmentModelFactory) New(ctx context.Context, input modelprofile.ModelFactoryInput, secret modelprofile.SecretValue) (trpcmodel.Model, error) {

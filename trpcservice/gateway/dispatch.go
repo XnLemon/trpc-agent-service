@@ -135,8 +135,9 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
 	}
+	config.AuditWriter = metrics.WrapAuditWriter(config.AuditWriter, config.Observability)
 	if config.Materializer == nil && config.RuntimeStore != nil {
-		materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: config.RuntimeStore})
+		materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: config.RuntimeStore, Observability: config.Observability})
 		if err != nil {
 			return nil, err
 		}
@@ -172,7 +173,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		span.SetStatus(observability.StatusError, observability.ErrorClass(cause))
 		span.RecordError(cause)
 		span.End()
-		_ = dispatcher.metrics.Duration(ctx, observability.DurationMilliseconds(started), map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch, "status": "error", "error_class": observability.ErrorClass(cause)})
+		_ = dispatcher.metrics.Operation(ctx, started, map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch}, cause)
 	}
 
 	plan, err := dispatcher.resolver.Resolve(ctx, request.Principal)
@@ -219,6 +220,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	runnerValue := lease.Runner()
 	if runnerValue == nil {
 		_ = lease.Release()
+		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
 		dispatcher.failDurable(durable, ErrRunnerUnavailable)
 		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
 			dispatcher.failDurable(durable, auditErr)
@@ -228,14 +230,16 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		finishWithError(ErrRunnerUnavailable)
 		return nil, ErrRunnerUnavailable
 	}
+	_ = dispatcher.metrics.Lease(ctx, 1, map[string]string{"component": "runner", "status": "active"})
 	runnerStarted := time.Now()
 	runnerCtx, _, finishRunner := observability.StartOperation(ctx, dispatcher.telemetry, observability.OperationRunnerExecution, "runner")
 	_ = dispatcher.metrics.Request(runnerCtx, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution, "status": "started"})
 	runnerEvents, err := runnerValue.Run(runnerCtx, identity.UserID, identity.SessionID, trpcmodel.NewUserMessage(message.Content), trpcagent.WithRequestID(requestID))
 	if err != nil {
 		finishRunner(err)
-		_ = dispatcher.metrics.Duration(runnerCtx, observability.DurationMilliseconds(runnerStarted), map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution, "status": "error", "error_class": observability.ErrorClass(err)})
+		_ = dispatcher.metrics.Operation(runnerCtx, runnerStarted, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, err)
 		_ = lease.Release()
+		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
 		dispatcher.failDurable(durable, err)
 		eventType, errorType := audit.EventExecutionFailed, string(audit.ErrorUnavailable)
 		if IsContextCancellation(err) {
@@ -255,8 +259,9 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	}
 	if runnerEvents == nil {
 		finishRunner(ErrExecution)
-		_ = dispatcher.metrics.Duration(runnerCtx, observability.DurationMilliseconds(runnerStarted), map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution, "status": "error", "error_class": "error"})
+		_ = dispatcher.metrics.Operation(runnerCtx, runnerStarted, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, ErrExecution)
 		_ = lease.Release()
+		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
 		dispatcher.failDurable(durable, ErrExecution)
 		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
 			dispatcher.failDurable(durable, auditErr)
@@ -318,9 +323,13 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 	_ = dispatcher.metrics.Request(operationCtx, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "status": "started"})
 	defer func() {
 		finish(err)
+		_ = dispatcher.metrics.Operation(operationCtx, started, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation}, err)
 		status := "success"
 		if err != nil {
-			status = "error"
+			status = observability.ErrorClass(err)
+			if status == "" {
+				status = "error"
+			}
 		}
 		_ = dispatcher.metrics.BackendDuration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "status": status, "error_class": observability.ErrorClass(err)})
 	}()
@@ -455,7 +464,10 @@ func (dispatcher *Dispatcher) finishDurable(requestID, traceID string, durable *
 
 func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, finishRunner func(error), runnerStarted time.Time) {
 	defer close(output)
-	defer func() { _ = lease.Release() }()
+	defer func() {
+		_ = lease.Release()
+		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
+	}()
 	var terminalErr error
 	var reply strings.Builder
 	var terminalEventType audit.EventType
@@ -481,17 +493,11 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 	defer func() {
 		if finishRunner != nil {
 			finishRunner(terminalErr)
-			status := "complete"
-			if terminalErr != nil {
-				status = "error"
-			}
-			_ = dispatcher.metrics.Duration(ctx, observability.DurationMilliseconds(runnerStarted), map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution, "status": status, "error_class": observability.ErrorClass(terminalErr)})
+			_ = dispatcher.metrics.Operation(ctx, runnerStarted, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, terminalErr)
 		}
 		terminalErr = dispatcher.finalizeForward(requestID, traceID, durable, principal, terminalErr, reply.String(), terminalEventType, terminalErrorType, finalizeAudit)
 		_ = dispatcher.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
-		status := "complete"
 		if terminalErr != nil {
-			status = "error"
 			class := observability.ErrorClass(terminalErr)
 			span.SetAttributes(observability.Attribute{Key: "error_class", Value: class})
 			span.SetStatus(observability.StatusError, class)
@@ -499,7 +505,7 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		} else {
 			span.SetStatus(observability.StatusOK, "")
 		}
-		_ = dispatcher.metrics.Duration(ctx, observability.DurationMilliseconds(started), map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch, "status": status, "error_class": observability.ErrorClass(terminalErr)})
+		_ = dispatcher.metrics.Operation(ctx, started, map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch}, terminalErr)
 		span.End()
 	}()
 	for {

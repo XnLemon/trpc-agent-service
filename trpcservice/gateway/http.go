@@ -184,14 +184,12 @@ func (handler *HTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 	request = request.WithContext(ctx)
 	_ = handler.metrics.Request(ctx, map[string]string{"component": "http", "operation": observability.OperationHTTPRequest, "status": "started"})
 	defer func() {
-		status := "complete"
 		var outcome error
 		if statusWriter.status >= http.StatusBadRequest {
-			status = "error"
 			outcome = errors.New("http request failed")
 		}
 		finish(outcome)
-		_ = handler.metrics.Duration(ctx, observability.DurationMilliseconds(started), map[string]string{"component": "http", "operation": observability.OperationHTTPRequest, "status": status, "error_class": observability.ErrorClass(outcome)})
+		_ = handler.metrics.Operation(ctx, started, map[string]string{"component": "http", "operation": observability.OperationHTTPRequest}, outcome)
 	}()
 	writer = statusWriter
 	if strings.HasPrefix(request.URL.Path, "/wecom/callback/") {

@@ -24,6 +24,7 @@ import (
 	channelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
@@ -120,6 +121,7 @@ type Runtime struct {
 	ping             func(context.Context) error
 	verifyMigrations func(context.Context, *sql.DB) error
 	closeDeps        func() error
+	telemetry        observability.Provider
 	closing          atomic.Bool
 	closeOnce        sync.Once
 	closeErr         error
@@ -156,6 +158,7 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	if err := prepareRuntimeConfig(&config); err != nil {
 		return nil, err
 	}
+	config.AuditWriter = metrics.WrapAuditWriter(config.AuditWriter, config.Observability)
 	runtimeGraph, err := newRuntimeGraph(config)
 	if err != nil {
 		return nil, err
@@ -226,7 +229,7 @@ func prepareRuntimeConfig(config *Config) error {
 	if config.RuntimeTenantID == "" {
 		return nil
 	}
-	wrapped, err := runtimesessionpostgres.New(config.RuntimeTenantID, config.Sessions, config.RuntimeStore)
+	wrapped, err := runtimesessionpostgres.NewWithObservability(config.RuntimeTenantID, config.Sessions, config.RuntimeStore, config.Observability)
 	if err != nil {
 		return ErrInvalidConfig
 	}
@@ -282,6 +285,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 		wecomHandler: config.WeComHandler,
 		db:           config.DB, ownDB: config.OwnDB, readyGate: readyGate,
 		ping: ping, verifyMigrations: config.VerifyMigrations, closeDeps: config.CloseDependencies,
+		telemetry: config.Observability,
 	}
 	if lifecycle, ok := config.WeComHandler.(callbackLifecycle); ok {
 		runtimeGraph.wecomLifecycle = lifecycle
@@ -427,6 +431,11 @@ func (graph *Runtime) Close() error {
 		}
 		if graph.ownDB && graph.db != nil {
 			closeErr = errors.Join(closeErr, graph.db.Close())
+		}
+		if graph.telemetry != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			closeErr = errors.Join(closeErr, graph.telemetry.Shutdown(ctx))
+			cancel()
 		}
 		graph.closeErr = closeErr
 	})
