@@ -10,7 +10,10 @@ Profile、Backend Profile 和 Channel Binding 的领域接口不变，租户隔�
 目标是让同一套控制面 API 可以选择 PostgreSQL 或 MySQL，并满足：
 
 - 五类控制面 Repository 都实现各自领域接口；
-- 所有读写都带显式 `tenant_id`，跨租户引用由复合主键/外键和 Repository 双重校验；
+- 所有租户作用域的控制面读写都带显式 `tenant_id`，跨租户引用由复合主键/外键和
+  Repository 双重校验；验签前的 `CandidateIndex.LookupCandidates(channel, digest)` 是有意保留
+  的全局候选发现例外，此时租户身份尚未可信，查询只能返回不含 Tenant/Secret 的短期上下文，
+  验签后必须重新执行租户作用域读取；
 - 发布、回滚、状态迁移和配置替换在一个事务内提交，事件 Outbox 与主表原子可见；
 - 行锁加乐观版本检查，重复写入、版本冲突、唯一冲突和非法状态迁移映射到稳定领域错误；
 - Bootstrap 根据受信配置选择驱动，重启后能从同一数据库重新发现控制面对象；
@@ -50,11 +53,13 @@ fail-closed。DSN 只存在于 Bootstrap 的短生命周期配置中，不能写
 | `BIGINT GENERATED ...` | `BIGINT AUTO_INCREMENT` | 事件 ID 在事务内由 `LastInsertId` 读取 |
 | `RETURNING` | `INSERT/UPDATE` 后按同一事务重新 `SELECT` | 不暴露中间状态 |
 | `FOR UPDATE` | `SELECT ... FOR UPDATE` | 仅在事务内使用；Context 取消释放锁 |
-| PostgreSQL advisory lock | `GET_LOCK`/`RELEASE_LOCK` | 仅迁移历史使用，连接固定在同一 `sql.Conn` |
+| PostgreSQL advisory lock | `GET_LOCK`/`RELEASE_LOCK` | 迁移历史锁和首租户锁是两个独立命名空间；各自固定在同一 `sql.Conn`，并在提交/回滚后显式释放 |
 | `SECURITY DEFINER` 函数 | 最小数据库账号 + 事务内受控 DML | 领域校验和显式租户谓词不可省略 |
 
-MySQL 连接必须使用 InnoDB、`REPEATABLE READ`（或更严格级别）和 UTC session time
-zone。迁移脚本不依赖 `public` schema、PostgreSQL 函数、正则运算符或 `RETURNING`。
+MySQL 连接必须使用 InnoDB、明确的 `READ COMMITTED` 隔离级别和 UTC session time
+zone，以匹配现有 PostgreSQL `database/sql` helper 的事务契约；不得用未界定的“或更严格”
+替代这个可测试的级别。迁移脚本不依赖 `public` schema、PostgreSQL 函数、正则运算符或
+`RETURNING`。
 JSON 字段仍只接受受信 Repository 产生的无密钥对象；`secret_ref` 是唯一可以持久化的
 凭据引用。
 
@@ -90,8 +95,11 @@ JSON 字段仍只接受受信 Repository 产生的无密钥对象；`secret_ref`
 
 - Binding 的稳定身份、`secret_ref` 和非密协议配置按租户保存；更新和状态迁移使用
   `tenant_id + binding_id + version`。
-- active 的 `(channel, public_route_key_digest, provider_account_id)` 唯一约束保持与
-  PostgreSQL 一致；候选索引只返回不含 Tenant/Secret 的短期上下文。
+- active provider account 的唯一 owner 约束是 `(channel, provider_account_id)`，只对
+  `status='active'` 生效；候选发现另建 `(channel, public_route_key_digest)` 索引，不能把 route
+  digest 加入 active-owner 唯一键。MySQL 8.0 用一个 inactive 为 `NULL` 的 stored generated
+  column（例如 `active_provider_account_id`）加唯一键表达 PostgreSQL 的 partial unique index。
+  候选索引只返回不含 Tenant/Secret 的短期上下文。
 - Candidate capability 继续是进程内一次性消费；重启后由持久化 version/digest 校验
   fail-closed。候选缓存不是跨节点状态，也不能替代数据库租户隔离。
 
@@ -103,17 +111,26 @@ conflict/deadlock`、`1451/1452 foreign-key`、`1264/1406 invalid` 等类别归�
 ## MySQL Migration 与权限
 
 MySQL 维护独立的有序 migration 集合和 `schema_migrations` 历史表，版本号与 PostgreSQL
-保持一致但摘要分别计算。每次迁移：
+保持一致但摘要分别计算。由于 MySQL 8.0 的表/索引 DDL 会隐式提交，迁移协议是
+forward-only、幂等且可恢复的，不能承诺通过用户 `ROLLBACK` 撤销 DDL。每次迁移：
 
-1. 在固定连接上执行 `GET_LOCK`，检查历史摘要和连续版本；
-2. 在事务中执行单个 migration，成功后写入版本、文件名、SHA-256 和 UTC 时间；
-3. 提交后再执行下一版本；失败回滚并保留可诊断的稳定 `ErrMigration`；
-4. `Verify` 只读校验，不创建或修改任何对象。
+1. 在固定连接上执行独立的 migration-history `GET_LOCK`，检查历史摘要和连续版本；
+2. 将当前版本以 `applying` 状态记录，再逐条执行幂等 DDL；每条语句完成后更新可恢复
+   的 checkpoint，成功后写入 `applied`、文件名、SHA-256 和 UTC 时间；
+3. 失败时保留 `applying/failed` 状态和稳定 `ErrMigration`，释放锁；下次启动必须先
+   对照对象/摘要恢复或重试该版本，禁止跳过失败版本；
+4. `Verify` 只读校验，不创建或修改任何对象；必须能识别 DDL 已落地但历史未完成的重启场景。
+
+首租户创建使用另一个独立的 `GET_LOCK('trpc-agent-service:first-tenant', timeout)`，在
+固定连接上串行化“空控制面检查 + 创建”，提交或回滚后显式释放；它不能与 migration-history
+锁复用生命周期或命名空间。
 
 迁移至少创建 `tenant`、`agent_app`、`agent_app_revision`、`agent_app_revision_tool`、
 `model_profile`、`backend_profile`、`backend_profile_binding`、`channel_binding` 及各自
 Change Outbox 表，并保留 `runtime_*`/audit 表所需的同租户复合键形状。表和索引使用
-`utf8mb4`、InnoDB；外键显式包含 `tenant_id`。迁移账号、控制面写账号和运行时读账号
+`utf8mb4`、`utf8mb4_bin`、InnoDB；`tenant_id`、各类 `*_id`、`*_key`、
+`provider_account_id`、route digest 和所有参与唯一键/外键/精确查找的列在列级固定该 binary
+collation（不得依赖服务器默认的 `utf8mb4_0900_ai_ci`）。外键显式包含 `tenant_id`。迁移账号、控制面写账号和运行时读账号
 分离，应用连接不拥有任意 schema DDL 权限。
 
 MySQL 没有 PostgreSQL 的 `SECURITY DEFINER` 函数边界，因此安全性由三层共同保证：
@@ -128,8 +145,8 @@ MySQL 没有 PostgreSQL 的 `SECURITY DEFINER` 函数边界，因此安全性由
 | --- | --- |
 | 契约 | 五类 MySQL Repository 编译实现领域接口，零值、nil DB、取消和错误分类测试 |
 | SQL 单元 | `sqlmock` 覆盖 `?` 参数、事务提交/回滚、版本冲突、重复键、跨租户谓词和防御性副本 |
-| Migration | `MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN` 指向干净 MySQL 8 服务，执行全量 migration、Verify、摘要不匹配和重启读取 |
-| Repository 集成 | `MYSQL_CONTROL_PLANE_TEST_DSN` 执行五类 Repository 的创建、更新、发布/回滚、生命周期、候选消费和双租户隔离 |
+| Migration | `MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN` 指向干净 MySQL 8 服务，执行全量 migration、Verify、摘要不匹配、DDL 后失败/重启恢复和大小写变体 |
+| Repository 集成 | `MYSQL_CONTROL_PLANE_TEST_DSN` 执行五类 Repository 的创建、更新、发布/回滚、生命周期、候选消费、双租户隔离和大小写敏感身份 |
 | 并发/race | MySQL 服务上的 optimistic-lock、同 App revision、候选消费和 Context 取消测试；本地继续运行 `go test -race ./...` |
 | Bootstrap | `TRPC_CONTROL_PLANE_DRIVER=mysql` 选择 MySQL；未知驱动、缺 DSN、迁移失败和重启 rediscovery 均 fail-closed |
 
@@ -145,4 +162,3 @@ MySQL 没有 PostgreSQL 的 `SECURITY DEFINER` 函数边界，因此安全性由
 | MySQL migration、摘要校验、权限和重启恢复 | 待代码阶段 |
 | Bootstrap 驱动选择与错误脱敏 | 待代码阶段 |
 | MySQL unit/integration/race 测试及 CI 服务 | 待代码阶段 |
-
