@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -407,6 +408,118 @@ func TestTransitionStatusPersistenceErrorBranches(t *testing.T) {
 			_, _, err = NewRepository(db).TransitionStatus(context.Background(), agent.TransitionStatusInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: agent.StatusSuspended, Metadata: metadata})
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestDraftPersistenceErrorBranches(t *testing.T) {
+	app := newStoredAgentApp(t)
+	input := agent.CreateDraftInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Configuration: agent.DraftConfiguration{Instruction: "draft", ModelProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", Runtime: agent.DefaultRuntimePolicy()}}
+	draft := newStoredAgentRevision(t, app, 1, false)
+	newDB := func(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
+		t.Helper()
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		return db, mock
+	}
+	createPrefix := func(m sqlmock.Sqlmock) {
+		m.ExpectBegin()
+		expectAgentApp(m, app)
+		m.ExpectQuery("COALESCE\\(MAX\\(revision\\)").WillReturnRows(sqlmock.NewRows([]string{"next_revision"}).AddRow(1))
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(sqlmock.Sqlmock)
+	}{
+		{"insert", func(m sqlmock.Sqlmock) {
+			createPrefix(m)
+			m.ExpectExec("INSERT INTO agent_app_revision").WillReturnError(errors.New("insert"))
+			m.ExpectRollback()
+		}},
+		{"replace tools", func(m sqlmock.Sqlmock) {
+			createPrefix(m)
+			m.ExpectExec("INSERT INTO agent_app_revision").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("DELETE FROM agent_app_revision_tool").WillReturnError(errors.New("tools"))
+			m.ExpectRollback()
+		}},
+		{"readback", func(m sqlmock.Sqlmock) {
+			createPrefix(m)
+			m.ExpectExec("INSERT INTO agent_app_revision").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("DELETE FROM agent_app_revision_tool").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectQuery("SELECT tenant_id, app_id, revision").WillReturnError(errors.New("readback"))
+			m.ExpectRollback()
+		}},
+		{"commit", func(m sqlmock.Sqlmock) {
+			createPrefix(m)
+			m.ExpectExec("INSERT INTO agent_app_revision").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("DELETE FROM agent_app_revision_tool").WillReturnResult(sqlmock.NewResult(0, 1))
+			expectAgentRevision(t, m, draft)
+			m.ExpectCommit().WillReturnError(errors.New("commit"))
+		}},
+	} {
+		t.Run("create "+tc.name, func(t *testing.T) {
+			db, mock := newDB(t)
+			tc.setup(mock)
+			if _, err := NewRepository(db).CreateDraft(context.Background(), input); !errors.Is(err, ErrStorage) {
+				t.Fatalf("error = %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	current := newStoredAgentRevision(t, app, 1, false)
+	updateInput := agent.UpdateDraftInput{TenantID: app.TenantID, AppID: app.AppID, Revision: 1, ExpectedAppVersion: app.Version, ExpectedDraftVersion: current.DraftVersion, Configuration: current.Configuration()}
+	updated := current.Clone()
+	updated.DraftVersion++
+	updated.UpdatedAt = current.UpdatedAt.Add(time.Second)
+	updatePrefix := func(m sqlmock.Sqlmock) {
+		m.ExpectBegin()
+		expectAgentApp(m, app)
+		expectAgentRevision(t, m, current)
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(sqlmock.Sqlmock)
+	}{
+		{"update", func(m sqlmock.Sqlmock) {
+			updatePrefix(m)
+			m.ExpectExec("UPDATE agent_app_revision SET").WillReturnError(errors.New("update"))
+			m.ExpectRollback()
+		}},
+		{"replace tools", func(m sqlmock.Sqlmock) {
+			updatePrefix(m)
+			m.ExpectExec("UPDATE agent_app_revision SET").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("DELETE FROM agent_app_revision_tool").WillReturnError(errors.New("tools"))
+			m.ExpectRollback()
+		}},
+		{"readback", func(m sqlmock.Sqlmock) {
+			updatePrefix(m)
+			m.ExpectExec("UPDATE agent_app_revision SET").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("DELETE FROM agent_app_revision_tool").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectQuery("SELECT tenant_id, app_id, revision").WillReturnError(errors.New("readback"))
+			m.ExpectRollback()
+		}},
+		{"commit", func(m sqlmock.Sqlmock) {
+			updatePrefix(m)
+			m.ExpectExec("UPDATE agent_app_revision SET").WillReturnResult(sqlmock.NewResult(0, 1))
+			m.ExpectExec("DELETE FROM agent_app_revision_tool").WillReturnResult(sqlmock.NewResult(0, 1))
+			expectAgentRevision(t, m, &updated)
+			m.ExpectCommit().WillReturnError(errors.New("commit"))
+		}},
+	} {
+		t.Run("update "+tc.name, func(t *testing.T) {
+			db, mock := newDB(t)
+			tc.setup(mock)
+			if _, err := NewRepository(db).UpdateDraft(context.Background(), updateInput); !errors.Is(err, ErrStorage) {
+				t.Fatalf("error = %v", err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatal(err)

@@ -70,6 +70,25 @@ func TestStorageNilContextsFailClosedWithDatabase(t *testing.T) {
 	}
 }
 
+func TestStorageDriverFailuresAreRedacted(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectPing().WillReturnError(errors.New("driver ping details"))
+	if err := Ping(context.Background(), db); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Ping(driver failure) = %v", err)
+	}
+	mock.ExpectBegin().WillReturnError(errors.New("driver begin details"))
+	if _, err := Begin(context.Background(), db); !errors.Is(err, ErrStorage) {
+		t.Fatalf("Begin(driver failure) = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMonotonicNowDoesNotMoveBeforePersistedTime(t *testing.T) {
 	previous := time.Now().UTC().Add(time.Hour)
 	if got := MonotonicNow(previous); !got.Equal(previous) {
