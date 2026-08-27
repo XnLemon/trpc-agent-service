@@ -461,6 +461,57 @@ func TestAgentRepositorySetsCanaryRevision(t *testing.T) {
 	}
 }
 
+func TestAgentRepositoryClearsCanaryRevision(t *testing.T) {
+	app := newStoredAgentApp(t)
+	currentRevision, canaryRevision := int64(1), int64(2)
+	app.Status, app.CurrentRevision, app.CanaryRevision, app.Version = agent.StatusActive, &currentRevision, &canaryRevision, 3
+	stored := app.Clone()
+	stored.CanaryRevision = nil
+	stored.Version++
+	stored.UpdatedAt = stored.UpdatedAt.Add(time.Second)
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectBegin()
+	expectAgentApp(mock, app)
+	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(10, 1))
+	expectAgentApp(mock, &stored)
+	expectAgentEvent(mock, app, agent.ChangeCanaryStopped, agent.StatusActive, agent.StatusActive, app.CanaryRevision, nil, "", app.Version, stored.Version, stored.UpdatedAt)
+	mock.ExpectCommit()
+
+	result, event, err := NewRepository(db).SetCanary(context.Background(), agent.SetCanaryInput{
+		TenantID: app.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version, TenantActive: true,
+		Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "rollback canary", CorrelationID: "agent-canary-clear"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CanaryRevision != nil || event.EventType != agent.ChangeCanaryStopped {
+		t.Fatalf("clear result = app=%+v event=%+v", result, event)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAgentRepositorySetCanaryRejectsInvalidState(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, _, err := NewRepository(db).SetCanary(context.Background(), agent.SetCanaryInput{TenantActive: true}); !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("invalid metadata error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAgentRepositoryRequiresStorage(t *testing.T) {
 	repository := NewRepository(nil)
 	ctx := context.Background()
