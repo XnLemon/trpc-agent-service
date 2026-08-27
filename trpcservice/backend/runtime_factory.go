@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 )
 
@@ -21,6 +22,7 @@ var (
 // Values are inaccessible after Close and are never shared across tenants.
 type CapabilitySet struct {
 	tenantID     string
+	mu           sync.RWMutex
 	capabilities map[Capability]any
 	closeOnce    sync.Once
 	closeErr     error
@@ -48,6 +50,8 @@ func (set *CapabilitySet) Capability(kind Capability) (any, bool) {
 	if set == nil {
 		return nil, false
 	}
+	set.mu.RLock()
+	defer set.mu.RUnlock()
 	value, ok := set.capabilities[kind]
 	return value, ok
 }
@@ -65,6 +69,105 @@ func (set *CapabilitySet) Session() (session.Service, error) {
 	return service, nil
 }
 
+// Memory returns the tenant-scoped memory capability.
+func (set *CapabilitySet) Memory() (runtimestorage.MemoryStore, error) {
+	value, ok := set.Capability(CapabilityMemory)
+	if !ok {
+		return nil, ErrCapabilityUnavailable
+	}
+	service, ok := value.(runtimestorage.MemoryStore)
+	if !ok || service == nil {
+		return nil, ErrCapabilityUnavailable
+	}
+	return service, nil
+}
+
+// Summary returns the tenant-scoped summary capability. The direct summary
+// binding is preferred; the Session/Memory fallback keeps older providers
+// compatible while they migrate to the explicit capability.
+func (set *CapabilitySet) Summary() (runtimestorage.SummaryStore, error) {
+	value, ok := set.Capability(CapabilitySummary)
+	if !ok {
+		value, ok = set.Capability(CapabilitySession)
+	}
+	if !ok {
+		value, ok = set.Capability(CapabilityMemory)
+	}
+	if !ok {
+		return nil, ErrCapabilityUnavailable
+	}
+	service, ok := value.(runtimestorage.SummaryStore)
+	if !ok || service == nil {
+		return nil, ErrCapabilityUnavailable
+	}
+	return service, nil
+}
+
+// Knowledge returns the tenant-scoped knowledge capability.
+func (set *CapabilitySet) Knowledge() (runtimestorage.KnowledgeStore, error) {
+	value, ok := set.Capability(CapabilityKnowledge)
+	if !ok {
+		return nil, ErrCapabilityUnavailable
+	}
+	service, ok := value.(runtimestorage.KnowledgeStore)
+	if !ok || service == nil {
+		return nil, ErrCapabilityUnavailable
+	}
+	return service, nil
+}
+
+// Artifact returns the tenant-scoped artifact capability.
+func (set *CapabilitySet) Artifact() (runtimestorage.ArtifactStore, error) {
+	value, ok := set.Capability(CapabilityArtifact)
+	if !ok {
+		return nil, ErrCapabilityUnavailable
+	}
+	service, ok := value.(runtimestorage.ArtifactStore)
+	if !ok || service == nil {
+		return nil, ErrCapabilityUnavailable
+	}
+	return service, nil
+}
+
+// Audit returns the tenant-scoped audit capability.
+func (set *CapabilitySet) Audit() (runtimestorage.AuditStore, error) {
+	value, ok := set.Capability(CapabilityAudit)
+	if !ok {
+		return nil, ErrCapabilityUnavailable
+	}
+	service, ok := value.(runtimestorage.AuditStore)
+	if !ok || service == nil {
+		return nil, ErrCapabilityUnavailable
+	}
+	return service, nil
+}
+
+// Vector returns a vector adapter carried by the knowledge capability.
+func (set *CapabilitySet) Vector() (runtimestorage.VectorStore, error) {
+	value, ok := set.Capability(CapabilityKnowledge)
+	if !ok {
+		return nil, ErrCapabilityUnavailable
+	}
+	service, ok := value.(runtimestorage.VectorStore)
+	if !ok || service == nil {
+		return nil, ErrCapabilityUnavailable
+	}
+	return service, nil
+}
+
+// Object returns an object adapter carried by the artifact capability.
+func (set *CapabilitySet) Object() (runtimestorage.ObjectStore, error) {
+	value, ok := set.Capability(CapabilityArtifact)
+	if !ok {
+		return nil, ErrCapabilityUnavailable
+	}
+	service, ok := value.(runtimestorage.ObjectStore)
+	if !ok || service == nil {
+		return nil, ErrCapabilityUnavailable
+	}
+	return service, nil
+}
+
 // Close releases all owned capability values exactly once. Capabilities that
 // do not expose Close are intentionally left untouched.
 func (set *CapabilitySet) Close() error {
@@ -72,14 +175,20 @@ func (set *CapabilitySet) Close() error {
 		return nil
 	}
 	set.closeOnce.Do(func() {
+		set.mu.Lock()
+		values := make([]any, 0, len(set.capabilities))
 		for _, value := range set.capabilities {
+			values = append(values, value)
+		}
+		clear(set.capabilities)
+		set.mu.Unlock()
+		for _, value := range values {
 			if closer, ok := value.(interface{ Close() error }); ok {
 				if err := closer.Close(); err != nil {
 					set.closeErr = errors.Join(set.closeErr, ErrStorageFactory)
 				}
 			}
 		}
-		clear(set.capabilities)
 	})
 	return set.closeErr
 }

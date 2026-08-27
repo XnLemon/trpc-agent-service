@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
@@ -36,6 +37,19 @@ func TestRegistryStorageFactoryMaterializesTenantSession(t *testing.T) {
 	}
 	if _, err := set.Session(); !errors.Is(err, ErrCapabilityUnavailable) {
 		t.Fatalf("Session after Close() = %v", err)
+	}
+}
+
+func TestCapabilitySetMaterializesExplicitSummary(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	store := &summaryCapabilityStub{}
+	set, err := NewCapabilitySet(tenantID, map[Capability]any{CapabilitySummary: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := set.Summary()
+	if err != nil || got != store {
+		t.Fatalf("Summary() = %v, %v", got, err)
 	}
 }
 
@@ -300,6 +314,18 @@ func (closer *failingCapabilityCloser) Close() error {
 }
 
 type capabilityProviderFunc func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error)
+
+type summaryCapabilityStub struct{}
+
+func (*summaryCapabilityStub) PutSummary(context.Context, runtimestorage.SummaryRecord) (runtimestorage.SummaryRecord, error) {
+	return runtimestorage.SummaryRecord{}, nil
+}
+func (*summaryCapabilityStub) GetSummary(context.Context, string, string, string) (runtimestorage.SummaryRecord, error) {
+	return runtimestorage.SummaryRecord{}, nil
+}
+func (*summaryCapabilityStub) EnqueueSummary(context.Context, runtimestorage.SummaryRecord) error {
+	return nil
+}
 
 func (function capabilityProviderFunc) New(ctx context.Context, input StorageFactoryInput, binding CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
 	return function(ctx, input, binding, secret)
