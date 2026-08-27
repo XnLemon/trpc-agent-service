@@ -197,7 +197,7 @@ func resourceInvalidation(change CacheInvalidation, parts []string, method strin
 
 func appMutation(parts []string, method string) bool {
 	return (len(parts) == 2 && method == http.MethodPatch) ||
-		(len(parts) == 3 && (parts[2] == "status" || parts[2] == "rollback")) ||
+		(len(parts) == 3 && (parts[2] == "status" || parts[2] == "rollback" || parts[2] == "canary")) ||
 		(len(parts) == 5 && parts[2] == "revisions" && parts[4] == "publish")
 }
 
@@ -402,6 +402,7 @@ func (h *Handler) tenantRoute(ctx context.Context, r *http.Request, p Principal,
 	}
 }
 
+//nolint:gocyclo // App routes coordinate several independently authorized mutations.
 func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenantID string, parts []string) (int, any, error) {
 	if len(parts) == 0 {
 		if r.Method != http.MethodPost {
@@ -462,6 +463,30 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 		body.TenantID, body.AppID = tenantID, appID
 		body.Metadata.ActorType, body.Metadata.ActorID = "admin", p.SubjectID
 		value, event, err := h.config.Apps.Rollback(ctx, body)
+		return http.StatusOK, map[string]any{"app": value, "event": event}, err
+	case "canary":
+		if len(parts) != 2 || r.Method != http.MethodPost {
+			return 0, nil, errNotFound
+		}
+		var body struct {
+			ExpectedAppVersion int64
+			CandidateRevision  *int64
+			Reason             string
+			CorrelationID      string
+		}
+		if err := decodeBody(r, &body); err != nil {
+			return 0, nil, err
+		}
+		tenantRoot, err := h.config.Tenants.Get(ctx, tenantID)
+		if err != nil {
+			return 0, nil, err
+		}
+		bodyInput := agent.SetCanaryInput{
+			TenantID: tenantID, AppID: appID, CandidateRevision: body.CandidateRevision,
+			ExpectedAppVersion: body.ExpectedAppVersion, TenantActive: tenantRoot.Status == tenant.StatusActive,
+			Metadata: agent.ChangeMetadata{ActorType: "admin", ActorID: p.SubjectID, Reason: body.Reason, CorrelationID: body.CorrelationID},
+		}
+		value, event, err := h.config.Apps.SetCanary(ctx, bodyInput)
 		return http.StatusOK, map[string]any{"app": value, "event": event}, err
 	default:
 		return 0, nil, errNotFound
@@ -726,7 +751,7 @@ func toExported(key string) string {
 		"profile_id": "ProfileID", "profile_key": "ProfileKey", "binding_id": "BindingID", "display_name": "DisplayName",
 		"description": "Description", "expected_version": "ExpectedVersion",
 		"expected_app_version": "ExpectedAppVersion", "expected_draft_version": "ExpectedDraftVersion",
-		"next_status": "NextStatus", "target_revision": "TargetRevision", "reason": "Reason",
+		"next_status": "NextStatus", "target_revision": "TargetRevision", "candidate_revision": "CandidateRevision", "reason": "Reason",
 		"correlation_id": "CorrelationID", "schema_version": "SchemaVersion", "secret_ref": "SecretRef",
 		"provider_account_id": "ProviderAccountID", "public_route_key_digest": "PublicRouteKeyDigest",
 		"audit_retention_days": "AuditRetentionDays", "log_masking_level": "LogMaskingLevel",

@@ -20,6 +20,7 @@
 - [Issue #69：Multi-tenant Bootstrap](issue-69-multi-tenant-bootstrap.md)：多租户 API identity、动态 Session capability 和按租户审计路由。
 - [Issue #72：Precise Cache Invalidation](issue-72-cache-invalidation.md)：按 tenant/app/profile 精确失效，并保持 in-flight Runner 快照。
   固定模型解析、密钥边界、Execution Plan 和 tRPC-Agent-Go Runner 的纵向契约。
+- [Issue #82：Agent App Registry 与租户灰度](issue-82-agent-app-registry.md)：实例内按租户选择不可变 candidate revision、授权变更、审计事实和 lease-safe 回滚。
 - [生产架构设计](architecture.md)：Issue #24 的控制面/数据面拓扑、可信 Channel Binding、
   企业微信全链路、幂等、迁移和能力边界设计。文档交付不等于对应生产代码已实现。
 - [Gateway、Execution Plan 与 HTTP/SSE](gateway.md)：对齐 PR #25 架构验收与 Issue #26
@@ -43,6 +44,8 @@
   交付、重试/DLQ、lease recovery、telemetry 与验收 ledger。
 - [租户审计与用量成本](audit-usage.md)：Issue #54/PR #55 的实现契约，固定 mandatory audit
   与 telemetry 边界、事件 schema、append-only/重复语义、失败策略、聚合和运维 ledger。
+- [Issue #79：生产可观测性、Dashboard 与告警](issue-79-observability.md)：trace/metrics 链路、
+  低基数标签、租户授权查询以及 Prometheus/Grafana 资源契约。
 
 ## 快速开始
 
@@ -80,6 +83,8 @@ cd trpc-agent-service
   重试/DLQ、恢复与运维证据
 - [租户审计与用量成本](audit-usage.md) — 版本化事件、append-only writer、用量成本聚合、
   保留/脱敏/访问控制和 failure/repair 规则
+- [Issue #79：生产可观测性、Dashboard 与告警](issue-79-observability.md) — trace、metrics、
+  dashboard、告警和租户查询边界
 - [运维方案](ops.md) — 发布灰度、监控审计、故障恢复、容量模型和生产风险清单
 
 ## CI

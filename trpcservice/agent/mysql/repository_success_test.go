@@ -24,9 +24,9 @@ func TestAgentRepositoryGetDecodesStoredApp(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	mock.ExpectQuery(".*").WithArgs(app.TenantID, app.AppID).WillReturnRows(sqlmock.NewRows([]string{
-		"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "version", "created_at", "updated_at",
+		"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "canary_revision", "version", "created_at", "updated_at",
 	}).AddRow(
-		app.TenantID, app.AppID, app.AppKey, app.DisplayName, app.Description, string(app.Status), nil, app.Version, app.CreatedAt, app.UpdatedAt,
+		app.TenantID, app.AppID, app.AppKey, app.DisplayName, app.Description, string(app.Status), nil, nil, app.Version, app.CreatedAt, app.UpdatedAt,
 	))
 
 	stored, err := NewRepository(db).Get(context.Background(), app.TenantID, app.AppID)
@@ -145,8 +145,8 @@ func TestAgentRepositoryCreatesApp(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(".*").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(sqlmock.NewRows([]string{
-		"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "version", "created_at", "updated_at",
-	}).AddRow(stored.TenantID, stored.AppID, stored.AppKey, stored.DisplayName, stored.Description, string(stored.Status), nil, stored.Version, stored.CreatedAt, stored.UpdatedAt))
+		"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "canary_revision", "version", "created_at", "updated_at",
+	}).AddRow(stored.TenantID, stored.AppID, stored.AppKey, stored.DisplayName, stored.Description, string(stored.Status), nil, nil, stored.Version, stored.CreatedAt, stored.UpdatedAt))
 	mock.ExpectCommit()
 
 	value, err := NewRepository(db).Create(context.Background(), input)
@@ -420,6 +420,47 @@ func TestAgentRepositoryRollsBackToPublishedRevision(t *testing.T) {
 	}
 }
 
+func TestAgentRepositorySetsCanaryRevision(t *testing.T) {
+	app := newStoredAgentApp(t)
+	currentRevision := int64(1)
+	app.Status = agent.StatusActive
+	app.CurrentRevision = &currentRevision
+	app.Version = 3
+	candidate := newStoredAgentRevision(t, app, 2, true)
+	stored := app.Clone()
+	stored.CanaryRevision = agentInt64(candidate.Revision)
+	stored.Version++
+	stored.UpdatedAt = stored.UpdatedAt.Add(time.Second)
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectBegin()
+	expectAgentApp(mock, app)
+	expectAgentRevision(t, mock, candidate)
+	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(9, 1))
+	expectAgentApp(mock, &stored)
+	expectAgentEvent(mock, app, agent.ChangeCanaryStarted, agent.StatusActive, agent.StatusActive, nil, stored.CanaryRevision, candidate.ContentDigest, app.Version, stored.Version, stored.UpdatedAt)
+	mock.ExpectCommit()
+
+	result, event, err := NewRepository(db).SetCanary(context.Background(), agent.SetCanaryInput{
+		TenantID: app.TenantID, AppID: app.AppID, CandidateRevision: agentInt64(candidate.Revision), ExpectedAppVersion: app.Version, TenantActive: true,
+		Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "canary", CorrelationID: "agent-canary"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CanaryRevision == nil || *result.CanaryRevision != candidate.Revision || result.Version != stored.Version || event.EventType != agent.ChangeCanaryStarted {
+		t.Fatalf("canary result = app=%+v event=%+v", result, event)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAgentRepositoryRequiresStorage(t *testing.T) {
 	repository := NewRepository(nil)
 	ctx := context.Background()
@@ -446,6 +487,9 @@ func TestAgentRepositoryRequiresStorage(t *testing.T) {
 	}
 	if _, _, err := repository.Rollback(ctx, agent.RollbackInput{}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("Rollback nil-storage error = %v", err)
+	}
+	if _, _, err := repository.SetCanary(ctx, agent.SetCanaryInput{}); !errors.Is(err, ErrStorage) {
+		t.Fatalf("SetCanary nil-storage error = %v", err)
 	}
 	if _, _, err := repository.TransitionStatus(ctx, agent.TransitionStatusInput{}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("TransitionStatus nil-storage error = %v", err)
@@ -889,9 +933,13 @@ func expectAgentApp(mock sqlmock.Sqlmock, value *agent.App) {
 	if value.CurrentRevision != nil {
 		currentRevision = *value.CurrentRevision
 	}
+	var canaryRevision any
+	if value.CanaryRevision != nil {
+		canaryRevision = *value.CanaryRevision
+	}
 	mock.ExpectQuery(".*").WithArgs(value.TenantID, value.AppID).WillReturnRows(sqlmock.NewRows([]string{
-		"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "version", "created_at", "updated_at",
-	}).AddRow(value.TenantID, value.AppID, value.AppKey, value.DisplayName, value.Description, string(value.Status), currentRevision, value.Version, value.CreatedAt, value.UpdatedAt))
+		"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "canary_revision", "version", "created_at", "updated_at",
+	}).AddRow(value.TenantID, value.AppID, value.AppKey, value.DisplayName, value.Description, string(value.Status), currentRevision, canaryRevision, value.Version, value.CreatedAt, value.UpdatedAt))
 }
 
 func expectAgentRevision(t *testing.T, mock sqlmock.Sqlmock, value *agent.Revision) {

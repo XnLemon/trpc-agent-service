@@ -16,6 +16,7 @@ type Repository interface {
 	GetRevision(context.Context, string, string, int64) (*Revision, error)
 	Publish(context.Context, PublishInput) (*App, *Revision, ChangeEvent, error)
 	Rollback(context.Context, RollbackInput) (*App, ChangeEvent, error)
+	SetCanary(context.Context, SetCanaryInput) (*App, ChangeEvent, error)
 	TransitionStatus(context.Context, TransitionStatusInput) (*App, ChangeEvent, error)
 }
 
@@ -75,6 +76,10 @@ const (
 	ChangeResumed ChangeEventType = "resumed"
 	// ChangeDisabled records an application disablement.
 	ChangeDisabled ChangeEventType = "disabled"
+	// ChangeCanaryStarted records candidate selection.
+	ChangeCanaryStarted ChangeEventType = "canary_started"
+	// ChangeCanaryStopped records candidate clearing.
+	ChangeCanaryStopped ChangeEventType = "canary_stopped"
 )
 
 // ChangeEvent is the complete immutable audit handoff returned atomically with
@@ -124,6 +129,16 @@ type RollbackInput struct {
 	AppID              string
 	TargetRevision     int64
 	ExpectedAppVersion int64
+	Metadata           ChangeMetadata
+}
+
+// SetCanaryInput selects or clears a published candidate revision.
+type SetCanaryInput struct {
+	TenantID           string
+	AppID              string
+	CandidateRevision  *int64
+	ExpectedAppVersion int64
+	TenantActive       bool
 	Metadata           ChangeMetadata
 }
 

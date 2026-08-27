@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
@@ -343,6 +344,60 @@ func TestDispatcherCancellationFinalizesAuditAndHandoff(t *testing.T) {
 	}
 	if !hasAuditEventTypes(auditEvents, audit.EventExecutionStarted, audit.EventExecutionCanceled) {
 		t.Fatalf("audit=%+v", auditEvents)
+	}
+}
+
+func TestDispatcherAuditsCanarySelectionBeforeExecutionStart(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	current, candidate := int64(1), int64(2)
+	app := fixture.app.Clone()
+	app.CurrentRevision, app.CanaryRevision = &current, &candidate
+	candidateRevision := fixture.revision.Clone()
+	candidateRevision.Revision = candidate
+	resolverConfig := resolverTestConfig(fixture)
+	resolverConfig.Apps = resolverAgentRepository{Repository: fixture.apps, getFn: func(context.Context, string, string) (*agent.App, error) { return &app, nil }, getRevisionFn: func(_ context.Context, _ string, _ string, revision int64) (*agent.Revision, error) {
+		if revision == candidate {
+			return &candidateRevision, nil
+		}
+		return fixture.revision, nil
+	}}
+	resolver, err := NewPlanResolver(resolverConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+		events := make(chan *trpcevent.Event, 1)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
+		close(events)
+		return &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+			return events, nil
+		}}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = registry.Close() }()
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := audit.NewInMemory(fixture.tenant.TenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.auditWriter = writer
+	principal := mustAPIPrincipal(t, fixture.tenant.TenantID, app.AppID)
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "canary-audit", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = collectDispatchEvents(stream)
+	events, err := writer.List(context.Background(), audit.Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) < 3 || events[0].EventType != audit.EventCanarySelected || events[0].Revision == nil || *events[0].Revision != candidate || events[1].EventType != audit.EventExecutionStarted {
+		t.Fatalf("audit events=%+v", events)
 	}
 }
 
@@ -951,7 +1006,7 @@ func assertDurableClaimReclaimsReconcilingAndValidatesIDs(t *testing.T, dispatch
 	if err != nil || recoveredReconciling == nil {
 		t.Fatalf("reconciling reclaim = %+v err=%v", recoveredReconciling, err)
 	}
-	dispatcher.finishDurable("", "", recoveredReconciling, errors.New("execution failed"))
+	dispatcher.finishDurable(context.Background(), "", "", recoveredReconciling, errors.New("execution failed"))
 	message.ExternalMessageID = ""
 	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing external ID error = %v", err)

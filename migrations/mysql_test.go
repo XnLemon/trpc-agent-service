@@ -61,7 +61,7 @@ func TestMySQLMigrationSetUsesBinaryIdentityAndRecoveryMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 || files[0].version != 1 {
+	if len(files) != 2 || files[0].version != 1 || files[1].version != 2 {
 		t.Fatalf("MySQL files = %#v", files)
 	}
 	script := files[0].statements
@@ -87,7 +87,7 @@ func TestMySQLHistoryAndArgumentHelpers(t *testing.T) {
 	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{0: {status: "applied"}}, files); !errors.Is(err, ErrInvalidHistory) {
 		t.Fatalf("zero history version error = %v", err)
 	}
-	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{2: {status: "applied"}}, files); !errors.Is(err, ErrInvalidHistory) {
+	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{3: {status: "applied"}}, files); !errors.Is(err, ErrInvalidHistory) {
 		t.Fatalf("future history version error = %v", err)
 	}
 	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{1: {status: "unknown"}}, files); !errors.Is(err, ErrInvalidHistory) {
@@ -410,7 +410,7 @@ func TestVerifyMySQLSchemaAndIndexes(t *testing.T) {
 		((table_name = ? AND index_name = ?) OR (table_name = ? AND index_name = ?) OR
 		 (table_name = ? AND index_name = ?) OR (table_name = ? AND index_name = ?) OR
 		 (table_name = ? AND index_name = ?) OR (table_name = ? AND index_name = ?) OR
-		 (table_name = ? AND index_name = ?))`
+		 (table_name = ? AND index_name = ?) OR (table_name = ? AND index_name = ?))`
 				if tc.rows == nil {
 					mock.ExpectQuery(regexp.QuoteMeta(query)).WithArgs(mysqlMockArgs(mysqlIndexArgs())...).WillReturnError(errors.New("index query failed"))
 				} else {
@@ -428,7 +428,7 @@ func TestVerifyMySQLTriggersRejectsMetadataAndBodyDrift(t *testing.T) {
 	query := `SELECT trigger_name, event_manipulation, event_object_table,
 		action_timing, action_statement
 		FROM information_schema.triggers
-		WHERE trigger_schema = DATABASE() AND trigger_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		WHERE trigger_schema = DATABASE() AND trigger_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	for _, test := range []struct {
 		name   string
 		mutate func(*mysqlSchemaTrigger)
@@ -473,7 +473,7 @@ func expectMySQLIndexRows(mock sqlmock.Sqlmock, indexes []mysqlSchemaIndex) {
 		((table_name = ? AND index_name = ?) OR (table_name = ? AND index_name = ?) OR
 		 (table_name = ? AND index_name = ?) OR (table_name = ? AND index_name = ?) OR
 		 (table_name = ? AND index_name = ?) OR (table_name = ? AND index_name = ?) OR
-		 (table_name = ? AND index_name = ?))`
+		 (table_name = ? AND index_name = ?) OR (table_name = ? AND index_name = ?))`
 	rows := sqlmock.NewRows([]string{"table_name", "index_name", "non_unique", "seq_in_index", "column_name", "sub_part"})
 	for _, index := range indexes {
 		nonUnique := 1
@@ -491,7 +491,7 @@ func expectMySQLTriggerRows(mock sqlmock.Sqlmock, triggers []mysqlSchemaTrigger)
 	query := `SELECT trigger_name, event_manipulation, event_object_table,
 		action_timing, action_statement
 		FROM information_schema.triggers
-		WHERE trigger_schema = DATABASE() AND trigger_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		WHERE trigger_schema = DATABASE() AND trigger_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	rows := sqlmock.NewRows([]string{"trigger_name", "event_manipulation", "event_object_table", "action_timing", "action_statement"})
 	for _, trigger := range triggers {
 		rows.AddRow(trigger.name, trigger.event, trigger.table, trigger.timing, strings.Join(trigger.actionFragments, "\n"))
@@ -508,8 +508,10 @@ func TestVerifyMySQLHistoryAndSchema(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		db, mock, conn := newMySQLMockConn(t)
 		defer closeMySQLMock(t, db, conn, mock)
-		rows := sqlmock.NewRows([]string{"version", "name", "sha256", "status", "statement_index", "error_text"}).
-			AddRow(files[0].version, files[0].name, files[0].digest, "applied", len(files[0].statements), "")
+		rows := sqlmock.NewRows([]string{"version", "name", "sha256", "status", "statement_index", "error_text"})
+		for _, file := range files {
+			rows.AddRow(file.version, file.name, file.digest, "applied", len(file.statements), "")
+		}
 		mock.ExpectQuery(historyQuery).WillReturnRows(rows)
 		expectMySQLSchemaRows(mock, requiredMySQLTables)
 		expectMySQLIndexRows(mock, requiredMySQLIndexes)

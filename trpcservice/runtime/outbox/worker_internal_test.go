@@ -322,7 +322,7 @@ func TestRunOnceDoesNotRedeliverUnknownSendingLease(t *testing.T) {
 	if provider.deliveries != 0 {
 		t.Fatalf("unknown reconciliation redelivered %d times", provider.deliveries)
 	}
-	if len(telemetry.operations) != 1 || len(telemetry.metrics) < 2 {
+	if countTelemetryOperations(telemetry, observability.OperationChannelSend) != 1 || countTelemetryOperations(telemetry, observability.OperationStorageOperation) < 2 || len(telemetry.metrics) < 2 {
 		t.Fatalf("missing lease-recovery telemetry: operations=%d metrics=%d", len(telemetry.operations), len(telemetry.metrics))
 	}
 }
@@ -436,8 +436,13 @@ func TestWorkerTelemetryPropagatesCorrelationAndRedactsProviderClasses(t *testin
 	if provider.requestID != "request-1" || provider.traceID != "trace-1" {
 		t.Fatalf("provider correlation = %q/%q", provider.requestID, provider.traceID)
 	}
-	if len(telemetry.operations) != 1 || telemetry.operations[0].requestID != "request-1" || telemetry.operations[0].traceID != "trace-1" {
+	if countTelemetryOperations(telemetry, observability.OperationChannelSend) != 1 || countTelemetryOperations(telemetry, observability.OperationStorageOperation) == 0 {
 		t.Fatalf("operation correlation = %+v", telemetry.operations)
+	}
+	for _, operation := range telemetry.operations {
+		if operation.requestID != "request-1" || operation.traceID != "trace-1" {
+			t.Fatalf("operation lost correlation = %+v", operation)
+		}
 	}
 	for _, record := range telemetry.metrics {
 		labels := make(map[string]string, len(record.attrs))
@@ -503,7 +508,17 @@ func TestWorkerTelemetryRecordsSuccessfulDelivery(t *testing.T) {
 	if processed, err := worker.RunOnce(context.Background()); err != nil || processed != 1 {
 		t.Fatalf("RunOnce = %d, %v", processed, err)
 	}
-	if len(telemetry.operations) != 1 || len(telemetry.metrics) < 3 {
+	if countTelemetryOperations(telemetry, observability.OperationChannelSend) != 1 || countTelemetryOperations(telemetry, observability.OperationStorageOperation) == 0 || len(telemetry.metrics) < 3 {
 		t.Fatalf("missing successful delivery telemetry: operations=%d metrics=%d", len(telemetry.operations), len(telemetry.metrics))
 	}
+}
+
+func countTelemetryOperations(provider *recordingTelemetry, name string) int {
+	count := 0
+	for _, operation := range provider.operations {
+		if operation.name == name {
+			count++
+		}
+	}
+	return count
 }

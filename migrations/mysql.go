@@ -197,6 +197,7 @@ var requiredMySQLIndexes = []mysqlSchemaIndex{
 	{table: "tenant", name: "tenant_key_idx", unique: true, columns: []string{"tenant_key"}},
 	{table: "model_profile", name: "model_profile_key_idx", unique: true, columns: []string{"tenant_id", "profile_key"}},
 	{table: "agent_app", name: "agent_app_key_idx", unique: true, columns: []string{"tenant_id", "app_key"}},
+	{table: "agent_app", name: "agent_app_canary_revision_idx", unique: false, columns: []string{"tenant_id", "app_id", "canary_revision"}},
 	{table: "backend_profile", name: "backend_profile_key_idx", unique: true, columns: []string{"tenant_id", "profile_key"}},
 	{table: "channel_binding", name: "channel_binding_key_idx", unique: true, columns: []string{"tenant_id", "binding_key"}},
 	{table: "channel_binding", name: "channel_binding_active_account_idx", unique: true, columns: []string{"channel", "active_provider_account_id"}},
@@ -212,6 +213,7 @@ type mysqlSchemaTrigger struct {
 var requiredMySQLTriggers = []mysqlSchemaTrigger{
 	{name: "agent_app_revision_guard_ins", table: "agent_app", event: "INSERT", timing: "BEFORE", actionFragments: []string{"new.current_revision", "from agent_app_revision", "new.status", "agent app current revision must be published"}},
 	{name: "agent_app_revision_guard_upd", table: "agent_app", event: "UPDATE", timing: "BEFORE", actionFragments: []string{"new.current_revision", "from agent_app_revision", "new.status", "agent app current revision must be published"}},
+	{name: "agent_app_canary_guard_upd", table: "agent_app", event: "UPDATE", timing: "BEFORE", actionFragments: []string{"new.canary_revision", "new.current_revision", "from agent_app_revision", "agent app canary revision must be published"}},
 	{name: "agent_revision_immutable_upd", table: "agent_app_revision", event: "UPDATE", timing: "BEFORE", actionFragments: []string{"new.tenant_id <> old.tenant_id", "old.state = 'published'", "published agent app revision is immutable"}},
 	{name: "agent_revision_immutable_del", table: "agent_app_revision", event: "DELETE", timing: "BEFORE", actionFragments: []string{"old.state = 'published'", "published agent app revision is immutable"}},
 	{name: "agent_revision_tool_guard_ins", table: "agent_app_revision_tool", event: "INSERT", timing: "BEFORE", actionFragments: []string{"select state into revision_state", "revision_state = 'published'", "published agent app tool authorization is immutable"}},
@@ -268,7 +270,7 @@ func verifyMySQLIndexes(ctx context.Context, conn *sql.Conn) error {
 		((table_name = ? AND index_name = ?) OR (table_name = ? AND index_name = ?) OR
 		 (table_name = ? AND index_name = ?) OR (table_name = ? AND index_name = ?) OR
 		 (table_name = ? AND index_name = ?) OR (table_name = ? AND index_name = ?) OR
-		 (table_name = ? AND index_name = ?))`, mysqlIndexArgs()...)
+		 (table_name = ? AND index_name = ?) OR (table_name = ? AND index_name = ?))`, mysqlIndexArgs()...)
 	if err != nil {
 		return ErrInvalidHistory
 	}
@@ -323,7 +325,7 @@ func verifyMySQLTriggers(ctx context.Context, conn *sql.Conn) error {
 	rows, err := conn.QueryContext(ctx, `SELECT trigger_name, event_manipulation, event_object_table,
 		action_timing, action_statement
 		FROM information_schema.triggers
-		WHERE trigger_schema = DATABASE() AND trigger_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, mysqlTriggerArgs()...)
+		WHERE trigger_schema = DATABASE() AND trigger_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, mysqlTriggerArgs()...)
 	if err != nil {
 		return ErrInvalidHistory
 	}

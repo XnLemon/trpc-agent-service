@@ -46,6 +46,23 @@ func TestNewAppNormalizesStableIdentityAndDefaults(t *testing.T) {
 	}
 }
 
+func TestAppCanaryValidationAndClone(t *testing.T) {
+	current, candidate := int64(1), int64(2)
+	app := App{TenantID: validTenantID, AppID: "app_01J1K9ZQTVE4PAWF1TSB2WMHNP", AppKey: "app", DisplayName: "App", Status: StatusActive, CurrentRevision: &current, CanaryRevision: &candidate, Version: 1, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	clone := app.Clone()
+	*clone.CanaryRevision = 3
+	if *app.CanaryRevision != 2 {
+		t.Fatal("clone leaked canary pointer")
+	}
+	if err := app.Validate(); err != nil {
+		t.Fatalf("valid canary app rejected: %v", err)
+	}
+	app.CanaryRevision = &current
+	if err := app.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("same canary/current accepted: %v", err)
+	}
+}
+
 func TestNewAppRejectsInvalidInput(t *testing.T) {
 	tests := []struct {
 		name   string

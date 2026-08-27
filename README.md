@@ -141,14 +141,14 @@
 - [x] 实现 Model Profile 控制面、Secret Resolver 契约和最小 Runner 链路
 - [x] 实现租户、Agent、通道和后端配置的 Admin API（Issue #41）
 - [x] 实现 Agent App 草稿更新、原子发布和版本回滚
-- [ ] 实现配置缓存失效、租户级灰度和租户配置版本回滚（当前已实现 Runner/Provider 精确失效；灰度与配置版本回滚另行跟踪）
+- [x] 实现配置缓存失效、租户级灰度和租户配置版本回滚（Issue #82；当前灰度为租户/App 全量候选 revision 选择，不含百分比分流）
 - [x] 接入 KMS/Secret Manager，禁止密钥进入运行时快照、日志和 trace（SecretManager 契约与 Vault KV v2 adapter；租户级灰度仍需独立治理能力）
 
 ### Gateway 与 Agent Worker
 
 - [x] 引入并初始化 tRPC-Agent-Go，建立可执行的 `runner.Runner`
 - [x] 将 Tenant、Agent Revision、Model Profile 和 Backend Profile 组合成 Execution Plan
-- [ ] 实现 Agent Registry，按 `tenant_id + agent_app_id + version` 加载 Agent
+- [x] 实现 Agent Registry，按租户/App 的 stable 或 canary revision 加载 Agent（Issue #82；Runner 仍按完整 ExecutionPlan key 复用）
 - [x] 实现 Tenant + App + Revision 不可变执行快照、Factory Cache Key 和无密钥 Factory 输入契约
 - [x] 实现 Gateway 的鉴权、租户解析、Agent 路由、限流和请求去重
 - [x] 实现普通及流式对话 API，并贯穿 `request_id` / `trace_id`
@@ -196,10 +196,10 @@
 - [ ] 实现工具白名单、调用前鉴权、密钥注入和危险操作二次确认
 - [ ] 实现 IM 用户权限校验、敏感信息脱敏和租户级预算控制
 - [x] 实现包含 README 指定字段的不可篡改审计日志（Issue #54/#55）
-- [x] 接入运行时 OpenTelemetry tracing、metrics 和结构化日志（Issue #45 阶段 A；完整 IM 协议和生产告警仍待完成）
-- [ ] 串联 IM callback、Gateway、Runner、Model、Tool、Storage 和 IM reply 的 trace
-- [ ] 采集请求量、延迟、错误率、IM 成功率、token、成本和后端延迟指标
-- [ ] 提供租户级 dashboard、告警规则并控制指标 label 基数
+- [x] 接入运行时 OpenTelemetry tracing、metrics 和结构化日志（Issue #45 阶段 A）
+- [ ] 串联 HTTP/IM callback、Gateway、Runner、Model、Tool、Storage 和 IM reply 的 trace（Issue #79；含流式模型调用、创建流失败和 WeCom context 继承）
+- [ ] 采集请求量、延迟、终态错误率、IM 成功/重试/死信、token、成本和实际 Session/Storage 后端延迟指标（Issue #79）
+- [ ] 提供通过授权 query adapter 的租户 usage dashboard、平台运维 process dashboard、告警规则并控制 provider/channel/model label 基数（Issue #79）
 
 ### 可靠性、运维与测试
 

@@ -135,8 +135,9 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
 	}
+	config.AuditWriter = metrics.WrapAuditWriter(config.AuditWriter, config.Observability)
 	if config.Materializer == nil && config.RuntimeStore != nil {
-		materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: config.RuntimeStore})
+		materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: config.RuntimeStore, Observability: config.Observability})
 		if err != nil {
 			return nil, err
 		}
@@ -172,7 +173,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		span.SetStatus(observability.StatusError, observability.ErrorClass(cause))
 		span.RecordError(cause)
 		span.End()
-		_ = dispatcher.metrics.Duration(ctx, observability.DurationMilliseconds(started), map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch, "status": "error", "error_class": observability.ErrorClass(cause)})
+		_ = dispatcher.metrics.Operation(ctx, started, map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch}, cause)
 	}
 
 	plan, err := dispatcher.resolver.Resolve(ctx, request.Principal)
@@ -185,10 +186,20 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		finishWithError(err)
 		return nil, err
 	}
+	planSnapshot := plan.AgentSnapshot()
+	planApp := planSnapshot.App()
 	durable, err := dispatcher.claimInbound(ctx, request.Principal, message, identity)
 	if err != nil {
 		finishWithError(err)
 		return nil, err
+	}
+	if planApp.CanaryRevision != nil && planSnapshot.Revision().Revision == *planApp.CanaryRevision {
+		selectedRevision := planSnapshot.Revision().Revision
+		if err := dispatcher.writeExecutionAuditRevision(ctx, request.Principal, message, identity, requestID, traceID, audit.EventCanarySelected, "", &selectedRevision); err != nil {
+			dispatcher.failDurable(durable, err)
+			finishWithError(err)
+			return nil, auditWriteFailure()
+		}
 	}
 	if err := dispatcher.writeExecutionAudit(ctx, request.Principal, message, identity, requestID, traceID, audit.EventExecutionStarted, ""); err != nil {
 		dispatcher.failDurable(durable, err)
@@ -219,6 +230,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	runnerValue := lease.Runner()
 	if runnerValue == nil {
 		_ = lease.Release()
+		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
 		dispatcher.failDurable(durable, ErrRunnerUnavailable)
 		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
 			dispatcher.failDurable(durable, auditErr)
@@ -228,9 +240,16 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		finishWithError(ErrRunnerUnavailable)
 		return nil, ErrRunnerUnavailable
 	}
-	runnerEvents, err := runnerValue.Run(ctx, identity.UserID, identity.SessionID, trpcmodel.NewUserMessage(message.Content), trpcagent.WithRequestID(requestID))
+	_ = dispatcher.metrics.Lease(ctx, 1, map[string]string{"component": "runner", "status": "active"})
+	runnerStarted := time.Now()
+	runnerCtx, _, finishRunner := observability.StartOperation(ctx, dispatcher.telemetry, observability.OperationRunnerExecution, "runner")
+	_ = dispatcher.metrics.Request(runnerCtx, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution, "status": "started"})
+	runnerEvents, err := runnerValue.Run(runnerCtx, identity.UserID, identity.SessionID, trpcmodel.NewUserMessage(message.Content), trpcagent.WithRequestID(requestID))
 	if err != nil {
+		finishRunner(err)
+		_ = dispatcher.metrics.Operation(runnerCtx, runnerStarted, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, err)
 		_ = lease.Release()
+		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
 		dispatcher.failDurable(durable, err)
 		eventType, errorType := audit.EventExecutionFailed, string(audit.ErrorUnavailable)
 		if IsContextCancellation(err) {
@@ -249,7 +268,10 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		return nil, ErrExecution
 	}
 	if runnerEvents == nil {
+		finishRunner(ErrExecution)
+		_ = dispatcher.metrics.Operation(runnerCtx, runnerStarted, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, ErrExecution)
 		_ = lease.Release()
+		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
 		dispatcher.failDurable(durable, ErrExecution)
 		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
 			dispatcher.failDurable(durable, auditErr)
@@ -262,7 +284,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 
 	output := make(chan DispatchEvent, 32)
 	_ = dispatcher.metrics.Active(ctx, 1, map[string]string{"component": "runner"})
-	go dispatcher.forward(ctx, requestID, traceID, runnerEvents, lease, durable, output, span, started, request.Principal, message, identity)
+	go dispatcher.forward(runnerCtx, requestID, traceID, runnerEvents, lease, durable, output, span, started, request.Principal, message, identity, finishRunner, runnerStarted)
 	return output, nil
 }
 
@@ -302,10 +324,33 @@ func normalizeDispatchRequest(ctx context.Context, request DispatchRequest) (Inb
 	return message, requestID, traceID, nil
 }
 
-func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity) (*durableExecution, error) {
+func detachedCorrelationContext(parent context.Context, requestID, traceID string) context.Context {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return observability.WithCorrelation(context.WithoutCancel(parent), requestID, traceID)
+}
+
+func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity) (result *durableExecution, err error) {
 	if dispatcher.runtimeStore == nil || principal.Kind() != PrincipalChannel {
 		return nil, nil
 	}
+	started := time.Now()
+	operationCtx, _, finish := observability.StartOperation(ctx, dispatcher.telemetry, observability.OperationStorageOperation, "storage")
+	_ = dispatcher.metrics.Request(operationCtx, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "status": "started"})
+	defer func() {
+		finish(err)
+		_ = dispatcher.metrics.Operation(operationCtx, started, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation}, err)
+		status := "success"
+		if err != nil {
+			status = observability.ErrorClass(err)
+			if status == "" {
+				status = "error"
+			}
+		}
+		_ = dispatcher.metrics.BackendDuration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "status": status, "error_class": observability.ErrorClass(err)})
+	}()
+	ctx = operationCtx
 	target, ok := principal.RoutingTarget()
 	if !ok || message.ExternalMessageID == "" || len([]rune(message.ExternalMessageID)) > maxDurableExternalMessageIDRunes {
 		return nil, fmt.Errorf("%w: durable Channel messages require an external message ID", ErrInvalid)
@@ -399,16 +444,20 @@ func (dispatcher *Dispatcher) failDurable(durable *durableExecution, cause error
 		return
 	}
 	to := runtimestorage.EventFailed
-	_, _ = durable.store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{
-		TenantID: durable.tenantID, EventID: durable.eventID, From: runtimestorage.EventRunning,
-		To: to, Owner: durable.owner, FencingToken: durable.fencingToken,
+	_ = dispatcher.observeStorage(context.Background(), func(operationCtx context.Context) error {
+		_, err := durable.store.TransitionMessage(operationCtx, runtimestorage.MessageTransition{
+			TenantID: durable.tenantID, EventID: durable.eventID, From: runtimestorage.EventRunning,
+			To: to, Owner: durable.owner, FencingToken: durable.fencingToken,
+		})
+		return err
 	})
 }
 
-func (dispatcher *Dispatcher) finishDurable(requestID, traceID string, durable *durableExecution, terminalErr error, replies ...string) {
+func (dispatcher *Dispatcher) finishDurable(ctx context.Context, requestID, traceID string, durable *durableExecution, terminalErr error, replies ...string) {
 	if durable == nil {
 		return
 	}
+	durableCtx := detachedCorrelationContext(ctx, requestID, traceID)
 	reply := ""
 	if len(replies) > 0 {
 		reply = replies[0]
@@ -417,7 +466,7 @@ func (dispatcher *Dispatcher) finishDurable(requestID, traceID string, durable *
 	replyID := ""
 	if terminalErr == nil && dispatcher.materializer != nil && strings.TrimSpace(reply) != "" {
 		var err error
-		segments, err = dispatcher.materializer.Materialize(context.Background(), outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: requestID, TraceID: traceID, Payload: reply, ReplyTarget: durable.replyTarget})
+		segments, err = dispatcher.materializer.Materialize(durableCtx, outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: requestID, TraceID: traceID, Payload: reply, ReplyTarget: durable.replyTarget})
 		if err != nil {
 			terminalErr = err
 		} else {
@@ -428,15 +477,43 @@ func (dispatcher *Dispatcher) finishDurable(requestID, traceID string, durable *
 	if terminalErr != nil {
 		to = runtimestorage.EventFailed
 	}
-	_, _ = durable.store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{
-		TenantID: durable.tenantID, EventID: durable.eventID, From: runtimestorage.EventRunning,
-		To: to, Owner: durable.owner, FencingToken: durable.fencingToken, ReplyID: replyID, SegmentCount: segments,
+	_ = dispatcher.observeStorage(durableCtx, func(operationCtx context.Context) error {
+		_, err := durable.store.TransitionMessage(operationCtx, runtimestorage.MessageTransition{
+			TenantID: durable.tenantID, EventID: durable.eventID, From: runtimestorage.EventRunning,
+			To: to, Owner: durable.owner, FencingToken: durable.fencingToken, ReplyID: replyID, SegmentCount: segments,
+		})
+		return err
 	})
 }
 
-func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time, principal Principal, message InboundMessage, identity tenant.RunnerIdentity) {
+func (dispatcher *Dispatcher) observeStorage(ctx context.Context, operation func(context.Context) error) error {
+	if dispatcher == nil || operation == nil {
+		return ErrInvalid
+	}
+	started := time.Now()
+	operationCtx, _, finish := observability.StartOperation(ctx, dispatcher.telemetry, observability.OperationStorageOperation, "storage")
+	_ = dispatcher.metrics.Request(operationCtx, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": "other", "status": "started"})
+	err := operation(operationCtx)
+	finish(err)
+	labels := map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": "other"}
+	_ = dispatcher.metrics.Operation(operationCtx, started, labels, err)
+	status := "success"
+	if err != nil {
+		status = observability.ErrorClass(err)
+		if status == "" {
+			status = "error"
+		}
+	}
+	_ = dispatcher.metrics.BackendDuration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "storage", "provider": "other", "status": status, "error_class": observability.ErrorClass(err)})
+	return err
+}
+
+func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, finishRunner func(error), runnerStarted time.Time) {
 	defer close(output)
-	defer func() { _ = lease.Release() }()
+	defer func() {
+		_ = lease.Release()
+		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
+	}()
 	var terminalErr error
 	var reply strings.Builder
 	var terminalEventType audit.EventType
@@ -446,7 +523,7 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		if auditFinalized {
 			return nil
 		}
-		err := dispatcher.writeExecutionAudit(context.Background(), principal, message, identity, requestID, traceID, eventType, errorType)
+		err := dispatcher.writeExecutionAudit(detachedCorrelationContext(ctx, requestID, traceID), principal, message, identity, requestID, traceID, eventType, errorType)
 		if err == nil {
 			auditFinalized = true
 		}
@@ -456,15 +533,17 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		if dispatcher.handoffStore == nil {
 			return nil
 		}
-		_, err := dispatcher.handoffStore.Finalize(context.Background(), audit.ExecutionHandoff{TenantID: principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType})
+		_, err := dispatcher.handoffStore.Finalize(detachedCorrelationContext(ctx, requestID, traceID), audit.ExecutionHandoff{TenantID: principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType})
 		return err
 	}
 	defer func() {
-		terminalErr = dispatcher.finalizeForward(requestID, traceID, durable, principal, terminalErr, reply.String(), terminalEventType, terminalErrorType, finalizeAudit)
+		if finishRunner != nil {
+			finishRunner(terminalErr)
+			_ = dispatcher.metrics.Operation(ctx, runnerStarted, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, terminalErr)
+		}
+		terminalErr = dispatcher.finalizeForward(ctx, requestID, traceID, durable, principal, terminalErr, reply.String(), terminalEventType, terminalErrorType, finalizeAudit)
 		_ = dispatcher.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
-		status := "complete"
 		if terminalErr != nil {
-			status = "error"
 			class := observability.ErrorClass(terminalErr)
 			span.SetAttributes(observability.Attribute{Key: "error_class", Value: class})
 			span.SetStatus(observability.StatusError, class)
@@ -472,7 +551,7 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		} else {
 			span.SetStatus(observability.StatusOK, "")
 		}
-		_ = dispatcher.metrics.Duration(ctx, observability.DurationMilliseconds(started), map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch, "status": status, "error_class": observability.ErrorClass(terminalErr)})
+		_ = dispatcher.metrics.Operation(ctx, started, map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch}, terminalErr)
 		span.End()
 	}()
 	for {
@@ -571,7 +650,7 @@ func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requ
 	return true
 }
 
-func (dispatcher *Dispatcher) finalizeForward(requestID, traceID string, durable *durableExecution, principal Principal, terminalErr error, reply string, terminalEventType audit.EventType, terminalErrorType string, finalizeAudit func(audit.EventType, string) error) error {
+func (dispatcher *Dispatcher) finalizeForward(ctx context.Context, requestID, traceID string, durable *durableExecution, principal Principal, terminalErr error, reply string, terminalEventType audit.EventType, terminalErrorType string, finalizeAudit func(audit.EventType, string) error) error {
 	eventType := terminalEventType
 	errorType := terminalErrorType
 	if eventType == "" {
@@ -594,14 +673,14 @@ func (dispatcher *Dispatcher) finalizeForward(requestID, traceID string, durable
 				result = audit.ResultCanceled
 			}
 		}
-		if _, err := dispatcher.handoffStore.Finalize(context.Background(), audit.ExecutionHandoff{TenantID: principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType}); err != nil && terminalErr == nil {
+		if _, err := dispatcher.handoffStore.Finalize(detachedCorrelationContext(ctx, requestID, traceID), audit.ExecutionHandoff{TenantID: principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType}); err != nil && terminalErr == nil {
 			terminalErr = auditWriteFailure()
 		}
 	}
 	if err := finalizeAudit(eventType, errorType); err != nil && terminalErr == nil {
 		terminalErr = ErrExecution
 	}
-	dispatcher.finishDurable(requestID, traceID, durable, terminalErr, reply)
+	dispatcher.finishDurable(ctx, requestID, traceID, durable, terminalErr, reply)
 	return terminalErr
 }
 
@@ -639,6 +718,10 @@ func terminalAuditError(err error) string {
 }
 
 func (dispatcher *Dispatcher) writeExecutionAudit(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, requestID, traceID string, eventType audit.EventType, errorType string) error {
+	return dispatcher.writeExecutionAuditRevision(ctx, principal, message, identity, requestID, traceID, eventType, errorType, nil)
+}
+
+func (dispatcher *Dispatcher) writeExecutionAuditRevision(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, requestID, traceID string, eventType audit.EventType, errorType string, revision *int64) error {
 	if dispatcher.auditWriter == nil {
 		return nil
 	}
@@ -646,7 +729,7 @@ func (dispatcher *Dispatcher) writeExecutionAudit(ctx context.Context, principal
 	if target, ok := principal.RoutingTarget(); ok {
 		channel = string(target.Channel)
 	}
-	event := audit.Event{SchemaVersion: audit.SchemaVersion, EventID: audit.NewEventID(requestID, string(eventType)), EventType: eventType, TenantID: principal.TenantID(), Channel: channel, UserID: message.ExternalUserID, SessionID: identity.SessionID, AgentAppID: principal.AppID(), ErrorType: errorType, RequestID: requestID, TraceID: traceID, ActorType: string(principal.Kind()), ActorID: principal.SubjectID(), OccurredAt: time.Now().UTC()}
+	event := audit.Event{SchemaVersion: audit.SchemaVersion, EventID: audit.NewEventID(requestID, string(eventType)), EventType: eventType, TenantID: principal.TenantID(), Channel: channel, UserID: message.ExternalUserID, SessionID: identity.SessionID, AgentAppID: principal.AppID(), Revision: revision, ErrorType: errorType, RequestID: requestID, TraceID: traceID, ActorType: string(principal.Kind()), ActorID: principal.SubjectID(), OccurredAt: time.Now().UTC()}
 	if _, err := dispatcher.auditWriter.Append(ctx, event); err != nil {
 		return err
 	}

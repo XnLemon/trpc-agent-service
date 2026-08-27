@@ -327,8 +327,8 @@ func mockAgentAppRows(value *agent.App) *sqlmock.Rows {
 	if value.CurrentRevision != nil {
 		current = *value.CurrentRevision
 	}
-	return sqlmock.NewRows([]string{"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "version", "created_at", "updated_at"}).
-		AddRow(value.TenantID, value.AppID, value.AppKey, value.DisplayName, value.Description, string(value.Status), current, value.Version, value.CreatedAt, value.UpdatedAt)
+	return sqlmock.NewRows([]string{"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "canary_revision", "version", "created_at", "updated_at"}).
+		AddRow(value.TenantID, value.AppID, value.AppKey, value.DisplayName, value.Description, string(value.Status), current, nil, value.Version, value.CreatedAt, value.UpdatedAt)
 }
 
 func expectAgentApp(mock sqlmock.Sqlmock, value *agent.App) {
