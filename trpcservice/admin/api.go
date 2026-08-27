@@ -468,12 +468,6 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 		if len(parts) != 2 || r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
-		canaryRepo, ok := h.config.Apps.(interface {
-			SetCanary(context.Context, agent.SetCanaryInput) (*agent.App, agent.ChangeEvent, error)
-		})
-		if !ok {
-			return 0, nil, fmt.Errorf("%w: canary is unavailable", agent.ErrInvalid)
-		}
 		var body struct {
 			ExpectedAppVersion int64
 			CandidateRevision  *int64
@@ -492,7 +486,7 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 			ExpectedAppVersion: body.ExpectedAppVersion, TenantActive: tenantRoot.Status == tenant.StatusActive,
 			Metadata: agent.ChangeMetadata{ActorType: "admin", ActorID: p.SubjectID, Reason: body.Reason, CorrelationID: body.CorrelationID},
 		}
-		value, event, err := canaryRepo.SetCanary(ctx, bodyInput)
+		value, event, err := h.config.Apps.SetCanary(ctx, bodyInput)
 		return http.StatusOK, map[string]any{"app": value, "event": event}, err
 	default:
 		return 0, nil, errNotFound
