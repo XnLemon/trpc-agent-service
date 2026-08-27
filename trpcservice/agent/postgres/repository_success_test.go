@@ -413,6 +413,45 @@ func TestAgentRepositoryRollsBackToPublishedRevision(t *testing.T) {
 	}
 }
 
+func TestAgentRepositorySetsCanaryRevision(t *testing.T) {
+	app := newStoredAgentApp(t)
+	stable := newStoredAgentRevision(t, app, 1, true)
+	candidate := newStoredAgentRevision(t, app, 2, true)
+	app.Status = agent.StatusActive
+	app.CurrentRevision = agentInt64(stable.Revision)
+	app.Version = 2
+	stored := app.Clone()
+	stored.CanaryRevision = agentInt64(candidate.Revision)
+	stored.Version++
+	stored.UpdatedAt = stored.UpdatedAt.Add(time.Second)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectBegin()
+	expectAgentApp(mock, app)
+	expectAgentRevision(t, mock, candidate)
+	mock.ExpectQuery(".*").WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(10)))
+	expectAgentApp(mock, &stored)
+	expectAgentEvent(mock, app, agent.ChangeCanaryStarted, agent.StatusActive, agent.StatusActive, nil, stored.CanaryRevision, candidate.ContentDigest, app.Version, stored.Version, stored.UpdatedAt)
+	mock.ExpectCommit()
+	selected, event, err := NewRepository(db).SetCanary(context.Background(), agent.SetCanaryInput{
+		TenantID: app.TenantID, AppID: app.AppID, CandidateRevision: stored.CanaryRevision,
+		ExpectedAppVersion: app.Version, TenantActive: true,
+		Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "canary", CorrelationID: "agent-canary"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.CanaryRevision == nil || *selected.CanaryRevision != candidate.Revision || event.EventType != agent.ChangeCanaryStarted {
+		t.Fatalf("canary result = app=%+v event=%+v", selected, event)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAgentRepositoryRequiresStorage(t *testing.T) {
 	repository := NewRepository(nil)
 	ctx := context.Background()
@@ -476,13 +515,16 @@ func newStoredAgentRevision(t *testing.T, app *agent.App, revision int64, publis
 }
 
 func expectAgentApp(mock sqlmock.Sqlmock, value *agent.App) {
-	var currentRevision any
+	var currentRevision, canaryRevision any
 	if value.CurrentRevision != nil {
 		currentRevision = *value.CurrentRevision
 	}
+	if value.CanaryRevision != nil {
+		canaryRevision = *value.CanaryRevision
+	}
 	mock.ExpectQuery(".*").WithArgs(value.TenantID, value.AppID).WillReturnRows(sqlmock.NewRows([]string{
 		"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "canary_revision", "version", "created_at", "updated_at",
-	}).AddRow(value.TenantID, value.AppID, value.AppKey, value.DisplayName, value.Description, string(value.Status), currentRevision, nil, value.Version, value.CreatedAt, value.UpdatedAt))
+	}).AddRow(value.TenantID, value.AppID, value.AppKey, value.DisplayName, value.Description, string(value.Status), currentRevision, canaryRevision, value.Version, value.CreatedAt, value.UpdatedAt))
 }
 
 func expectAgentRevision(t *testing.T, mock sqlmock.Sqlmock, value *agent.Revision) {
