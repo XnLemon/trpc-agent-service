@@ -229,7 +229,9 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	_ = h.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "wecom", "status": "started"})
 	defer func() {
 		var outcome error
-		if capture.status >= http.StatusBadRequest {
+		if ctxErr := r.Context().Err(); ctxErr != nil {
+			outcome = ctxErr
+		} else if capture.status >= http.StatusBadRequest {
 			outcome = errors.New("wecom callback failed")
 		}
 		finish(outcome)
