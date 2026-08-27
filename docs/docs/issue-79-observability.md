@@ -32,7 +32,7 @@ Storage telemetry 覆盖实际 RuntimeStore/Session service 的读写方法（Ge
 | trpcservice_backend_operation_duration_ms | histogram | Session/Storage 后端延迟 | component, provider, status, error_class |
 | trpcservice_channel_deliveries_total | counter | IM 发送成功/失败/重试/DLQ | channel, provider, status, error_class |
 
-标签白名单在代码中集中校验；禁止 tenant_id、user_id、session_id、message_id、request_id、trace_id、完整 URL 和原文。provider 的 canonical 枚举是 `openai|postgres|inmemory|other`，channel 是 `api|telegram|wecom|outbox|other`，model_family 是 `gpt|claude|gemini|other`，currency 是 `usd|cny|eur|jpy|gbp|other`；未知或租户自定义值统一映射到 `other`，不能直接把模型名作为 label。Token/cost 的生产来源是单个 AuditEvent 的 `Event.Cost` 增量：只有 `Append` 返回 `err == nil && Duplicate == false` 时上报一次，不能把周期性的 `UsageTotal` 快照当作 counter 增量；重复事件不能重复计数，写入失败不能伪造成本；成本查询和 dashboard 必须按 currency 分组，不能跨币种直接相加。匿名或未获授权的调用者拒绝访问；平台运维管理员才可读取进程级聚合，租户调用者只能读取其授权的 AuditEvent usage aggregate。
+标签白名单在代码中集中校验；禁止 tenant_id、user_id、session_id、message_id、request_id、trace_id、完整 URL 和原文。provider 的 canonical 枚举是 `openai|postgres|inmemory|other`，channel 是 `api|telegram|wecom|outbox|other`，model_family 是 `gpt|claude|gemini|other`，currency 是小写 ISO-4217 alpha-3 code（例如 `usd`、`cad`、`aud`），每个币种保持一一映射；不支持或格式错误的 currency 拒绝成本 telemetry，不能把多个真实币种合并到 `other`。未知 provider/channel/model 值仍统一映射到 `other`，不能直接把模型名作为 label。Token/cost 的生产来源是单个 AuditEvent 的 `Event.Cost` 增量：只有 `Append` 返回 `err == nil && Duplicate == false` 时上报一次，不能把周期性的 `UsageTotal` 快照当作 counter 增量；重复事件不能重复计数，写入失败不能伪造成本；成本查询和 dashboard 必须按 currency 分组，不能跨币种直接相加。匿名或未获授权的调用者拒绝访问；平台运维管理员才可读取进程级聚合，租户调用者只能读取其授权的 AuditEvent usage aggregate。
 
 ## Dashboard 与访问控制
 
@@ -42,7 +42,7 @@ Dashboard 展示四组面板：请求与错误率、端到端/分阶段延迟、
 
 ## 告警初始规则
 
-初始阈值是可调的起始值，不是容量承诺：5 分钟顶层 HTTP 终态错误率 > 5%；P95 gateway/runner 延迟 > 2s；IM delivery retryable/dead-letter failure > 1%；backend P95 > 500ms。HTTP request rate/error rate 只统计 `component="http", operation="http.request"`，避免把同一请求的 Gateway、Runner、Model、Tool、Storage 终态叠加成一个 request。终态集合固定为 `complete|success|error|failure|canceled|timeout`，错误分子为 `error|failure|canceled|timeout`，分母只取上述终态（`started` 不进入分母）。Delivery 比率按投递尝试计数：分母为 `success|retry|failure|dead_letter`，分子为 `retry|failure|dead_letter`；dead-letter 是最终结果，retry 是当前尝试结果。token/cost 预算由同一个授权 query adapter 从 AuditEvent aggregate 计算 80%/100% 阈值，不把 tenant_id 放进 Prometheus label；本仓库不把租户预算伪装成 Prometheus 指标，部署方如需 Prometheus 告警，必须由 adapter 发布按 currency 分组的受控 aggregate gauge 后自行接入。告警 payload 只带 component、operation、channel、provider、error_class 和受控聚合标识。
+初始阈值是可调的起始值，不是容量承诺：5 分钟顶层 HTTP 终态错误率 > 5%；P95 gateway/runner 延迟 > 2s；IM delivery retryable/dead-letter failure > 1%；backend P95 > 500ms。HTTP request rate/error rate 只统计 `component="http", operation="http.request"`，避免把同一请求的 Gateway、Runner、Model、Tool、Storage 终态叠加成一个 request。规则使用极小 epsilon 仅避免零流量除零，不改变实际终态分母。终态集合固定为 `complete|success|error|failure|canceled|timeout`，错误分子为 `error|failure|canceled|timeout`，分母只取上述终态（`started` 不进入分母）。Delivery 比率按投递尝试计数：分母为 `success|retry|failure|dead_letter`，分子为 `retry|failure|dead_letter`；dead-letter 是最终结果，retry 是当前尝试结果。token/cost 预算由同一个授权 query adapter 从 AuditEvent aggregate 计算 80%/100% 阈值，不把 tenant_id 放进 Prometheus label；本仓库不把租户预算伪装成 Prometheus 指标，部署方如需 Prometheus 告警，必须由 adapter 发布按 currency 分组的受控 aggregate gauge 后自行接入。告警 payload 只带 component、operation、channel、provider、error_class 和受控聚合标识。
 
 ## 验收台账
 

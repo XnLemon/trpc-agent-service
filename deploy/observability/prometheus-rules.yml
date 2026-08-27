@@ -2,9 +2,9 @@ groups:
   - name: trpcservice-runtime
     rules:
       - record: trpcservice:request_error_rate5m
-        expr: sum(rate(trpcservice_requests_total{component="http",operation="http.request",status=~"error|failure|canceled|timeout"}[5m])) / clamp_min(sum(rate(trpcservice_requests_total{component="http",operation="http.request",status=~"complete|success|error|failure|canceled|timeout"}[5m])), 1)
+        expr: sum(rate(trpcservice_requests_total{component="http",operation="http.request",status=~"error|failure|canceled|timeout"}[5m])) / clamp_min(sum(rate(trpcservice_requests_total{component="http",operation="http.request",status=~"complete|success|error|failure|canceled|timeout"}[5m])), 1e-9)
       - record: trpcservice:delivery_failure_rate5m
-        expr: sum(rate(trpcservice_channel_deliveries_total{status=~"retry|failure|dead_letter"}[5m])) / clamp_min(sum(rate(trpcservice_channel_deliveries_total{status=~"success|retry|failure|dead_letter"}[5m])), 1)
+        expr: sum(rate(trpcservice_channel_deliveries_total{status=~"retry|failure|dead_letter"}[5m])) / clamp_min(sum(rate(trpcservice_channel_deliveries_total{status=~"success|retry|failure|dead_letter"}[5m])), 1e-9)
       - alert: TRPCServiceHighErrorRate
         expr: trpcservice:request_error_rate5m > 0.05
         for: 10m
