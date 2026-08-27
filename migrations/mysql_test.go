@@ -66,6 +66,10 @@ func TestMySQLMigrationSetUsesBinaryIdentityAndRecoveryMarkers(t *testing.T) {
 	}
 	script := files[0].statements
 	joined := strings.Join(script, "\n")
+	canaryScript := strings.Join(files[1].statements, "\n")
+	if !strings.Contains(canaryScript, "ADD COLUMN IF NOT EXISTS canary_revision") {
+		t.Fatalf("canary migration is not replay-safe: %q", canaryScript)
+	}
 	for _, fragment := range []string{"utf8mb4_bin", "active_provider_account_id", "channel_binding_candidate_idx", "ENGINE=InnoDB"} {
 		if !strings.Contains(joined, fragment) {
 			t.Fatalf("migration is missing %q", fragment)

@@ -1,6 +1,10 @@
 ALTER TABLE agent_app
-    ADD COLUMN canary_revision BIGINT NULL AFTER current_revision,
-    ADD KEY agent_app_canary_revision_idx (tenant_id, app_id, canary_revision),
+    ADD COLUMN IF NOT EXISTS canary_revision BIGINT NULL AFTER current_revision;
+
+ALTER TABLE agent_app
+    ADD KEY agent_app_canary_revision_idx (tenant_id, app_id, canary_revision);
+
+ALTER TABLE agent_app
     ADD CONSTRAINT agent_app_canary_revision_fk
     FOREIGN KEY (tenant_id, app_id, canary_revision)
     REFERENCES agent_app_revision (tenant_id, app_id, revision);
