@@ -49,6 +49,7 @@ nav:
       - "Issue #50 Reliable Reply Delivery": issue-50-reliable-delivery.md
       - 租户审计与用量成本: audit-usage.md
       - 运行时可观测性契约: observability.md
+      - "Issue #79 生产可观测性": issue-79-observability.md
   - 运维与验证:
       - 运维方案: ops.md
 

@@ -63,5 +63,6 @@ provider 文本或带敏感值的 stack。
 - [ ] 验证：`go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...`、
   `mkdocs build --strict`。
 
-非目标：AuditEvent/usage/cost 持久化、Dashboard/告警服务、Session/Memory/Storage 后端、
-以及 #41 的 Admin 路由、migration 和 bootstrap 依赖图。
+AuditEvent/usage/cost 持久化仍由 Issue #54 负责；Dashboard、告警和租户授权查询由
+[Issue #79](issue-79-observability.md) 承接。Session/Memory/Storage 后端以及 #41 的 Admin
+路由、migration 和 bootstrap 依赖图仍不属于本页。

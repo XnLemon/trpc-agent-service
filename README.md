@@ -196,10 +196,10 @@
 - [ ] 实现工具白名单、调用前鉴权、密钥注入和危险操作二次确认
 - [ ] 实现 IM 用户权限校验、敏感信息脱敏和租户级预算控制
 - [x] 实现包含 README 指定字段的不可篡改审计日志（Issue #54/#55）
-- [x] 接入运行时 OpenTelemetry tracing、metrics 和结构化日志（Issue #45 阶段 A；完整 IM 协议和生产告警仍待完成）
-- [ ] 串联 IM callback、Gateway、Runner、Model、Tool、Storage 和 IM reply 的 trace
-- [ ] 采集请求量、延迟、错误率、IM 成功率、token、成本和后端延迟指标
-- [ ] 提供租户级 dashboard、告警规则并控制指标 label 基数
+- [x] 接入运行时 OpenTelemetry tracing、metrics 和结构化日志（Issue #45 阶段 A）
+- [x] 串联 HTTP/IM callback、Gateway、Runner、Model、Tool、Storage 和 IM reply 的 trace（Issue #79）
+- [x] 采集请求量、延迟、错误率、IM 成功率、token、成本和后端延迟指标（Issue #79）
+- [x] 提供租户授权 dashboard、告警规则并控制指标 label 基数（Issue #79）
 
 ### 可靠性、运维与测试
 
