@@ -30,6 +30,7 @@ type HTTPConfig struct {
 	Dispatcher     DispatchService
 	Authenticator  APIAuthenticator
 	Admin          http.Handler
+	WeCom          http.Handler
 	Ready          func() bool
 	Limiter        *TenantLimiter
 	Idempotency    *IdempotencyStore
@@ -42,6 +43,7 @@ type HTTPHandler struct {
 	dispatcher     DispatchService
 	authenticator  APIAuthenticator
 	admin          http.Handler
+	wecom          http.Handler
 	ready          func() bool
 	limiter        *TenantLimiter
 	idempotency    *IdempotencyStore
@@ -99,6 +101,7 @@ func NewHTTPHandler(config HTTPConfig) (*HTTPHandler, error) {
 	handler := &HTTPHandler{
 		dispatcher: config.Dispatcher, authenticator: config.Authenticator, ready: config.Ready,
 		admin:        config.Admin,
+		wecom:        config.WeCom,
 		maxBodyBytes: config.MaxBodyBytes, requestTimeout: config.RequestTimeout,
 		limiter: config.Limiter, idempotency: config.Idempotency,
 	}
@@ -164,6 +167,14 @@ func (handler *HTTPHandler) Close() error {
 
 func (handler *HTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if request == nil {
+		return
+	}
+	if strings.HasPrefix(request.URL.Path, "/wecom/callback/") {
+		if handler.wecom == nil {
+			handler.writeError(writer, request, http.StatusNotFound, "not found", "", "")
+			return
+		}
+		handler.wecom.ServeHTTP(writer, request)
 		return
 	}
 	if request.URL.Path == "/admin/v1" || strings.HasPrefix(request.URL.Path, "/admin/v1/") {

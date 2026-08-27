@@ -89,6 +89,7 @@ const (
 // Tokens, AES keys, and other credentials are resolved from SecretRef later.
 type WeComProtocolConfiguration struct {
 	CorpID    string `json:"corp_id,omitempty"`
+	AgentID   string `json:"agent_id,omitempty"`
 	ReceiveID string `json:"receive_id,omitempty"`
 }
 
@@ -160,6 +161,10 @@ func normalizeProtocolConfiguration(channel Channel, configuration ProtocolConfi
 	if normalized.WeCom != nil {
 		var err error
 		normalized.WeCom.CorpID, err = normalizeProtocolValue(normalized.WeCom.CorpID, "corp id")
+		if err != nil {
+			return ProtocolConfiguration{}, err
+		}
+		normalized.WeCom.AgentID, err = normalizeProtocolValue(normalized.WeCom.AgentID, "agent id")
 		if err != nil {
 			return ProtocolConfiguration{}, err
 		}

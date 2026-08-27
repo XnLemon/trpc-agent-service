@@ -15,17 +15,35 @@ import (
 
 // Store is a concurrency-safe in-memory implementation of the runtime store.
 type Store struct {
-	mu        sync.RWMutex
-	sessions  map[string]runtimestorage.Session
-	events    map[string]runtimestorage.MessageEvent
-	histories map[string][]runtimestorage.EventPayload
-	messages  map[string]string
-	replies   map[string]runtimestorage.ReplyOutbox
+	mu           sync.RWMutex
+	sessions     map[string]runtimestorage.Session
+	events       map[string]runtimestorage.MessageEvent
+	histories    map[string][]runtimestorage.EventPayload
+	messages     map[string]string
+	replies      map[string]runtimestorage.ReplyOutbox
+	correlations map[string]runtimestorage.ReplyCorrelation
 }
 
 // New creates an empty runtime store.
 func New() *Store {
-	return &Store{sessions: map[string]runtimestorage.Session{}, events: map[string]runtimestorage.MessageEvent{}, histories: map[string][]runtimestorage.EventPayload{}, messages: map[string]string{}, replies: map[string]runtimestorage.ReplyOutbox{}}
+	return &Store{sessions: map[string]runtimestorage.Session{}, events: map[string]runtimestorage.MessageEvent{}, histories: map[string][]runtimestorage.EventPayload{}, messages: map[string]string{}, replies: map[string]runtimestorage.ReplyOutbox{}, correlations: map[string]runtimestorage.ReplyCorrelation{}}
+}
+
+// GetReplyCorrelation loads a durable execution-to-reply correlation.
+func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID string) (runtimestorage.ReplyCorrelation, error) {
+	if err := check(ctx); err != nil {
+		return runtimestorage.ReplyCorrelation{}, err
+	}
+	if tenantID == "" || eventID == "" {
+		return runtimestorage.ReplyCorrelation{}, runtimestorage.ErrInvalid
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	value, ok := s.correlations[key(tenantID, eventID)]
+	if !ok {
+		return runtimestorage.ReplyCorrelation{}, runtimestorage.ErrNotFound
+	}
+	return value, nil
 }
 
 // GetSession returns a tenant-scoped session snapshot.
@@ -124,7 +142,7 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 	if err := check(ctx); err != nil {
 		return runtimestorage.MessageEvent{}, false, err
 	}
-	if runtimestorage.ValidateSession(input.TenantID, input.SessionID) != nil || input.BindingID == "" || input.ExternalMessageID == "" || input.EventID == "" {
+	if runtimestorage.ValidateSession(input.TenantID, input.SessionID) != nil || input.BindingID == "" || input.ExternalMessageID == "" || input.EventID == "" || runtimestorage.ValidateReplyTarget(input.ReplyTarget) != nil || (input.ReplyTarget != (runtimestorage.ReplyTarget{}) && input.ReplyTarget.BindingID != input.BindingID) {
 		return runtimestorage.MessageEvent{}, false, runtimestorage.ErrInvalid
 	}
 	s.mu.Lock()
@@ -144,7 +162,7 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 	sess.Version++
 	sess.UpdatedAt = time.Now().UTC()
 	s.sessions[sessionKey] = sess
-	event := runtimestorage.MessageEvent{TenantID: input.TenantID, EventID: input.EventID, SessionID: input.SessionID, BindingID: input.BindingID, ExternalMessageID: input.ExternalMessageID, IdempotencyKey: input.IdempotencyKey, EventSeq: sess.Version, Status: runtimestorage.EventReceived, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	event := runtimestorage.MessageEvent{TenantID: input.TenantID, EventID: input.EventID, SessionID: input.SessionID, BindingID: input.BindingID, ExternalMessageID: input.ExternalMessageID, IdempotencyKey: input.IdempotencyKey, EventSeq: sess.Version, Status: runtimestorage.EventReceived, ReplyTarget: input.ReplyTarget, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	s.events[key(input.TenantID, input.EventID)] = event
 	s.messages[unique] = key(input.TenantID, input.EventID)
 	return cloneEvent(event), false, nil
@@ -300,7 +318,7 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
-	if err := runtimestorage.ValidateTenant(value.TenantID); err != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex {
+	if err := runtimestorage.ValidateTenant(value.TenantID); err != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
 	}
 	if value.Status == "" {
@@ -314,12 +332,16 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 	value.UpdatedAt = now
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.events[key(value.TenantID, value.EventID)]; !ok {
+	event, ok := s.events[key(value.TenantID, value.EventID)]
+	if !ok {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrNotFound
+	}
+	if event.ReplyTarget != value.ReplyTarget {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
 	}
 	k := replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)
 	if existing, ok := s.replies[k]; ok {
-		if existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload {
+		if existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload || existing.ReplyTarget != value.ReplyTarget {
 			return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
 		}
 		return cloneReply(existing), nil
@@ -331,7 +353,22 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 // EnqueueReplies validates a complete reply before committing any new segment.
 // This prevents a failed multi-segment materialization from exposing a
 // deliverable prefix to a worker.
+//
+//nolint:gocyclo // The atomic in-memory write validates and materializes the complete batch.
 func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	return s.enqueueReplies(ctx, runtimestorage.ReplyCorrelation{}, values)
+}
+
+// EnqueueRepliesWithCorrelation atomically persists execution correlation and
+// the complete reply segment batch.
+func (s *Store) EnqueueRepliesWithCorrelation(ctx context.Context, correlation runtimestorage.ReplyCorrelation, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	if correlation.TenantID == "" || correlation.EventID == "" || correlation.RequestID == "" {
+		return nil, runtimestorage.ErrInvalid
+	}
+	return s.enqueueReplies(ctx, correlation, values)
+}
+
+func (s *Store) enqueueReplies(ctx context.Context, correlation runtimestorage.ReplyCorrelation, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
 	}
@@ -341,8 +378,20 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.events[key(first.TenantID, first.EventID)]; !ok {
+	event, ok := s.events[key(first.TenantID, first.EventID)]
+	if !ok {
 		return nil, runtimestorage.ErrNotFound
+	}
+	if event.ReplyTarget != first.ReplyTarget {
+		return nil, runtimestorage.ErrConflict
+	}
+	if correlation.RequestID != "" {
+		if correlation.TenantID != first.TenantID || correlation.EventID != first.EventID {
+			return nil, runtimestorage.ErrInvalid
+		}
+		if existing, ok := s.correlations[key(correlation.TenantID, correlation.EventID)]; ok && existing != correlation {
+			return nil, runtimestorage.ErrConflict
+		}
 	}
 	if err := validateExistingReplies(s.replies, values); err != nil {
 		return nil, err
@@ -360,6 +409,9 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 		s.replies[k] = value
 		result = append(result, cloneReply(value))
 	}
+	if correlation.RequestID != "" {
+		s.correlations[key(correlation.TenantID, correlation.EventID)] = correlation
+	}
 	return result, nil
 }
 
@@ -370,7 +422,7 @@ func validateReplyBatch(values []runtimestorage.ReplyOutbox) (runtimestorage.Rep
 	first := values[0]
 	seen := make(map[int]struct{}, len(values))
 	for _, value := range values {
-		if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || value.Status != "" && value.Status != runtimestorage.ReplyPending || value.TenantID != first.TenantID || value.ReplyID != first.ReplyID || value.EventID != first.EventID || value.SegmentCount != first.SegmentCount {
+		if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || value.Status != "" && value.Status != runtimestorage.ReplyPending || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil || value.TenantID != first.TenantID || value.ReplyID != first.ReplyID || value.EventID != first.EventID || value.SegmentCount != first.SegmentCount || value.ReplyTarget != first.ReplyTarget {
 			return runtimestorage.ReplyOutbox{}, nil, runtimestorage.ErrInvalid
 		}
 		if _, duplicate := seen[value.SegmentIndex]; duplicate {
@@ -391,7 +443,7 @@ func validateReplyBatch(values []runtimestorage.ReplyOutbox) (runtimestorage.Rep
 
 func validateExistingReplies(replies map[string]runtimestorage.ReplyOutbox, values []runtimestorage.ReplyOutbox) error {
 	for _, value := range values {
-		if existing, ok := replies[replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)]; ok && (existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload) {
+		if existing, ok := replies[replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)]; ok && (existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload || existing.ReplyTarget != value.ReplyTarget) {
 			return runtimestorage.ErrConflict
 		}
 	}

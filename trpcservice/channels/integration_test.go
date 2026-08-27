@@ -142,6 +142,220 @@ func assertTrustedTargetRejectsInvalidStates(t *testing.T, setup trustedInboundS
 	}
 }
 
+func TestResolveCandidateRoutingTargetSealsCurrentSnapshots(t *testing.T) {
+	root, _, app := activeTenantApp(t, "resolve-target")
+	repo := inmemory.NewInMemoryRepository()
+	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeCom, "resolve-target-route")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := createActiveBinding(t, repo, root.TenantID, app.AppID, "wecom", channels.ChannelWeCom, "corp-resolve", routeDigest, "secret/wecom")
+	candidate := oneCandidate(t, repo, channels.ChannelWeCom, routeDigest)
+	if candidate.CandidateToken == "" {
+		t.Fatal("candidate token is empty")
+	}
+	tenantRepo := &singleTenantRepository{value: root}
+	appRepo := &singleAppRepository{value: app}
+	target, err := channels.ResolveCandidateRoutingTarget(context.Background(), repo, tenantRepo, appRepo, candidate, func(context.Context, channels.Binding) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := target.Validate(); err != nil || target.BindingID != binding.BindingID || target.TenantID != root.TenantID || target.AppID != app.AppID {
+		t.Fatalf("target = %+v, err=%v", target, err)
+	}
+	if _, err := channels.ResolveCandidateRoutingTarget(context.Background(), repo, tenantRepo, appRepo, candidate, func(context.Context, channels.Binding) error { return nil }); !errors.Is(err, channels.ErrVerificationFailed) {
+		t.Fatalf("candidate replay error = %v", err)
+	}
+}
+
+func TestResolveCandidateRoutingTargetFailureBoundaries(t *testing.T) {
+	tests := []struct {
+		name         string
+		prepare      func(*routingTargetFixture)
+		want         error
+		cancellation bool
+	}{
+		{name: "nil context", prepare: func(f *routingTargetFixture) { f.ctx = nil }, want: channels.ErrVerificationFailed},
+		{name: "canceled context", prepare: func(f *routingTargetFixture) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			f.ctx = ctx
+		}, cancellation: true},
+		{name: "nil consumer", prepare: func(f *routingTargetFixture) { f.consumer = nil }, want: channels.ErrVerificationFailed},
+		{name: "nil tenant repository", prepare: func(f *routingTargetFixture) { f.tenants = nil }, want: channels.ErrVerificationFailed},
+		{name: "nil app repository", prepare: func(f *routingTargetFixture) { f.apps = nil }, want: channels.ErrVerificationFailed},
+		{name: "nil verifier", prepare: func(f *routingTargetFixture) { f.verify = nil }, want: channels.ErrVerificationFailed},
+		{name: "empty candidate channel", prepare: func(f *routingTargetFixture) { f.candidate.Channel = "" }, want: channels.ErrVerificationFailed},
+		{name: "consume failure", prepare: func(f *routingTargetFixture) { f.consumerStub.consumeErr = errors.New("consume failed") }, want: channels.ErrVerificationFailed},
+		{name: "consume cancellation", prepare: func(f *routingTargetFixture) { f.consumerStub.consumeErr = context.Canceled }, cancellation: true},
+		{name: "nil binding", prepare: func(f *routingTargetFixture) { f.consumerStub.nilBinding = true }, want: channels.ErrVerificationFailed},
+		{name: "verification failure", prepare: func(f *routingTargetFixture) { f.verifyErr = errors.New("verification failed") }, want: channels.ErrVerificationFailed},
+		{name: "verification cancellation", prepare: func(f *routingTargetFixture) { f.verifyErr = context.Canceled }, cancellation: true},
+		{name: "invalid binding", prepare: func(f *routingTargetFixture) { f.consumerStub.binding = &channels.Binding{} }, want: channels.ErrVerificationFailed},
+		{name: "tenant lookup failure", prepare: func(f *routingTargetFixture) { f.tenantRepo.err = errors.New("tenant lookup failed") }, want: channels.ErrVerificationFailed},
+		{name: "tenant lookup cancellation", prepare: func(f *routingTargetFixture) { f.tenantRepo.err = context.Canceled }, cancellation: true},
+		{name: "invalid tenant snapshot", prepare: func(f *routingTargetFixture) { f.tenantRepo.value = &tenant.Tenant{} }, want: channels.ErrVerificationFailed},
+		{name: "app lookup failure", prepare: func(f *routingTargetFixture) { f.appRepo.err = errors.New("app lookup failed") }, want: channels.ErrVerificationFailed},
+		{name: "app lookup cancellation", prepare: func(f *routingTargetFixture) { f.appRepo.err = context.Canceled }, cancellation: true},
+		{name: "invalid routing target", prepare: func(f *routingTargetFixture) {
+			app := f.app.Clone()
+			app.Status = agent.StatusSuspended
+			f.appRepo.value = &app
+		}, want: channels.ErrVerificationFailed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newRoutingTargetFixture(t)
+			tt.prepare(&fixture)
+			if fixture.verify != nil {
+				fixture.verify = func(context.Context, channels.Binding) error { return fixture.verifyErr }
+			}
+			_, err := channels.ResolveCandidateRoutingTarget(fixture.ctx, fixture.consumer, fixture.tenants, fixture.apps, fixture.candidate, fixture.verify)
+			if tt.cancellation {
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("error = %v, want context cancellation", err)
+				}
+				return
+			}
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("error = %v, want %v", err, tt.want)
+			}
+		})
+	}
+}
+
+type routingTargetFixture struct {
+	ctx          context.Context
+	consumer     channels.CandidateConsumer
+	consumerStub *routingCandidateConsumerStub
+	tenants      tenant.Repository
+	apps         agent.Repository
+	candidate    channels.CandidateBindingContext
+	verify       func(context.Context, channels.Binding) error
+	verifyErr    error
+	tenantRepo   *singleTenantRepository
+	appRepo      *singleAppRepository
+	app          *agent.App
+}
+
+func newRoutingTargetFixture(t *testing.T) routingTargetFixture {
+	t.Helper()
+	root, _, app := activeTenantApp(t, "resolve-boundaries")
+	repo := inmemory.NewInMemoryRepository()
+	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeCom, "resolve-boundaries-route")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := createActiveBinding(t, repo, root.TenantID, app.AppID, "wecom", channels.ChannelWeCom, "corp-boundaries", routeDigest, "secret/wecom")
+	fixture := routingTargetFixture{
+		ctx:        context.Background(),
+		consumer:   &routingCandidateConsumerStub{binding: binding},
+		candidate:  oneCandidate(t, repo, channels.ChannelWeCom, routeDigest),
+		verifyErr:  nil,
+		tenantRepo: &singleTenantRepository{value: root},
+		appRepo:    &singleAppRepository{value: app},
+		app:        app,
+	}
+	fixture.consumerStub = fixture.consumer.(*routingCandidateConsumerStub)
+	fixture.tenants = fixture.tenantRepo
+	fixture.apps = fixture.appRepo
+	fixture.verify = func(context.Context, channels.Binding) error { return fixture.verifyErr }
+	return fixture
+}
+
+type routingCandidateConsumerStub struct {
+	binding    *channels.Binding
+	consumeErr error
+	nilBinding bool
+}
+
+func (s *routingCandidateConsumerStub) LookupCandidates(context.Context, channels.Channel, string) ([]channels.CandidateBindingContext, error) {
+	return nil, errors.New("unsupported")
+}
+func (s *routingCandidateConsumerStub) Get(context.Context, string, string) (*channels.Binding, error) {
+	return nil, errors.New("unsupported")
+}
+func (s *routingCandidateConsumerStub) ConsumeCandidate(context.Context, channels.CandidateBindingContext) (*channels.Binding, error) {
+	if s.consumeErr != nil {
+		return nil, s.consumeErr
+	}
+	if s.nilBinding {
+		return nil, nil
+	}
+	if s.binding == nil {
+		return nil, nil
+	}
+	binding := s.binding.Clone()
+	return &binding, nil
+}
+
+type singleTenantRepository struct {
+	value *tenant.Tenant
+	err   error
+}
+
+func (r *singleTenantRepository) Create(context.Context, tenant.CreateInput) (*tenant.Tenant, error) {
+	return nil, errors.New("unsupported")
+}
+
+func (r *singleTenantRepository) Get(context.Context, string) (*tenant.Tenant, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	if r.value == nil {
+		return nil, nil
+	}
+	value := r.value.Clone()
+	return &value, nil
+}
+func (r *singleTenantRepository) UpdateConfiguration(context.Context, tenant.UpdateConfigurationInput) (*tenant.Tenant, error) {
+	return nil, errors.New("unsupported")
+}
+func (r *singleTenantRepository) TransitionStatus(context.Context, tenant.TransitionStatusInput) (*tenant.Tenant, tenant.StatusChangeEvent, error) {
+	return nil, tenant.StatusChangeEvent{}, errors.New("unsupported")
+}
+
+type singleAppRepository struct {
+	value *agent.App
+	err   error
+}
+
+func (r *singleAppRepository) Create(context.Context, agent.CreateInput) (*agent.App, error) {
+	return nil, errors.New("unsupported")
+}
+func (r *singleAppRepository) Get(context.Context, string, string) (*agent.App, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	if r.value == nil {
+		return nil, nil
+	}
+	value := r.value.Clone()
+	return &value, nil
+}
+func (r *singleAppRepository) UpdateMetadata(context.Context, agent.UpdateMetadataInput) (*agent.App, error) {
+	return nil, errors.New("unsupported")
+}
+func (r *singleAppRepository) CreateDraft(context.Context, agent.CreateDraftInput) (*agent.Revision, error) {
+	return nil, errors.New("unsupported")
+}
+func (r *singleAppRepository) UpdateDraft(context.Context, agent.UpdateDraftInput) (*agent.Revision, error) {
+	return nil, errors.New("unsupported")
+}
+func (r *singleAppRepository) GetRevision(context.Context, string, string, int64) (*agent.Revision, error) {
+	return nil, errors.New("unsupported")
+}
+func (r *singleAppRepository) Publish(context.Context, agent.PublishInput) (*agent.App, *agent.Revision, agent.ChangeEvent, error) {
+	return nil, nil, agent.ChangeEvent{}, errors.New("unsupported")
+}
+func (r *singleAppRepository) Rollback(context.Context, agent.RollbackInput) (*agent.App, agent.ChangeEvent, error) {
+	return nil, agent.ChangeEvent{}, errors.New("unsupported")
+}
+func (r *singleAppRepository) TransitionStatus(context.Context, agent.TransitionStatusInput) (*agent.App, agent.ChangeEvent, error) {
+	return nil, agent.ChangeEvent{}, errors.New("unsupported")
+}
+
 func TestFakeResolverRejectsPurposeMismatchBadProofExpiryAndReplay(t *testing.T) {
 	clock := &integrationClock{now: time.Now().UTC().Add(time.Hour)}
 	repo := inmemory.NewInMemoryRepository(inmemory.Options{Clock: clock.Now, CandidateTTL: time.Second})

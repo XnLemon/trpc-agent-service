@@ -22,6 +22,8 @@
   限流、幂等和服务生命周期契约。
 - [Telegram 长轮询 Adapter](telegram.md)：Issue #31 的文档先行契约，固定单 Binding、Bot
   身份校验、普通文本映射、Dispatch 聚合回复和生命周期边界。
+- [企业微信自建应用 Text Webhook](wecom.md)：Issue #60 的文档先行契约，固定 callback
+  验签/AES 解密、可信 Binding 路由、文本入站和可靠回复边界。
 - [Telegram live E2E 示例](https://github.com/XnLemon/trpc-agent-service/tree/main/examples/telegram-e2e)：
   Issue #33 的真实 Bot API 传输冒烟测试和手动 CI 运行说明。
 - [PostgreSQL 控制面与启动装配](postgresql-control-plane.md)：Issue #37 的实现契约，
@@ -57,6 +59,7 @@ cd trpc-agent-service
 - [数据模型](data-model.md) — 核心表结构、Session/Event/Memory/Summary/Audit 和租户约束
 - [Channel Binding](channel-binding.md) — 租户级通道绑定、候选发现与可信入站路由
 - [Telegram 长轮询 Adapter](telegram.md) — 单 Binding Telegram long polling、文本映射与安全边界
+- [企业微信自建应用 Text Webhook](wecom.md) — 自建应用 callback、文本入站与回复 Outbox
 - [Gateway、Execution Plan 与 HTTP/SSE](gateway.md) — 可信主体、固定执行计划、Runner Registry、
   Dispatch、健康检查、优雅停机和普通/流式 API
 - [PostgreSQL 控制面与启动装配](postgresql-control-plane.md) — 六类控制面表的 migration 顺序、

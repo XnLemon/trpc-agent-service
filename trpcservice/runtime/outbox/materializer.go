@@ -11,7 +11,9 @@ import (
 // ErrMaterialization wraps failures while creating durable reply segments.
 var ErrMaterialization = errors.New("reply materialization failed")
 
-const defaultSegmentRunes = 4096
+// defaultSegmentRunes is deliberately conservative: 512 Unicode code points
+// fit within the 2048-byte text limit of currently supported IM providers.
+const defaultSegmentRunes = 512
 
 // Materializer turns one completed Runner reply into durable, idempotent
 // segments. It is deliberately independent of any channel SDK.
@@ -28,10 +30,13 @@ type MaterializerConfig struct {
 
 // MaterializeInput identifies the completed reply to segment.
 type MaterializeInput struct {
-	TenantID string
-	EventID  string
-	ReplyID  string
-	Payload  string
+	TenantID    string
+	EventID     string
+	ReplyID     string
+	RequestID   string
+	TraceID     string
+	Payload     string
+	ReplyTarget runtimestorage.ReplyTarget
 }
 
 // NewMaterializer creates a reply materializer with a default segment size.
@@ -48,7 +53,7 @@ func NewMaterializer(config MaterializerConfig) (*Materializer, error) {
 // Materialize writes all segments under the stable reply identity. A repeated
 // call is idempotent when the existing rows have the same event and payload.
 func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) (int, error) {
-	if m == nil || ctx == nil || runtimestorage.ValidateTenant(input.TenantID) != nil || input.EventID == "" || input.ReplyID == "" {
+	if m == nil || ctx == nil || runtimestorage.ValidateTenant(input.TenantID) != nil || input.EventID == "" || input.ReplyID == "" || runtimestorage.ValidateReplyTarget(input.ReplyTarget) != nil {
 		return 0, ErrInvalid
 	}
 	segments := splitRunes(input.Payload, m.segmentSize)
@@ -61,9 +66,19 @@ func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) 
 	}
 	replies := make([]runtimestorage.ReplyOutbox, 0, len(segments))
 	for index, payload := range segments {
-		replies = append(replies, runtimestorage.ReplyOutbox{TenantID: input.TenantID, ReplyID: input.ReplyID, EventID: input.EventID, SegmentIndex: index, SegmentCount: len(segments), Payload: payload})
+		replies = append(replies, runtimestorage.ReplyOutbox{TenantID: input.TenantID, ReplyID: input.ReplyID, EventID: input.EventID, SegmentIndex: index, SegmentCount: len(segments), Payload: payload, ReplyTarget: input.ReplyTarget})
 	}
-	if _, err := batchStore.EnqueueReplies(ctx, replies); err != nil {
+	var err error
+	if input.RequestID != "" {
+		correlatedStore, correlated := m.store.(runtimestorage.ReplyBatchCorrelationEnqueuer)
+		if !correlated {
+			return 0, errors.Join(ErrMaterialization, runtimestorage.ErrInvalid)
+		}
+		_, err = correlatedStore.EnqueueRepliesWithCorrelation(ctx, runtimestorage.ReplyCorrelation{TenantID: input.TenantID, EventID: input.EventID, RequestID: input.RequestID, TraceID: input.TraceID}, replies)
+	} else {
+		_, err = batchStore.EnqueueReplies(ctx, replies)
+	}
+	if err != nil {
 		return 0, errors.Join(ErrMaterialization, err)
 	}
 	return len(segments), nil

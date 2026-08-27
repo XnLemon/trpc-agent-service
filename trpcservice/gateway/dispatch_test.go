@@ -132,6 +132,46 @@ func newTestDispatcher(t *testing.T, runnerValue *testRunner) (*Dispatcher, Prin
 	return dispatcher, mustAPIPrincipal(t, fixture.tenant.TenantID, fixture.app.AppID)
 }
 
+func TestReplyTargetUsesConversationDestination(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	tests := []struct {
+		name    string
+		message InboundMessage
+		want    runtimestorage.ReplyTarget
+		wantErr bool
+	}{
+		{
+			name:    "direct peer",
+			message: InboundMessage{ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1", ExternalThreadID: "thread-1"},
+			want:    runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: "direct", ReceiverID: "peer-1", ThreadID: "thread-1"},
+		},
+		{
+			name:    "group chat",
+			message: InboundMessage{ConversationKind: channels.ConversationGroup, ExternalChatID: "chat-1", ExternalThreadID: "thread-1"},
+			want:    runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: "group", ReceiverID: "chat-1", ThreadID: "thread-1"},
+		},
+		{name: "unknown conversation", message: InboundMessage{ConversationKind: "unknown"}, wantErr: true},
+		{name: "missing direct peer", message: InboundMessage{ConversationKind: channels.ConversationDirect}, wantErr: true},
+		{name: "blank group chat", message: InboundMessage{ConversationKind: channels.ConversationGroup, ExternalChatID: " "}, wantErr: true},
+		{name: "invalid thread", message: InboundMessage{ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1", ExternalThreadID: "thread\n"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := replyTarget(target, tt.message)
+			if tt.wantErr {
+				if !errors.Is(err, ErrInvalid) {
+					t.Fatalf("error = %v, want invalid", err)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("reply target = %+v err %v, want %+v", got, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestDispatcherMapsEventsAndPropagatesIdentityAndRequestID(t *testing.T) {
 	runnerValue := &testRunner{}
 	var captured capturedRun
@@ -754,6 +794,10 @@ func TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle(t 
 
 func dispatchAndAssertDurableReply(t *testing.T, dispatcher *Dispatcher, principal Principal, store runtimestorage.RuntimeStore) runtimestorage.MessageEvent {
 	t.Helper()
+	target, ok := principal.RoutingTarget()
+	if !ok {
+		t.Fatal("channel principal has no routing target")
+	}
 	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{
 		Principal: principal, RequestID: "durable-reply",
 		Message: InboundMessage{Content: "inbound", ExternalMessageID: "durable-reply", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"},
@@ -774,11 +818,11 @@ func dispatchAndAssertDurableReply(t *testing.T, dispatcher *Dispatcher, princip
 		segments[row.SegmentIndex] = row
 	}
 	first, second := segments[0], segments[1]
-	if first.Payload != "abc" || second.Payload != "def" || first.SegmentCount != 2 || second.SegmentCount != 2 || first.ReplyID != second.ReplyID {
+	if first.Payload != "abc" || second.Payload != "def" || first.SegmentCount != 2 || second.SegmentCount != 2 || first.ReplyID != second.ReplyID || first.ReplyTarget != (runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: "direct", ReceiverID: "peer-1"}) || second.ReplyTarget != first.ReplyTarget {
 		t.Fatalf("materialized rows = %+v", rows)
 	}
 	message, err := store.GetMessage(context.Background(), principal.TenantID(), first.EventID)
-	if err != nil || message.Status != runtimestorage.EventCompleted || message.ReplyID != first.ReplyID || message.SegmentCount != 2 {
+	if err != nil || message.Status != runtimestorage.EventCompleted || message.ReplyID != first.ReplyID || message.SegmentCount != 2 || message.ReplyTarget != first.ReplyTarget {
 		t.Fatalf("materialized message = %+v / %v", message, err)
 	}
 	return message
@@ -907,7 +951,7 @@ func assertDurableClaimReclaimsReconcilingAndValidatesIDs(t *testing.T, dispatch
 	if err != nil || recoveredReconciling == nil {
 		t.Fatalf("reconciling reclaim = %+v err=%v", recoveredReconciling, err)
 	}
-	dispatcher.finishDurable(recoveredReconciling, errors.New("execution failed"))
+	dispatcher.finishDurable("", "", recoveredReconciling, errors.New("execution failed"))
 	message.ExternalMessageID = ""
 	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing external ID error = %v", err)

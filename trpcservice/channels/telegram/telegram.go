@@ -174,6 +174,8 @@ type Adapter struct {
 	runCancel context.CancelFunc
 }
 
+var _ channels.PollingAdapter = (*Adapter)(nil)
+
 type normalizedConfig struct {
 	token          string
 	target         channels.RoutingTarget
@@ -327,6 +329,9 @@ func (adapter *Adapter) Run(ctx context.Context) error {
 	client.Start(runContext)
 	return nil
 }
+
+// Channel identifies the protocol owned by this Adapter.
+func (*Adapter) Channel() channels.Channel { return channels.ChannelTelegram }
 
 // Close closes only idempotency state owned by the adapter. Injected stores and
 // HTTP clients remain owned by their callers; polling is stopped by canceling

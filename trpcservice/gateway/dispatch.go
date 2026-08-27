@@ -59,6 +59,9 @@ type DispatchRequest struct {
 	Message   InboundMessage
 	RequestID string
 	TraceID   string
+	// Accepted is notified after the durable channel claim and handoff reserve
+	// succeed, before runner execution begins. It is optional for API callers.
+	Accepted chan<- struct{}
 }
 
 // DispatchEvent is a redacted event safe for a protocol adapter. It contains
@@ -115,6 +118,7 @@ type durableExecution struct {
 	eventID      string
 	owner        string
 	fencingToken int64
+	replyTarget  runtimestorage.ReplyTarget
 }
 
 // NewDispatcher validates the protocol-neutral execution dependencies.
@@ -149,6 +153,8 @@ func (dispatcher *Dispatcher) Ready() bool {
 // Dispatch starts one execution and returns a redacted event stream. The
 // returned stream owns the Runner lease until it reaches terminal state or the
 // caller Context is canceled.
+//
+//nolint:gocyclo // Dispatch coordinates validation, durable state, audit, lease, and stream lifecycle.
 func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequest) (<-chan DispatchEvent, error) {
 	if dispatcher == nil || dispatcher.resolver == nil || dispatcher.registry == nil {
 		return nil, ErrNotReady
@@ -192,6 +198,12 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	if err := dispatcher.reserveHandoff(ctx, request.Principal, requestID, traceID); err != nil {
 		finishWithError(err)
 		return nil, auditWriteFailure()
+	}
+	if request.Accepted != nil {
+		select {
+		case request.Accepted <- struct{}{}:
+		default:
+		}
 	}
 	lease, err := dispatcher.registry.Acquire(ctx, plan)
 	if err != nil {
@@ -299,6 +311,10 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 		return nil, fmt.Errorf("%w: durable Channel messages require an external message ID", ErrInvalid)
 	}
 	store := dispatcher.runtimeStore
+	replyTarget, err := replyTarget(target, message)
+	if err != nil {
+		return nil, err
+	}
 	if err := ensureInboundSession(ctx, store, principal.TenantID(), identity.SessionID); err != nil {
 		return nil, err
 	}
@@ -306,6 +322,7 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 		TenantID: principal.TenantID(), EventID: uuid.NewString(), SessionID: identity.SessionID,
 		BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID,
 		IdempotencyKey: message.ExternalMessageID,
+		ReplyTarget:    replyTarget,
 	})
 	if err != nil {
 		return nil, err
@@ -326,7 +343,23 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 		}
 		return nil, err
 	}
-	return &durableExecution{store: store, tenantID: principal.TenantID(), eventID: event.EventID, owner: owner, fencingToken: running.FencingToken}, nil
+	return &durableExecution{store: store, tenantID: principal.TenantID(), eventID: event.EventID, owner: owner, fencingToken: running.FencingToken, replyTarget: event.ReplyTarget}, nil
+}
+
+func replyTarget(target channels.RoutingTarget, message InboundMessage) (runtimestorage.ReplyTarget, error) {
+	reply := runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: string(message.ConversationKind), ThreadID: message.ExternalThreadID}
+	switch message.ConversationKind {
+	case channels.ConversationDirect:
+		reply.ReceiverID = message.ExternalPeerID
+	case channels.ConversationGroup:
+		reply.ReceiverID = message.ExternalChatID
+	default:
+		return runtimestorage.ReplyTarget{}, fmt.Errorf("%w: reply conversation kind is invalid", ErrInvalid)
+	}
+	if err := runtimestorage.ValidateReplyTarget(reply); err != nil {
+		return runtimestorage.ReplyTarget{}, fmt.Errorf("%w: reply target is invalid", ErrInvalid)
+	}
+	return reply, nil
 }
 
 func ensureInboundSession(ctx context.Context, store runtimestorage.RuntimeStore, tenantID, sessionID string) error {
@@ -372,7 +405,7 @@ func (dispatcher *Dispatcher) failDurable(durable *durableExecution, cause error
 	})
 }
 
-func (dispatcher *Dispatcher) finishDurable(durable *durableExecution, terminalErr error, replies ...string) {
+func (dispatcher *Dispatcher) finishDurable(requestID, traceID string, durable *durableExecution, terminalErr error, replies ...string) {
 	if durable == nil {
 		return
 	}
@@ -384,7 +417,7 @@ func (dispatcher *Dispatcher) finishDurable(durable *durableExecution, terminalE
 	replyID := ""
 	if terminalErr == nil && dispatcher.materializer != nil && strings.TrimSpace(reply) != "" {
 		var err error
-		segments, err = dispatcher.materializer.Materialize(context.Background(), outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, Payload: reply})
+		segments, err = dispatcher.materializer.Materialize(context.Background(), outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: requestID, TraceID: traceID, Payload: reply, ReplyTarget: durable.replyTarget})
 		if err != nil {
 			terminalErr = err
 		} else {
@@ -427,7 +460,7 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		return err
 	}
 	defer func() {
-		terminalErr = dispatcher.finalizeForward(requestID, durable, principal, terminalErr, reply.String(), terminalEventType, terminalErrorType, finalizeAudit)
+		terminalErr = dispatcher.finalizeForward(requestID, traceID, durable, principal, terminalErr, reply.String(), terminalEventType, terminalErrorType, finalizeAudit)
 		_ = dispatcher.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
 		status := "complete"
 		if terminalErr != nil {
@@ -538,7 +571,7 @@ func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requ
 	return true
 }
 
-func (dispatcher *Dispatcher) finalizeForward(requestID string, durable *durableExecution, principal Principal, terminalErr error, reply string, terminalEventType audit.EventType, terminalErrorType string, finalizeAudit func(audit.EventType, string) error) error {
+func (dispatcher *Dispatcher) finalizeForward(requestID, traceID string, durable *durableExecution, principal Principal, terminalErr error, reply string, terminalEventType audit.EventType, terminalErrorType string, finalizeAudit func(audit.EventType, string) error) error {
 	eventType := terminalEventType
 	errorType := terminalErrorType
 	if eventType == "" {
@@ -568,7 +601,7 @@ func (dispatcher *Dispatcher) finalizeForward(requestID string, durable *durable
 	if err := finalizeAudit(eventType, errorType); err != nil && terminalErr == nil {
 		terminalErr = ErrExecution
 	}
-	dispatcher.finishDurable(durable, terminalErr, reply)
+	dispatcher.finishDurable(requestID, traceID, durable, terminalErr, reply)
 	return terminalErr
 }
 

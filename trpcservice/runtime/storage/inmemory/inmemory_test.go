@@ -74,6 +74,34 @@ func TestStoreTenantIsolationAndCAS(t *testing.T) {
 	}
 }
 
+func TestStoreReplyCorrelationIsIdempotentAndConflictSafe(t *testing.T) {
+	store := inmemory.New()
+	value := runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event-a", RequestID: "request-a", TraceID: "trace-a"}
+	if _, err := store.CreateSession(context.Background(), value.TenantID, "session-correlation", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: value.TenantID, EventID: value.EventID, SessionID: "session-correlation", BindingID: "binding-correlation", ExternalMessageID: "external-correlation"}); err != nil {
+		t.Fatal(err)
+	}
+	batch := []runtimestorage.ReplyOutbox{{TenantID: value.TenantID, ReplyID: "reply-correlation", EventID: value.EventID, SegmentIndex: 0, SegmentCount: 1, Payload: "payload"}}
+	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), value, batch); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), value, batch); err != nil {
+		t.Fatalf("idempotent save = %v", err)
+	}
+	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), runtimestorage.ReplyCorrelation{TenantID: value.TenantID, EventID: value.EventID, RequestID: "other"}, batch); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("conflicting save = %v", err)
+	}
+	got, err := store.GetReplyCorrelation(context.Background(), value.TenantID, value.EventID)
+	if err != nil || got != value {
+		t.Fatalf("correlation = %+v, %v", got, err)
+	}
+	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), runtimestorage.ReplyCorrelation{}, nil); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid atomic enqueue = %v", err)
+	}
+}
+
 func TestStoreDuplicateMessageAndConcurrentSequence(t *testing.T) {
 	store := inmemory.New()
 	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-1", nil); err != nil {
@@ -110,6 +138,30 @@ func TestStoreDuplicateMessageAndConcurrentSequence(t *testing.T) {
 	}
 	if len(seq) != 2 || seq[0] == seq[1] {
 		t.Fatalf("concurrent sequences = %v", seq)
+	}
+}
+
+func TestStorePersistsFirstReplyTargetForDuplicateMessage(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	first := runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session-1", BindingID: "binding-1", ExternalMessageID: "external-1", EventID: "event-1", ReplyTarget: runtimestorage.ReplyTarget{BindingID: "binding-1", ConversationKind: "direct", ReceiverID: "user-1"}}
+	event, duplicate, err := store.RecordMessage(context.Background(), first)
+	if err != nil || duplicate {
+		t.Fatalf("first record = %+v duplicate=%v err=%v", event, duplicate, err)
+	}
+	first.EventID = "event-2"
+	first.ReplyTarget.ReceiverID = "user-2"
+	duplicateEvent, duplicate, err := store.RecordMessage(context.Background(), first)
+	if err != nil || !duplicate || duplicateEvent.ReplyTarget.ReceiverID != "user-1" {
+		t.Fatalf("duplicate record = %+v duplicate=%v err=%v", duplicateEvent, duplicate, err)
+	}
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-1", EventID: event.EventID, SegmentCount: 1, ReplyTarget: event.ReplyTarget}); err != nil {
+		t.Fatalf("enqueue matching target = %v", err)
+	}
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-2", EventID: event.EventID, SegmentCount: 1, ReplyTarget: first.ReplyTarget}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("enqueue mismatched target = %v", err)
 	}
 }
 

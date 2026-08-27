@@ -15,7 +15,7 @@ func TestOrderedFilesAreContiguousAndDigestable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 7 || files[0].version != 1 || files[1].version != 2 || files[2].version != 3 || files[3].version != 4 || files[4].version != 5 || files[5].version != 6 || files[6].version != 7 {
+	if len(files) != 9 || files[0].version != 1 || files[1].version != 2 || files[2].version != 3 || files[3].version != 4 || files[4].version != 5 || files[5].version != 6 || files[6].version != 7 || files[7].version != 8 || files[8].version != 9 {
 		t.Fatalf("migration order = %+v", files)
 	}
 	for _, migration := range files {

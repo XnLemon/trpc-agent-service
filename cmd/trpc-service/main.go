@@ -242,6 +242,9 @@ func runService(ctx context.Context, signals <-chan os.Signal, handler *gateway.
 	}()
 	select {
 	case err := <-serveResult:
+		if ctx.Err() != nil {
+			return shutdownService(handler, shutdownTimeout, shutdown)
+		}
 		closeErr := closeGatewayHandler(handler)
 		if err == nil || errors.Is(err, http.ErrServerClosed) {
 			return closeErr

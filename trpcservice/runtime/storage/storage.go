@@ -4,10 +4,22 @@ package storage
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	pgstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
+
+const maxReplyTargetIDRunes = 1024
+
+// ReplyTarget is the trusted, durable destination for a channel reply. A zero
+// target is retained only for rows created before per-message routing existed.
+type ReplyTarget struct {
+	BindingID        string
+	ConversationKind string
+	ReceiverID       string
+	ThreadID         string
+}
 
 var (
 	// ErrNotFound reports a missing tenant-scoped runtime record.
@@ -83,6 +95,7 @@ type MessageEvent struct {
 	LeaseExpiresAt    *time.Time
 	ReplyID           string
 	SegmentCount      int
+	ReplyTarget       ReplyTarget
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }
@@ -95,6 +108,7 @@ type MessageEventInput struct {
 	BindingID         string
 	ExternalMessageID string
 	IdempotencyKey    string
+	ReplyTarget       ReplyTarget
 }
 
 // EventPayload is one immutable upstream Runner event retained for durable
@@ -133,6 +147,7 @@ type ReplyOutbox struct {
 	SegmentIndex      int
 	SegmentCount      int
 	Payload           string
+	ReplyTarget       ReplyTarget
 	Status            string
 	Attempts          int
 	FencingToken      int64
@@ -142,6 +157,16 @@ type ReplyOutbox struct {
 	LastErrorClass    string
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+}
+
+// ReplyCorrelation is the durable link between an execution request and its
+// asynchronously delivered reply. It is kept separately so existing reply
+// rows remain backwards compatible.
+type ReplyCorrelation struct {
+	TenantID  string
+	EventID   string
+	RequestID string
+	TraceID   string
 }
 
 // ReplyTransition requests a fenced reply lifecycle transition.
@@ -185,6 +210,18 @@ type ReplyBatchEnqueuer interface {
 	EnqueueReplies(context.Context, []ReplyOutbox) ([]ReplyOutbox, error)
 }
 
+// ReplyBatchCorrelationEnqueuer atomically persists a reply correlation and
+// its complete segment batch.
+type ReplyBatchCorrelationEnqueuer interface {
+	EnqueueRepliesWithCorrelation(context.Context, ReplyCorrelation, []ReplyOutbox) ([]ReplyOutbox, error)
+}
+
+// ReplyCorrelationStore persists request/trace identifiers for reply delivery
+// audit and recovery. It is optional for legacy runtime stores.
+type ReplyCorrelationStore interface {
+	GetReplyCorrelation(context.Context, string, string) (ReplyCorrelation, error)
+}
+
 // ValidateTenant checks the required tenant identity.
 func ValidateTenant(tenantID string) error {
 	if tenantID == "" {
@@ -199,6 +236,38 @@ func ValidateSession(tenantID, sessionID string) error {
 		return ErrInvalid
 	}
 	return nil
+}
+
+// ValidateReplyTarget accepts either the legacy zero target or a complete
+// direct/group destination. Partial values are never safe to route.
+func ValidateReplyTarget(target ReplyTarget) error {
+	if target == (ReplyTarget{}) {
+		return nil
+	}
+	if !validReplyTargetID(target.BindingID) || !validReplyTargetID(target.ReceiverID) {
+		return ErrInvalid
+	}
+	switch target.ConversationKind {
+	case "direct", "group":
+	default:
+		return ErrInvalid
+	}
+	if target.ThreadID != "" && !validReplyTargetID(target.ThreadID) {
+		return ErrInvalid
+	}
+	return nil
+}
+
+func validReplyTargetID(value string) bool {
+	if strings.TrimSpace(value) == "" || len([]rune(value)) > maxReplyTargetIDRunes {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateTransition reports whether a reply transition is legal.

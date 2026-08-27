@@ -16,6 +16,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
 	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/agent/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
@@ -77,9 +78,15 @@ type Config struct {
 	// Bootstrap owns its lifecycle but never derives a recipient from HTTP.
 	OutboxWorker       *outbox.Worker
 	OutboxPollInterval time.Duration
+	// AuditWriter receives execution and configured channel delivery facts.
+	AuditWriter        audit.Writer
 	Authenticator      gateway.APIAuthenticator
 	AdminAuthenticator admin.Authenticator
 	AdminHandler       http.Handler
+	WeComHandler       http.Handler
+	// WeComHandlerFactory is called after Dispatcher construction so a callback
+	// handler cannot receive an uninitialized execution dependency.
+	WeComHandlerFactory func(gateway.DispatchService) (http.Handler, error)
 
 	Registry          gateway.RunnerRegistryConfig
 	HTTP              gateway.HTTPConfig
@@ -95,11 +102,13 @@ type Config struct {
 // before the HTTP server is drained; Close then closes the Runner Registry and
 // only after that resources explicitly owned by this graph.
 type Runtime struct {
-	Handler      *gateway.HTTPHandler
-	Resolver     *gateway.PlanResolver
-	Registry     *gateway.RunnerRegistry
-	Dispatcher   *gateway.Dispatcher
-	OutboxWorker *outbox.Worker
+	Handler        *gateway.HTTPHandler
+	Resolver       *gateway.PlanResolver
+	Registry       *gateway.RunnerRegistry
+	Dispatcher     *gateway.Dispatcher
+	OutboxWorker   *outbox.Worker
+	wecomLifecycle callbackLifecycle
+	wecomHandler   http.Handler
 
 	db               *sql.DB
 	ownDB            bool
@@ -110,6 +119,11 @@ type Runtime struct {
 	closing          atomic.Bool
 	closeOnce        sync.Once
 	closeErr         error
+}
+
+type callbackLifecycle interface {
+	BeginShutdown()
+	Close() error
 }
 
 // NewWithDatabase is the normal constructor for a real PostgreSQL bootstrap.
@@ -229,11 +243,22 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 		return nil, ErrInvalidConfig
 	}
 	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{
-		Resolver: resolver, Registry: registry, RuntimeStore: config.RuntimeStore, DrainTimeout: config.DrainTimeout,
+		Resolver: resolver, Registry: registry, RuntimeStore: config.RuntimeStore, DrainTimeout: config.DrainTimeout, AuditWriter: config.AuditWriter,
 	})
 	if err != nil {
 		_ = registry.Close()
 		return nil, ErrInvalidConfig
+	}
+	if config.WeComHandler != nil && config.WeComHandlerFactory != nil {
+		_ = registry.Close()
+		return nil, ErrInvalidConfig
+	}
+	if config.WeComHandlerFactory != nil {
+		config.WeComHandler, err = config.WeComHandlerFactory(dispatcher)
+		if err != nil || config.WeComHandler == nil {
+			_ = registry.Close()
+			return nil, ErrInvalidConfig
+		}
 	}
 	readyGate := config.ReadyGate
 	if readyGate == nil {
@@ -243,12 +268,17 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	if ping == nil && config.DB != nil {
 		ping = config.DB.PingContext
 	}
-	return &Runtime{
+	runtimeGraph := &Runtime{
 		Resolver: resolver, Registry: registry, Dispatcher: dispatcher,
 		OutboxWorker: config.OutboxWorker,
+		wecomHandler: config.WeComHandler,
 		db:           config.DB, ownDB: config.OwnDB, readyGate: readyGate,
 		ping: ping, verifyMigrations: config.VerifyMigrations, closeDeps: config.CloseDependencies,
-	}, nil
+	}
+	if lifecycle, ok := config.WeComHandler.(callbackLifecycle); ok {
+		runtimeGraph.wecomLifecycle = lifecycle
+	}
+	return runtimeGraph, nil
 }
 
 func configureAdmin(config *Config, registry *gateway.RunnerRegistry) error {
@@ -276,7 +306,7 @@ func configureAdmin(config *Config, registry *gateway.RunnerRegistry) error {
 
 func configureHandler(runtimeGraph *Runtime, config Config) error {
 	handler, err := gateway.NewHTTPHandler(gateway.HTTPConfig{
-		Dispatcher: runtimeGraph.Dispatcher, Authenticator: config.Authenticator, Admin: config.AdminHandler,
+		Dispatcher: runtimeGraph.Dispatcher, Authenticator: config.Authenticator, Admin: config.AdminHandler, WeCom: runtimeGraph.wecomHandler,
 		Ready: runtimeGraph.Ready, Limiter: config.HTTP.Limiter, Idempotency: config.HTTP.Idempotency,
 		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout,
 	})
@@ -336,6 +366,9 @@ func (graph *Runtime) BeginShutdown() {
 	if graph.Handler != nil {
 		graph.Handler.BeginShutdown()
 	}
+	if graph.wecomLifecycle != nil {
+		graph.wecomLifecycle.BeginShutdown()
+	}
 }
 
 // Close performs bounded Registry shutdown, then closes explicitly owned
@@ -349,6 +382,9 @@ func (graph *Runtime) Close() error {
 		var closeErr error
 		if graph.Handler != nil {
 			closeErr = errors.Join(closeErr, graph.Handler.Close())
+		}
+		if graph.wecomLifecycle != nil {
+			closeErr = errors.Join(closeErr, graph.wecomLifecycle.Close())
 		}
 		if graph.Registry != nil {
 			closeErr = errors.Join(closeErr, graph.Registry.Close())

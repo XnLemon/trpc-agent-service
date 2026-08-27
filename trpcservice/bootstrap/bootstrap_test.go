@@ -1,9 +1,11 @@
 package bootstrap
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -337,7 +339,74 @@ func assertEnvironmentRequiredValues(t *testing.T) {
 	}
 }
 
+func TestEnvironmentWeComCredentialsMustBeConfiguredTogether(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envWeComCallbackToken, "callback-token")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("partial WeCom configuration error = %v", err)
+	}
+	t.Setenv(envWeComEncodingAESKey, "encoding-key")
+	t.Setenv(envWeComAppSecret, "app-secret")
+	t.Setenv(envWeComSecretRef, "env/wecom")
+	config, err := loadEnvironment()
+	if err != nil || config.wecom == nil {
+		t.Fatalf("complete WeCom environment = %+v, %v", config.wecom, err)
+	}
+	if config.wecom.callbackToken != "callback-token" || config.wecom.secretRef != "env/wecom" {
+		t.Fatalf("WeCom environment = %+v", config.wecom)
+	}
+	resolver := environmentWeComCredentialResolver{tenantID: config.tenantID, config: *config.wecom}
+	credentials, err := resolver.Resolve(context.Background(), channels.SecretScope{TenantID: config.tenantID, SecretRef: config.wecom.secretRef})
+	if err != nil || credentials.CallbackToken != config.wecom.callbackToken || credentials.AppSecret != config.wecom.appSecret {
+		t.Fatalf("WeCom credentials = %+v, %v", credentials, err)
+	}
+	if _, err := resolver.Resolve(context.Background(), channels.SecretScope{TenantID: config.tenantID, SecretRef: "env/other"}); err == nil {
+		t.Fatal("mismatched WeCom secret reference was accepted")
+	}
+}
+
+func TestWeComHandlerFactoryIsWiredAndOwnedByRuntime(t *testing.T) {
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	callback := &bootstrapWeComLifecycle{}
+	var factoryCalls int
+	config.WeComHandlerFactory = func(dispatcher gateway.DispatchService) (http.Handler, error) {
+		if dispatcher == nil {
+			t.Fatal("WeCom factory received nil dispatcher")
+		}
+		factoryCalls++
+		return callback, nil
+	}
+	graph, err := New(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	graph.HandlerValue().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/wecom/callback/route", nil))
+	if response.Code != http.StatusNoContent || factoryCalls != 1 || callback.calls.Load() != 1 {
+		t.Fatalf("WeCom callback wiring = status %d factory %d calls %d", response.Code, factoryCalls, callback.calls.Load())
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if callback.beginShutdown.Load() != 1 || callback.closed.Load() != 1 {
+		t.Fatalf("WeCom lifecycle = begin %d close %d", callback.beginShutdown.Load(), callback.closed.Load())
+	}
+}
+
 func nilContextForTest() context.Context { return nil }
+
+func setRequiredEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv(envPostgresDSN, "postgres://postgres:postgres@127.0.0.1:5432/control_plane")
+	t.Setenv(envAPIToken, "api-token")
+	t.Setenv(envTenantID, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	t.Setenv(envAppID, "app_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	t.Setenv(envAdminToken, "admin-token")
+	t.Setenv(envAdminTenants, "*")
+	t.Setenv(envModelAPIKey, "model-secret")
+	t.Setenv(envSessionBackend, "inmemory")
+}
 
 func TestEnvironmentBootstrapPreservesCancellationAndRejectsBadLists(t *testing.T) {
 	t.Setenv(envPostgresDSN, "postgres://postgres:postgres@127.0.0.1:5432/control_plane")
@@ -491,6 +560,126 @@ func TestNewFromEnvironmentBuildsRealGraphWhenDatabaseOpens(t *testing.T) {
 	}
 }
 
+func TestNewFromEnvironmentInstallsWeComCallbackAndOutboxWorker(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envWeComCallbackToken, "callback-token")
+	t.Setenv(envWeComEncodingAESKey, base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)))
+	t.Setenv(envWeComAppSecret, "app-secret")
+	t.Setenv(envWeComSecretRef, "env/wecom")
+
+	registerBootstrapPingDriver.Do(func() {
+		sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{})
+	})
+	db, err := sql.Open("trpc-service-bootstrap-ping", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousVerify := verifyEnvironmentMigrations
+	previousWorker := newEnvironmentWeComWorker
+	var workerConfig outbox.Config
+	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	newEnvironmentWeComWorker = func(config outbox.Config) (*outbox.Worker, error) {
+		workerConfig = config
+		return outbox.New(config)
+	}
+	defer func() { openEnvironmentDatabase = previousOpen }()
+	defer func() { applyEnvironmentMigrations = previousApply }()
+	defer func() { verifyEnvironmentMigrations = previousVerify }()
+	defer func() { newEnvironmentWeComWorker = previousWorker }()
+
+	graph, err := NewFromEnvironment(context.Background())
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if graph.OutboxWorker == nil || graph.wecomLifecycle == nil {
+		_ = graph.Close()
+		t.Fatal("WeCom environment did not install callback and outbox components")
+	}
+	if workerConfig.AuditWriter == nil {
+		_ = graph.Close()
+		t.Fatal("WeCom environment outbox worker did not receive an audit writer")
+	}
+	callback := httptest.NewRecorder()
+	graph.HandlerValue().ServeHTTP(callback, httptest.NewRequest(http.MethodPost, "/wecom/callback/environment-route", nil))
+	if callback.Code != http.StatusForbidden {
+		_ = graph.Close()
+		t.Fatalf("WeCom environment callback status = %d", callback.Code)
+	}
+	if err := graph.OutboxWorker.Start(context.Background(), time.Second); !errors.Is(err, outbox.ErrAlreadyRunning) {
+		_ = graph.Close()
+		t.Fatalf("environment outbox worker was not started: %v", err)
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewFromEnvironmentCleansUpWhenWeComWorkerSetupFails(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envWeComCallbackToken, "callback-token")
+	t.Setenv(envWeComEncodingAESKey, base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)))
+	t.Setenv(envWeComAppSecret, "app-secret")
+	t.Setenv(envWeComSecretRef, "env/wecom")
+
+	registerBootstrapPingDriver.Do(func() {
+		sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{})
+	})
+	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousVerify := verifyEnvironmentMigrations
+	previousOwner := environmentWeComOwnerFunc
+	previousWorker := newEnvironmentWeComWorker
+	defer func() {
+		openEnvironmentDatabase = previousOpen
+		applyEnvironmentMigrations = previousApply
+		verifyEnvironmentMigrations = previousVerify
+		environmentWeComOwnerFunc = previousOwner
+		newEnvironmentWeComWorker = previousWorker
+	}()
+
+	tests := []struct {
+		name      string
+		ownerErr  error
+		workerErr error
+	}{
+		{name: "owner", ownerErr: errors.New("owner unavailable")},
+		{name: "worker", workerErr: errors.New("worker unavailable")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, err := sql.Open("trpc-service-bootstrap-ping", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+			applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+			verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+			if tt.ownerErr != nil {
+				environmentWeComOwnerFunc = func() (string, error) { return "", tt.ownerErr }
+			} else {
+				environmentWeComOwnerFunc = func() (string, error) { return "test-owner", nil }
+			}
+			if tt.workerErr != nil {
+				newEnvironmentWeComWorker = func(outbox.Config) (*outbox.Worker, error) { return nil, tt.workerErr }
+			} else {
+				newEnvironmentWeComWorker = outbox.New
+			}
+
+			if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("setup error = %v", err)
+			}
+			if err := db.Ping(); err == nil {
+				t.Fatal("database was not closed after WeCom setup failure")
+			}
+		})
+	}
+}
+
 var registerBootstrapPingDriver sync.Once
 
 func TestNewUsesDatabasePingAndBuildsPostgreSQLRepositories(t *testing.T) {
@@ -581,6 +770,22 @@ type bootstrapBlockingProvider struct {
 	started  chan struct{}
 	canceled chan struct{}
 	once     sync.Once
+}
+
+type bootstrapWeComLifecycle struct {
+	calls         atomic.Int32
+	beginShutdown atomic.Int32
+	closed        atomic.Int32
+}
+
+func (handler *bootstrapWeComLifecycle) ServeHTTP(writer http.ResponseWriter, _ *http.Request) {
+	handler.calls.Add(1)
+	writer.WriteHeader(http.StatusNoContent)
+}
+func (handler *bootstrapWeComLifecycle) BeginShutdown() { handler.beginShutdown.Add(1) }
+func (handler *bootstrapWeComLifecycle) Close() error {
+	handler.closed.Add(1)
+	return nil
 }
 
 func (p *bootstrapBlockingProvider) Deliver(ctx context.Context, _ runtimestorage.ReplyOutbox) (string, error) {

@@ -5,18 +5,27 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
+	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/agent/postgres"
+	auditpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/audit/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
@@ -24,15 +33,15 @@ import (
 
 const (
 	envPostgresDSN = "TRPC_POSTGRES_DSN"
-	// #nosec G101 -- environment variable name, not a secret.
+	// #nosec G101 -- environment variable name, not a credential.
 	envAPIToken = "TRPC_API_TOKEN"
 	envTenantID = "TRPC_TENANT_ID"
 	envAppID    = "TRPC_APP_ID"
-	// #nosec G101 -- environment variable name, not a secret.
+	// #nosec G101 -- environment variable name, not a credential.
 	envAdminToken   = "TRPC_ADMIN_TOKEN"
 	envAdminTenants = "TRPC_ADMIN_TENANTS"
 	envSubjectID    = "TRPC_SUBJECT_ID"
-	// #nosec G101 -- environment variable name, not a secret.
+	// #nosec G101 -- environment variable name, not a credential.
 	envModelAPIKey       = "TRPC_MODEL_API_KEY"
 	envModelProvider     = "TRPC_MODEL_PROVIDER"
 	envModelNames        = "TRPC_MODEL_NAMES"
@@ -40,6 +49,13 @@ const (
 	// #nosec G101 -- environment variable name, not a secret.
 	envModelSecretRef = "TRPC_MODEL_SECRET_REF"
 	envSessionBackend = "TRPC_SESSION_BACKEND"
+	// #nosec G101 -- environment variable name, not a secret.
+	envWeComCallbackToken  = "WECOM_CALLBACK_TOKEN"
+	envWeComEncodingAESKey = "WECOM_ENCODING_AES_KEY"
+	// #nosec G101 -- environment variable name, not a secret.
+	envWeComAppSecret = "WECOM_APP_SECRET"
+	// #nosec G101 -- environment variable name, not a secret.
+	envWeComSecretRef = "WECOM_SECRET_REF"
 
 	defaultModelProvider = "openai"
 	defaultModelNames    = "gpt-4o-mini"
@@ -53,6 +69,8 @@ var (
 	openEnvironmentDatabase     = postgres.Open
 	applyEnvironmentMigrations  = migrations.Apply
 	verifyEnvironmentMigrations = migrations.Verify
+	environmentWeComOwnerFunc   = environmentWeComOwner
+	newEnvironmentWeComWorker   = outbox.New
 )
 
 // environmentConfig is intentionally private: it contains the one secret
@@ -72,6 +90,14 @@ type environmentConfig struct {
 	endpointHosts  []string
 	secretRef      string
 	runtimeStorage string
+	wecom          *environmentWeComConfig
+}
+
+type environmentWeComConfig struct {
+	callbackToken  string
+	encodingAESKey string
+	appSecret      string
+	secretRef      string
 }
 
 // NewFromEnvironment assembles the production bootstrap graph from explicit
@@ -113,17 +139,56 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	tenantRepo := tenantpostgres.NewRepository(db)
+	appRepo := agentpostgres.NewRepository(db)
+	channelRepo := channelpostgres.NewRepository(db)
+	auditWriter, err := auditpostgres.New(db, config.tenantID)
+	if err != nil {
+		_ = delegateSessions.Close()
+		_ = runtimeStore.Close()
+		_ = db.Close()
+		return nil, ErrInvalidConfig
+	}
+	var wecomFactory func(gateway.DispatchService) (http.Handler, error)
+	var wecomWorker *outbox.Worker
+	if config.wecom != nil {
+		credentials := environmentWeComCredentialResolver{tenantID: config.tenantID, config: *config.wecom}
+		wecomFactory = func(dispatcher gateway.DispatchService) (http.Handler, error) {
+			return wecom.New(wecom.Config{Candidates: channelRepo, Tenants: tenantRepo, Apps: appRepo, Credentials: credentials, Dispatcher: dispatcher, AuditWriter: auditWriter})
+		}
+		owner, ownerErr := environmentWeComOwnerFunc()
+		if ownerErr != nil {
+			_ = delegateSessions.Close()
+			_ = runtimeStore.Close()
+			_ = db.Close()
+			return nil, ErrInvalidConfig
+		}
+		wecomWorker, err = newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelRepo, Credentials: credentials}, TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second, AuditWriter: auditWriter})
+		if err != nil {
+			_ = delegateSessions.Close()
+			_ = runtimeStore.Close()
+			_ = db.Close()
+			return nil, ErrInvalidConfig
+		}
+	}
 	graph, err := NewWithDatabase(ctx, db, Config{
-		OwnDB:              true,
-		ModelCatalog:       modelCatalog,
-		BackendCatalog:     backendCatalog,
-		SecretResolver:     environmentSecretResolver{reference: config.secretRef, value: config.modelAPIKey},
-		ModelFactory:       environmentModelFactory{},
-		Sessions:           delegateSessions,
-		RuntimeStore:       runtimeStore,
-		RuntimeTenantID:    config.tenantID,
-		Authenticator:      authenticator,
-		AdminAuthenticator: adminAuthenticator,
+		OwnDB:               true,
+		Tenants:             tenantRepo,
+		Apps:                appRepo,
+		Channels:            channelRepo,
+		ModelCatalog:        modelCatalog,
+		BackendCatalog:      backendCatalog,
+		SecretResolver:      environmentSecretResolver{reference: config.secretRef, value: config.modelAPIKey},
+		ModelFactory:        environmentModelFactory{},
+		Sessions:            delegateSessions,
+		RuntimeStore:        runtimeStore,
+		RuntimeTenantID:     config.tenantID,
+		Authenticator:       authenticator,
+		AdminAuthenticator:  adminAuthenticator,
+		WeComHandlerFactory: wecomFactory,
+		OutboxWorker:        wecomWorker,
+		OutboxPollInterval:  time.Second,
+		AuditWriter:         auditWriter,
 		Ping: func(pingContext context.Context) error {
 			return postgres.Ping(pingContext, db)
 		},
@@ -192,6 +257,19 @@ func loadEnvironment() (environmentConfig, error) {
 	config.subjectID = strings.TrimSpace(config.subjectID)
 	if config.runtimeStorage != "postgres" && config.runtimeStorage != "inmemory" {
 		return environmentConfig{}, fmt.Errorf("%w: %s must be explicitly set to postgres or inmemory", ErrInvalidConfig, envSessionBackend)
+	}
+	wecomValues := []string{strings.TrimSpace(os.Getenv(envWeComCallbackToken)), strings.TrimSpace(os.Getenv(envWeComEncodingAESKey)), strings.TrimSpace(os.Getenv(envWeComAppSecret)), strings.TrimSpace(os.Getenv(envWeComSecretRef))}
+	configured := 0
+	for _, value := range wecomValues {
+		if value != "" {
+			configured++
+		}
+	}
+	if configured != 0 && configured != len(wecomValues) {
+		return environmentConfig{}, fmt.Errorf("%w: WeCom credentials must be configured together", ErrInvalidConfig)
+	}
+	if configured == len(wecomValues) {
+		config.wecom = &environmentWeComConfig{callbackToken: wecomValues[0], encodingAESKey: wecomValues[1], appSecret: wecomValues[2], secretRef: wecomValues[3]}
 	}
 	return config, nil
 }
@@ -272,6 +350,32 @@ func environmentList(name, value string, lowercase bool) ([]string, error) {
 type environmentSecretResolver struct {
 	reference string
 	value     string
+}
+
+type environmentWeComCredentialResolver struct {
+	tenantID string
+	config   environmentWeComConfig
+}
+
+func (resolver environmentWeComCredentialResolver) Resolve(ctx context.Context, scope channels.SecretScope) (wecom.Credentials, error) {
+	if ctx == nil {
+		return wecom.Credentials{}, errors.New("wecom credential resolver context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return wecom.Credentials{}, err
+	}
+	if err := scope.Validate(); err != nil || scope.TenantID != resolver.tenantID || scope.SecretRef != resolver.config.secretRef {
+		return wecom.Credentials{}, errors.New("configured WeCom secret reference is unavailable")
+	}
+	return wecom.Credentials{CallbackToken: resolver.config.callbackToken, EncodingAESKey: resolver.config.encodingAESKey, AppSecret: resolver.config.appSecret}, nil
+}
+
+func environmentWeComOwner() (string, error) {
+	hostname, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostname) == "" {
+		return "", errors.New("WeCom worker hostname is unavailable")
+	}
+	return fmt.Sprintf("wecom-%s-%d", hostname, os.Getpid()), nil
 }
 
 func (resolver environmentSecretResolver) Resolve(ctx context.Context, scope modelprofile.SecretScope) (modelprofile.SecretValue, error) {
