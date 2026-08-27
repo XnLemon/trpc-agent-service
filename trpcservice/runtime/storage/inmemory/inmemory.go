@@ -15,17 +15,56 @@ import (
 
 // Store is a concurrency-safe in-memory implementation of the runtime store.
 type Store struct {
-	mu        sync.RWMutex
-	sessions  map[string]runtimestorage.Session
-	events    map[string]runtimestorage.MessageEvent
-	histories map[string][]runtimestorage.EventPayload
-	messages  map[string]string
-	replies   map[string]runtimestorage.ReplyOutbox
+	mu           sync.RWMutex
+	sessions     map[string]runtimestorage.Session
+	events       map[string]runtimestorage.MessageEvent
+	histories    map[string][]runtimestorage.EventPayload
+	messages     map[string]string
+	replies      map[string]runtimestorage.ReplyOutbox
+	correlations map[string]runtimestorage.ReplyCorrelation
 }
 
 // New creates an empty runtime store.
 func New() *Store {
-	return &Store{sessions: map[string]runtimestorage.Session{}, events: map[string]runtimestorage.MessageEvent{}, histories: map[string][]runtimestorage.EventPayload{}, messages: map[string]string{}, replies: map[string]runtimestorage.ReplyOutbox{}}
+	return &Store{sessions: map[string]runtimestorage.Session{}, events: map[string]runtimestorage.MessageEvent{}, histories: map[string][]runtimestorage.EventPayload{}, messages: map[string]string{}, replies: map[string]runtimestorage.ReplyOutbox{}, correlations: map[string]runtimestorage.ReplyCorrelation{}}
+}
+
+// SaveReplyCorrelation stores an idempotent execution-to-reply correlation.
+func (s *Store) SaveReplyCorrelation(ctx context.Context, value runtimestorage.ReplyCorrelation) error {
+	if err := check(ctx); err != nil {
+		return err
+	}
+	if value.TenantID == "" || value.EventID == "" || value.RequestID == "" {
+		return runtimestorage.ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := key(value.TenantID, value.EventID)
+	if existing, ok := s.correlations[k]; ok {
+		if existing != value {
+			return runtimestorage.ErrConflict
+		}
+		return nil
+	}
+	s.correlations[k] = value
+	return nil
+}
+
+// GetReplyCorrelation loads a durable execution-to-reply correlation.
+func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID string) (runtimestorage.ReplyCorrelation, error) {
+	if err := check(ctx); err != nil {
+		return runtimestorage.ReplyCorrelation{}, err
+	}
+	if tenantID == "" || eventID == "" {
+		return runtimestorage.ReplyCorrelation{}, runtimestorage.ErrInvalid
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	value, ok := s.correlations[key(tenantID, eventID)]
+	if !ok {
+		return runtimestorage.ReplyCorrelation{}, runtimestorage.ErrNotFound
+	}
+	return value, nil
 }
 
 // GetSession returns a tenant-scoped session snapshot.
@@ -338,6 +377,19 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 //
 //nolint:gocyclo // The atomic in-memory write validates and materializes the complete batch.
 func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	return s.enqueueReplies(ctx, runtimestorage.ReplyCorrelation{}, values)
+}
+
+// EnqueueRepliesWithCorrelation atomically persists execution correlation and
+// the complete reply segment batch.
+func (s *Store) EnqueueRepliesWithCorrelation(ctx context.Context, correlation runtimestorage.ReplyCorrelation, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	if correlation.TenantID == "" || correlation.EventID == "" || correlation.RequestID == "" {
+		return nil, runtimestorage.ErrInvalid
+	}
+	return s.enqueueReplies(ctx, correlation, values)
+}
+
+func (s *Store) enqueueReplies(ctx context.Context, correlation runtimestorage.ReplyCorrelation, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
 	}
@@ -354,6 +406,14 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 	if event.ReplyTarget != first.ReplyTarget {
 		return nil, runtimestorage.ErrConflict
 	}
+	if correlation.RequestID != "" {
+		if correlation.TenantID != first.TenantID || correlation.EventID != first.EventID {
+			return nil, runtimestorage.ErrInvalid
+		}
+		if existing, ok := s.correlations[key(correlation.TenantID, correlation.EventID)]; ok && existing != correlation {
+			return nil, runtimestorage.ErrConflict
+		}
+	}
 	if err := validateExistingReplies(s.replies, values); err != nil {
 		return nil, err
 	}
@@ -369,6 +429,9 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 		value.CreatedAt, value.UpdatedAt = now, now
 		s.replies[k] = value
 		result = append(result, cloneReply(value))
+	}
+	if correlation.RequestID != "" {
+		s.correlations[key(correlation.TenantID, correlation.EventID)] = correlation
 	}
 	return result, nil
 }

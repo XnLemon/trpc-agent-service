@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
@@ -272,13 +273,17 @@ func TestMaterializerDefaultSegmentSizeAndUnicodeSplit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	count, err := m.Materialize(context.Background(), MaterializeInput{TenantID: "tenant-a", EventID: "event-default", ReplyID: "reply-default", Payload: "你好"})
+	count, err := m.Materialize(context.Background(), MaterializeInput{TenantID: "tenant-a", EventID: "event-default", ReplyID: "reply-default", RequestID: "request-default", TraceID: "trace-default", Payload: "你好"})
 	if err != nil || count != 1 {
 		t.Fatalf("default materialization = %d/%v", count, err)
 	}
 	rows, err := store.ListReplyCandidates(context.Background(), "tenant-a")
 	if err != nil || len(rows) != 1 || rows[0].Payload != "你好" {
 		t.Fatalf("unicode row = %+v/%v", rows, err)
+	}
+	correlation, err := store.GetReplyCorrelation(context.Background(), "tenant-a", "event-default")
+	if err != nil || correlation.RequestID != "request-default" || correlation.TraceID != "trace-default" {
+		t.Fatalf("materializer correlation = %+v/%v", correlation, err)
 	}
 	if got := splitRunes("  ", 2); got != nil {
 		t.Fatalf("blank split = %#v", got)
@@ -445,6 +450,40 @@ func TestWorkerTelemetryPropagatesCorrelationAndRedactsProviderClasses(t *testin
 		if labels["error_class"] == "provider_error" {
 			t.Fatalf("unbounded provider class leaked into metric labels: %+v", labels)
 		}
+	}
+}
+
+func TestWorkerDeliveryAuditUsesPersistedCorrelation(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-audit-correlation", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", EventID: "event-audit-correlation", SessionID: "session-audit-correlation", BindingID: "binding-audit-correlation", ExternalMessageID: "external-audit-correlation"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-audit-correlation", EventID: "event-audit-correlation", SegmentCount: 1, Payload: "payload"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveReplyCorrelation(context.Background(), runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event-audit-correlation", RequestID: "request-audit", TraceID: "trace-audit"}); err != nil {
+		t.Fatal(err)
+	}
+	auditStore, err := audit.NewInMemory("tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := New(Config{Store: store, Provider: branchProvider{id: "provider"}, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, AuditWriter: auditStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := worker.RunOnce(context.Background()); err != nil || processed != 1 {
+		t.Fatalf("RunOnce = %d, %v", processed, err)
+	}
+	events, err := auditStore.List(context.Background(), audit.Query{EventTypes: []audit.EventType{audit.EventIMDeliverySent}})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("delivery audit events = %d, %v", len(events), err)
+	}
+	if events[0].RequestID != "request-audit" || events[0].TraceID != "trace-audit" {
+		t.Fatalf("delivery correlation = %q/%q", events[0].RequestID, events[0].TraceID)
 	}
 }
 

@@ -21,6 +21,40 @@ const replyColumns = "tenant_id,reply_id,event_id,segment_index,segment_count,pa
 // New creates a PostgreSQL runtime store over db.
 func New(db *sql.DB) *Store { return &Store{db: db} }
 
+// SaveReplyCorrelation stores an idempotent execution-to-reply correlation.
+func (s *Store) SaveReplyCorrelation(ctx context.Context, value runtimestorage.ReplyCorrelation) error {
+	if err := check(ctx); err != nil {
+		return err
+	}
+	if value.TenantID == "" || value.EventID == "" || value.RequestID == "" {
+		return runtimestorage.ErrInvalid
+	}
+	err := s.db.QueryRowContext(ctx, "INSERT INTO public.runtime_reply_correlation (tenant_id,event_id,request_id,trace_id) VALUES ($1,$2,$3,$4) ON CONFLICT (tenant_id,event_id) DO UPDATE SET request_id=public.runtime_reply_correlation.request_id, trace_id=public.runtime_reply_correlation.trace_id WHERE public.runtime_reply_correlation.request_id=EXCLUDED.request_id AND public.runtime_reply_correlation.trace_id=EXCLUDED.trace_id RETURNING tenant_id", value.TenantID, value.EventID, value.RequestID, value.TraceID).Scan(new(string))
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return runtimestorage.ErrConflict
+	}
+	return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+}
+
+// GetReplyCorrelation loads the durable execution-to-reply correlation.
+func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID string) (runtimestorage.ReplyCorrelation, error) {
+	if err := check(ctx); err != nil {
+		return runtimestorage.ReplyCorrelation{}, err
+	}
+	if tenantID == "" || eventID == "" {
+		return runtimestorage.ReplyCorrelation{}, runtimestorage.ErrInvalid
+	}
+	var value runtimestorage.ReplyCorrelation
+	err := s.db.QueryRowContext(ctx, "SELECT tenant_id,event_id,request_id,trace_id FROM public.runtime_reply_correlation WHERE tenant_id=$1 AND event_id=$2", tenantID, eventID).Scan(&value.TenantID, &value.EventID, &value.RequestID, &value.TraceID)
+	if err != nil {
+		return runtimestorage.ReplyCorrelation{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	return value, nil
+}
+
 // GetSession loads a tenant-scoped session.
 func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (runtimestorage.Session, error) {
 	if err := check(ctx); err != nil {
@@ -373,6 +407,60 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	return result, nil
+}
+
+// EnqueueRepliesWithCorrelation atomically persists execution correlation and
+// the complete reply segment batch.
+func (s *Store) EnqueueRepliesWithCorrelation(ctx context.Context, correlation runtimestorage.ReplyCorrelation, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	if err := check(ctx); err != nil {
+		return nil, err
+	}
+	if correlation.TenantID == "" || correlation.EventID == "" || correlation.RequestID == "" {
+		return nil, runtimestorage.ErrInvalid
+	}
+	first, err := validateReplyBatchForCorrelation(correlation, values)
+	if err != nil {
+		return nil, err
+	}
+	if first.ReplyTarget != (runtimestorage.ReplyTarget{}) {
+		event, err := s.GetMessage(ctx, first.TenantID, first.EventID)
+		if err != nil {
+			return nil, err
+		}
+		if event.ReplyTarget != first.ReplyTarget {
+			return nil, runtimestorage.ErrConflict
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := tx.QueryRowContext(ctx, "INSERT INTO public.runtime_reply_correlation (tenant_id,event_id,request_id,trace_id) VALUES ($1,$2,$3,$4) ON CONFLICT (tenant_id,event_id) DO UPDATE SET request_id=public.runtime_reply_correlation.request_id, trace_id=public.runtime_reply_correlation.trace_id WHERE public.runtime_reply_correlation.request_id=EXCLUDED.request_id AND public.runtime_reply_correlation.trace_id=EXCLUDED.trace_id RETURNING tenant_id", correlation.TenantID, correlation.EventID, correlation.RequestID, correlation.TraceID).Scan(new(string)); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, runtimestorage.ErrConflict
+		}
+		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	result, err := s.insertReplySegments(ctx, tx, values)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	return result, nil
+}
+
+func validateReplyBatchForCorrelation(correlation runtimestorage.ReplyCorrelation, values []runtimestorage.ReplyOutbox) (runtimestorage.ReplyOutbox, error) {
+	if err := validateReplyBatch(values); err != nil {
+		return runtimestorage.ReplyOutbox{}, err
+	}
+	first := values[0]
+	if first.TenantID != correlation.TenantID || first.EventID != correlation.EventID {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
+	}
+	return first, nil
 }
 
 func validateReplyBatch(values []runtimestorage.ReplyOutbox) error {

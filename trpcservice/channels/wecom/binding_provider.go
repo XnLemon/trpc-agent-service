@@ -2,6 +2,7 @@ package wecom
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -57,11 +58,17 @@ func (p *BindingProvider) provider(ctx context.Context, value storage.ReplyOutbo
 		return nil, err
 	}
 	binding, err := p.Bindings.Get(ctx, value.TenantID, value.ReplyTarget.BindingID)
-	if err != nil || binding == nil || !binding.CanAcceptInbound() || binding.Channel != channels.ChannelWeCom || binding.Protocol.WeCom == nil {
+	if err != nil {
+		return nil, mapBindingLookupError(err)
+	}
+	if binding == nil || !binding.CanAcceptInbound() || binding.Channel != channels.ChannelWeCom || binding.Protocol.WeCom == nil {
 		return nil, invalidDelivery()
 	}
 	credentials, err := p.Credentials.Resolve(ctx, channels.SecretScope{TenantID: binding.TenantID, SecretRef: binding.SecretRef})
-	if err != nil || credentials.AppSecret == "" {
+	if err != nil {
+		return nil, mapBindingLookupError(err)
+	}
+	if credentials.AppSecret == "" {
 		return nil, invalidDelivery()
 	}
 	key := fmt.Sprintf("%s/%s/%d/%s", binding.TenantID, binding.BindingID, binding.Version, binding.ConfigDigest)
@@ -71,11 +78,26 @@ func (p *BindingProvider) provider(ctx context.Context, value storage.ReplyOutbo
 		p.providers = make(map[string]*Provider)
 	}
 	if provider := p.providers[key]; provider != nil {
-		return provider, nil
+		if provider.AppSecret == credentials.AppSecret {
+			return provider, nil
+		}
 	}
 	provider := &Provider{CorpID: binding.Protocol.WeCom.CorpID, AgentID: binding.Protocol.WeCom.AgentID, AppSecret: credentials.AppSecret, HTTPClient: p.HTTPClient, BaseURL: p.BaseURL, Now: p.Now}
 	p.providers[key] = provider
 	return provider, nil
+}
+
+func mapBindingLookupError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	if errors.Is(err, channels.ErrNotFound) || errors.Is(err, channels.ErrInvalid) {
+		return invalidDelivery()
+	}
+	return &outbox.DeliveryError{Class: "unavailable", Retryable: true}
 }
 
 func invalidDelivery() error { return &outbox.DeliveryError{Class: "invalid", Retryable: false} }

@@ -33,6 +33,8 @@ type MaterializeInput struct {
 	TenantID    string
 	EventID     string
 	ReplyID     string
+	RequestID   string
+	TraceID     string
 	Payload     string
 	ReplyTarget runtimestorage.ReplyTarget
 }
@@ -66,7 +68,17 @@ func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) 
 	for index, payload := range segments {
 		replies = append(replies, runtimestorage.ReplyOutbox{TenantID: input.TenantID, ReplyID: input.ReplyID, EventID: input.EventID, SegmentIndex: index, SegmentCount: len(segments), Payload: payload, ReplyTarget: input.ReplyTarget})
 	}
-	if _, err := batchStore.EnqueueReplies(ctx, replies); err != nil {
+	var err error
+	if input.RequestID != "" {
+		correlatedStore, correlated := m.store.(runtimestorage.ReplyBatchCorrelationEnqueuer)
+		if !correlated {
+			return 0, errors.Join(ErrMaterialization, runtimestorage.ErrInvalid)
+		}
+		_, err = correlatedStore.EnqueueRepliesWithCorrelation(ctx, runtimestorage.ReplyCorrelation{TenantID: input.TenantID, EventID: input.EventID, RequestID: input.RequestID, TraceID: input.TraceID}, replies)
+	} else {
+		_, err = batchStore.EnqueueReplies(ctx, replies)
+	}
+	if err != nil {
 		return 0, errors.Join(ErrMaterialization, err)
 	}
 	return len(segments), nil

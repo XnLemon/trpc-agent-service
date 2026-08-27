@@ -159,6 +159,16 @@ type ReplyOutbox struct {
 	UpdatedAt         time.Time
 }
 
+// ReplyCorrelation is the durable link between an execution request and its
+// asynchronously delivered reply. It is kept separately so existing reply
+// rows remain backwards compatible.
+type ReplyCorrelation struct {
+	TenantID  string
+	EventID   string
+	RequestID string
+	TraceID   string
+}
+
 // ReplyTransition requests a fenced reply lifecycle transition.
 type ReplyTransition struct {
 	TenantID      string
@@ -198,6 +208,19 @@ type RuntimeStore interface {
 // readers can keep a narrow dependency surface.
 type ReplyBatchEnqueuer interface {
 	EnqueueReplies(context.Context, []ReplyOutbox) ([]ReplyOutbox, error)
+}
+
+// ReplyBatchCorrelationEnqueuer atomically persists a reply correlation and
+// its complete segment batch.
+type ReplyBatchCorrelationEnqueuer interface {
+	EnqueueRepliesWithCorrelation(context.Context, ReplyCorrelation, []ReplyOutbox) ([]ReplyOutbox, error)
+}
+
+// ReplyCorrelationStore persists request/trace identifiers for reply delivery
+// audit and recovery. It is optional for legacy runtime stores.
+type ReplyCorrelationStore interface {
+	SaveReplyCorrelation(context.Context, ReplyCorrelation) error
+	GetReplyCorrelation(context.Context, string, string) (ReplyCorrelation, error)
 }
 
 // ValidateTenant checks the required tenant identity.

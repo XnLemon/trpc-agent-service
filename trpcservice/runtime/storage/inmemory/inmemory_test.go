@@ -74,6 +74,24 @@ func TestStoreTenantIsolationAndCAS(t *testing.T) {
 	}
 }
 
+func TestStoreReplyCorrelationIsIdempotentAndConflictSafe(t *testing.T) {
+	store := inmemory.New()
+	value := runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event-a", RequestID: "request-a", TraceID: "trace-a"}
+	if err := store.SaveReplyCorrelation(context.Background(), value); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveReplyCorrelation(context.Background(), value); err != nil {
+		t.Fatalf("idempotent save = %v", err)
+	}
+	if err := store.SaveReplyCorrelation(context.Background(), runtimestorage.ReplyCorrelation{TenantID: value.TenantID, EventID: value.EventID, RequestID: "other"}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("conflicting save = %v", err)
+	}
+	got, err := store.GetReplyCorrelation(context.Background(), value.TenantID, value.EventID)
+	if err != nil || got != value {
+		t.Fatalf("correlation = %+v, %v", got, err)
+	}
+}
+
 func TestStoreDuplicateMessageAndConcurrentSequence(t *testing.T) {
 	store := inmemory.New()
 	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-1", nil); err != nil {

@@ -405,7 +405,7 @@ func (dispatcher *Dispatcher) failDurable(durable *durableExecution, cause error
 	})
 }
 
-func (dispatcher *Dispatcher) finishDurable(durable *durableExecution, terminalErr error, replies ...string) {
+func (dispatcher *Dispatcher) finishDurable(requestID, traceID string, durable *durableExecution, terminalErr error, replies ...string) {
 	if durable == nil {
 		return
 	}
@@ -417,7 +417,7 @@ func (dispatcher *Dispatcher) finishDurable(durable *durableExecution, terminalE
 	replyID := ""
 	if terminalErr == nil && dispatcher.materializer != nil && strings.TrimSpace(reply) != "" {
 		var err error
-		segments, err = dispatcher.materializer.Materialize(context.Background(), outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, Payload: reply, ReplyTarget: durable.replyTarget})
+		segments, err = dispatcher.materializer.Materialize(context.Background(), outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: requestID, TraceID: traceID, Payload: reply, ReplyTarget: durable.replyTarget})
 		if err != nil {
 			terminalErr = err
 		} else {
@@ -460,7 +460,7 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		return err
 	}
 	defer func() {
-		terminalErr = dispatcher.finalizeForward(requestID, durable, principal, terminalErr, reply.String(), terminalEventType, terminalErrorType, finalizeAudit)
+		terminalErr = dispatcher.finalizeForward(requestID, traceID, durable, principal, terminalErr, reply.String(), terminalEventType, terminalErrorType, finalizeAudit)
 		_ = dispatcher.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
 		status := "complete"
 		if terminalErr != nil {
@@ -571,7 +571,7 @@ func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requ
 	return true
 }
 
-func (dispatcher *Dispatcher) finalizeForward(requestID string, durable *durableExecution, principal Principal, terminalErr error, reply string, terminalEventType audit.EventType, terminalErrorType string, finalizeAudit func(audit.EventType, string) error) error {
+func (dispatcher *Dispatcher) finalizeForward(requestID, traceID string, durable *durableExecution, principal Principal, terminalErr error, reply string, terminalEventType audit.EventType, terminalErrorType string, finalizeAudit func(audit.EventType, string) error) error {
 	eventType := terminalEventType
 	errorType := terminalErrorType
 	if eventType == "" {
@@ -601,7 +601,7 @@ func (dispatcher *Dispatcher) finalizeForward(requestID string, durable *durable
 	if err := finalizeAudit(eventType, errorType); err != nil && terminalErr == nil {
 		terminalErr = ErrExecution
 	}
-	dispatcher.finishDurable(durable, terminalErr, reply)
+	dispatcher.finishDurable(requestID, traceID, durable, terminalErr, reply)
 	return terminalErr
 }
 

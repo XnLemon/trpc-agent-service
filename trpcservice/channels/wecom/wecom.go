@@ -212,7 +212,16 @@ func (h *Handler) handleChallenge(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = r.Body.Close() }()
-	decoder := xml.NewDecoder(io.LimitReader(r.Body, h.maxBodyBytes))
+	body, err := io.ReadAll(io.LimitReader(r.Body, h.maxBodyBytes+1))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if int64(len(body)) > h.maxBodyBytes {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	decoder := xml.NewDecoder(bytes.NewReader(body))
 	var envelope callbackEnvelope
 	if err := decoder.Decode(&envelope); err != nil || envelope.Encrypt == "" {
 		http.Error(w, "forbidden", http.StatusForbidden)

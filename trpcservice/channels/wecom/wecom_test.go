@@ -666,6 +666,71 @@ func TestBindingProviderUsesActiveWeComBindingAndCachesProvider(t *testing.T) {
 	}
 }
 
+func TestBindingProviderPreservesRetryableResolutionErrorsAndRotatesSecrets(t *testing.T) {
+	binding := dynamicTestBinding(t, "binding-provider-resolution", "env/wecom", "app_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	value := storage.ReplyOutbox{TenantID: binding.TenantID, ReplyTarget: storage.ReplyTarget{BindingID: binding.BindingID, ConversationKind: "direct", ReceiverID: "user-1"}}
+
+	t.Run("binding cancellation is preserved", func(t *testing.T) {
+		provider := &BindingProvider{Bindings: &bindingLookupStub{err: context.Canceled}, Credentials: &credentialResolverStub{}}
+		if _, err := provider.provider(context.Background(), value); !errors.Is(err, context.Canceled) {
+			t.Fatalf("provider error = %v", err)
+		}
+	})
+
+	t.Run("credential failures are retryable unless invalid", func(t *testing.T) {
+		for _, want := range []struct {
+			name  string
+			err   error
+			class string
+			retry bool
+		}{
+			{name: "canceled", err: context.Canceled},
+			{name: "unavailable", err: errors.New("resolver unavailable"), class: "unavailable", retry: true},
+			{name: "invalid secret ref", err: channels.ErrNotFound, class: "invalid", retry: false},
+		} {
+			t.Run(want.name, func(t *testing.T) {
+				provider := &BindingProvider{Bindings: &bindingLookupStub{binding: binding}, Credentials: &credentialResolverStub{err: want.err}}
+				_, err := provider.provider(context.Background(), value)
+				if errors.Is(want.err, context.Canceled) {
+					if !errors.Is(err, context.Canceled) {
+						t.Fatalf("provider error = %v", err)
+					}
+					return
+				}
+				var deliveryErr *outbox.DeliveryError
+				if !errors.As(err, &deliveryErr) || deliveryErr.Class != want.class || deliveryErr.Retryable != want.retry {
+					t.Fatalf("provider error = %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("secret rotation replaces cached provider", func(t *testing.T) {
+		provider := &BindingProvider{Bindings: &bindingLookupStub{binding: binding}, Credentials: &sequenceCredentialResolver{values: []Credentials{{AppSecret: "old"}, {AppSecret: "new"}}}}
+		first, err := provider.provider(context.Background(), value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := provider.provider(context.Background(), value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first == second || first.AppSecret != "old" || second.AppSecret != "new" {
+			t.Fatalf("provider rotation = first %+v second %+v", first, second)
+		}
+	})
+}
+
+func TestHandlerRejectsBodyLargerThanConfiguredLimit(t *testing.T) {
+	handler := &Handler{maxBodyBytes: 3}
+	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("1234"))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("response status = %d", response.Code)
+	}
+}
+
 func TestProviderRejectsInvalidAgentAndMapsTokenFailures(t *testing.T) {
 	value := storage.ReplyOutbox{Payload: "hello", ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user"}}
 	invalidAgent := &Provider{CorpID: "corp", AgentID: "01", AppSecret: "secret", token: "cached", tokenExpiry: time.Now().Add(time.Hour)}
@@ -867,10 +932,14 @@ func encryptCallbackTestPayload(t *testing.T, key []byte, receiveID string, mess
 type bindingLookupStub struct {
 	binding *channels.Binding
 	calls   int
+	err     error
 }
 
 func (stub *bindingLookupStub) Get(_ context.Context, _, _ string) (*channels.Binding, error) {
 	stub.calls++
+	if stub.err != nil {
+		return nil, stub.err
+	}
 	value := stub.binding.Clone()
 	return &value, nil
 }
@@ -878,10 +947,14 @@ func (stub *bindingLookupStub) Get(_ context.Context, _, _ string) (*channels.Bi
 type credentialResolverStub struct {
 	credentials Credentials
 	calls       int
+	err         error
 }
 
 func (stub *credentialResolverStub) Resolve(_ context.Context, _ channels.SecretScope) (Credentials, error) {
 	stub.calls++
+	if stub.err != nil {
+		return Credentials{}, stub.err
+	}
 	return stub.credentials, nil
 }
 

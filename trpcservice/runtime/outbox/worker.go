@@ -329,7 +329,13 @@ func (w *Worker) recordDelivery(ctx context.Context, eventType audit.EventType, 
 	if eventType != audit.EventIMDeliverySent {
 		decision = audit.DecisionRejected
 	}
-	return w.audit.IM(ctx, eventType, value.ReplyID, "", "", "", decision, class)
+	requestID, traceID := value.ReplyID, ""
+	if correlations, ok := w.store.(runtimestorage.ReplyCorrelationStore); ok {
+		if correlation, err := correlations.GetReplyCorrelation(ctx, value.TenantID, value.EventID); err == nil {
+			requestID, traceID = correlation.RequestID, correlation.TraceID
+		}
+	}
+	return w.audit.IM(ctx, eventType, requestID, traceID, "", "", decision, class)
 }
 
 func (w *Worker) retryDue(value runtimestorage.ReplyOutbox, now time.Time) bool {
