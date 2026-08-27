@@ -140,7 +140,15 @@ func TestSetCanarySelectsPublishedRevisionAndRollbackClearsIt(t *testing.T) {
 	if _, _, err := r.SetCanary(context.Background(), agent.SetCanaryInput{TenantID: tenantOne, AppID: app.AppID, CandidateRevision: &candidate, ExpectedAppVersion: app.Version, TenantActive: true, Metadata: changeMetadata()}); !errors.Is(err, agent.ErrConflict) {
 		t.Fatalf("stale canary version error = %v", err)
 	}
-	rolledBack, rollbackEvent, err := r.Rollback(context.Background(), agent.RollbackInput{TenantID: tenantOne, AppID: app.AppID, TargetRevision: first.Revision, ExpectedAppVersion: selected.Version, Metadata: changeMetadata()})
+	newDraft := createDraft(t, r, selected, draftConfiguration("after-canary"))
+	publishedAfterCanary, _, _, err := r.Publish(context.Background(), publishInput(selected, newDraft))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if publishedAfterCanary.CanaryRevision != nil {
+		t.Fatalf("publishing a new stable revision retained canary: %+v", publishedAfterCanary)
+	}
+	rolledBack, rollbackEvent, err := r.Rollback(context.Background(), agent.RollbackInput{TenantID: tenantOne, AppID: app.AppID, TargetRevision: first.Revision, ExpectedAppVersion: publishedAfterCanary.Version, Metadata: changeMetadata()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,6 +173,66 @@ func TestSetCanaryRejectsInactiveTenantAppAndDraftCandidate(t *testing.T) {
 				t.Fatalf("SetCanary error = %v", err)
 			}
 		})
+	}
+}
+
+func TestSetCanaryClearsSelectionAndRejectsInvalidCandidates(t *testing.T) {
+	r := NewRepository()
+	app := createApp(t, r, tenantOne, "canary-clear")
+	first := createDraft(t, r, app, draftConfiguration("first"))
+	var err error
+	app, first, _, err = r.Publish(context.Background(), publishInput(app, first))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := createDraft(t, r, app, draftConfiguration("second"))
+	app, second, _, err = r.Publish(context.Background(), publishInput(app, second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := first.Revision
+	selected, _, err := r.SetCanary(context.Background(), agent.SetCanaryInput{
+		TenantID: tenantOne, AppID: app.AppID, CandidateRevision: &candidate, ExpectedAppVersion: app.Version, TenantActive: true, Metadata: changeMetadata(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleared, event, err := r.SetCanary(context.Background(), agent.SetCanaryInput{
+		TenantID: tenantOne, AppID: app.AppID, ExpectedAppVersion: selected.Version, TenantActive: true, Metadata: changeMetadata(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.CanaryRevision != nil || event.EventType != agent.ChangeCanaryStopped || event.PreviousRevision == nil || *event.PreviousRevision != candidate || event.CurrentRevision != nil || event.ContentDigest != "" {
+		t.Fatalf("canary clear = app=%+v event=%+v", cleared, event)
+	}
+	stable := second.Revision
+	cases := []struct {
+		name  string
+		input agent.SetCanaryInput
+	}{
+		{name: "zero revision", input: agent.SetCanaryInput{CandidateRevision: int64Pointer(0)}},
+		{name: "stable revision", input: agent.SetCanaryInput{CandidateRevision: &stable}},
+		{name: "missing revision", input: agent.SetCanaryInput{CandidateRevision: int64Pointer(99)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := tc.input
+			input.TenantID, input.AppID, input.ExpectedAppVersion = tenantOne, app.AppID, cleared.Version
+			input.TenantActive, input.Metadata = true, changeMetadata()
+			if _, _, err := r.SetCanary(context.Background(), input); !errors.Is(err, agent.ErrInvalid) && !errors.Is(err, agent.ErrNotFound) {
+				t.Fatalf("SetCanary error = %v", err)
+			}
+		})
+	}
+	invalidMetadata := agent.SetCanaryInput{TenantID: tenantOne, AppID: app.AppID, ExpectedAppVersion: cleared.Version, TenantActive: true}
+	if _, _, err := r.SetCanary(context.Background(), invalidMetadata); !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("invalid metadata error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := r.SetCanary(ctx, agent.SetCanaryInput{TenantID: tenantOne, AppID: app.AppID, ExpectedAppVersion: cleared.Version, TenantActive: true, Metadata: changeMetadata()}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled context error = %v", err)
 	}
 }
 

@@ -262,6 +262,7 @@ func (r *InMemoryRepository) Publish(ctx context.Context, input agent.PublishInp
 	previousStatus := updated.Status
 	previousRevision := cloneInt64(updated.CurrentRevision)
 	updated.CurrentRevision = int64Pointer(input.Revision)
+	updated.CanaryRevision = nil
 	if updated.Status == agent.StatusDraft {
 		updated.Status = agent.StatusActive
 	}

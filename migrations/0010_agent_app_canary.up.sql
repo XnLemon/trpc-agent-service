@@ -80,7 +80,7 @@ BEGIN
       FROM public.agent_app AS app
       JOIN public.tenant AS tenant ON tenant.tenant_id = app.tenant_id
       WHERE app.tenant_id = p_tenant_id AND app.app_id = p_app_id
-      FOR UPDATE OF app;
+      FOR UPDATE OF app, tenant;
     IF NOT FOUND THEN RAISE EXCEPTION 'agent app does not exist'; END IF;
     IF v_version <> p_expected_app_version THEN RAISE EXCEPTION 'agent app version conflict'; END IF;
     IF v_tenant_status <> 'active' THEN RAISE EXCEPTION 'tenant must be active'; END IF;
