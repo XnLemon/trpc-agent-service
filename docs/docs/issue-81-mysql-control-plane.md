@@ -157,8 +157,8 @@ collation（不得依赖服务器默认的 `utf8mb4_0900_ai_ci`）。外键显�
 
 | 条目 | 状态 |
 | --- | --- |
-| Tenant、Agent、Model、Backend、Channel MySQL Repository | 待代码阶段 |
-| 事务、乐观锁、生命周期、Outbox 和租户隔离语义 | 待代码阶段 |
-| MySQL migration、摘要校验、权限和重启恢复 | 待代码阶段 |
-| Bootstrap 驱动选择与错误脱敏 | 待代码阶段 |
-| MySQL unit/integration/race 测试及 CI 服务 | 待代码阶段 |
+| Tenant、Agent、Model、Backend、Channel MySQL Repository | 已完成：`trpcservice/*/mysql` |
+| 事务、乐观锁、生命周期、Outbox 和租户隔离语义 | 已完成：事务/复合键/候选消费集成验证 |
+| MySQL migration、摘要校验、权限和重启恢复 | 已完成：`migrations/mysql.go` 与 MySQL 8 migration |
+| Bootstrap 驱动选择与错误脱敏 | 已完成：`TRPC_CONTROL_PLANE_DRIVER` 与 fail-closed 测试 |
+| MySQL unit/integration/race 测试及 CI 服务 | 已完成：sqlmock、live Skip、race 与 CI MySQL 8 service |

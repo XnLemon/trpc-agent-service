@@ -512,6 +512,53 @@ func TestEnvironmentRuntimeStoreSelection(t *testing.T) {
 	}
 }
 
+func TestEnvironmentSelectsMySQLControlPlaneAndRejectsPostgresRuntimeStore(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envControlPlaneDriver, "mysql")
+	t.Setenv(envPostgresDSN, "")
+	t.Setenv(envMySQLDSN, "user:password@tcp(localhost:3306)/control_plane")
+	config, err := loadEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.driver != ControlPlaneDriverMySQL || config.dsn != "user:password@tcp(localhost:3306)/control_plane" {
+		t.Fatalf("MySQL environment config = %+v", config)
+	}
+	t.Setenv(envSessionBackend, "postgres")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("MySQL/PostgreSQL runtime combination error = %v", err)
+	}
+	t.Setenv(envSessionBackend, "inmemory")
+	t.Setenv(envMySQLDSN, "")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("missing MySQL DSN error = %v", err)
+	}
+	t.Setenv(envMySQLDSN, "user:password@tcp(localhost:3306)/control_plane")
+	t.Setenv(envControlPlaneDriver, "sqlite")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("unknown control-plane driver error = %v", err)
+	}
+}
+
+func TestPrepareDatabaseConfigBuildsMySQLRepositories(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectPing()
+	config := Config{DB: db, ControlPlaneDriver: ControlPlaneDriverMySQL}
+	if err := prepareDatabaseConfig(context.Background(), &config); err != nil {
+		t.Fatal(err)
+	}
+	if config.Tenants == nil || config.Apps == nil || config.Models == nil || config.Backends == nil || config.Channels == nil {
+		t.Fatalf("MySQL repositories were not built: %+v", config)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNewFromEnvironmentBuildsRealGraphWhenDatabaseOpens(t *testing.T) {
 	t.Setenv(envPostgresDSN, "postgres://configured")
 	t.Setenv(envAPIToken, "api-token")

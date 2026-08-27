@@ -12,10 +12,14 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	agentmysql "github.com/XnLemon/trpc-agent-service/trpcservice/agent/mysql"
 	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/agent/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	auditpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/audit/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	channelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/channels/mysql"
 	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
@@ -24,7 +28,10 @@ import (
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
+	tenantmysql "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/mysql"
 	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
@@ -32,7 +39,9 @@ import (
 )
 
 const (
-	envPostgresDSN = "TRPC_POSTGRES_DSN"
+	envControlPlaneDriver = "TRPC_CONTROL_PLANE_DRIVER"
+	envPostgresDSN        = "TRPC_POSTGRES_DSN"
+	envMySQLDSN           = "TRPC_MYSQL_DSN"
 	// #nosec G101 -- environment variable name, not a credential.
 	envAPIToken = "TRPC_API_TOKEN"
 	envTenantID = "TRPC_TENANT_ID"
@@ -66,17 +75,21 @@ const (
 )
 
 var (
-	openEnvironmentDatabase     = postgres.Open
-	applyEnvironmentMigrations  = migrations.Apply
-	verifyEnvironmentMigrations = migrations.Verify
-	environmentWeComOwnerFunc   = environmentWeComOwner
-	newEnvironmentWeComWorker   = outbox.New
+	openEnvironmentDatabase          = postgres.Open
+	openMySQLEnvironmentDatabase     = mysql.Open
+	applyEnvironmentMigrations       = migrations.Apply
+	applyMySQLEnvironmentMigrations  = migrations.ApplyMySQL
+	verifyEnvironmentMigrations      = migrations.Verify
+	verifyMySQLEnvironmentMigrations = migrations.VerifyMySQL
+	environmentWeComOwnerFunc        = environmentWeComOwner
+	newEnvironmentWeComWorker        = outbox.New
 )
 
 // environmentConfig is intentionally private: it contains the one secret
 // handed to the ModelFactory and must not become a serializable application
 // configuration object.
 type environmentConfig struct {
+	driver         ControlPlaneDriver
 	dsn            string
 	apiToken       string
 	adminToken     string
@@ -125,12 +138,22 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: Admin authenticator configuration is invalid", ErrInvalidConfig)
 	}
-	db, err := openEnvironmentDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+	var db *sql.DB
+	openDatabase := openEnvironmentDatabase
+	applyMigrations := applyEnvironmentMigrations
+	verifyMigrations := verifyEnvironmentMigrations
+	if config.driver == ControlPlaneDriverMySQL {
+		db, err = openMySQLEnvironmentDatabase(ctx, config.dsn, mysql.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+		applyMigrations = applyMySQLEnvironmentMigrations
+		verifyMigrations = verifyMySQLEnvironmentMigrations
+	} else {
+		db, err = openDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("%w: PostgreSQL control plane is unavailable", ErrInvalidConfig)
+		return nil, fmt.Errorf("%w: %s control plane is unavailable", ErrInvalidConfig, config.driver)
 	}
 	delegateSessions := inmemory.NewSessionService()
 	runtimeStore, err := environmentRuntimeStore(config.runtimeStorage, db)
@@ -139,15 +162,25 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	tenantRepo := tenantpostgres.NewRepository(db)
-	appRepo := agentpostgres.NewRepository(db)
-	channelRepo := channelpostgres.NewRepository(db)
-	auditWriter, err := auditpostgres.New(db, config.tenantID)
-	if err != nil {
-		_ = delegateSessions.Close()
-		_ = runtimeStore.Close()
-		_ = db.Close()
-		return nil, ErrInvalidConfig
+	var tenantRepo tenant.Repository
+	var appRepo agent.Repository
+	var channelRepo channels.CandidateConsumer
+	var auditWriter audit.Writer
+	if config.driver == ControlPlaneDriverMySQL {
+		tenantRepo = tenantmysql.NewRepository(db)
+		appRepo = agentmysql.NewRepository(db)
+		channelRepo = channelmysql.NewRepository(db)
+	} else {
+		tenantRepo = tenantpostgres.NewRepository(db)
+		appRepo = agentpostgres.NewRepository(db)
+		channelRepo = channelpostgres.NewRepository(db)
+		auditWriter, err = auditpostgres.New(db, config.tenantID)
+		if err != nil {
+			_ = delegateSessions.Close()
+			_ = runtimeStore.Close()
+			_ = db.Close()
+			return nil, ErrInvalidConfig
+		}
 	}
 	var wecomFactory func(gateway.DispatchService) (http.Handler, error)
 	var wecomWorker *outbox.Worker
@@ -173,6 +206,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	}
 	graph, err := NewWithDatabase(ctx, db, Config{
 		OwnDB:               true,
+		ControlPlaneDriver:  config.driver,
 		Tenants:             tenantRepo,
 		Apps:                appRepo,
 		Channels:            channelRepo,
@@ -190,10 +224,13 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		OutboxPollInterval:  time.Second,
 		AuditWriter:         auditWriter,
 		Ping: func(pingContext context.Context) error {
+			if config.driver == ControlPlaneDriverMySQL {
+				return mysql.Ping(pingContext, db)
+			}
 			return postgres.Ping(pingContext, db)
 		},
-		Migrate:          applyEnvironmentMigrations,
-		VerifyMigrations: verifyEnvironmentMigrations,
+		Migrate:          applyMigrations,
+		VerifyMigrations: verifyMigrations,
 		CloseDependencies: func() error {
 			return errors.Join(delegateSessions.Close(), runtimeStore.Close())
 		},
@@ -207,71 +244,121 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 }
 
 func loadEnvironment() (environmentConfig, error) {
-	config := environmentConfig{
+	config := baseEnvironmentConfig()
+	for _, load := range []func(*environmentConfig) error{
+		selectEnvironmentDatabase,
+		loadEnvironmentCredentials,
+		loadEnvironmentModelConfig,
+		validateEnvironmentRuntime,
+	} {
+		if err := load(&config); err != nil {
+			return environmentConfig{}, err
+		}
+	}
+	wecom, err := loadEnvironmentWeCom()
+	if err != nil {
+		return environmentConfig{}, err
+	}
+	config.wecom = wecom
+	return config, nil
+}
+
+func baseEnvironmentConfig() environmentConfig {
+	return environmentConfig{
+		driver:         ControlPlaneDriver(strings.ToLower(strings.TrimSpace(environmentOrDefault(envControlPlaneDriver, string(ControlPlaneDriverPostgres))))),
 		modelProvider:  environmentOrDefault(envModelProvider, defaultModelProvider),
 		secretRef:      environmentOrDefault(envModelSecretRef, defaultModelSecretRef),
 		subjectID:      environmentOrDefault(envSubjectID, defaultSubjectID),
 		runtimeStorage: strings.ToLower(strings.TrimSpace(os.Getenv(envSessionBackend))),
 	}
-	var err error
-	if config.dsn, err = requiredEnvironment(envPostgresDSN); err != nil {
-		return environmentConfig{}, err
+}
+
+func selectEnvironmentDatabase(config *environmentConfig) error {
+	if config.driver != ControlPlaneDriverPostgres && config.driver != ControlPlaneDriverMySQL {
+		return fmt.Errorf("%w: %s must be postgres or mysql", ErrInvalidConfig, envControlPlaneDriver)
 	}
-	if config.apiToken, err = requiredEnvironment(envAPIToken); err != nil {
-		return environmentConfig{}, err
+	name := envPostgresDSN
+	if config.driver == ControlPlaneDriverMySQL {
+		name = envMySQLDSN
 	}
-	if config.tenantID, err = requiredEnvironment(envTenantID); err != nil {
-		return environmentConfig{}, err
+	dsn, err := requiredEnvironment(name)
+	if err != nil {
+		return err
 	}
-	if config.appID, err = requiredEnvironment(envAppID); err != nil {
-		return environmentConfig{}, err
+	config.dsn = dsn
+	return nil
+}
+
+func loadEnvironmentCredentials(config *environmentConfig) error {
+	values := []struct {
+		name   string
+		target *string
+	}{
+		{name: envAPIToken, target: &config.apiToken},
+		{name: envTenantID, target: &config.tenantID},
+		{name: envAppID, target: &config.appID},
+		{name: envAdminToken, target: &config.adminToken},
+		{name: envModelAPIKey, target: &config.modelAPIKey},
 	}
-	if config.adminToken, err = requiredEnvironment(envAdminToken); err != nil {
-		return environmentConfig{}, err
+	for _, value := range values {
+		loaded, err := requiredEnvironment(value.name)
+		if err != nil {
+			return err
+		}
+		*value.target = loaded
 	}
 	adminTenantValue, err := requiredEnvironment(envAdminTenants)
 	if err != nil {
-		return environmentConfig{}, err
+		return err
 	}
-	adminTenants, err := environmentList(envAdminTenants, adminTenantValue, false)
-	if err != nil {
-		return environmentConfig{}, err
-	}
-	config.adminTenants = adminTenants
-	if config.modelAPIKey, err = requiredEnvironment(envModelAPIKey); err != nil {
-		return environmentConfig{}, err
-	}
+	config.adminTenants, err = environmentList(envAdminTenants, adminTenantValue, false)
+	return err
+}
+
+func loadEnvironmentModelConfig(config *environmentConfig) error {
 	config.modelProvider = strings.ToLower(strings.TrimSpace(config.modelProvider))
 	config.secretRef = strings.TrimSpace(config.secretRef)
 	if config.modelProvider == "" || config.secretRef == "" {
-		return environmentConfig{}, fmt.Errorf("%w: model provider and secret reference are required", ErrInvalidConfig)
+		return fmt.Errorf("%w: model provider and secret reference are required", ErrInvalidConfig)
 	}
+	var err error
 	config.modelNames, err = environmentList(envModelNames, environmentOrDefault(envModelNames, defaultModelNames), true)
 	if err != nil {
-		return environmentConfig{}, err
+		return err
 	}
 	config.endpointHosts, err = environmentList(envModelEndpointHost, environmentOrDefault(envModelEndpointHost, defaultEndpointHost), true)
 	if err != nil {
-		return environmentConfig{}, err
+		return err
 	}
 	config.subjectID = strings.TrimSpace(config.subjectID)
+	return nil
+}
+
+func validateEnvironmentRuntime(config *environmentConfig) error {
 	if config.runtimeStorage != "postgres" && config.runtimeStorage != "inmemory" {
-		return environmentConfig{}, fmt.Errorf("%w: %s must be explicitly set to postgres or inmemory", ErrInvalidConfig, envSessionBackend)
+		return fmt.Errorf("%w: %s must be explicitly set to postgres or inmemory", ErrInvalidConfig, envSessionBackend)
 	}
-	wecomValues := []string{strings.TrimSpace(os.Getenv(envWeComCallbackToken)), strings.TrimSpace(os.Getenv(envWeComEncodingAESKey)), strings.TrimSpace(os.Getenv(envWeComAppSecret)), strings.TrimSpace(os.Getenv(envWeComSecretRef))}
+	if config.driver == ControlPlaneDriverMySQL && config.runtimeStorage == "postgres" {
+		return fmt.Errorf("%w: %s=postgres is not available with MySQL control plane; use inmemory until a MySQL runtime adapter is selected", ErrInvalidConfig, envSessionBackend)
+	}
+	return nil
+}
+
+func loadEnvironmentWeCom() (*environmentWeComConfig, error) {
+	values := []string{strings.TrimSpace(os.Getenv(envWeComCallbackToken)), strings.TrimSpace(os.Getenv(envWeComEncodingAESKey)), strings.TrimSpace(os.Getenv(envWeComAppSecret)), strings.TrimSpace(os.Getenv(envWeComSecretRef))}
 	configured := 0
-	for _, value := range wecomValues {
+	for _, value := range values {
 		if value != "" {
 			configured++
 		}
 	}
-	if configured != 0 && configured != len(wecomValues) {
-		return environmentConfig{}, fmt.Errorf("%w: WeCom credentials must be configured together", ErrInvalidConfig)
+	if configured != 0 && configured != len(values) {
+		return nil, fmt.Errorf("%w: WeCom credentials must be configured together", ErrInvalidConfig)
 	}
-	if configured == len(wecomValues) {
-		config.wecom = &environmentWeComConfig{callbackToken: wecomValues[0], encodingAESKey: wecomValues[1], appSecret: wecomValues[2], secretRef: wecomValues[3]}
+	if configured == 0 {
+		return nil, nil
 	}
-	return config, nil
+	return &environmentWeComConfig{callbackToken: values[0], encodingAESKey: values[1], appSecret: values[2], secretRef: values[3]}, nil
 }
 
 func environmentRuntimeStore(kind string, db *sql.DB) (runtimestorage.RuntimeStore, error) {
