@@ -367,7 +367,7 @@ func (adapter *Adapter) Close() error {
 
 // HandleUpdate validates and processes one Telegram update. It is exposed for
 // deterministic tests and for the SDK's default handler.
-func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update) error {
+func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update) (err error) {
 	if adapter == nil {
 		return ErrNotReady
 	}
@@ -376,17 +376,21 @@ func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update)
 		adapter.report(ErrorOperationUpdate, ErrInvalid)
 		return err
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
 	started := time.Now()
 	operationCtx, _, finish := observability.StartOperation(ctx, adapter.telemetry, observability.OperationChannelReceive, "channel")
 	_ = adapter.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "telegram", "status": "started"})
 	defer func() {
-		finish(nil)
-		_ = adapter.metrics.Duration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "telegram", "status": "complete"})
+		finish(err)
+		status := "success"
+		if err != nil {
+			status = "error"
+		}
+		_ = adapter.metrics.Duration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "telegram", "status": status, "error_class": observability.ErrorClass(err)})
 	}()
 	ctx = operationCtx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	adapter.mu.RLock()
 	closed, client := adapter.closed, adapter.client
 	adapter.mu.RUnlock()
@@ -544,7 +548,7 @@ func (adapter *Adapter) sendEvents(ctx context.Context, message *models.Message,
 	return adapter.sendText(ctx, message, builder.String())
 }
 
-func (adapter *Adapter) sendText(ctx context.Context, message *models.Message, text string) error {
+func (adapter *Adapter) sendText(ctx context.Context, message *models.Message, text string) (err error) {
 	if message == nil {
 		return ErrInvalidUpdate
 	}
@@ -554,8 +558,12 @@ func (adapter *Adapter) sendText(ctx context.Context, message *models.Message, t
 	started := time.Now()
 	operationCtx, _, finish := observability.StartOperation(ctx, adapter.telemetry, observability.OperationChannelSend, "channel")
 	defer func() {
-		finish(nil)
-		_ = adapter.metrics.Duration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "channel": "telegram", "status": "success"})
+		finish(err)
+		status := "success"
+		if err != nil {
+			status = "error"
+		}
+		_ = adapter.metrics.Duration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "channel": "telegram", "status": status, "error_class": observability.ErrorClass(err)})
 	}()
 	ctx = operationCtx
 	chunks := splitText(text, maximumReplyRunes)
