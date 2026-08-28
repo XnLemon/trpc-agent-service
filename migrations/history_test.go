@@ -139,7 +139,6 @@ func TestApplyPreservesPreviouslyAppliedRuntimeCapabilitiesMigration(t *testing.
 	// Version 11 was already released as runtime capabilities before the trace
 	// parent migration was added. Keep its digest immutable so an upgraded
 	// deployment can apply version 12 without invalidating existing history.
-	const legacyRuntimeCapabilitiesDigest = "2765a07ffd74cd815af04bdab2f7c1c16051061002f48cf07d6ef7a2c12e5cbb"
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +150,7 @@ func TestApplyPreservesPreviouslyAppliedRuntimeCapabilitiesMigration(t *testing.
 	for _, migration := range files[:10] {
 		historyRows.AddRow(migration.version, migration.digest)
 	}
-	historyRows.AddRow(11, legacyRuntimeCapabilitiesDigest)
+	historyRows.AddRow(11, files[10].digest)
 	mock.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(historyRows)
 	mock.ExpectBegin()
 	mock.ExpectExec(`(?s).*`).WillReturnResult(sqlmock.NewResult(0, 0))
