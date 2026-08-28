@@ -35,7 +35,7 @@ func TestPostgresQueueLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	claimRow := sqlmock.NewRows(columns).AddRow("tenant-a", "task-1", "run", []byte("payload"), "leased", 1, 1, "worker", now.Add(time.Minute), now, "", now, now)
-	mock.ExpectQuery(regexp.QuoteMeta("WITH candidate AS")).WillReturnRows(claimRow)
+	mock.ExpectQuery(regexp.QuoteMeta("WITH candidate AS")).WithArgs("tenant-a", "worker", int64(60000)).WillReturnRows(claimRow)
 	claimed, err := store.Claim(context.Background(), "tenant-a", "worker", time.Minute)
 	if err != nil || claimed.FencingToken != 1 {
 		t.Fatalf("claim = %+v err=%v", claimed, err)
@@ -145,6 +145,24 @@ func TestPostgresQueueConstructorAndBoundaryInputs(t *testing.T) {
 	}
 	if _, err := store.Complete(context.Background(), "tenant-a", "task", "", 1); !errors.Is(err, queue.ErrInvalid) {
 		t.Fatalf("empty owner = %v", err)
+	}
+}
+
+func TestPostgresClaimPreservesSubsecondLease(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, _ := New(db)
+	columns := []string{"tenant_id", "task_id", "kind", "payload", "status", "attempts", "fencing_token", "lease_owner", "lease_expires_at", "next_attempt_at", "last_error_class", "created_at", "updated_at"}
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta("WITH candidate AS")).WithArgs("tenant-a", "worker", int64(1500)).WillReturnRows(sqlmock.NewRows(columns).AddRow("tenant-a", "task-1", "run", []byte("payload"), "leased", 1, 1, "worker", now.Add(1500*time.Millisecond), now, "", now, now))
+	if _, err := store.Claim(context.Background(), "tenant-a", "worker", 1500*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -75,12 +75,15 @@ func (s *Store) Claim(ctx context.Context, tenantID, owner string, lease time.Du
 	if owner == "" || lease <= 0 {
 		return queue.Task{}, queue.ErrInvalid
 	}
-	seconds := int64(lease / time.Second)
-	if seconds == 0 {
-		seconds = 1
+	milliseconds := lease.Milliseconds()
+	if lease%time.Millisecond != 0 {
+		milliseconds++
+	}
+	if milliseconds == 0 {
+		milliseconds = 1
 	}
 	var value queue.Task
-	err := s.db.QueryRowContext(ctx, "WITH candidate AS (SELECT tenant_id,task_id FROM public.runtime_execution_queue WHERE ($1='' OR tenant_id=$1) AND ((status IN ('queued','retryable') AND next_attempt_at<=now()) OR (status='leased' AND lease_expires_at<=now())) ORDER BY created_at,task_id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE public.runtime_execution_queue q SET status='leased',attempts=q.attempts+1,fencing_token=q.fencing_token+1,lease_owner=$2,lease_expires_at=now()+($3 * interval '1 second'),updated_at=now() FROM candidate c WHERE q.tenant_id=c.tenant_id AND q.task_id=c.task_id RETURNING "+columns, tenantID, owner, seconds).Scan(args(&value)...)
+	err := s.db.QueryRowContext(ctx, "WITH candidate AS (SELECT tenant_id,task_id FROM public.runtime_execution_queue WHERE ($1='' OR tenant_id=$1) AND ((status IN ('queued','retryable') AND next_attempt_at<=now()) OR (status='leased' AND lease_expires_at<=now())) ORDER BY created_at,task_id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE public.runtime_execution_queue q SET status='leased',attempts=q.attempts+1,fencing_token=q.fencing_token+1,lease_owner=$2,lease_expires_at=now()+($3 * interval '1 millisecond'),updated_at=now() FROM candidate c WHERE q.tenant_id=c.tenant_id AND q.task_id=c.task_id RETURNING "+columns, tenantID, owner, milliseconds).Scan(args(&value)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return queue.Task{}, queue.ErrNotFound
 	}
