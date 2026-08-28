@@ -147,6 +147,33 @@ func TestMatchesCapabilityRejectsUnsupportedAndNilValues(t *testing.T) {
 	}
 }
 
+func TestMatchesCapabilityContracts(t *testing.T) {
+	store := runtimeinmemory.New()
+	knowledgeOnly := struct{ runtimestorage.KnowledgeStore }{KnowledgeStore: store}
+	artifactOnly := struct{ runtimestorage.ArtifactStore }{ArtifactStore: store}
+	for _, test := range []struct {
+		name  string
+		kind  Capability
+		value any
+		want  bool
+	}{
+		{name: "session", kind: CapabilitySession, value: inmemory.NewSessionService(), want: true},
+		{name: "memory", kind: CapabilityMemory, value: store, want: true},
+		{name: "summary", kind: CapabilitySummary, value: store, want: true},
+		{name: "knowledge requires vector", kind: CapabilityKnowledge, value: knowledgeOnly},
+		{name: "knowledge with vector", kind: CapabilityKnowledge, value: store, want: true},
+		{name: "artifact requires object", kind: CapabilityArtifact, value: artifactOnly},
+		{name: "artifact with object", kind: CapabilityArtifact, value: store, want: true},
+		{name: "audit", kind: CapabilityAudit, value: store, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := matchesCapability(test.kind, test.value); got != test.want {
+				t.Fatalf("matchesCapability(%q, %T) = %t, want %t", test.kind, test.value, got, test.want)
+			}
+		})
+	}
+}
+
 func TestRegistryStorageFactoryCancellationAndMissingSession(t *testing.T) {
 	providers := NewProviderRegistry()
 	secrets := modelprofile.NewSecretRegistry()
