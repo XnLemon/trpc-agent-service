@@ -46,12 +46,14 @@ nav:
       - Tenant 运行时持久化: runtime-storage.md
       - Runtime Capabilities (#75): runtime-capabilities.md
       - PostgreSQL 控制面与启动装配: postgresql-control-plane.md
+      - "Issue #81 MySQL 控制面 Repository": issue-81-mysql-control-plane.md
       - 可重启控制面与 Admin API: issue-41-runtime-bootstrap-admin-api.md
       - 首次运行初始化: issue-67-first-run-init.md
       - "Issue #50 Reliable Reply Delivery": issue-50-reliable-delivery.md
       - 租户审计与用量成本: audit-usage.md
       - 运行时可观测性契约: observability.md
       - "Issue #79 生产可观测性": issue-79-observability.md
+      - "Issue #88 Prometheus 可观测性": issue-88-prometheus.md
   - 运维与验证:
       - 运维方案: ops.md
 

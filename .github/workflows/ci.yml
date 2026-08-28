@@ -75,10 +75,37 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: mysql
+          MYSQL_DATABASE: trpc_agent_mysql_migration_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pmysql"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      mysql-repository:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: mysql
+          MYSQL_DATABASE: trpc_agent_mysql_repository_test
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pmysql"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     env:
       POSTGRES_MIGRATION_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5432/trpc_agent_migration_test?sslmode=disable
       POSTGRES_REPOSITORY_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5433/trpc_agent_repository_test?sslmode=disable
       POSTGRES_INIT_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5434/trpc_agent_init_test?sslmode=disable
+      MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN: trpc_migration:mysql@tcp(127.0.0.1:3306)/trpc_agent_mysql_migration_test?parseTime=true&loc=UTC
+      MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN: trpc_migration:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
+      MYSQL_CONTROL_PLANE_TEST_DSN: trpc_app:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -87,6 +114,30 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Provision MySQL migration and application accounts
+        run: |
+          mysql --protocol=tcp -h 127.0.0.1 -P 3306 -uroot -pmysql -e "
+            SET GLOBAL log_bin_trust_function_creators = 1;
+            CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
+            CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
+            GRANT ALL PRIVILEGES ON trpc_agent_mysql_migration_test.* TO 'trpc_migration'@'%';
+            FLUSH PRIVILEGES;"
+          mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "
+            SET GLOBAL log_bin_trust_function_creators = 1;
+            CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
+            CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
+            GRANT ALL PRIVILEGES ON trpc_agent_mysql_repository_test.* TO 'trpc_migration'@'%';
+            FLUSH PRIVILEGES;"
+      - name: Prepare MySQL schemas and application grants
+        run: |
+          MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN="$MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN" \
+            go test ./migrations -run '^TestMySQLControlPlaneMigrationLive$' -count=1
+          MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN="$MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN" \
+            go test ./migrations -run '^TestMySQLControlPlaneMigrationLive$' -count=1
+          for table in tenant model_profile agent_app agent_app_revision agent_app_revision_tool backend_profile backend_profile_binding channel_binding tenant_status_change_outbox model_profile_change_outbox backend_profile_change_outbox agent_app_change_outbox channel_binding_change_outbox tenant_configuration_outbox; do
+            mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "GRANT SELECT, INSERT, UPDATE, DELETE ON trpc_agent_mysql_repository_test.${table} TO 'trpc_app'@'%';"
+          done
 
       - name: Build
         run: ./scripts/build.sh
@@ -144,10 +195,37 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: mysql
+          MYSQL_DATABASE: trpc_agent_mysql_migration_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pmysql"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      mysql-repository:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: mysql
+          MYSQL_DATABASE: trpc_agent_mysql_repository_test
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pmysql"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     env:
       POSTGRES_MIGRATION_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5432/trpc_agent_migration_test?sslmode=disable
       POSTGRES_REPOSITORY_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5433/trpc_agent_repository_test?sslmode=disable
       POSTGRES_INIT_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5434/trpc_agent_init_test?sslmode=disable
+      MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN: trpc_migration:mysql@tcp(127.0.0.1:3306)/trpc_agent_mysql_migration_test?parseTime=true&loc=UTC
+      MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN: trpc_migration:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
+      MYSQL_CONTROL_PLANE_TEST_DSN: trpc_app:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -156,6 +234,30 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Provision MySQL migration and application accounts
+        run: |
+          mysql --protocol=tcp -h 127.0.0.1 -P 3306 -uroot -pmysql -e "
+            SET GLOBAL log_bin_trust_function_creators = 1;
+            CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
+            CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
+            GRANT ALL PRIVILEGES ON trpc_agent_mysql_migration_test.* TO 'trpc_migration'@'%';
+            FLUSH PRIVILEGES;"
+          mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "
+            SET GLOBAL log_bin_trust_function_creators = 1;
+            CREATE USER IF NOT EXISTS 'trpc_migration'@'%' IDENTIFIED BY 'mysql';
+            CREATE USER IF NOT EXISTS 'trpc_app'@'%' IDENTIFIED BY 'mysql';
+            GRANT ALL PRIVILEGES ON trpc_agent_mysql_repository_test.* TO 'trpc_migration'@'%';
+            FLUSH PRIVILEGES;"
+      - name: Prepare MySQL schemas and application grants
+        run: |
+          MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN="$MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN" \
+            go test ./migrations -run '^TestMySQLControlPlaneMigrationLive$' -count=1
+          MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN="$MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN" \
+            go test ./migrations -run '^TestMySQLControlPlaneMigrationLive$' -count=1
+          for table in tenant model_profile agent_app agent_app_revision agent_app_revision_tool backend_profile backend_profile_binding channel_binding tenant_status_change_outbox model_profile_change_outbox backend_profile_change_outbox agent_app_change_outbox channel_binding_change_outbox tenant_configuration_outbox; do
+            mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "GRANT SELECT, INSERT, UPDATE, DELETE ON trpc_agent_mysql_repository_test.${table} TO 'trpc_app'@'%';"
+          done
 
       - name: Race test
         run: ./scripts/race.sh

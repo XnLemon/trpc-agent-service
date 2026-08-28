@@ -15,27 +15,33 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	agentmysql "github.com/XnLemon/trpc-agent-service/trpcservice/agent/mysql"
 	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/agent/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
+	backendmysql "github.com/XnLemon/trpc-agent-service/trpcservice/backend/mysql"
 	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
+	channelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/channels/mysql"
 	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	modelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/model/mysql"
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
+	tenantmysql "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/mysql"
 	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
@@ -51,9 +57,20 @@ var (
 	ErrBootstrapNotReady = errors.New("bootstrap dependencies are not configured")
 )
 
+// ControlPlaneDriver selects the durable control-plane SQL adapter. The zero
+// value intentionally preserves the historical PostgreSQL default.
+type ControlPlaneDriver string
+
+const (
+	// ControlPlaneDriverPostgres selects the PostgreSQL control-plane adapter.
+	ControlPlaneDriverPostgres ControlPlaneDriver = "postgres"
+	// ControlPlaneDriverMySQL selects the MySQL control-plane adapter.
+	ControlPlaneDriverMySQL ControlPlaneDriver = "mysql"
+)
+
 // Config is the complete, explicit dependency boundary for one process.
-// Repositories are optional only when DB is supplied; they are then built as
-// PostgreSQL implementations. All other runtime dependencies are required so
+// Repositories are optional only when DB is supplied; they are then built for
+// the selected ControlPlaneDriver (PostgreSQL by default). All other runtime dependencies are required so
 // a successful bootstrap always creates a real Resolver, Registry and HTTP
 // handler.
 type Config struct {
@@ -61,11 +78,14 @@ type Config struct {
 	Observability observability.Provider
 	DB            *sql.DB
 	OwnDB         bool
-	Tenants       tenant.Repository
-	Apps          agent.Repository
-	Models        modelprofile.Repository
-	Backends      backend.Repository
-	Channels      channels.CandidateConsumer
+	// ControlPlaneDriver selects the repository implementation used when DB is
+	// supplied and repositories are not injected. Empty means PostgreSQL.
+	ControlPlaneDriver ControlPlaneDriver
+	Tenants            tenant.Repository
+	Apps               agent.Repository
+	Models             modelprofile.Repository
+	Backends           backend.Repository
+	Channels           channels.CandidateConsumer
 
 	ModelCatalog   *modelprofile.ProviderCatalog
 	BackendCatalog *backend.ProviderCatalog
@@ -140,6 +160,15 @@ func NewWithDatabase(ctx context.Context, db *sql.DB, config Config) (*Runtime, 
 	return New(ctx, config)
 }
 
+// NewWithDatabaseDriver is the explicit constructor for a selected SQL
+// control-plane adapter. Existing callers should continue using
+// NewWithDatabase, which defaults to PostgreSQL.
+func NewWithDatabaseDriver(ctx context.Context, db *sql.DB, driver ControlPlaneDriver, config Config) (*Runtime, error) {
+	config.DB = db
+	config.ControlPlaneDriver = driver
+	return New(ctx, config)
+}
+
 // New assembles the real PlanResolver, Runtime RunnerRegistry, Dispatcher and
 // HTTPHandler from explicit dependencies.
 func New(ctx context.Context, config Config) (*Runtime, error) {
@@ -179,9 +208,67 @@ func prepareDatabaseConfig(ctx context.Context, config *Config) error {
 	if config.DB == nil {
 		return nil
 	}
+	driver, err := resolveControlPlaneDriver(config)
+	if err != nil {
+		return ErrInvalidConfig
+	}
 	if err := config.DB.PingContext(ctx); err != nil {
+		if driver == ControlPlaneDriverMySQL {
+			return mysql.ErrStorage
+		}
 		return postgres.ErrStorage
 	}
+	if driver == ControlPlaneDriverMySQL {
+		return prepareMySQLDatabaseConfig(ctx, config)
+	}
+	return preparePostgresDatabaseConfig(ctx, config)
+}
+
+func resolveControlPlaneDriver(config *Config) (ControlPlaneDriver, error) {
+	driver := config.ControlPlaneDriver
+	if driver == "" {
+		driver = ControlPlaneDriverPostgres
+		config.ControlPlaneDriver = driver
+	}
+	if driver != ControlPlaneDriverPostgres && driver != ControlPlaneDriverMySQL {
+		return "", ErrInvalidConfig
+	}
+	return driver, nil
+}
+
+func prepareMySQLDatabaseConfig(ctx context.Context, config *Config) error {
+	if config.Migrate != nil {
+		if err := config.Migrate(ctx, config.DB); err != nil {
+			return ErrInvalidConfig
+		}
+	}
+	if config.VerifyMigrations != nil {
+		if err := config.VerifyMigrations(ctx, config.DB); err != nil {
+			return ErrInvalidConfig
+		}
+	}
+	if err := mysql.VerifyApplicationPrivileges(ctx, config.DB); err != nil {
+		return ErrInvalidConfig
+	}
+	if config.Tenants == nil {
+		config.Tenants = tenantmysql.NewRepository(config.DB)
+	}
+	if config.Apps == nil {
+		config.Apps = agentmysql.NewRepository(config.DB)
+	}
+	if config.Models == nil {
+		config.Models = modelmysql.NewRepository(config.DB, config.ModelCatalog)
+	}
+	if config.Backends == nil {
+		config.Backends = backendmysql.NewRepository(config.DB, config.BackendCatalog)
+	}
+	if config.Channels == nil {
+		config.Channels = channelmysql.NewRepository(config.DB)
+	}
+	return nil
+}
+
+func preparePostgresDatabaseConfig(ctx context.Context, config *Config) error {
 	if config.Migrate != nil {
 		if err := config.Migrate(ctx, config.DB); err != nil {
 			return ErrInvalidConfig

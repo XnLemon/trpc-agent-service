@@ -15,6 +15,38 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
+func TestParseEnvironmentOTLPHeadersAndTelemetryBoundaries(t *testing.T) {
+	headers, err := parseEnvironmentOTLPHeaders("authorization=Bearer secret, x-tenant=platform")
+	if err != nil || headers["authorization"] != "Bearer secret" || headers["x-tenant"] != "platform" {
+		t.Fatalf("OTLP headers = %#v, %v", headers, err)
+	}
+	for _, invalid := range []string{"missing-equals", "=value", "key=", "key=value,key=other", "key=value\n"} {
+		if _, err := parseEnvironmentOTLPHeaders(invalid); !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("invalid OTLP headers %q error = %v", invalid, err)
+		}
+	}
+	t.Setenv(envOTLPEndpoint, "http://collector:4318/v1/otlp")
+	t.Setenv(envOTLPHeaders, "authorization=Bearer secret")
+	t.Setenv(envOTLPInsecure, "true")
+	t.Setenv(envOTELServiceName, "service-test")
+	config := environmentConfig{}
+	if err := config.loadTelemetry(); err != nil {
+		t.Fatal(err)
+	}
+	if config.otlp.Endpoint != "http://collector:4318/v1/otlp" || !config.otlp.Insecure || config.otlp.Headers["authorization"] != "Bearer secret" || config.otlp.ServiceName != "service-test" {
+		t.Fatalf("OTLP config = %+v", config.otlp)
+	}
+	t.Setenv(envOTLPInsecure, "not-bool")
+	if err := config.loadTelemetry(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("invalid OTLP insecure error = %v", err)
+	}
+	t.Setenv(envOTLPInsecure, "false")
+	t.Setenv(envOTELServiceName, "bad\nname")
+	if err := config.loadTelemetry(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("invalid OTEL service name error = %v", err)
+	}
+}
+
 func TestParseEnvironmentAPIIdentities(t *testing.T) {
 	value := "token-a|t_00000000000000000000000000|app_00000000000000000000000000|service-a, token-b|t_00000000000000000000000001|app_00000000000000000000000001|service-b"
 	identities, err := parseEnvironmentAPIIdentities(value)

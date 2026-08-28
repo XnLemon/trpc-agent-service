@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -145,10 +146,14 @@ func NewOTLPProvider(ctx context.Context, config OTLPConfig) (Provider, error) {
 	if config.Endpoint == "" {
 		return NewNoopProvider(), nil
 	}
+	config.Endpoint = strings.TrimSpace(config.Endpoint)
+	if err := validateOTLPEndpoint(config.Endpoint); err != nil {
+		return NewNoopProvider(), err
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	options := []otlptracehttp.Option{otlptracehttp.WithEndpoint(config.Endpoint)}
+	options := otlpTraceEndpointOptions(config.Endpoint)
 	if config.Insecure {
 		options = append(options, otlptracehttp.WithInsecure())
 	}
@@ -174,7 +179,7 @@ func NewOTLPProvider(ctx context.Context, config OTLPConfig) (Provider, error) {
 		_ = exporter.Shutdown(ctx)
 		return NewNoopProvider(), err
 	}
-	metricOptions := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpoint(config.Endpoint)}
+	metricOptions := otlpMetricEndpointOptions(config.Endpoint)
 	if config.Insecure {
 		metricOptions = append(metricOptions, otlpmetrichttp.WithInsecure())
 	}
@@ -199,6 +204,51 @@ func NewOTLPProvider(ctx context.Context, config OTLPConfig) (Provider, error) {
 		return errors.Join(tracerProvider.Shutdown(shutdownCtx), meterProvider.Shutdown(shutdownCtx))
 	}
 	return NewProvider(Config{ServiceName: config.ServiceName, TracerProvider: tracerProvider, MeterProvider: meterProvider, Shutdown: shutdown}), nil
+}
+
+func otlpTraceEndpointOptions(endpoint string) []otlptracehttp.Option {
+	if strings.Contains(endpoint, "://") {
+		return []otlptracehttp.Option{otlptracehttp.WithEndpointURL(otlpSignalEndpointURL(endpoint, "/v1/traces"))}
+	}
+	return []otlptracehttp.Option{otlptracehttp.WithEndpoint(endpoint)}
+}
+
+func otlpMetricEndpointOptions(endpoint string) []otlpmetrichttp.Option {
+	if strings.Contains(endpoint, "://") {
+		return []otlpmetrichttp.Option{otlpmetrichttp.WithEndpointURL(otlpSignalEndpointURL(endpoint, "/v1/metrics"))}
+	}
+	return []otlpmetrichttp.Option{otlpmetrichttp.WithEndpoint(endpoint)}
+}
+
+func otlpSignalEndpointURL(endpoint, suffix string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	path := strings.TrimRight(u.Path, "/")
+	if !strings.HasSuffix(path, suffix) {
+		path += suffix
+	}
+	u.Path = path
+	return u.String()
+}
+
+func validateOTLPEndpoint(endpoint string) error {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" || strings.ContainsAny(endpoint, "\r\n\t ") {
+		return errors.New("OTLP endpoint must not contain whitespace")
+	}
+	if strings.Contains(endpoint, "://") {
+		u, err := url.Parse(endpoint)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return errors.New("OTLP endpoint URL is invalid")
+		}
+		return nil
+	}
+	if strings.ContainsAny(endpoint, "/?#") {
+		return errors.New("OTLP endpoint host must not contain a path")
+	}
+	return nil
 }
 
 type provider struct {

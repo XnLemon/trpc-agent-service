@@ -131,7 +131,7 @@
 - [x] 实现不可变运行时配置快照和带租户命名空间的 Runner 用户/会话身份
 - [x] 覆盖租户隔离、并发更新、Context 取消和运行时边界测试
 - [x] 实现 PostgreSQL Tenant、Agent、Model、Backend、Channel Binding Repository（Issue #37）
-- [ ] 实现 MySQL 租户及控制面 Repository
+- [x] 实现 MySQL 租户及控制面 Repository（Issue #81；契约、验收对照与验证见 `docs/docs/issue-81-mysql-control-plane.md`）
 - [x] 实现租户级 Agent App 根模型和生命周期
 - [x] 实现 LLMAgent Revision 版本模型、草稿、不可变发布和内容摘要
 - [x] 定义 Agent Repository 并提供租户隔离、并发安全的 InMemory 实现
@@ -306,7 +306,7 @@
 
 - **Format & Lint**：`gofmt` 校验、`go vet`、`golangci-lint`
 - **Build, Test & Coverage**：构建、单测覆盖率、上传 [Codecov](https://codecov.io)、清理
-- **Race Tests**：在与迁移和 PostgreSQL Repository 测试相同的临时 PostgreSQL 依赖上执行 `go test -race ./...`
+- **Race Tests**：在临时 PostgreSQL 与 MySQL 8 依赖上执行 `go test -race ./...`；MySQL migration/repository live 测试使用独立 migration 账号和表级 DML 白名单应用账号
 
 Codecov 对 project 和 patch 状态均使用 **85%**、零容差的报告目标。它会将状态发布到 PR；要使已发布的
 状态成为合并门禁，仓库管理员还需在 GitHub 分支保护或 ruleset 中要求对应的状态（当前仓库尚未配置该规则）。
@@ -322,6 +322,14 @@ cd trpc-agent-service
 ./scripts/build.sh
 ./scripts/start.sh
 ```
+
+控制面默认使用 PostgreSQL；切换 MySQL 时必须同时提供应用账号
+`TRPC_MYSQL_DSN` 和迁移账号 `TRPC_MYSQL_MIGRATION_DSN`，Bootstrap 会在绑定 HTTP
+端口前完成迁移、schema 和权限校验。迁移账号需要目标数据库的 DDL 权限；应用账号只
+授予控制面 14 张表各自完整的表级 `SELECT/INSERT/UPDATE/DELETE`（缺失任何一项也会拒绝），
+不授予额外表、全局、schema、列级、routine/`EXECUTE` 或 `PROXY` 权限，也不授予
+`CREATE/ALTER/DROP/TRIGGER` 等 DDL 权限。两个 DSN 必须实际登录为不同 MySQL 账号并指向
+同一个数据库；Bootstrap 会拒绝超出白名单的直接/角色权限、启用角色权限或 grant option。
 
 首次使用 PostgreSQL 时，先按 [Issue #67 首次运行初始化](https://xnlemon.github.io/trpc-agent-service/issue-67-first-run-init/) 生成 `TRPC_TENANT_ID` 和 `TRPC_APP_ID`，再启动服务。正常启动不会自动创建 Tenant 或 Agent App。
 
