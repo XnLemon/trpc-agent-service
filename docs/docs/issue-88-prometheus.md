@@ -49,12 +49,11 @@ Collector 导出的名称和 labels 必须保持 `deploy/observability/grafana-d
 与 `deploy/observability/prometheus-rules.yml` 中的 `trpcservice_*` 查询兼容。指标的
 属性继续由 observability 白名单过滤，高基数或敏感值被丢弃/脱敏。
 
-## 本地验收证据（Mock 数据）
+## 验收证据
 
-以下截图证明本地的 metrics 和 trace 链路已经打通。截图均来自 localhost 上的
-Grafana、Prometheus、OTel Collector 和 Tempo；请求、延迟、token、cost、Runner、
-backend、delivery 以及 trace span 都是人工生成的 mock 数据，不代表生产流量或真实
-租户成本。
+Metrics 和 runtime dashboard 截图来自本地 mock 数据；Trace 截图来自测试服务器上的
+真实 WeCom 请求。租户 usage/cost 仍不应从 platform dashboard 推断，必须通过授权的
+AuditEvent 查询。
 
 ### 图 1：Metrics 采集
 
@@ -70,16 +69,19 @@ delivery 和 backend latency 等固定低基数聚合：
 
 ![图 2：Runtime dashboard mock 数据](assets/issue-88/runtime-dashboard.png)
 
-### 图 3：Trace 泳道
+### 图 3：真实 Trace 泳道
 
-Tempo Explore 中的测试 Trace ID 为 6309a3ed2e3d53cfb3965bd07135367e，可以看到
-http.request、gateway.dispatch、runner.execution、model.call 和 tool.call 的父子层级：
+Tempo Explore 中的真实服务器 Trace ID 为 `f9a3d27f6e711ff0eba6b098ebcc7db5`，时间为
+2026-08-29 02:33:49（CST），共 21 个 span。可以看到 `http.request`、
+`channel.receive`、`gateway.dispatch`、`runner.execution`、`model.call`、
+`storage.operation` 和 `channel.send` 的父子层级：
 
-![图 3：Tempo trace mock 泳道](assets/issue-88/trace-explore.png)
+![图 3：真实 WeCom 请求的 Tempo trace 泳道](assets/issue-88/trace-explore.png)
 
-Trace 截图同样是 mock span。真实 WeCom/Telegram 请求需要在服务进程配置 OTLP endpoint
-后，通过 Grafana Explore → Tempo 按时间或 Trace ID 查询；异步 Outbox channel.send
-的跨进程 parent context 持久化由 follow-up Issue #91 跟踪。
+该 trace 对应的 `message_event` 已进入 `replied`，`reply_outbox` 已进入 `sent`。
+真实 WeCom/Telegram 请求需要在服务进程配置 OTLP endpoint 后，通过 Grafana Explore →
+Tempo 按时间或 Trace ID 查询；异步 Outbox channel.send 的跨进程 parent context
+持久化由 follow-up Issue #91 跟踪。
 
 ## 一键化部署配置清单
 
@@ -124,4 +126,5 @@ Grafana 默认 datasource 会自动 provision：Prometheus 与 Tempo；dashboard
 - [x] bootstrap OTLP 环境变量边界和默认 no-op
 - [x] Collector、Prometheus、Grafana 本地配置
 - [x] endpoint、配置边界和 exporter failure focused tests
-- [ ] 用真实服务流量完成一次本地 dashboard 验证（需要数据库和模型凭据）
+- [x] 用真实服务流量完成一次 Trace 验证（测试服务器 WeCom 请求）
+- [ ] 用真实服务流量完成一次本地 metrics/dashboard 验证（需要数据库和模型凭据）
