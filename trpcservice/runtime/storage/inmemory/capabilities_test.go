@@ -605,7 +605,7 @@ func TestInMemoryRejectsNonFiniteAndOversizedFields(t *testing.T) {
 	if err := store.UpsertVector(ctx, runtimestorage.VectorRecord{TenantID: "tenant-a", DocumentID: "doc", Embedding: []float64{math.Inf(1)}}); !errors.Is(err, runtimestorage.ErrInvalid) {
 		t.Fatal(err)
 	}
-	if _, err := store.PutObject(ctx, "tenant-a", long, strings.NewReader("x"), ""); !errors.Is(err, runtimestorage.ErrInvalid) {
+	if _, err := store.PutObject(ctx, "tenant-a", strings.Repeat("x", 1100), strings.NewReader("x"), ""); !errors.Is(err, runtimestorage.ErrInvalid) {
 		t.Fatal(err)
 	}
 }
