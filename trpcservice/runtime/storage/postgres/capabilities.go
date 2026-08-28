@@ -35,7 +35,7 @@ func (s *Store) PutMemory(ctx context.Context, input runtimestorage.MemoryInput)
 	if err := checkCapability(ctx, s); err != nil {
 		return runtimestorage.MemoryRecord{}, err
 	}
-	if runtimestorage.ValidateTenant(input.TenantID) != nil || strings.TrimSpace(input.UserID) == "" || strings.TrimSpace(input.Content) == "" {
+	if runtimestorage.ValidateTenant(input.TenantID) != nil || !runtimestorage.ValidateText(input.UserID, 256, true) || !runtimestorage.ValidateText(input.Content, 0, true) || !runtimestorage.ValidateText(input.MemoryID, 256, false) || !runtimestorage.ValidateText(input.SessionID, 256, false) || !runtimestorage.ValidateEmbedding(input.Embedding) {
 		return runtimestorage.MemoryRecord{}, runtimestorage.ErrInvalid
 	}
 	if input.MemoryID == "" {
@@ -344,7 +344,7 @@ func (s *Store) PutKnowledge(ctx context.Context, value runtimestorage.Knowledge
 	if err := checkCapability(ctx, s); err != nil {
 		return runtimestorage.KnowledgeDocument{}, err
 	}
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.DocumentID == "" || strings.TrimSpace(value.Content) == "" {
+	if runtimestorage.ValidateTenant(value.TenantID) != nil || !runtimestorage.ValidateText(value.DocumentID, 256, true) || !runtimestorage.ValidateText(value.Content, 0, true) || !runtimestorage.ValidateEmbedding(value.Embedding) {
 		return runtimestorage.KnowledgeDocument{}, runtimestorage.ErrInvalid
 	}
 	metadataValue := value.Metadata
@@ -483,7 +483,7 @@ func (s *Store) PutArtifact(ctx context.Context, value runtimestorage.ArtifactRe
 	if err := checkCapability(ctx, s); err != nil {
 		return runtimestorage.ArtifactRecord{}, err
 	}
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ArtifactID == "" || len(value.Content) == 0 {
+	if runtimestorage.ValidateTenant(value.TenantID) != nil || !runtimestorage.ValidateText(value.ArtifactID, 256, true) || !runtimestorage.ValidateText(value.SessionID, 256, false) || !runtimestorage.ValidateText(value.Name, 512, false) || !runtimestorage.ValidateText(value.MimeType, 256, false) || len(value.Content) == 0 {
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrInvalid
 	}
 	var out runtimestorage.ArtifactRecord
@@ -574,7 +574,7 @@ func (s *Store) AppendAudit(ctx context.Context, value runtimestorage.AuditRecor
 	if err := checkCapability(ctx, s); err != nil {
 		return runtimestorage.AuditRecord{}, err
 	}
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.EventType == "" {
+	if runtimestorage.ValidateTenant(value.TenantID) != nil || !runtimestorage.ValidateText(value.EventType, 128, true) || !runtimestorage.ValidateText(value.AuditID, 256, false) {
 		return runtimestorage.AuditRecord{}, runtimestorage.ErrInvalid
 	}
 	if value.AuditID == "" {
@@ -639,7 +639,7 @@ func (s *Store) UpsertVector(ctx context.Context, value runtimestorage.VectorRec
 	if err := checkCapability(ctx, s); err != nil {
 		return err
 	}
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.DocumentID == "" || len(value.Embedding) == 0 {
+	if runtimestorage.ValidateTenant(value.TenantID) != nil || !runtimestorage.ValidateText(value.DocumentID, 256, true) || len(value.Embedding) == 0 || !runtimestorage.ValidateEmbedding(value.Embedding) || !runtimestorage.ValidateText(string(value.Source), 128, false) {
 		return runtimestorage.ErrInvalid
 	}
 	if value.Source == "" {
@@ -742,7 +742,7 @@ func (s *Store) PutObject(ctx context.Context, tenantID, objectKey string, conte
 	if err := checkCapability(ctx, s); err != nil {
 		return runtimestorage.ObjectInfo{}, err
 	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || objectKey == "" || content == nil {
+	if runtimestorage.ValidateTenant(tenantID) != nil || !runtimestorage.ValidateText(objectKey, 1024, true) || !runtimestorage.ValidateText(contentType, 256, false) || content == nil {
 		return runtimestorage.ObjectInfo{}, runtimestorage.ErrInvalid
 	}
 	data, err := io.ReadAll(content)

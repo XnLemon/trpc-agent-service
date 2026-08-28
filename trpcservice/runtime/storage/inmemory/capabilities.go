@@ -21,7 +21,7 @@ func (s *Store) PutMemory(ctx context.Context, input runtimestorage.MemoryInput)
 	if err := check(ctx); err != nil {
 		return runtimestorage.MemoryRecord{}, err
 	}
-	if runtimestorage.ValidateTenant(input.TenantID) != nil || strings.TrimSpace(input.UserID) == "" || strings.TrimSpace(input.Content) == "" {
+	if runtimestorage.ValidateTenant(input.TenantID) != nil || !runtimestorage.ValidateText(input.UserID, 256, true) || !runtimestorage.ValidateText(input.Content, 0, true) || !runtimestorage.ValidateText(input.MemoryID, 256, false) || !runtimestorage.ValidateText(input.SessionID, 256, false) || !runtimestorage.ValidateEmbedding(input.Embedding) {
 		return runtimestorage.MemoryRecord{}, runtimestorage.ErrInvalid
 	}
 	if input.Metadata != nil && cloneMap(input.Metadata) == nil {
@@ -29,6 +29,15 @@ func (s *Store) PutMemory(ctx context.Context, input runtimestorage.MemoryInput)
 	}
 	if input.MemoryID == "" {
 		input.MemoryID = "mem_" + uuid.NewString()
+	}
+	if input.Topics == nil {
+		input.Topics = []string{}
+	}
+	if input.Metadata == nil {
+		input.Metadata = map[string]any{}
+	}
+	if input.Embedding == nil {
+		input.Embedding = []float64{}
 	}
 	now := time.Now().UTC()
 	s.mu.Lock()
@@ -301,7 +310,7 @@ func (s *Store) PutKnowledge(ctx context.Context, value runtimestorage.Knowledge
 	if err := check(ctx); err != nil {
 		return runtimestorage.KnowledgeDocument{}, err
 	}
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.DocumentID == "" || strings.TrimSpace(value.Content) == "" {
+	if runtimestorage.ValidateTenant(value.TenantID) != nil || !runtimestorage.ValidateText(value.DocumentID, 256, true) || !runtimestorage.ValidateText(value.Content, 0, true) || !runtimestorage.ValidateEmbedding(value.Embedding) {
 		return runtimestorage.KnowledgeDocument{}, runtimestorage.ErrInvalid
 	}
 	if value.Metadata != nil && cloneMap(value.Metadata) == nil {
@@ -322,6 +331,12 @@ func (s *Store) PutKnowledge(ctx context.Context, value runtimestorage.Knowledge
 		value.Digest = hex.EncodeToString(sum[:])
 	}
 	value.Metadata, value.Embedding = cloneMap(value.Metadata), append([]float64(nil), value.Embedding...)
+	if value.Metadata == nil {
+		value.Metadata = map[string]any{}
+	}
+	if value.Embedding == nil {
+		value.Embedding = []float64{}
+	}
 	s.knowledge[k] = value
 	if len(value.Embedding) > 0 {
 		s.vectors[key(value.TenantID, string(runtimestorage.VectorSourceKnowledge), value.DocumentID)] = runtimestorage.VectorRecord{TenantID: value.TenantID, Source: runtimestorage.VectorSourceKnowledge, DocumentID: value.DocumentID, Content: value.Content, Metadata: cloneMap(value.Metadata), Embedding: append([]float64(nil), value.Embedding...), Version: value.Version, UpdatedAt: value.UpdatedAt}
@@ -404,7 +419,7 @@ func (s *Store) PutArtifact(ctx context.Context, value runtimestorage.ArtifactRe
 	if err := check(ctx); err != nil {
 		return runtimestorage.ArtifactRecord{}, err
 	}
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ArtifactID == "" || len(value.Content) == 0 {
+	if runtimestorage.ValidateTenant(value.TenantID) != nil || !runtimestorage.ValidateText(value.ArtifactID, 256, true) || !runtimestorage.ValidateText(value.SessionID, 256, false) || !runtimestorage.ValidateText(value.Name, 512, false) || !runtimestorage.ValidateText(value.MimeType, 256, false) || len(value.Content) == 0 {
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrInvalid
 	}
 	s.mu.Lock()
@@ -480,7 +495,7 @@ func (s *Store) AppendAudit(ctx context.Context, value runtimestorage.AuditRecor
 	if err := check(ctx); err != nil {
 		return runtimestorage.AuditRecord{}, err
 	}
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.EventType == "" {
+	if runtimestorage.ValidateTenant(value.TenantID) != nil || !runtimestorage.ValidateText(value.EventType, 128, true) || !runtimestorage.ValidateText(value.AuditID, 256, false) {
 		return runtimestorage.AuditRecord{}, runtimestorage.ErrInvalid
 	}
 	if value.Payload != nil && cloneMap(value.Payload) == nil {
@@ -504,6 +519,9 @@ func (s *Store) AppendAudit(ctx context.Context, value runtimestorage.AuditRecor
 		}
 	}
 	value.Payload = cloneMap(value.Payload)
+	if value.Payload == nil {
+		value.Payload = map[string]any{}
+	}
 	s.audits[value.TenantID] = append(rows, value)
 	return cloneAudit(value), nil
 }
@@ -541,7 +559,7 @@ func (s *Store) UpsertVector(ctx context.Context, value runtimestorage.VectorRec
 	if err := check(ctx); err != nil {
 		return err
 	}
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.DocumentID == "" || len(value.Embedding) == 0 {
+	if runtimestorage.ValidateTenant(value.TenantID) != nil || !runtimestorage.ValidateText(value.DocumentID, 256, true) || len(value.Embedding) == 0 || !runtimestorage.ValidateEmbedding(value.Embedding) || !runtimestorage.ValidateText(string(value.Source), 128, false) {
 		return runtimestorage.ErrInvalid
 	}
 	if value.Metadata != nil && cloneMap(value.Metadata) == nil {
@@ -550,6 +568,9 @@ func (s *Store) UpsertVector(ctx context.Context, value runtimestorage.VectorRec
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	value.Embedding, value.Metadata = append([]float64(nil), value.Embedding...), cloneMap(value.Metadata)
+	if value.Metadata == nil {
+		value.Metadata = map[string]any{}
+	}
 	if value.Version < 1 {
 		value.Version = 1
 	}
@@ -633,7 +654,7 @@ func (s *Store) PutObject(ctx context.Context, tenantID, objectKey string, conte
 	if err := check(ctx); err != nil {
 		return runtimestorage.ObjectInfo{}, err
 	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || strings.TrimSpace(objectKey) == "" || content == nil {
+	if runtimestorage.ValidateTenant(tenantID) != nil || !runtimestorage.ValidateText(objectKey, 1024, true) || !runtimestorage.ValidateText(contentType, 256, false) || content == nil {
 		return runtimestorage.ObjectInfo{}, runtimestorage.ErrInvalid
 	}
 	data, err := io.ReadAll(content)

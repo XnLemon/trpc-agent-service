@@ -256,8 +256,11 @@ func environmentRegistries(config environmentConfig, delegateSessions session.Se
 		if err := modelRegistry.Register(identity.TenantID, config.modelProvider, environmentModelFactory{}); err != nil {
 			return nil, nil, nil, err
 		}
-		if err := backendRegistry.Register(identity.TenantID, backend.CapabilitySession, "inmemory", environmentSessionCapabilityProvider{delegate: delegateSessions, store: runtimeStore, telemetry: config.telemetry, backend: config.runtimeStorage}); err != nil {
-			return nil, nil, nil, err
+		for _, capability := range []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit} {
+			provider := environmentRuntimeCapabilityProvider{capability: capability, delegate: delegateSessions, store: runtimeStore, telemetry: config.telemetry, backend: config.runtimeStorage}
+			if err := backendRegistry.Register(identity.TenantID, capability, "inmemory", provider); err != nil {
+				return nil, nil, nil, err
+			}
 		}
 	}
 	return secretRegistry, modelRegistry, backendRegistry, nil
@@ -447,7 +450,7 @@ func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalo
 	}
 	backendCatalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
 		Provider:        "inmemory",
-		Capabilities:    []backend.Capability{backend.CapabilitySession},
+		Capabilities:    []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit},
 		EndpointPolicy:  backend.FieldForbidden,
 		SecretRefPolicy: backend.FieldForbidden,
 		Options:         map[string]backend.OptionSpec{},
@@ -568,6 +571,24 @@ type environmentSessionCapabilityProvider struct {
 	store     runtimestorage.RuntimeStore
 	telemetry observability.Provider
 	backend   string
+}
+
+type environmentRuntimeCapabilityProvider struct {
+	capability backend.Capability
+	delegate   session.Service
+	store      runtimestorage.RuntimeStore
+	telemetry  observability.Provider
+	backend    string
+}
+
+func (provider environmentRuntimeCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, _ backend.CapabilityBinding, _ modelprofile.SecretValue) (any, error) {
+	if ctx == nil {
+		return nil, context.Canceled
+	}
+	if provider.capability == backend.CapabilitySession {
+		return runtimesessionpostgres.NewWithObservability(input.TenantID, provider.delegate, provider.store, provider.telemetry, provider.backend)
+	}
+	return provider.store, nil
 }
 
 func (provider environmentSessionCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, _ backend.CapabilityBinding, _ modelprofile.SecretValue) (any, error) {
