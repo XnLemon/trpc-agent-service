@@ -310,7 +310,7 @@ func (s *Store) PutKnowledge(ctx context.Context, value runtimestorage.Knowledge
 	if err := check(ctx); err != nil {
 		return runtimestorage.KnowledgeDocument{}, err
 	}
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || !runtimestorage.ValidateText(value.DocumentID, 256, true) || !runtimestorage.ValidateText(value.Content, 0, true) || !runtimestorage.ValidateEmbedding(value.Embedding) {
+	if runtimestorage.ValidateTenant(value.TenantID) != nil || !runtimestorage.ValidateText(value.DocumentID, 256, true) || !runtimestorage.ValidateText(value.Content, 0, true) || !runtimestorage.ValidateText(value.Digest, 128, false) || !runtimestorage.ValidateEmbedding(value.Embedding) {
 		return runtimestorage.KnowledgeDocument{}, runtimestorage.ErrInvalid
 	}
 	if value.Metadata != nil && cloneMap(value.Metadata) == nil {
