@@ -353,9 +353,17 @@ func matchesCapability(kind Capability, value any) bool {
 		return ok
 	case CapabilityKnowledge:
 		_, ok := value.(runtimestorage.KnowledgeStore)
+		if !ok {
+			return false
+		}
+		_, ok = value.(runtimestorage.VectorStore)
 		return ok
 	case CapabilityArtifact:
 		_, ok := value.(runtimestorage.ArtifactStore)
+		if !ok {
+			return false
+		}
+		_, ok = value.(runtimestorage.ObjectStore)
 		return ok
 	case CapabilityAudit:
 		_, ok := value.(runtimestorage.AuditStore)
