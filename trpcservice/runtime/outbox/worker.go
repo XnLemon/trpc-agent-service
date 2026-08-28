@@ -291,6 +291,7 @@ func (w *Worker) processClaimed(ctx context.Context, candidate, claimed runtimes
 }
 
 func restoreCorrelationContext(ctx context.Context, store runtimestorage.RuntimeStore, value runtimestorage.ReplyOutbox) context.Context {
+	ctx = observability.ContextWithoutTraceParent(ctx)
 	correlations, ok := store.(runtimestorage.ReplyCorrelationStore)
 	if !ok {
 		return ctx

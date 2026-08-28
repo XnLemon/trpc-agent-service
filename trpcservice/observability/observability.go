@@ -544,6 +544,15 @@ func NormalizeTraceParent(value string) string {
 	return TraceParentFromContext(ContextWithTraceParent(context.Background(), value))
 }
 
+// ContextWithoutTraceParent preserves cancellation and values while removing
+// any ambient span, so a subsequent operation starts a new root trace.
+func ContextWithoutTraceParent(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return trace.ContextWithSpanContext(ctx, trace.SpanContext{})
+}
+
 func validTraceParent(value string) bool {
 	if value == "" {
 		return false

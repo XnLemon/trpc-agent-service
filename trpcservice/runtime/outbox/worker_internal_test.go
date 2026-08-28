@@ -459,6 +459,16 @@ func TestWorkerTelemetryPropagatesCorrelationAndRedactsProviderClasses(t *testin
 	}
 }
 
+func TestRestoreCorrelationContextDropsAmbientSpanWhenCorrelationUnavailable(t *testing.T) {
+	valid := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	ambient := observability.ContextWithTraceParent(context.Background(), valid)
+	value := runtimestorage.ReplyOutbox{TenantID: "tenant-a", EventID: "event-legacy"}
+	ctx := restoreCorrelationContext(ambient, inmemory.New(), value)
+	if got := observability.TraceParentFromContext(ctx); got != "" {
+		t.Fatalf("ambient traceparent retained for legacy correlation: %q", got)
+	}
+}
+
 func TestWorkerDeliveryAuditUsesPersistedCorrelation(t *testing.T) {
 	store := inmemory.New()
 	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-audit-correlation", nil); err != nil {
