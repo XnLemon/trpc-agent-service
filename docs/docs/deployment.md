@@ -44,6 +44,10 @@ docker compose --env-file deploy/service.env -f deploy/docker-compose.yml down
 填充后的 `deploy/service.env` 已被 `.dockerignore` 排除，不会进入 Docker build context；该文件
 仍可能被 Compose 读取，因此不要提交到 Git，也不要把它作为生产 Secret 管理方案。
 
+Compose 的默认 DSN 会把 `POSTGRES_USER`、`POSTGRES_PASSWORD` 和 `POSTGRES_DB` 组合起来；如果
+用户名或密码包含 `@`、`:`、`/` 等 URL 保留字符，请先做 URL 编码并显式设置
+`TRPC_POSTGRES_DSN`，不要依赖字符串拼接。
+
 ## Kubernetes 部署
 
 `deploy/kubernetes` 是一个可用的 Kustomize base，包含 ConfigMap、Secret 引用、
