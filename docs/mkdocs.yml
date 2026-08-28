@@ -43,6 +43,7 @@ nav:
       - Gateway、Execution Plan 与 HTTP/SSE: gateway.md
       - Telegram 长轮询 Adapter: telegram.md
       - 企业微信自建应用 Text Webhook: wecom.md
+      - "Issue #77 Channel Capabilities": issue-77-channel-capabilities.md
       - Tenant 运行时持久化: runtime-storage.md
       - Runtime Capabilities (#75): runtime-capabilities.md
       - PostgreSQL 控制面与启动装配: postgresql-control-plane.md
