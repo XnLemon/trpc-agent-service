@@ -135,6 +135,18 @@ func TestCapabilitySetTypedAccessorsRejectWrongTypes(t *testing.T) {
 	}
 }
 
+func TestMatchesCapabilityRejectsUnsupportedAndNilValues(t *testing.T) {
+	if matchesCapability(CapabilitySession, (*session.Service)(nil)) {
+		t.Fatal("typed nil accepted")
+	}
+	if matchesCapability(Capability("unknown"), struct{}{}) {
+		t.Fatal("unknown capability accepted")
+	}
+	if _, ok := (&CapabilitySet{}).Capability(CapabilitySession); ok {
+		t.Fatal("missing capability reported")
+	}
+}
+
 func TestRegistryStorageFactoryCancellationAndMissingSession(t *testing.T) {
 	providers := NewProviderRegistry()
 	secrets := modelprofile.NewSecretRegistry()
