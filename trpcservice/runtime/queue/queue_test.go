@@ -270,3 +270,136 @@ func TestWorkerCloseBeforeStartPreventsRun(t *testing.T) {
 		t.Fatalf("run after close = ok=%v err=%v", ok, err)
 	}
 }
+
+type stubStore struct {
+	claimTask   Task
+	claimErr    error
+	completeErr error
+	retryErr    error
+	failErr     error
+}
+
+func (s *stubStore) Enqueue(context.Context, TaskInput) (Task, bool, error) {
+	return Task{}, false, nil
+}
+func (s *stubStore) Get(context.Context, string, string) (Task, error) { return s.claimTask, nil }
+func (s *stubStore) Claim(context.Context, string, string, time.Duration) (Task, error) {
+	return s.claimTask, s.claimErr
+}
+func (s *stubStore) Complete(context.Context, string, string, string, int64) (Task, error) {
+	return Task{}, s.completeErr
+}
+func (s *stubStore) Retry(context.Context, string, string, string, int64, time.Time, string) (Task, error) {
+	return Task{}, s.retryErr
+}
+func (s *stubStore) Fail(context.Context, string, string, string, int64, string) (Task, error) {
+	return Task{}, s.failErr
+}
+func (s *stubStore) Close() error { return nil }
+
+func TestQueueBoundaryBranches(t *testing.T) {
+	if _, err := New(Config{Store: NewMemory(), Handler: func(context.Context, Task) error { return nil }, Owner: "w", LeaseDuration: time.Second, BackoffBase: 2 * time.Second, BackoffMax: time.Second}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid backoff config = %v", err)
+	}
+	var nilWorker *Worker
+	if _, err := nilWorker.RunOnce(context.Background()); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil RunOnce = %v", err)
+	}
+	if err := nilWorker.Start(context.Background()); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil Start = %v", err)
+	}
+	if err := nilWorker.Close(); err != nil {
+		t.Fatalf("nil Close = %v", err)
+	}
+
+	store := &stubStore{claimErr: errors.New("claim failed")}
+	worker, err := New(Config{Store: store, Owner: "worker", LeaseDuration: time.Second, Handler: func(context.Context, Task) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.RunOnce(context.Background()); err == nil {
+		t.Fatal("claim error swallowed")
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := worker.RunOnce(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled RunOnce = %v", err)
+	}
+	worker.backoffBase = 4 * time.Second
+	worker.backoffMax = 5 * time.Second
+	if got := worker.backoff(4); got != worker.backoffMax {
+		t.Fatalf("capped backoff = %v", got)
+	}
+	if got := errorClass(nil); got != "" {
+		t.Fatalf("nil error class = %q", got)
+	}
+	if got := errorClass(context.DeadlineExceeded); got != "deadline_exceeded" {
+		t.Fatalf("deadline class = %q", got)
+	}
+	if got := errorClass(errors.New("other")); got != "handler_error" {
+		t.Fatalf("handler class = %q", got)
+	}
+	if err := validateInput(TaskInput{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid input = %v", err)
+	}
+
+	backend := NewBackend()
+	closedView := NewMemoryWithBackend(nil)
+	_ = closedView.Close()
+	closedBackendView := NewMemoryWithBackend(backend)
+	backend.mu.Lock()
+	backend.closed = true
+	backend.mu.Unlock()
+	if _, _, err := closedBackendView.Enqueue(context.Background(), TaskInput{TenantID: "t", TaskID: "id", Kind: "k", Payload: []byte("p")}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("enqueue closed backend = %v", err)
+	}
+	if _, err := closedBackendView.Claim(context.Background(), "t", "w", time.Second); !errors.Is(err, ErrClosed) {
+		t.Fatalf("claim closed backend = %v", err)
+	}
+	_ = closedBackendView.Close()
+
+	storeMem := NewMemory()
+	if _, _, err := storeMem.Enqueue(context.Background(), TaskInput{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("memory invalid enqueue = %v", err)
+	}
+	if _, err := storeMem.Get(context.Background(), "", "id"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("memory invalid get = %v", err)
+	}
+	if _, err := storeMem.Claim(context.Background(), "t", "w", time.Second); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("memory empty claim = %v", err)
+	}
+	if _, err := storeMem.Claim(context.Background(), "t", "", time.Second); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("memory invalid claim = %v", err)
+	}
+	if _, err := storeMem.transition(context.Background(), "", "id", "w", 1, StatusCompleted, "", time.Time{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("memory invalid transition = %v", err)
+	}
+	if _, err := storeMem.transition(context.Background(), "t", "missing", "w", 1, StatusCompleted, "", time.Time{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("memory missing transition = %v", err)
+	}
+	if err := storeMem.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := storeMem.Enqueue(context.Background(), TaskInput{TenantID: "t", TaskID: "id", Kind: "k", Payload: []byte("p")}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("memory enqueue after close = %v", err)
+	}
+
+	baseTask := Task{TenantID: "t", TaskID: "id", FencingToken: 1, Attempts: 1, Status: StatusLeased}
+	for name, tc := range map[string]struct {
+		store   *stubStore
+		handler Handler
+		wantErr error
+	}{
+		"complete": {store: &stubStore{claimTask: baseTask, completeErr: errors.New("complete failed")}, handler: func(context.Context, Task) error { return nil }, wantErr: errors.New("complete failed")},
+		"retry":    {store: &stubStore{claimTask: baseTask, retryErr: errors.New("retry failed")}, handler: func(context.Context, Task) error { return Retry(errors.New("temporary")) }, wantErr: errors.New("retry failed")},
+		"fail":     {store: &stubStore{claimTask: baseTask, failErr: errors.New("fail failed")}, handler: func(context.Context, Task) error { return errors.New("permanent") }, wantErr: errors.New("fail failed")},
+	} {
+		w, err := New(Config{Store: tc.store, Owner: "worker", LeaseDuration: time.Second, MaxAttempts: 2, Handler: tc.handler})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.RunOnce(context.Background()); err == nil || err.Error() != tc.wantErr.Error() {
+			t.Fatalf("%s error = %v", name, err)
+		}
+	}
+}
