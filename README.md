@@ -337,9 +337,12 @@ Codecov 对 project 和 patch 状态均使用 **85%**、零容差的报告目标
 git clone https://github.com/XnLemon/trpc-agent-service.git
 cd trpc-agent-service
 
-cp deploy/service.env.example deploy/service.env
+cp deploy/example.env deploy/service.env
 ./scripts/quickstart.sh
 ```
+
+默认参数模板是仓库内的 [`deploy/example.env`](deploy/example.env)；复制后的
+`deploy/service.env` 只用于本地覆盖，不应提交真实凭据。
 
 脚本会构建服务镜像，等待 PostgreSQL 和服务健康检查，并验证 `/healthz`、`/readyz`；成功后
 服务继续运行在 `http://127.0.0.1:8080`。`deploy/service.env` 仅供本地使用，已被 Git 和

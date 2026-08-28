@@ -17,7 +17,7 @@ git clone https://github.com/XnLemon/trpc-agent-service.git
 cd trpc-agent-service
 
 # 可选：使用自己的本地值；不复制时脚本直接使用 example 文件。
-cp deploy/service.env.example deploy/service.env
+cp deploy/example.env deploy/service.env
 ./scripts/quickstart.sh
 ```
 
@@ -30,8 +30,11 @@ docker compose --env-file deploy/service.env -f deploy/docker-compose.yml down
 ```
 
 如果没有复制 `deploy/service.env`，把上面的参数替换为
-`deploy/service.env.example`。删除本地数据库卷会丢失演示数据，只有明确需要重置时才执行
+`deploy/example.env`。删除本地数据库卷会丢失演示数据，只有明确需要重置时才执行
 `down -v`。
+
+`deploy/example.env` 是仓库内提交的默认参数模板；复制后得到的
+`deploy/service.env` 仅用于本机覆盖值，真实凭据不会随镜像构建上下文提交。
 
 ### Compose 验收契约
 

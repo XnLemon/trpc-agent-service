@@ -4,6 +4,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+if [[ ! -f deploy/example.env ]]; then
+  echo "::error::deploy/example.env is missing" >&2
+  exit 1
+fi
+if git check-ignore -q deploy/example.env; then
+  echo "::error::deploy/example.env must remain tracked" >&2
+  exit 1
+fi
+
 assert_dockerignore_entry() {
   local entry="$1"
   if ! grep -Fqx "$entry" .dockerignore; then
@@ -22,7 +31,7 @@ assert_gitignore_entry() {
 
 # A developer may copy the example to deploy/service.env before starting
 # Compose. Keep both the concrete file and other populated env files out of
-# the Docker build context while retaining *.env.example documentation.
+# the Docker build context while retaining the tracked example.env template.
 assert_dockerignore_entry "deploy/service.env"
 assert_dockerignore_entry "deploy/*.env"
 assert_gitignore_entry "deploy/service.env"
@@ -34,7 +43,7 @@ kustomize_output="$(mktemp)"
 trap 'rm -f "$compose_config" "$custom_compose_config" "$kustomize_output"' EXIT
 
 docker compose \
-  --env-file deploy/service.env.example \
+  --env-file deploy/example.env \
   -f deploy/docker-compose.yml \
   config >"$compose_config"
 grep -Fq -- '0.0.0.0:8080' "$compose_config"
@@ -45,7 +54,7 @@ POSTGRES_USER=validation-user \
 POSTGRES_PASSWORD=validation-pass \
 POSTGRES_DB=validation-db \
   docker compose \
-    --env-file deploy/service.env.example \
+    --env-file deploy/example.env \
     -f deploy/docker-compose.yml \
     config >"$custom_compose_config"
 grep -Fq -- 'postgres://validation-user:validation-pass@postgres:5432/validation-db?sslmode=disable' "$custom_compose_config"

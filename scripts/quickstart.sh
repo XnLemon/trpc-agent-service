@@ -14,7 +14,7 @@ if [[ -z "$env_file" ]]; then
   if [[ -f deploy/service.env ]]; then
     env_file=deploy/service.env
   else
-    env_file=deploy/service.env.example
+    env_file=deploy/example.env
   fi
 fi
 if [[ ! -f "$env_file" ]]; then
