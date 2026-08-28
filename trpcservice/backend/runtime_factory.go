@@ -54,7 +54,22 @@ func (set *CapabilitySet) Capability(kind Capability) (any, bool) {
 	set.mu.RLock()
 	defer set.mu.RUnlock()
 	value, ok := set.capabilities[kind]
+	if ok && isNilCapability(value) {
+		return nil, false
+	}
 	return value, ok
+}
+
+func isNilCapability(value any) bool {
+	if value == nil {
+		return true
+	}
+	v := reflect.ValueOf(value)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	}
+	return false
 }
 
 // Session returns the tenant-scoped session.Service capability.
@@ -323,6 +338,9 @@ func (factory *RegistryStorageFactory) materializeBinding(ctx context.Context, i
 }
 
 func matchesCapability(kind Capability, value any) bool {
+	if isNilCapability(value) {
+		return false
+	}
 	switch kind {
 	case CapabilitySession:
 		_, ok := value.(session.Service)
