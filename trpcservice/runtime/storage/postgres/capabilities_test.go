@@ -663,6 +663,142 @@ func TestPostgresKnowledgeAndArtifactContracts(t *testing.T) {
 	}
 }
 
+func TestSearchKnowledgeReturnBranches(t *testing.T) {
+	query := regexp.QuoteMeta("SELECT tenant_id,document_id,content,metadata,embedding,digest,version,created_at,updated_at FROM public.runtime_knowledge WHERE tenant_id=$1 AND embedding <> '[]'::jsonb")
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	row := func(documentID string, metadata, embedding []byte) *sqlmock.Rows {
+		return sqlmock.NewRows([]string{"tenant_id", "document_id", "content", "metadata", "embedding", "digest", "version", "created_at", "updated_at"}).
+			AddRow("tenant-a", documentID, "content", metadata, embedding, "digest", int64(1), when, when)
+	}
+
+	tests := []struct {
+		name string
+		call func(*runtimepostgres.Store) error
+		want error
+	}{
+		{name: "nil context", call: func(store *runtimepostgres.Store) error {
+			_, err := store.SearchKnowledge(nil, "tenant-a", []float64{1}, 1)
+			return err
+		}, want: runtimestorage.ErrInvalid},
+		{name: "invalid tenant", call: func(store *runtimepostgres.Store) error {
+			_, err := store.SearchKnowledge(context.Background(), "", []float64{1}, 1)
+			return err
+		}, want: runtimestorage.ErrInvalid},
+		{name: "empty embedding", call: func(store *runtimepostgres.Store) error {
+			_, err := store.SearchKnowledge(context.Background(), "tenant-a", nil, 1)
+			return err
+		}, want: runtimestorage.ErrInvalid},
+		{name: "negative limit", call: func(store *runtimepostgres.Store) error {
+			_, err := store.SearchKnowledge(context.Background(), "tenant-a", []float64{1}, -1)
+			return err
+		}, want: runtimestorage.ErrInvalid},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, _, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			if err := test.call(runtimepostgres.New(db)); !errors.Is(err, test.want) {
+				t.Fatalf("SearchKnowledge error = %v, want %v", err, test.want)
+			}
+		})
+	}
+
+	t.Run("nil store", func(t *testing.T) {
+		var store *runtimepostgres.Store
+		_, err := store.SearchKnowledge(context.Background(), "tenant-a", []float64{1}, 1)
+		if !errors.Is(err, runtimestorage.ErrStorage) {
+			t.Fatalf("SearchKnowledge nil store = %v", err)
+		}
+	})
+
+	t.Run("query error mapping", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		mock.ExpectQuery(query).WithArgs("tenant-a").WillReturnError(sql.ErrNoRows)
+		_, err = runtimepostgres.New(db).SearchKnowledge(context.Background(), "tenant-a", []float64{1}, 1)
+		if !errors.Is(err, runtimestorage.ErrNotFound) {
+			t.Fatalf("SearchKnowledge query error = %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	for _, test := range []struct {
+		name string
+		rows *sqlmock.Rows
+	}{
+		{name: "scan error", rows: sqlmock.NewRows([]string{"tenant_id", "document_id"}).AddRow("tenant-a", "doc")},
+		{name: "metadata decode error", rows: row("doc", []byte("{"), []byte("[1]"))},
+		{name: "embedding decode error", rows: row("doc", []byte("{}"), []byte("["))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			mock.ExpectQuery(query).WithArgs("tenant-a").WillReturnRows(test.rows)
+			_, err = runtimepostgres.New(db).SearchKnowledge(context.Background(), "tenant-a", []float64{1}, 1)
+			if !errors.Is(err, runtimestorage.ErrStorage) {
+				t.Fatalf("SearchKnowledge %s = %v", test.name, err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	t.Run("cosine filtering sorting and limit", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		rows := row("doc-z", []byte("{\"z\":1}"), []byte("[0,1]"))
+		rows.AddRow("tenant-a", "doc-a", "content", []byte("{\"a\":1}"), []byte("[0,1]"), "digest", int64(1), when, when)
+		rows.AddRow("tenant-a", "doc-high", "content", []byte("{\"high\":1}"), []byte("[1,0]"), "digest", int64(1), when, when)
+		rows.AddRow("tenant-a", "doc-zero", "content", []byte("{\"zero\":1}"), []byte("[0,0]"), "digest", int64(1), when, when)
+		rows.AddRow("tenant-a", "doc-mismatch", "content", []byte("{\"mismatch\":1}"), []byte("[1]"), "digest", int64(1), when, when)
+		mock.ExpectQuery(query).WithArgs("tenant-a").WillReturnRows(rows)
+		values, err := runtimepostgres.New(db).SearchKnowledge(context.Background(), "tenant-a", []float64{1, 0}, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(values) != 2 || values[0].Document.DocumentID != "doc-high" || values[0].Score != 1 || values[1].Document.DocumentID != "doc-a" || values[1].Score != 0 {
+			t.Fatalf("SearchKnowledge ordering/limit = %+v", values)
+		}
+		if values[1].Document.Metadata["a"] != float64(1) {
+			t.Fatalf("SearchKnowledge metadata = %#v", values[1].Document.Metadata)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("rows error", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		mock.ExpectQuery(query).WithArgs("tenant-a").WillReturnRows(row("doc", []byte("{}"), []byte("[1]")).RowError(0, errors.New("row iteration failed")))
+		_, err = runtimepostgres.New(db).SearchKnowledge(context.Background(), "tenant-a", []float64{1}, 1)
+		if !errors.Is(err, runtimestorage.ErrStorage) {
+			t.Fatalf("SearchKnowledge rows error = %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 func TestPostgresAuditVectorAndObjectContracts(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
