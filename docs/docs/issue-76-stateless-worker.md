@@ -39,7 +39,8 @@ Gateway 不保存 session 粘性，也不能由请求体选择租户；它把已
   `ErrConflict`，不能覆盖新 Worker 的结果。
 - 重试由 `NextAttemptAt` 和有限的指数退避驱动；不可重试错误或超过上限进入
   `failed`（死信），保留脱敏的错误类别。
-- `Worker.Run` 只由创建者拥有；`Close` 可重复调用，会取消派生 context、停止领取
+- `Worker.Start(ctx)` 只由创建者调用且只能启动一次；`RunOnce(ctx)` 可用于同步处理单个任务。
+  `Close` 可重复调用，会取消派生 context、停止领取
   新任务并等待正在运行的 handler，保证不会向已关闭的 channel 发送。
 
 状态转换：
@@ -67,7 +68,7 @@ leased (lease expired) -> leased  (new fencing token)
    目标；重复执行安全。快照期间的写入都由双写记录在 watermark 之后。
 3. **catch-up**：从初始 watermark（含快照期间的增量）继续增量，直到
    source/destination 的 watermark 相等。
-4. **validate**：按规范化 JSON 计算 SHA-256 checksum，比较记录数、字节数和 digest；
+4. **validate**：按规范化 JSON 计算 SHA-256 checksum，比较记录数和 digest；
    任一租户失败都阻止切换。
 5. **cutover**：原子地把租户路由标记为 destination，并保留旧 source 的只读窗口。
 6. **rollback**：只允许在 cutover 后且未发生 destination-only 写入时回退；回退前

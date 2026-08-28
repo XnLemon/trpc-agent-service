@@ -115,6 +115,8 @@ type Tool struct {
 	router      Router
 	mu          sync.Mutex
 	barriers    map[string]int64
+	copied      map[string]bool
+	caughtUp    map[string]bool
 	cutovers    map[string]Backend
 }
 
@@ -123,7 +125,7 @@ func NewTool(source Source, destination Destination, router Router) (*Tool, erro
 	if source == nil || destination == nil || router == nil {
 		return nil, ErrInvalid
 	}
-	return &Tool{source: source, destination: destination, router: router, barriers: map[string]int64{}, cutovers: map[string]Backend{}}, nil
+	return &Tool{source: source, destination: destination, router: router, barriers: map[string]int64{}, copied: map[string]bool{}, caughtUp: map[string]bool{}, cutovers: map[string]Backend{}}, nil
 }
 
 // Begin establishes the source dual-write watermark barrier.
@@ -137,6 +139,9 @@ func (t *Tool) Begin(ctx context.Context, tenantID string) (Report, error) {
 	}
 	t.mu.Lock()
 	t.barriers[tenantID] = watermark
+	t.copied[tenantID] = false
+	t.caughtUp[tenantID] = false
+	delete(t.cutovers, tenantID)
 	t.mu.Unlock()
 	return Report{TenantID: tenantID, Phase: PhaseDualWrite, SourceWatermark: watermark}, nil
 }
@@ -163,6 +168,10 @@ func (t *Tool) Copy(ctx context.Context, tenantID string) (Report, error) {
 	if err := t.destination.Apply(ctx, records); err != nil {
 		return Report{}, err
 	}
+	t.mu.Lock()
+	t.copied[tenantID] = true
+	t.caughtUp[tenantID] = false
+	t.mu.Unlock()
 	return Report{TenantID: tenantID, Phase: PhaseCopy, Copied: len(records), SourceWatermark: snapshot.Watermark}, nil
 }
 
@@ -173,8 +182,9 @@ func (t *Tool) CatchUp(ctx context.Context, tenantID string) (Report, error) {
 	}
 	t.mu.Lock()
 	barrier, ok := t.barriers[tenantID]
+	copied := t.copied[tenantID]
 	t.mu.Unlock()
-	if !ok {
+	if !ok || !copied {
 		return Report{}, ErrConflict
 	}
 	changes, watermark, err := t.source.Changes(ctx, tenantID, barrier)
@@ -191,6 +201,9 @@ func (t *Tool) CatchUp(ctx context.Context, tenantID string) (Report, error) {
 	if err := t.destination.Apply(ctx, normalizeRecords(tenantID, records)); err != nil {
 		return Report{}, err
 	}
+	t.mu.Lock()
+	t.caughtUp[tenantID] = true
+	t.mu.Unlock()
 	return Report{TenantID: tenantID, Phase: PhaseCatchUp, CaughtUp: len(records), SourceWatermark: watermark, DestinationWatermark: watermark}, nil
 }
 
@@ -223,8 +236,10 @@ func (t *Tool) Cutover(ctx context.Context, tenantID string) (Report, error) {
 	}
 	t.mu.Lock()
 	_, barrierKnown := t.barriers[tenantID]
+	copied := t.copied[tenantID]
+	caughtUp := t.caughtUp[tenantID]
 	t.mu.Unlock()
-	if !barrierKnown {
+	if !barrierKnown || !copied || !caughtUp {
 		return Report{}, ErrConflict
 	}
 	validation, err := t.Validate(ctx, tenantID)
