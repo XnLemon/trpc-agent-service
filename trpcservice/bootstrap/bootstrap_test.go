@@ -29,6 +29,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
@@ -572,6 +573,8 @@ func nilContextForTest() context.Context { return nil }
 func setRequiredEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv(envPostgresDSN, "postgres://postgres:postgres@127.0.0.1:5432/control_plane")
+	t.Setenv(envMySQLDSN, "")
+	t.Setenv(envMySQLMigrationDSN, "")
 	t.Setenv(envAPIToken, "api-token")
 	t.Setenv(envTenantID, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")
 	t.Setenv(envAppID, "app_01ARZ3NDEKTSV4RRFFQ69G5FAV")
@@ -682,6 +685,337 @@ func TestEnvironmentRuntimeStoreSelection(t *testing.T) {
 	}
 	if _, err := environmentRuntimeStore("postgres", nil); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("postgres nil db = %v", err)
+	}
+}
+
+func TestEnvironmentSelectsMySQLControlPlaneAndRejectsPostgresRuntimeStore(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envControlPlaneDriver, "mysql")
+	t.Setenv(envPostgresDSN, "")
+	t.Setenv(envMySQLDSN, "user:password@tcp(localhost:3306)/control_plane")
+	t.Setenv(envMySQLMigrationDSN, "migration:password@tcp(localhost:3306)/control_plane")
+	config, err := loadEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.driver != ControlPlaneDriverMySQL || config.dsn != "user:password@tcp(localhost:3306)/control_plane" {
+		t.Fatalf("MySQL environment config = %+v", config)
+	}
+	t.Setenv(envSessionBackend, "postgres")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("MySQL/PostgreSQL runtime combination error = %v", err)
+	}
+	t.Setenv(envSessionBackend, "inmemory")
+	t.Setenv(envMySQLDSN, "")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("missing MySQL DSN error = %v", err)
+	}
+	t.Setenv(envMySQLDSN, "user:password@tcp(localhost:3306)/control_plane")
+	t.Setenv(envMySQLMigrationDSN, "")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("missing MySQL migration DSN error = %v", err)
+	}
+	t.Setenv(envMySQLMigrationDSN, "migration:password@tcp(localhost:3306)/control_plane")
+	t.Setenv(envControlPlaneDriver, "sqlite")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("unknown control-plane driver error = %v", err)
+	}
+}
+
+func TestNewFromEnvironmentBootstrapsMySQLWithSeparateMigrationAccount(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envControlPlaneDriver, "mysql")
+	t.Setenv(envPostgresDSN, "")
+	t.Setenv(envMySQLDSN, "app:password@tcp(mysql)/control_plane")
+	t.Setenv(envMySQLMigrationDSN, "migration:password@tcp(mysql)/control_plane")
+
+	migrationDB, migrationMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	appDB, appMock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		_ = migrationDB.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = migrationDB.Close()
+		_ = appDB.Close()
+	})
+	migrationMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("migration@%"))
+	migrationMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
+	migrationMock.ExpectClose()
+	appMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
+	appMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
+	appMock.ExpectPing()
+	appMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
+	appMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
+	appMock.ExpectQuery("SELECT COUNT\\(\\*\\)").WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
+	appMock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for app@%"}).AddRow("GRANT USAGE ON *.* TO 'app'@'%'"))
+	appMock.ExpectPing()
+	appMock.ExpectClose()
+
+	previousOpen := openMySQLEnvironmentDatabase
+	previousApply := applyMySQLEnvironmentMigrations
+	previousVerify := verifyMySQLEnvironmentMigrations
+	openCalls := 0
+	var openedDSNs []string
+	var applied, verified int
+	openMySQLEnvironmentDatabase = func(_ context.Context, dsn string, _ mysql.Options) (*sql.DB, error) {
+		openedDSNs = append(openedDSNs, dsn)
+		openCalls++
+		if openCalls == 1 {
+			return migrationDB, nil
+		}
+		return appDB, nil
+	}
+	applyMySQLEnvironmentMigrations = func(_ context.Context, db *sql.DB) error {
+		if db != migrationDB {
+			return errors.New("migrations used application database")
+		}
+		applied++
+		return nil
+	}
+	verifyMySQLEnvironmentMigrations = func(_ context.Context, db *sql.DB) error {
+		if db != migrationDB && db != appDB {
+			return errors.New("verification used unknown database")
+		}
+		verified++
+		return nil
+	}
+	t.Cleanup(func() {
+		openMySQLEnvironmentDatabase = previousOpen
+		applyMySQLEnvironmentMigrations = previousApply
+		verifyMySQLEnvironmentMigrations = previousVerify
+	})
+
+	graph, err := NewFromEnvironment(context.Background())
+	if err != nil {
+		t.Fatalf("%v (opens=%#v applied=%d verified=%d app expectations=%v)", err, openedDSNs, applied, verified, appMock.ExpectationsWereMet())
+	}
+	if !graph.Ready() {
+		_ = graph.Close()
+		t.Fatal("MySQL environment graph is not ready")
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if applied != 1 || verified != 1 {
+		t.Fatalf("MySQL migration/verification calls = applied %d verified %d", applied, verified)
+	}
+	if len(openedDSNs) != 2 || openedDSNs[0] != "migration:password@tcp(mysql)/control_plane" || openedDSNs[1] != "app:password@tcp(mysql)/control_plane" {
+		t.Fatalf("MySQL bootstrap DSNs = %#v", openedDSNs)
+	}
+	if err := appMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewFromEnvironmentRejectsSharedMySQLAccount(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envControlPlaneDriver, "mysql")
+	t.Setenv(envPostgresDSN, "")
+	t.Setenv(envMySQLDSN, "shared:password@tcp(mysql)/control_plane")
+	t.Setenv(envMySQLMigrationDSN, "shared:password@tcp(mysql)/control_plane")
+
+	migrationDB, migrationMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	appDB, appMock, err := sqlmock.New()
+	if err != nil {
+		_ = migrationDB.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = migrationDB.Close()
+		_ = appDB.Close()
+	})
+	migrationMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("shared@%"))
+	migrationMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
+	migrationMock.ExpectClose()
+	appMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("shared@%"))
+	appMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
+	appMock.ExpectClose()
+
+	previousOpen := openMySQLEnvironmentDatabase
+	previousApply := applyMySQLEnvironmentMigrations
+	previousVerify := verifyMySQLEnvironmentMigrations
+	openCalls := 0
+	openMySQLEnvironmentDatabase = func(_ context.Context, _ string, _ mysql.Options) (*sql.DB, error) {
+		openCalls++
+		if openCalls == 1 {
+			return migrationDB, nil
+		}
+		return appDB, nil
+	}
+	applyMySQLEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	verifyMySQLEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	t.Cleanup(func() {
+		openMySQLEnvironmentDatabase = previousOpen
+		applyMySQLEnvironmentMigrations = previousApply
+		verifyMySQLEnvironmentMigrations = previousVerify
+	})
+
+	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("shared MySQL account error = %v", err)
+	}
+	if err := migrationMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if err := appMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewFromEnvironmentRejectsDifferentMySQLDatabase(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envControlPlaneDriver, "mysql")
+	t.Setenv(envPostgresDSN, "")
+	t.Setenv(envMySQLDSN, "app:password@tcp(mysql)/application_db")
+	t.Setenv(envMySQLMigrationDSN, "migration:password@tcp(mysql)/control_plane")
+
+	migrationDB, migrationMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	appDB, appMock, err := sqlmock.New()
+	if err != nil {
+		_ = migrationDB.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = migrationDB.Close()
+		_ = appDB.Close()
+	})
+	migrationMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("migration@%"))
+	migrationMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
+	migrationMock.ExpectClose()
+	appMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
+	appMock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("application_db"))
+	appMock.ExpectClose()
+
+	previousOpen := openMySQLEnvironmentDatabase
+	previousApply := applyMySQLEnvironmentMigrations
+	previousVerify := verifyMySQLEnvironmentMigrations
+	openCalls := 0
+	openMySQLEnvironmentDatabase = func(_ context.Context, _ string, _ mysql.Options) (*sql.DB, error) {
+		openCalls++
+		if openCalls == 1 {
+			return migrationDB, nil
+		}
+		return appDB, nil
+	}
+	applyMySQLEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	verifyMySQLEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	t.Cleanup(func() {
+		openMySQLEnvironmentDatabase = previousOpen
+		applyMySQLEnvironmentMigrations = previousApply
+		verifyMySQLEnvironmentMigrations = previousVerify
+	})
+
+	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("different MySQL database error = %v", err)
+	}
+	if err := migrationMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if err := appMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewFromEnvironmentRejectsMySQLApplicationOpenFailure(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envControlPlaneDriver, "mysql")
+	t.Setenv(envPostgresDSN, "")
+	t.Setenv(envMySQLDSN, "app:password@tcp(mysql)/control_plane")
+	t.Setenv(envMySQLMigrationDSN, "migration:password@tcp(mysql)/control_plane")
+
+	migrationDB, migrationMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = migrationDB.Close() })
+	migrationMock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("migration@%"))
+	migrationMock.ExpectClose()
+
+	previousOpen := openMySQLEnvironmentDatabase
+	previousApply := applyMySQLEnvironmentMigrations
+	previousVerify := verifyMySQLEnvironmentMigrations
+	openCalls := 0
+	openMySQLEnvironmentDatabase = func(_ context.Context, _ string, _ mysql.Options) (*sql.DB, error) {
+		openCalls++
+		if openCalls == 1 {
+			return migrationDB, nil
+		}
+		return nil, errors.New("application DSN unavailable")
+	}
+	applyMySQLEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	verifyMySQLEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	t.Cleanup(func() {
+		openMySQLEnvironmentDatabase = previousOpen
+		applyMySQLEnvironmentMigrations = previousApply
+		verifyMySQLEnvironmentMigrations = previousVerify
+	})
+
+	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("application open failure = %v", err)
+	}
+	if err := migrationMock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrepareDatabaseConfigBuildsMySQLRepositories(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectPing()
+	mock.ExpectQuery("SELECT DATABASE\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("control_plane"))
+	mock.ExpectQuery("SELECT CURRENT_USER\\(\\)").WillReturnRows(sqlmock.NewRows([]string{"CURRENT_USER()"}).AddRow("app@%"))
+	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
+	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for app@%"}).AddRow("GRANT USAGE ON *.* TO 'app'@'%'"))
+	config := Config{DB: db, ControlPlaneDriver: ControlPlaneDriverMySQL}
+	if err := prepareDatabaseConfig(context.Background(), &config); err != nil {
+		t.Fatal(err)
+	}
+	if config.Tenants == nil || config.Apps == nil || config.Models == nil || config.Backends == nil || config.Channels == nil {
+		t.Fatalf("MySQL repositories were not built: %+v", config)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrepareDatabaseConfigFailsClosedWhenMigrationVerificationFails(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectPing()
+	verified := false
+	config := Config{
+		DB: db, ControlPlaneDriver: ControlPlaneDriverMySQL,
+		VerifyMigrations: func(context.Context, *sql.DB) error {
+			verified = true
+			return errors.New("schema is incomplete")
+		},
+	}
+	if err := prepareDatabaseConfig(context.Background(), &config); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("verification error = %v", err)
+	}
+	if !verified {
+		t.Fatal("migration verification was not called before repository construction")
+	}
+	if config.Tenants != nil || config.Apps != nil {
+		t.Fatal("repositories were constructed after verification failure")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 

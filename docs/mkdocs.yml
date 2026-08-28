@@ -45,6 +45,7 @@ nav:
       - 企业微信自建应用 Text Webhook: wecom.md
       - Tenant 运行时持久化: runtime-storage.md
       - PostgreSQL 控制面与启动装配: postgresql-control-plane.md
+      - "Issue #81 MySQL 控制面 Repository": issue-81-mysql-control-plane.md
       - 可重启控制面与 Admin API: issue-41-runtime-bootstrap-admin-api.md
       - 首次运行初始化: issue-67-first-run-init.md
       - "Issue #50 Reliable Reply Delivery": issue-50-reliable-delivery.md

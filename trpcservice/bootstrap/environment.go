@@ -12,11 +12,14 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	agentmysql "github.com/XnLemon/trpc-agent-service/trpcservice/agent/mysql"
 	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/agent/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	auditpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/audit/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	channelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/channels/mysql"
 	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
@@ -28,7 +31,10 @@ import (
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
+	tenantmysql "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/mysql"
 	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
@@ -37,7 +43,10 @@ import (
 )
 
 const (
-	envPostgresDSN = "TRPC_POSTGRES_DSN"
+	envControlPlaneDriver = "TRPC_CONTROL_PLANE_DRIVER"
+	envPostgresDSN        = "TRPC_POSTGRES_DSN"
+	envMySQLDSN           = "TRPC_MYSQL_DSN"
+	envMySQLMigrationDSN  = "TRPC_MYSQL_MIGRATION_DSN"
 	// #nosec G101 -- environment variable name, not a credential.
 	envAPIToken      = "TRPC_API_TOKEN"
 	envAPIIdentities = "TRPC_API_IDENTITIES"
@@ -74,18 +83,23 @@ const (
 )
 
 var (
-	openEnvironmentDatabase     = postgres.Open
-	applyEnvironmentMigrations  = migrations.Apply
-	verifyEnvironmentMigrations = migrations.Verify
-	environmentWeComOwnerFunc   = environmentWeComOwner
-	newEnvironmentWeComWorker   = outbox.New
+	openEnvironmentDatabase          = postgres.Open
+	openMySQLEnvironmentDatabase     = mysql.Open
+	applyEnvironmentMigrations       = migrations.Apply
+	applyMySQLEnvironmentMigrations  = migrations.ApplyMySQL
+	verifyEnvironmentMigrations      = migrations.Verify
+	verifyMySQLEnvironmentMigrations = migrations.VerifyMySQL
+	environmentWeComOwnerFunc        = environmentWeComOwner
+	newEnvironmentWeComWorker        = outbox.New
 )
 
 // environmentConfig is intentionally private: it contains the one secret
 // handed to the ModelFactory and must not become a serializable application
 // configuration object.
 type environmentConfig struct {
+	driver         ControlPlaneDriver
 	dsn            string
+	migrationDSN   string
 	apiToken       string
 	apiIdentities  map[string]gateway.APIIdentity
 	adminToken     string
@@ -134,12 +148,9 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: Admin authenticator configuration is invalid", ErrInvalidConfig)
 	}
-	db, err := openEnvironmentDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+	db, applyMigrations, verifyMigrations, err := openEnvironmentDatabaseForConfig(ctx, config)
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("%w: PostgreSQL control plane is unavailable", ErrInvalidConfig)
+		return nil, err
 	}
 	delegateSessions := inmemory.NewSessionService()
 	runtimeStore, err := environmentRuntimeStore(config.runtimeStorage, db)
@@ -148,15 +159,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	tenantRepo := tenantpostgres.NewRepository(db)
-	appRepo := agentpostgres.NewRepository(db)
-	channelRepo := channelpostgres.NewRepository(db)
-	var auditWriter audit.Writer
-	if len(config.apiIdentities) > 1 {
-		auditWriter = auditpostgres.NewMultiTenant(db)
-	} else {
-		auditWriter, err = auditpostgres.New(db, config.tenantID)
-	}
+	tenantRepo, appRepo, channelRepo, auditWriter, err := environmentRepositories(config, db)
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = runtimeStore.Close()
@@ -187,6 +190,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	}
 	graph, err := NewWithDatabase(ctx, db, Config{
 		OwnDB:               true,
+		ControlPlaneDriver:  config.driver,
 		Observability:       config.telemetry,
 		Tenants:             tenantRepo,
 		Apps:                appRepo,
@@ -206,10 +210,13 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		OutboxPollInterval:  time.Second,
 		AuditWriter:         auditWriter,
 		Ping: func(pingContext context.Context) error {
+			if config.driver == ControlPlaneDriverMySQL {
+				return mysql.Ping(pingContext, db)
+			}
 			return postgres.Ping(pingContext, db)
 		},
-		Migrate:          applyEnvironmentMigrations,
-		VerifyMigrations: verifyEnvironmentMigrations,
+		Migrate:          applyMigrations,
+		VerifyMigrations: verifyMigrations,
 		CloseDependencies: func() error {
 			return errors.Join(delegateSessions.Close(), runtimeStore.Close())
 		},
@@ -222,7 +229,81 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	return graph, nil
 }
 
-func environmentWeComComponents(config environmentConfig, channelsRepo *channelpostgres.ChannelRepository, tenantsRepo *tenantpostgres.TenantRepository, appsRepo *agentpostgres.AgentRepository, runtimeStore runtimestorage.RuntimeStore, auditWriter audit.Writer) (func(gateway.DispatchService) (http.Handler, error), *outbox.Worker, error) {
+func openEnvironmentDatabaseForConfig(ctx context.Context, config environmentConfig) (*sql.DB, func(context.Context, *sql.DB) error, func(context.Context, *sql.DB) error, error) {
+	if config.driver != ControlPlaneDriverMySQL {
+		db, err := openEnvironmentDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, nil, ctx.Err()
+			}
+			return nil, nil, nil, fmt.Errorf("%w: %s control plane is unavailable", ErrInvalidConfig, config.driver)
+		}
+		return db, applyEnvironmentMigrations, verifyEnvironmentMigrations, nil
+	}
+	migrationDB, migrationErr := openMySQLEnvironmentDatabase(ctx, config.migrationDSN, mysql.Options{MaxOpenConns: 4, MaxIdleConns: 4})
+	var migrationUser, migrationDatabase string
+	if migrationErr == nil {
+		migrationUser, migrationErr = mysql.CurrentUser(ctx, migrationDB)
+	}
+	if migrationErr == nil {
+		migrationDatabase, migrationErr = mysql.CurrentDatabase(ctx, migrationDB)
+	}
+	if migrationErr == nil {
+		migrationErr = applyMySQLEnvironmentMigrations(ctx, migrationDB)
+	}
+	if migrationErr == nil {
+		migrationErr = verifyMySQLEnvironmentMigrations(ctx, migrationDB)
+	}
+	if migrationDB != nil {
+		if closeErr := migrationDB.Close(); migrationErr == nil {
+			migrationErr = closeErr
+		}
+	}
+	if migrationErr != nil {
+		if ctx.Err() != nil {
+			return nil, nil, nil, ctx.Err()
+		}
+		return nil, nil, nil, fmt.Errorf("%w: MySQL migrations are not ready", ErrInvalidConfig)
+	}
+	db, err := openMySQLEnvironmentDatabase(ctx, config.dsn, mysql.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, nil, ctx.Err()
+		}
+		return nil, nil, nil, fmt.Errorf("%w: mysql control plane is unavailable", ErrInvalidConfig)
+	}
+	applicationUser, userErr := mysql.CurrentUser(ctx, db)
+	applicationDatabase, databaseErr := mysql.CurrentDatabase(ctx, db)
+	if userErr != nil || databaseErr != nil || applicationUser == migrationUser || applicationDatabase != migrationDatabase {
+		_ = db.Close()
+		if ctx.Err() != nil {
+			return nil, nil, nil, ctx.Err()
+		}
+		return nil, nil, nil, fmt.Errorf("%w: MySQL migration and application accounts/databases are invalid", ErrInvalidConfig)
+	}
+	// The application account is verification-only during bootstrap; migrations
+	// and trigger metadata are handled through the migration account above.
+	return db, nil, nil, nil
+}
+
+func environmentRepositories(config environmentConfig, db *sql.DB) (tenant.Repository, agent.Repository, channels.CandidateConsumer, audit.Writer, error) {
+	if config.driver == ControlPlaneDriverMySQL {
+		return tenantmysql.NewRepository(db), agentmysql.NewRepository(db), channelmysql.NewRepository(db), nil, nil
+	}
+	tenantRepo := tenantpostgres.NewRepository(db)
+	appRepo := agentpostgres.NewRepository(db)
+	channelRepo := channelpostgres.NewRepository(db)
+	var auditWriter audit.Writer
+	var err error
+	if len(config.apiIdentities) > 1 {
+		auditWriter = auditpostgres.NewMultiTenant(db)
+	} else {
+		auditWriter, err = auditpostgres.New(db, config.tenantID)
+	}
+	return tenantRepo, appRepo, channelRepo, auditWriter, err
+}
+
+func environmentWeComComponents(config environmentConfig, channelsRepo channels.CandidateConsumer, tenantsRepo tenant.Repository, appsRepo agent.Repository, runtimeStore runtimestorage.RuntimeStore, auditWriter audit.Writer) (func(gateway.DispatchService) (http.Handler, error), *outbox.Worker, error) {
 	if config.wecom == nil {
 		return nil, nil, nil
 	}
@@ -265,6 +346,7 @@ func environmentRegistries(config environmentConfig, delegateSessions session.Se
 
 func loadEnvironment() (environmentConfig, error) {
 	config := environmentConfig{
+		driver:         ControlPlaneDriver(strings.ToLower(strings.TrimSpace(environmentOrDefault(envControlPlaneDriver, string(ControlPlaneDriverPostgres))))),
 		modelProvider:  environmentOrDefault(envModelProvider, defaultModelProvider),
 		secretRef:      environmentOrDefault(envModelSecretRef, defaultModelSecretRef),
 		subjectID:      environmentOrDefault(envSubjectID, defaultSubjectID),
@@ -281,9 +363,25 @@ func loadEnvironment() (environmentConfig, error) {
 }
 
 func (config *environmentConfig) loadDatabase() error {
-	var err error
-	config.dsn, err = requiredEnvironment(envPostgresDSN)
-	return err
+	if config.driver != ControlPlaneDriverPostgres && config.driver != ControlPlaneDriverMySQL {
+		return fmt.Errorf("%w: %s must be postgres or mysql", ErrInvalidConfig, envControlPlaneDriver)
+	}
+	dsnName := envPostgresDSN
+	if config.driver == ControlPlaneDriverMySQL {
+		dsnName = envMySQLDSN
+	}
+	dsn, err := requiredEnvironment(dsnName)
+	if err != nil {
+		return err
+	}
+	config.dsn = dsn
+	if config.driver == ControlPlaneDriverMySQL {
+		config.migrationDSN, err = requiredEnvironment(envMySQLMigrationDSN)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (config *environmentConfig) loadIdentities() error {
@@ -392,6 +490,9 @@ func (config *environmentConfig) loadRuntime() error {
 	config.subjectID = strings.TrimSpace(config.subjectID)
 	if config.runtimeStorage != "postgres" && config.runtimeStorage != "inmemory" {
 		return fmt.Errorf("%w: %s must be explicitly set to postgres or inmemory", ErrInvalidConfig, envSessionBackend)
+	}
+	if config.driver == ControlPlaneDriverMySQL && config.runtimeStorage == "postgres" {
+		return fmt.Errorf("%w: %s=postgres is not available with MySQL control plane; use inmemory until a MySQL runtime adapter is selected", ErrInvalidConfig, envSessionBackend)
 	}
 	return nil
 }
