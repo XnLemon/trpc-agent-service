@@ -57,6 +57,7 @@ nav:
       - "Issue #91 Outbox Trace Context": issue-91-trace-context.md
   - 运维与验证:
       - 运维方案: ops.md
+      - 部署、配置与快速开始: deployment.md
 
 markdown_extensions:
   - admonition

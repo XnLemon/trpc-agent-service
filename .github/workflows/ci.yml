@@ -35,6 +35,45 @@ jobs:
       - name: Lint
         run: ./scripts/lint.sh
 
+  deployment:
+    name: Deployment Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TRPC_SERVICE_IMAGE: trpc-agent-service:ci
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate deployment manifests
+        run: ./scripts/validate-deployment.sh
+
+      - name: Build container image
+        run: docker build --tag "$TRPC_SERVICE_IMAGE" .
+
+      - name: Run Compose smoke test
+        run: |
+          docker compose \
+            --env-file deploy/example.env \
+            -f deploy/docker-compose.yml \
+            up -d --wait
+          docker compose \
+            --env-file deploy/example.env \
+            -f deploy/docker-compose.yml \
+            exec -T service /app/trpc-healthcheck http://127.0.0.1:8080/healthz
+          docker compose \
+            --env-file deploy/example.env \
+            -f deploy/docker-compose.yml \
+            exec -T service /app/trpc-healthcheck http://127.0.0.1:8080/readyz
+
+      - name: Stop Compose services
+        if: always()
+        run: |
+          docker compose \
+            --env-file deploy/example.env \
+            -f deploy/docker-compose.yml \
+            down -v --remove-orphans || true
+
   build-test:
     name: Build, Test & Coverage
     runs-on: ubuntu-latest

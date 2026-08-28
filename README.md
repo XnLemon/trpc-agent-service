@@ -120,8 +120,8 @@
 - [x] 配置 Go CI、Codecov 和 MkDocs 文档 CI
 - [x] 将命令行入口改造成持续运行的服务，并支持优雅停机（Issue #41）
 - [x] 增加显式、幂等且并发安全的首次 Tenant/App 初始化命令（Issue #67）
-- [ ] 增加 Dockerfile、Docker Compose 最小部署和 Kubernetes 生产部署清单
-- [ ] 增加配置示例、环境变量说明和可验证的端到端快速开始
+- [x] 增加 Dockerfile、Docker Compose 最小部署和 Kubernetes 生产部署清单（Issue #74）
+- [x] 增加配置示例、环境变量说明和可验证的部署快速开始（Issue #74）
 
 ### 多租户控制面
 
@@ -285,6 +285,9 @@
   但这不代表 Telegram webhook、多账号/HA Channel 调度、媒体能力、治理链或完整平台验收
   已满足 README 原验收要求。
 
+> Issue #75（运行时 Memory/Knowledge/Artifact 等能力）已由 PR #90 合并，Issue #91
+>（Outbox trace parent）已由 PR #92 合并；它们已计入上方完成度。后续开放 PR 不计入
+>完成度，直到合并并有对应验证证据。
 > 当前基线仍不包含完整的 Redis/外部向量库/对象存储迁移工具、百分比分流、无状态 Worker
 > 水平扩展、IM webhook/rich update 和 Plugin/Guardrail 治理链；这些能力继续保留在上方未完成清单。
 
@@ -304,8 +307,13 @@
 |   |-- race.sh            # 运行完整模块的 race 检测
 |   |-- format.sh          # 格式化 Go 代码（--check 为 CI 校验模式）
 |   |-- lint.sh            # 静态检查
+|   |-- quickstart.sh      # Docker Compose 可验证快速开始
 |   |-- start.sh           # 启动服务
-|   `-- stop.sh            # 停止服务
+|   |-- stop.sh            # 停止服务
+|   `-- validate-deployment.sh # 部署清单和 build context 预检
+|-- Dockerfile             # 非 root distroless 服务镜像
+|-- deploy                 # Compose、配置示例和 Kubernetes 清单
+|   `-- observability       # OTel Collector、Prometheus、Tempo、Grafana 配置
 |-- data                   # 服务运行时数据
 |-- migrations             # PostgreSQL/MySQL schema 与迁移校验
 |-- examples               # 可运行的外部集成示例
@@ -314,8 +322,6 @@
 |-- docs                   # 各模块说明与架构设计文档
 |-- cmd
 |   `-- trpc-service       # 命令行入口，可直接启动服务
-|-- deploy
-|   `-- observability       # OTel Collector、Prometheus、Tempo、Grafana 配置
 `-- trpcservice            # 源码
     |-- admin              # Admin API 与认证
     |-- agent              # Agent App/Revision 模型与 Repository
@@ -347,6 +353,10 @@
 - **Format & Lint**：`gofmt` 校验、`go vet`、`golangci-lint`
 - **Build, Test & Coverage**：构建、单测覆盖率、上传 [Codecov](https://codecov.io)、清理
 - **Race Tests**：在临时 PostgreSQL 与 MySQL 8 依赖上执行 `go test -race ./...`；MySQL migration/repository live 测试使用独立 migration 账号和表级 DML 白名单应用账号
+- **Deployment**：校验 Docker Compose/Kustomize 清单，构建镜像并运行 PostgreSQL + 服务 smoke test，验证 `/healthz` 和 `/readyz`
+
+完整的环境变量参考、Kubernetes Secret 约束和 Compose/Kubernetes 操作步骤见
+[部署、配置与快速开始](docs/docs/deployment.md)。
 
 Codecov 对 project 和 patch 状态均使用 **85%**、零容差的报告目标。它会将状态发布到 PR；要使已发布的
 状态成为合并门禁，仓库管理员还需在 GitHub 分支保护或 ruleset 中要求对应的状态（当前仓库尚未配置该规则）。
@@ -356,12 +366,35 @@ Codecov 对 project 和 patch 状态均使用 **85%**、零容差的报告目标
 ## 快速开始
 
 服务启动会调用 `bootstrap.NewFromEnvironment`，缺少数据库、身份、Admin 或模型配置时会在绑定 HTTP
-端口前失败。下面以 PostgreSQL 为例；数据库本身需先运行并允许服务账号执行项目 migration。
+端口前失败。下面提供 Compose 快速开始；源码模式适用于连接自有 PostgreSQL、模型和身份配置。
+
+### Docker Compose（推荐的最小可运行部署）
 
 ```bash
 git clone https://github.com/XnLemon/trpc-agent-service.git
 cd trpc-agent-service
 
+cp deploy/example.env deploy/service.env
+./scripts/quickstart.sh
+```
+
+默认参数模板是仓库内的 [`deploy/example.env`](deploy/example.env)；复制后的
+`deploy/service.env` 只用于本地覆盖，不应提交真实凭据。
+
+脚本会构建服务镜像，等待 PostgreSQL 和服务健康检查，并验证 `/healthz`、`/readyz`；成功后
+服务继续运行在 `http://127.0.0.1:8080`。`deploy/service.env` 仅供本地使用，已被 Git 和
+Docker build context 忽略，不能提交真实凭据。
+
+这个快速开始验证的是数据库迁移、bootstrap 和 HTTP 部署入口，不会自动创建 Tenant、Agent
+App、Model 或 Backend，也不会调用真实模型。要发送第一条对话请求，请先按
+[Issue #67 首次运行初始化](https://xnlemon.github.io/trpc-agent-service/issue-67-first-run-init/)
+初始化控制面，再通过 Admin API 创建并发布运行配置。
+
+### 源码模式
+
+需要连接自己的 PostgreSQL、模型和身份配置时，可以直接构建并启动 Go 服务：
+
+```bash
 ./scripts/build.sh
 
 export TRPC_POSTGRES_DSN='postgres://postgres:postgres@127.0.0.1:5432/trpc_control_plane?sslmode=disable'

@@ -49,6 +49,9 @@
 
 ## 快速开始
 
+生产入口、Docker Compose 快速开始、Kubernetes 清单和完整环境变量参考见
+[部署、配置与快速开始](deployment.md)。
+
 ```bash
 git clone https://github.com/XnLemon/trpc-agent-service.git
 cd trpc-agent-service
