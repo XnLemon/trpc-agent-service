@@ -56,6 +56,7 @@ nav:
       - "Issue #88 Prometheus 可观测性": issue-88-prometheus.md
   - 运维与验证:
       - 运维方案: ops.md
+      - 部署、配置与快速开始: deployment.md
 
 markdown_extensions:
   - admonition

@@ -120,8 +120,8 @@
 - [x] 配置 Go CI、Codecov 和 MkDocs 文档 CI
 - [x] 将命令行入口改造成持续运行的服务，并支持优雅停机（Issue #41）
 - [x] 增加显式、幂等且并发安全的首次 Tenant/App 初始化命令（Issue #67）
-- [ ] 增加 Dockerfile、Docker Compose 最小部署和 Kubernetes 生产部署清单
-- [ ] 增加配置示例、环境变量说明和可验证的端到端快速开始
+- [x] 增加 Dockerfile、Docker Compose 最小部署和 Kubernetes 生产部署清单（Issue #74）
+- [x] 增加配置示例、环境变量说明和可验证的端到端快速开始（Issue #74）
 
 ### 多租户控制面
 
@@ -286,8 +286,12 @@
 |   |-- race.sh            # 运行完整模块的 race 检测
 |   |-- format.sh          # 格式化 Go 代码（--check 为 CI 校验模式）
 |   |-- lint.sh            # 静态检查
+|   |-- quickstart.sh      # Docker Compose 可验证快速开始
 |   |-- start.sh           # 启动服务
-|   `-- stop.sh            # 停止服务
+|   |-- stop.sh            # 停止服务
+|   `-- validate-deployment.sh # 部署清单和 build context 预检
+|-- Dockerfile             # 非 root distroless 服务镜像
+|-- deploy                 # Compose、配置示例和 Kubernetes 清单
 |-- data                   # 服务运行时数据
 |-- examples               # 可运行的外部集成示例
 |   `-- telegram-e2e        # Telegram live long-polling E2E
@@ -315,6 +319,10 @@
 - **Format & Lint**：`gofmt` 校验、`go vet`、`golangci-lint`
 - **Build, Test & Coverage**：构建、单测覆盖率、上传 [Codecov](https://codecov.io)、清理
 - **Race Tests**：在临时 PostgreSQL 与 MySQL 8 依赖上执行 `go test -race ./...`；MySQL migration/repository live 测试使用独立 migration 账号和表级 DML 白名单应用账号
+- **Deployment**：校验 Docker Compose/Kustomize 清单，构建镜像并运行 PostgreSQL + 服务 smoke test，验证 `/healthz` 和 `/readyz`
+
+完整的环境变量参考、Kubernetes Secret 约束和 Compose/Kubernetes 操作步骤见
+[部署、配置与快速开始](docs/docs/deployment.md)。
 
 Codecov 对 project 和 patch 状态均使用 **85%**、零容差的报告目标。它会将状态发布到 PR；要使已发布的
 状态成为合并门禁，仓库管理员还需在 GitHub 分支保护或 ruleset 中要求对应的状态（当前仓库尚未配置该规则）。
@@ -323,10 +331,25 @@ Codecov 对 project 和 patch 状态均使用 **85%**、零容差的报告目标
 
 ## 快速开始
 
+### Docker Compose（推荐的最小可运行部署）
+
 ```bash
 git clone https://github.com/XnLemon/trpc-agent-service.git
 cd trpc-agent-service
 
+cp deploy/service.env.example deploy/service.env
+./scripts/quickstart.sh
+```
+
+脚本会构建服务镜像，等待 PostgreSQL 和服务健康检查，并验证 `/healthz`、`/readyz`；成功后
+服务继续运行在 `http://127.0.0.1:8080`。`deploy/service.env` 仅供本地使用，已被 Git 和
+Docker build context 忽略，不能提交真实凭据。
+
+### 源码模式
+
+需要连接自己的 PostgreSQL、模型和身份配置时，可以直接构建并启动 Go 服务：
+
+```bash
 ./scripts/build.sh
 ./scripts/start.sh
 ```
