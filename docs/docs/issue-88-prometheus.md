@@ -81,6 +81,43 @@ Trace 截图同样是 mock span。真实 WeCom/Telegram 请求需要在服务进
 后，通过 Grafana Explore → Tempo 按时间或 Trace ID 查询；异步 Outbox channel.send
 的跨进程 parent context 持久化由 follow-up Issue #91 跟踪。
 
+## 一键化部署配置清单
+
+后续部署脚本可以直接复用 `deploy/observability/docker-compose.yml` 与同目录配置文件。
+部署前只需要准备服务进程的 OTLP 环境变量：
+
+```dotenv
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+OTEL_EXPORTER_OTLP_INSECURE=true
+OTEL_SERVICE_NAME=trpc-agent-service
+OTEL_EXPORTER_OTLP_HEADERS=
+```
+
+组件端口和依赖关系固定如下：
+
+| 组件 | 地址/端口 | 作用 | 持久化 |
+| --- | --- | --- | --- |
+| trpc-service → Collector | `4318` | OTLP/HTTP metrics + traces 接收 | 无 |
+| Collector → Prometheus | `9464` | Prometheus scrape endpoint | 无 |
+| Prometheus | `9090` | metrics 查询与 recording rules | `prometheus-data` |
+| Tempo | `3200`（查询）、容器内 `4318`（OTLP） | trace 存储与查询 | `tempo-data` |
+| Grafana | `3000` | Dashboard/Explore UI | `grafana-data` |
+
+标准启动、停止和健康检查命令：
+
+```bash
+docker compose -f deploy/observability/docker-compose.yml up -d
+docker compose -f deploy/observability/docker-compose.yml ps
+curl http://localhost:9090/-/ready
+curl http://localhost:3200/ready
+curl http://localhost:3000/api/health
+docker compose -f deploy/observability/docker-compose.yml down
+```
+
+Grafana 默认 datasource 会自动 provision：Prometheus 与 Tempo；dashboard 文件自动挂载。
+生产环境必须替换 `admin/admin`，限制 `4318`、`9464`、`3200` 的公网暴露，并将数据卷接入
+备份策略。Collector exporter 失败只记录并丢弃 telemetry，不能阻塞业务关闭。
+
 ## Issue #88 台账
 
 - [x] OTLP metric exporter 与 provider shutdown 生命周期

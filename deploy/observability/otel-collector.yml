@@ -10,6 +10,8 @@ processors:
 exporters:
   prometheus:
     endpoint: 0.0.0.0:9464
+  otlphttp/tempo:
+    endpoint: http://tempo:4318
   debug:
     verbosity: basic
 
@@ -22,4 +24,4 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [otlphttp/tempo, debug]

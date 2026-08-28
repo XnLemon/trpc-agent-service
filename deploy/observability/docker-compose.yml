@@ -4,9 +4,20 @@ services:
     command: ["--config=/etc/otelcol-contrib/config.yml"]
     volumes:
       - ./otel-collector.yml:/etc/otelcol-contrib/config.yml:ro
+    depends_on:
+      - tempo
     ports:
       - "4318:4318"
       - "9464:9464"
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    command: ["-config.file=/etc/tempo.yml"]
+    volumes:
+      - ./tempo.yml:/etc/tempo.yml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"
 
   prometheus:
     image: prom/prometheus:v2.54.1
@@ -37,3 +48,4 @@ services:
 volumes:
   prometheus-data:
   grafana-data:
+  tempo-data:
