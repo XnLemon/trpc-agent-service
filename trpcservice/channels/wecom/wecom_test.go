@@ -585,6 +585,23 @@ func TestDynamicHandlerRoutesOnlyVerifiedBinding(t *testing.T) {
 	}
 }
 
+func TestHandlerTryAcceptedIngress(t *testing.T) {
+	handler := &Handler{}
+	message := inboundXML{FromUserName: "user"}
+	accepted := make(chan struct{}, 1)
+	accepted <- struct{}{}
+	recorder := httptest.NewRecorder()
+	if !handler.tryAcceptedIngress(accepted, recorder, context.Background(), gateway.Principal{}, message, "request", "trace") {
+		t.Fatal("accepted ingress was not consumed")
+	}
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "success" {
+		t.Fatalf("accepted ingress response = %d %q", recorder.Code, recorder.Body.String())
+	}
+	if handler.tryAcceptedIngress(make(chan struct{}, 1), httptest.NewRecorder(), context.Background(), gateway.Principal{}, message, "request", "trace") {
+		t.Fatal("empty acceptance channel was consumed")
+	}
+}
+
 func assertIngressAudit(t *testing.T, writer audit.Reader, count int, eventType audit.EventType, decision audit.Decision, errorType, requestID, traceID string) {
 	t.Helper()
 	var events []audit.Event

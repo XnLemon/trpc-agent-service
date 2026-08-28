@@ -295,11 +295,8 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		// returning a completed result. Since both channels can then be ready,
 		// make acceptance take precedence so the mandatory ingress audit is not
 		// skipped by select's random ready-case choice.
-		select {
-		case <-accepted:
-			h.writeIngressSuccess(w, r.Context(), state.principal, message, requestID, traceID, audit.EventIMIngressAccepted, audit.DecisionAccepted, "")
+		if h.tryAcceptedIngress(accepted, w, r.Context(), state.principal, message, requestID, traceID) {
 			return
-		default:
 		}
 		if dispatchErr == nil {
 			h.writeSuccess(w)
@@ -311,6 +308,16 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	case <-r.Context().Done():
+	}
+}
+
+func (h *Handler) tryAcceptedIngress(accepted <-chan struct{}, w http.ResponseWriter, ctx context.Context, principal gateway.Principal, message inboundXML, requestID, traceID string) bool {
+	select {
+	case <-accepted:
+		h.writeIngressSuccess(w, ctx, principal, message, requestID, traceID, audit.EventIMIngressAccepted, audit.DecisionAccepted, "")
+		return true
+	default:
+		return false
 	}
 }
 
