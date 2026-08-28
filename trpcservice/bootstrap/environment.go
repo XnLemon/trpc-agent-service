@@ -591,12 +591,39 @@ func (provider environmentRuntimeCapabilityProvider) New(ctx context.Context, in
 	// The runtime store is owned by the environment, not by an individual
 	// tenant CapabilitySet. Wrap it so factory cleanup cannot stop shared
 	// workers when one runner is torn down.
-	return borrowedRuntimeStore{RuntimeStore: provider.store}, nil
+	switch provider.capability {
+	case backend.CapabilityMemory:
+		return borrowedMemoryStore{MemoryStore: provider.store}, nil
+	case backend.CapabilitySummary:
+		return borrowedSummaryStore{SummaryStore: provider.store}, nil
+	case backend.CapabilityKnowledge:
+		return borrowedKnowledgeStore{KnowledgeStore: provider.store, VectorStore: provider.store}, nil
+	case backend.CapabilityArtifact:
+		return borrowedArtifactStore{ArtifactStore: provider.store, ObjectStore: provider.store}, nil
+	case backend.CapabilityAudit:
+		return borrowedAuditStore{AuditStore: provider.store}, nil
+	default:
+		return nil, backend.ErrStorageFactory
+	}
 }
 
-type borrowedRuntimeStore struct{ runtimestorage.RuntimeStore }
+type borrowedMemoryStore struct{ runtimestorage.MemoryStore }
+type borrowedSummaryStore struct{ runtimestorage.SummaryStore }
+type borrowedKnowledgeStore struct {
+	runtimestorage.KnowledgeStore
+	runtimestorage.VectorStore
+}
+type borrowedArtifactStore struct {
+	runtimestorage.ArtifactStore
+	runtimestorage.ObjectStore
+}
+type borrowedAuditStore struct{ runtimestorage.AuditStore }
 
-func (borrowedRuntimeStore) Close() error { return nil }
+func (borrowedMemoryStore) Close() error    { return nil }
+func (borrowedSummaryStore) Close() error   { return nil }
+func (borrowedKnowledgeStore) Close() error { return nil }
+func (borrowedArtifactStore) Close() error  { return nil }
+func (borrowedAuditStore) Close() error     { return nil }
 
 func (provider environmentSessionCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, _ backend.CapabilityBinding, _ modelprofile.SecretValue) (any, error) {
 	if ctx == nil {
