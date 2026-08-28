@@ -482,6 +482,7 @@ func TestInMemoryCapabilityCanceledContextComplete(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // table-driven contract coverage intentionally exercises validation and ordering branches.
 func TestInMemoryCapabilityValidationAndOrderingBranches(t *testing.T) {
 	store := inmemory.New()
 	defer store.Close()
