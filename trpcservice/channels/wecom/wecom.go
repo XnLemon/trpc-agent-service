@@ -291,6 +291,16 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	case <-accepted:
 		h.writeIngressSuccess(w, r.Context(), state.principal, message, requestID, traceID, audit.EventIMIngressAccepted, audit.DecisionAccepted, "")
 	case dispatchErr := <-result:
+		// Dispatch implementations may notify acceptance immediately before
+		// returning a completed result. Since both channels can then be ready,
+		// make acceptance take precedence so the mandatory ingress audit is not
+		// skipped by select's random ready-case choice.
+		select {
+		case <-accepted:
+			h.writeIngressSuccess(w, r.Context(), state.principal, message, requestID, traceID, audit.EventIMIngressAccepted, audit.DecisionAccepted, "")
+			return
+		default:
+		}
 		if dispatchErr == nil {
 			h.writeSuccess(w)
 			return
