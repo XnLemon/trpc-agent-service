@@ -105,6 +105,36 @@ func TestCapabilitySetTypedAccessors(t *testing.T) {
 	}
 }
 
+func TestCapabilitySetTypedAccessorsRejectWrongTypes(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	cases := []struct {
+		name string
+		kind Capability
+		call func(*CapabilitySet) error
+	}{
+		{"Session", CapabilitySession, func(set *CapabilitySet) error { _, err := set.Session(); return err }},
+		{"Memory", CapabilityMemory, func(set *CapabilitySet) error { _, err := set.Memory(); return err }},
+		{"Summary", CapabilitySummary, func(set *CapabilitySet) error { _, err := set.Summary(); return err }},
+		{"Knowledge", CapabilityKnowledge, func(set *CapabilitySet) error { _, err := set.Knowledge(); return err }},
+		{"Artifact", CapabilityArtifact, func(set *CapabilitySet) error { _, err := set.Artifact(); return err }},
+		{"Audit", CapabilityAudit, func(set *CapabilitySet) error { _, err := set.Audit(); return err }},
+		{"Vector", CapabilityKnowledge, func(set *CapabilitySet) error { _, err := set.Vector(); return err }},
+		{"Object", CapabilityArtifact, func(set *CapabilitySet) error { _, err := set.Object(); return err }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			set, err := NewCapabilitySet(tenantID, map[Capability]any{tc.kind: struct{}{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer set.Close()
+			if !errors.Is(tc.call(set), ErrCapabilityUnavailable) {
+				t.Fatalf("%s accepted wrong capability type", tc.name)
+			}
+		})
+	}
+}
+
 func TestRegistryStorageFactoryCancellationAndMissingSession(t *testing.T) {
 	providers := NewProviderRegistry()
 	secrets := modelprofile.NewSecretRegistry()

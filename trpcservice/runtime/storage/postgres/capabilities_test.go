@@ -501,8 +501,18 @@ func TestPostgresKnowledgeAndArtifactContracts(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO public.runtime_knowledge")).
 		WithArgs("tenant-a", "doc", "knowledge", []byte("{}"), []byte("[1,0]"), sqlmock.AnyArg()).
 		WillReturnRows(knowledgeRows().AddRow("tenant-a", "doc", "knowledge", []byte("{}"), []byte("[1,0]"), "digest", int64(1), when, when))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO public.runtime_vector_index")).
+		WithArgs("tenant-a", "doc", int64(1)).WillReturnResult(sqlmock.NewResult(0, 1))
 	if _, err := runtimepostgres.New(db).PutKnowledge(context.Background(), runtimestorage.KnowledgeDocument{TenantID: "tenant-a", DocumentID: "doc", Content: "knowledge", Embedding: []float64{1, 0}}); err != nil {
 		t.Fatalf("PutKnowledge = %v", err)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO public.runtime_knowledge")).
+		WithArgs("tenant-a", "empty", "without embedding", []byte("{}"), []byte("[]"), sqlmock.AnyArg()).
+		WillReturnRows(knowledgeRows().AddRow("tenant-a", "empty", "without embedding", []byte("{}"), []byte("[]"), "empty-digest", int64(1), when, when))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM public.runtime_vector_index WHERE tenant_id=$1 AND source=$2 AND document_id=$3")).
+		WithArgs("tenant-a", runtimestorage.VectorSourceKnowledge, "empty").WillReturnResult(sqlmock.NewResult(0, 0))
+	if _, err := runtimepostgres.New(db).PutKnowledge(context.Background(), runtimestorage.KnowledgeDocument{TenantID: "tenant-a", DocumentID: "empty", Content: "without embedding"}); err != nil {
+		t.Fatalf("PutKnowledge without embedding = %v", err)
 	}
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT tenant_id,document_id,content,metadata,embedding,digest,version,created_at,updated_at FROM public.runtime_knowledge WHERE tenant_id=$1 AND document_id=$2")).
 		WithArgs("tenant-a", "doc").WillReturnRows(knowledgeRows().AddRow("tenant-a", "doc", "knowledge", []byte("{}"), []byte("[1,0]"), "digest", int64(1), when, when))

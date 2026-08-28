@@ -33,7 +33,7 @@ type Store struct {
 	indexQueue   chan runtimestorage.MemoryRecord
 	indexDone    chan struct{}
 	indexMu      *sync.RWMutex
-	closeOnce    sync.Once
+	closeOnce    *sync.Once
 	lifecycle    *backendLifecycle
 }
 
@@ -98,10 +98,15 @@ func NewWithBackend(backend *Backend) *Store {
 		backend.store = newStore(backend.lifecycle)
 	}
 	if backend.lifecycle == nil || !backend.lifecycle.retain() {
-		return New()
+		// Keep closed-backend views attached to the same state graph. They
+		// cannot enqueue new index work, but reads remain consistent with
+		// other views instead of silently switching to an unrelated store.
+		view := *backend.store
+		view.closeOnce = &sync.Once{}
+		return &view
 	}
 	view := *backend.store
-	view.closeOnce = sync.Once{}
+	view.closeOnce = &sync.Once{}
 	return &view
 }
 
@@ -131,7 +136,7 @@ func newStore(lifecycle *backendLifecycle) *Store {
 		knowledge: map[string]runtimestorage.KnowledgeDocument{}, artifacts: map[string]runtimestorage.ArtifactRecord{},
 		audits: map[string][]runtimestorage.AuditRecord{}, vectors: map[string]runtimestorage.VectorRecord{},
 		objects: map[string]runtimestorage.ObjectInfo{}, objectData: map[string][]byte{},
-		indexQueue: make(chan runtimestorage.MemoryRecord, 128), indexDone: lifecycle.done, indexMu: lifecycle.indexMu, lifecycle: lifecycle,
+		indexQueue: make(chan runtimestorage.MemoryRecord, 128), indexDone: lifecycle.done, indexMu: lifecycle.indexMu, lifecycle: lifecycle, closeOnce: &sync.Once{},
 	}
 	go store.indexWorker()
 	return store
@@ -676,7 +681,14 @@ func (s *Store) Close() error {
 	if s == nil {
 		return nil
 	}
-	s.closeOnce.Do(func() { s.lifecycle.release() })
+	if s.closeOnce == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		if s.lifecycle != nil {
+			s.lifecycle.release()
+		}
+	})
 	return nil
 }
 func check(ctx context.Context) error {

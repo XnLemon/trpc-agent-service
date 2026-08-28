@@ -376,6 +376,15 @@ func (s *Store) PutKnowledge(ctx context.Context, value runtimestorage.Knowledge
 	if pgstorage.DecodeJSON(metaRaw, &out.Metadata) != nil || pgstorage.DecodeJSON(embRaw, &out.Embedding) != nil {
 		return runtimestorage.KnowledgeDocument{}, runtimestorage.ErrStorage
 	}
+	var projectionErr error
+	if len(out.Embedding) > 0 {
+		_, projectionErr = s.db.ExecContext(ctx, "INSERT INTO public.runtime_vector_index (tenant_id,source,document_id,content,metadata,embedding,version) SELECT tenant_id,'knowledge',document_id,content,metadata,embedding,version FROM public.runtime_knowledge WHERE tenant_id=$1 AND document_id=$2 AND version=$3 AND embedding <> '[]'::jsonb ON CONFLICT (tenant_id,source,document_id) DO UPDATE SET content=EXCLUDED.content,metadata=EXCLUDED.metadata,embedding=EXCLUDED.embedding,version=EXCLUDED.version,updated_at=now() WHERE EXCLUDED.version >= public.runtime_vector_index.version", out.TenantID, out.DocumentID, out.Version)
+	} else {
+		_, projectionErr = s.db.ExecContext(ctx, "DELETE FROM public.runtime_vector_index WHERE tenant_id=$1 AND source=$2 AND document_id=$3", out.TenantID, runtimestorage.VectorSourceKnowledge, out.DocumentID)
+	}
+	if projectionErr != nil {
+		return runtimestorage.KnowledgeDocument{}, pgstorage.MapError(ctx, projectionErr, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
 	return out, nil
 }
 

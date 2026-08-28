@@ -12,6 +12,10 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 )
 
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+
 func TestCapabilitiesAreTenantScopedAndDefensive(t *testing.T) {
 	store := inmemory.New()
 	defer store.Close()
@@ -410,5 +414,174 @@ func TestInMemoryCapabilityErrorBranches(t *testing.T) {
 	}
 	if err := store.EnqueueMemoryIndex(ctx, value); !errors.Is(err, runtimestorage.ErrStorage) {
 		t.Fatalf("closed memory index = %v", err)
+	}
+}
+
+func TestInMemoryCapabilityCanceledContextComplete(t *testing.T) {
+	store := inmemory.New()
+	defer store.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{"GetMemory", func() error { _, err := store.GetMemory(ctx, "tenant-a", "memory"); return err }},
+		{"ListMemories", func() error { _, err := store.ListMemories(ctx, "tenant-a", "user", 1); return err }},
+		{"SearchMemories", func() error { _, err := store.SearchMemories(ctx, "tenant-a", "user", "query", 1); return err }},
+		{"DeleteMemory", func() error { return store.DeleteMemory(ctx, "tenant-a", "memory") }},
+		{"EnqueueMemoryIndex", func() error {
+			return store.EnqueueMemoryIndex(ctx, runtimestorage.MemoryRecord{TenantID: "tenant-a", MemoryID: "memory", Version: 1})
+		}},
+		{"WaitForMemoryIndex", func() error { return store.WaitForMemoryIndex(ctx, "tenant-a", "memory", 1) }},
+		{"PutSummary", func() error {
+			_, err := store.PutSummary(ctx, runtimestorage.SummaryRecord{TenantID: "tenant-a", SessionID: "session", Text: "summary"})
+			return err
+		}},
+		{"GetSummary", func() error { _, err := store.GetSummary(ctx, "tenant-a", "session", "default"); return err }},
+		{"EnqueueSummary", func() error {
+			return store.EnqueueSummary(ctx, runtimestorage.SummaryRecord{TenantID: "tenant-a", SessionID: "session", Text: "summary"})
+		}},
+		{"PutKnowledge", func() error {
+			_, err := store.PutKnowledge(ctx, runtimestorage.KnowledgeDocument{TenantID: "tenant-a", DocumentID: "document", Content: "content"})
+			return err
+		}},
+		{"GetKnowledge", func() error { _, err := store.GetKnowledge(ctx, "tenant-a", "document"); return err }},
+		{"SearchKnowledge", func() error { _, err := store.SearchKnowledge(ctx, "tenant-a", []float64{1}, 1); return err }},
+		{"DeleteKnowledge", func() error { return store.DeleteKnowledge(ctx, "tenant-a", "document") }},
+		{"PutArtifact", func() error {
+			_, err := store.PutArtifact(ctx, runtimestorage.ArtifactRecord{TenantID: "tenant-a", ArtifactID: "artifact", Content: []byte("x")})
+			return err
+		}},
+		{"GetArtifact", func() error { _, err := store.GetArtifact(ctx, "tenant-a", "artifact"); return err }},
+		{"ListArtifacts", func() error { _, err := store.ListArtifacts(ctx, "tenant-a", ""); return err }},
+		{"DeleteArtifact", func() error { return store.DeleteArtifact(ctx, "tenant-a", "artifact") }},
+		{"AppendAudit", func() error {
+			_, err := store.AppendAudit(ctx, runtimestorage.AuditRecord{TenantID: "tenant-a", EventType: "event"})
+			return err
+		}},
+		{"ListAudit", func() error { _, err := store.ListAudit(ctx, "tenant-a", time.Time{}, 1); return err }},
+		{"UpsertVector", func() error {
+			return store.UpsertVector(ctx, runtimestorage.VectorRecord{TenantID: "tenant-a", DocumentID: "document", Embedding: []float64{1}})
+		}},
+		{"SearchVectors", func() error { _, err := store.SearchVectors(ctx, "tenant-a", []float64{1}, 1); return err }},
+		{"DeleteVector", func() error { return store.DeleteVector(ctx, "tenant-a", "document") }},
+		{"PutObject", func() error {
+			_, err := store.PutObject(ctx, "tenant-a", "object", strings.NewReader("x"), "text/plain")
+			return err
+		}},
+		{"GetObject", func() error { _, _, err := store.GetObject(ctx, "tenant-a", "object"); return err }},
+		{"DeleteObject", func() error { return store.DeleteObject(ctx, "tenant-a", "object") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !errors.Is(tc.call(), context.Canceled) {
+				t.Fatalf("%s did not preserve cancellation", tc.name)
+			}
+		})
+	}
+}
+
+func TestInMemoryCapabilityValidationAndOrderingBranches(t *testing.T) {
+	store := inmemory.New()
+	defer store.Close()
+	ctx := context.Background()
+	invalid := []struct {
+		name string
+		call func() error
+	}{
+		{"PutMemory", func() error {
+			_, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "", UserID: "user", Content: "content"})
+			return err
+		}},
+		{"GetMemory", func() error { _, err := store.GetMemory(ctx, "", "memory"); return err }},
+		{"ListMemories", func() error { _, err := store.ListMemories(ctx, "", "user", 1); return err }},
+		{"SearchMemories", func() error { _, err := store.SearchMemories(ctx, "", "user", "query", 1); return err }},
+		{"DeleteMemory", func() error { return store.DeleteMemory(ctx, "", "memory") }},
+		{"EnqueueMemoryIndex", func() error {
+			return store.EnqueueMemoryIndex(ctx, runtimestorage.MemoryRecord{TenantID: "", MemoryID: "memory", Version: 1})
+		}},
+		{"WaitForMemoryIndex", func() error { return store.WaitForMemoryIndex(ctx, "", "memory", 1) }},
+		{"PutSummary", func() error {
+			_, err := store.PutSummary(ctx, runtimestorage.SummaryRecord{TenantID: "", SessionID: "session", Text: "summary"})
+			return err
+		}},
+		{"GetSummary", func() error { _, err := store.GetSummary(ctx, "", "session", "default"); return err }},
+		{"PutKnowledge", func() error {
+			_, err := store.PutKnowledge(ctx, runtimestorage.KnowledgeDocument{TenantID: "", DocumentID: "document", Content: "content"})
+			return err
+		}},
+		{"GetKnowledge", func() error { _, err := store.GetKnowledge(ctx, "", "document"); return err }},
+		{"SearchKnowledge", func() error { _, err := store.SearchKnowledge(ctx, "", []float64{1}, 1); return err }},
+		{"DeleteKnowledge", func() error { return store.DeleteKnowledge(ctx, "", "document") }},
+		{"PutArtifact", func() error {
+			_, err := store.PutArtifact(ctx, runtimestorage.ArtifactRecord{TenantID: "", ArtifactID: "artifact", Content: []byte("x")})
+			return err
+		}},
+		{"GetArtifact", func() error { _, err := store.GetArtifact(ctx, "", "artifact"); return err }},
+		{"ListArtifacts", func() error { _, err := store.ListArtifacts(ctx, "", ""); return err }},
+		{"DeleteArtifact", func() error { return store.DeleteArtifact(ctx, "", "artifact") }},
+		{"AppendAudit", func() error {
+			_, err := store.AppendAudit(ctx, runtimestorage.AuditRecord{TenantID: "", EventType: "event"})
+			return err
+		}},
+		{"ListAudit", func() error { _, err := store.ListAudit(ctx, "", time.Time{}, 1); return err }},
+		{"UpsertVector", func() error {
+			return store.UpsertVector(ctx, runtimestorage.VectorRecord{TenantID: "", DocumentID: "document", Embedding: []float64{1}})
+		}},
+		{"SearchVectors", func() error { _, err := store.SearchVectors(ctx, "", []float64{1}, 1); return err }},
+		{"DeleteVector", func() error { return store.DeleteVector(ctx, "", "document") }},
+		{"PutObject", func() error {
+			_, err := store.PutObject(ctx, "", "object", strings.NewReader("x"), "text/plain")
+			return err
+		}},
+		{"GetObject", func() error { _, _, err := store.GetObject(ctx, "", "object"); return err }},
+		{"DeleteObject", func() error { return store.DeleteObject(ctx, "", "object") }},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			if !errors.Is(tc.call(), runtimestorage.ErrInvalid) {
+				t.Fatalf("%s accepted invalid input", tc.name)
+			}
+		})
+	}
+	if _, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", UserID: "user", Content: "generated id"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "tie-a", UserID: "user", Content: "same score"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "tie-b", UserID: "user", Content: "same score"}); err != nil {
+		t.Fatal(err)
+	}
+	if values, err := store.SearchMemories(ctx, "tenant-a", "user", "same", 0); err != nil || len(values) != 2 || values[0].Memory.MemoryID != "tie-a" {
+		t.Fatalf("memory tie ordering = %+v, %v", values, err)
+	}
+	if _, err := store.PutKnowledge(ctx, runtimestorage.KnowledgeDocument{TenantID: "tenant-a", DocumentID: "zero", Content: "zero", Embedding: []float64{0}}); err != nil {
+		t.Fatal(err)
+	}
+	if values, err := store.SearchKnowledge(ctx, "tenant-a", []float64{1}, 0); err != nil || len(values) != 0 {
+		t.Fatalf("zero-norm knowledge = %+v, %v", values, err)
+	}
+	if err := store.UpsertVector(ctx, runtimestorage.VectorRecord{TenantID: "tenant-a", Source: runtimestorage.VectorSourceKnowledge, DocumentID: "same", Embedding: []float64{1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertVector(ctx, runtimestorage.VectorRecord{TenantID: "tenant-a", Source: runtimestorage.VectorSourceMemory, DocumentID: "same", Embedding: []float64{1}}); err != nil {
+		t.Fatal(err)
+	}
+	if values, err := store.SearchVectors(ctx, "tenant-a", []float64{1}, 1); err != nil || len(values) != 1 {
+		t.Fatalf("vector limit = %+v, %v", values, err)
+	}
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, id := range []string{"audit-b", "audit-a"} {
+		if _, err := store.AppendAudit(ctx, runtimestorage.AuditRecord{TenantID: "tenant-a", AuditID: id, EventType: "event", OccurredAt: when}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if values, err := store.ListAudit(ctx, "tenant-a", time.Time{}, 1); err != nil || len(values) != 1 || values[0].AuditID != "audit-a" {
+		t.Fatalf("audit ordering = %+v, %v", values, err)
+	}
+	if _, err := store.PutObject(ctx, "tenant-a", "broken", failingReader{}, ""); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("failing object reader = %v", err)
 	}
 }
