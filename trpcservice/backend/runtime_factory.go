@@ -313,5 +313,36 @@ func (factory *RegistryStorageFactory) materializeBinding(ctx context.Context, i
 		}
 		return nil, err
 	}
+	if !matchesCapability(binding.Capability, value) {
+		if closer, ok := value.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+		return nil, ErrStorageFactory
+	}
 	return value, nil
+}
+
+func matchesCapability(kind Capability, value any) bool {
+	switch kind {
+	case CapabilitySession:
+		_, ok := value.(session.Service)
+		return ok
+	case CapabilityMemory:
+		_, ok := value.(runtimestorage.MemoryStore)
+		return ok
+	case CapabilitySummary:
+		_, ok := value.(runtimestorage.SummaryStore)
+		return ok
+	case CapabilityKnowledge:
+		_, ok := value.(runtimestorage.KnowledgeStore)
+		return ok
+	case CapabilityArtifact:
+		_, ok := value.(runtimestorage.ArtifactStore)
+		return ok
+	case CapabilityAudit:
+		_, ok := value.(runtimestorage.AuditStore)
+		return ok
+	default:
+		return false
+	}
 }
