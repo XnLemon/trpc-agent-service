@@ -30,7 +30,7 @@ func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID strin
 		return runtimestorage.ReplyCorrelation{}, runtimestorage.ErrInvalid
 	}
 	var value runtimestorage.ReplyCorrelation
-	err := s.db.QueryRowContext(ctx, "SELECT tenant_id,event_id,request_id,trace_id FROM public.runtime_reply_correlation WHERE tenant_id=$1 AND event_id=$2", tenantID, eventID).Scan(&value.TenantID, &value.EventID, &value.RequestID, &value.TraceID)
+	err := s.db.QueryRowContext(ctx, "SELECT tenant_id,event_id,request_id,trace_id,trace_parent FROM public.runtime_reply_correlation WHERE tenant_id=$1 AND event_id=$2", tenantID, eventID).Scan(&value.TenantID, &value.EventID, &value.RequestID, &value.TraceID, &value.TraceParent)
 	if err != nil {
 		return runtimestorage.ReplyCorrelation{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
@@ -418,7 +418,7 @@ func (s *Store) EnqueueRepliesWithCorrelation(ctx context.Context, correlation r
 		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := tx.QueryRowContext(ctx, "INSERT INTO public.runtime_reply_correlation (tenant_id,event_id,request_id,trace_id) VALUES ($1,$2,$3,$4) ON CONFLICT (tenant_id,event_id) DO UPDATE SET request_id=public.runtime_reply_correlation.request_id, trace_id=public.runtime_reply_correlation.trace_id WHERE public.runtime_reply_correlation.request_id=EXCLUDED.request_id AND public.runtime_reply_correlation.trace_id=EXCLUDED.trace_id RETURNING tenant_id", correlation.TenantID, correlation.EventID, correlation.RequestID, correlation.TraceID).Scan(new(string)); err != nil {
+	if err := tx.QueryRowContext(ctx, "INSERT INTO public.runtime_reply_correlation (tenant_id,event_id,request_id,trace_id,trace_parent) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (tenant_id,event_id) DO UPDATE SET request_id=public.runtime_reply_correlation.request_id, trace_id=public.runtime_reply_correlation.trace_id, trace_parent=public.runtime_reply_correlation.trace_parent WHERE public.runtime_reply_correlation.request_id=EXCLUDED.request_id AND public.runtime_reply_correlation.trace_id=EXCLUDED.trace_id AND public.runtime_reply_correlation.trace_parent=EXCLUDED.trace_parent RETURNING tenant_id", correlation.TenantID, correlation.EventID, correlation.RequestID, correlation.TraceID, correlation.TraceParent).Scan(new(string)); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, runtimestorage.ErrConflict
 		}

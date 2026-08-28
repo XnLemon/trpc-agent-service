@@ -273,7 +273,8 @@ func TestMaterializerDefaultSegmentSizeAndUnicodeSplit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	count, err := m.Materialize(context.Background(), MaterializeInput{TenantID: "tenant-a", EventID: "event-default", ReplyID: "reply-default", RequestID: "request-default", TraceID: "trace-default", Payload: "你好"})
+	validTraceParent := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	count, err := m.Materialize(context.Background(), MaterializeInput{TenantID: "tenant-a", EventID: "event-default", ReplyID: "reply-default", RequestID: "request-default", TraceID: "trace-default", TraceParent: validTraceParent, Payload: "你好"})
 	if err != nil || count != 1 {
 		t.Fatalf("default materialization = %d/%v", count, err)
 	}
@@ -282,7 +283,7 @@ func TestMaterializerDefaultSegmentSizeAndUnicodeSplit(t *testing.T) {
 		t.Fatalf("unicode row = %+v/%v", rows, err)
 	}
 	correlation, err := store.GetReplyCorrelation(context.Background(), "tenant-a", "event-default")
-	if err != nil || correlation.RequestID != "request-default" || correlation.TraceID != "trace-default" {
+	if err != nil || correlation.RequestID != "request-default" || correlation.TraceID != "trace-default" || correlation.TraceParent != validTraceParent {
 		t.Fatalf("materializer correlation = %+v/%v", correlation, err)
 	}
 	if got := splitRunes("  ", 2); got != nil {

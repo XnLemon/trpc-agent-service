@@ -43,6 +43,7 @@ type MaterializeInput struct {
 	ReplyID     string
 	RequestID   string
 	TraceID     string
+	TraceParent string
 	Payload     string
 	ReplyTarget runtimestorage.ReplyTarget
 }
@@ -103,7 +104,13 @@ func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) 
 		if !correlated {
 			return 0, errors.Join(ErrMaterialization, runtimestorage.ErrInvalid)
 		}
-		_, err = correlatedStore.EnqueueRepliesWithCorrelation(operationCtx, runtimestorage.ReplyCorrelation{TenantID: input.TenantID, EventID: input.EventID, RequestID: input.RequestID, TraceID: input.TraceID}, replies)
+		traceParent := input.TraceParent
+		if traceParent == "" {
+			traceParent = observability.TraceParentFromContext(operationCtx)
+		} else {
+			traceParent = observability.TraceParentFromContext(observability.ContextWithTraceParent(context.Background(), traceParent))
+		}
+		_, err = correlatedStore.EnqueueRepliesWithCorrelation(operationCtx, runtimestorage.ReplyCorrelation{TenantID: input.TenantID, EventID: input.EventID, RequestID: input.RequestID, TraceID: input.TraceID, TraceParent: traceParent}, replies)
 	} else {
 		_, err = batchStore.EnqueueReplies(operationCtx, replies)
 	}

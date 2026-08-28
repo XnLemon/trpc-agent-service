@@ -117,6 +117,19 @@ func TestStartOperationProvidesGenericHook(t *testing.T) {
 	finish(context.Canceled)
 }
 
+func TestTraceParentRoundTripRejectsInvalidValues(t *testing.T) {
+	valid := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	ctx := ContextWithTraceParent(context.Background(), valid)
+	if got := TraceParentFromContext(ctx); got != valid {
+		t.Fatalf("traceparent round trip = %q, want %q", got, valid)
+	}
+	for _, invalid := range []string{"", "not-a-traceparent", "00-00000000000000000000000000000000-00f067aa0ba902b7-01", "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01"} {
+		if got := TraceParentFromContext(ContextWithTraceParent(context.Background(), invalid)); got != "" {
+			t.Fatalf("invalid traceparent %q was retained as %q", invalid, got)
+		}
+	}
+}
+
 func TestTelemetryAdaptersEnforceSafeFieldsAndWrapSDKPrimitives(t *testing.T) {
 	var logs bytes.Buffer
 	provider := NewProvider(Config{
