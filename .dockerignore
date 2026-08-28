@@ -16,3 +16,7 @@ coverage.html
 vendor/
 docs/site/
 **/__pycache__/
+
+# Never send populated deployment credentials to the Docker build context.
+deploy/service.env
+deploy/*.env

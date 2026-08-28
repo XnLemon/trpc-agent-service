@@ -21,6 +21,7 @@ services:
       context: ..
       dockerfile: Dockerfile
     image: trpc-agent-service:local
+    command: ["-addr", "0.0.0.0:8080"]
     depends_on:
       postgres:
         condition: service_healthy

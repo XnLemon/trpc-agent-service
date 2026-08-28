@@ -22,14 +22,23 @@ const (
 var errUnhealthy = errors.New("health check failed")
 
 func main() {
-	url := defaultHealthURL
-	if len(os.Args) > 1 {
-		url = os.Args[1]
-	}
-	if err := check(context.Background(), http.DefaultClient, url); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	if err := run(os.Args[1:], os.Stderr); err != nil {
 		os.Exit(1)
 	}
+}
+
+func run(args []string, stderr io.Writer) error {
+	url := defaultHealthURL
+	if len(args) > 0 {
+		url = args[0]
+	}
+	if err := check(context.Background(), http.DefaultClient, url); err != nil {
+		if stderr != nil {
+			_, _ = fmt.Fprintln(stderr, err)
+		}
+		return err
+	}
+	return nil
 }
 
 func check(parent context.Context, client *http.Client, url string) error {
