@@ -77,6 +77,8 @@ func TestSummaryOrderingAndSharedBackendVisibility(t *testing.T) {
 	backend := inmemory.NewBackend()
 	nodeA, nodeB := inmemory.NewWithBackend(backend), inmemory.NewWithBackend(backend)
 	defer nodeA.Close()
+	defer nodeB.Close()
+	defer backend.Close()
 	_, err := nodeA.CreateSession(context.Background(), "tenant-a", "session-1", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +95,36 @@ func TestSummaryOrderingAndSharedBackendVisibility(t *testing.T) {
 	}
 	if _, err := nodeB.GetSummary(context.Background(), "tenant-b", "session-1", "default"); !errors.Is(err, runtimestorage.ErrNotFound) {
 		t.Fatalf("cross tenant summary = %v", err)
+	}
+}
+
+func TestSharedBackendViewCloseDoesNotStopOtherViews(t *testing.T) {
+	backend := inmemory.NewBackend()
+	nodeA := inmemory.NewWithBackend(backend)
+	nodeB := inmemory.NewWithBackend(backend)
+	if _, err := nodeA.PutMemory(context.Background(), runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "before-close", UserID: "user", Content: "durable", Embedding: []float64{1, 0}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := nodeA.Close(); err != nil {
+		t.Fatal(err)
+	}
+	value, err := nodeB.PutMemory(context.Background(), runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "after-close", UserID: "user", Content: "still running", Embedding: []float64{1, 0}})
+	if err != nil {
+		t.Fatalf("PutMemory through remaining view = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := nodeB.WaitForMemoryIndex(ctx, "tenant-a", value.MemoryID, value.Version); err != nil {
+		t.Fatalf("remaining view index = %v", err)
+	}
+	if err := nodeB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nodeB.PutMemory(context.Background(), runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "closed", UserID: "user", Content: "closed"}); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("PutMemory after final view close = %v", err)
 	}
 }
 

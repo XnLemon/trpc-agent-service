@@ -12,6 +12,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestCapabilityMethodsRejectNilStore(t *testing.T) {
@@ -200,6 +201,27 @@ func TestPostgresCapabilityConflictAndRollbackPaths(t *testing.T) {
 	}
 }
 
+func TestEnqueueMemoryIndexPreservesExistingProjection(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO public.runtime_vector_index")).
+		WithArgs("tenant-a", "m1", int64(1)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT tenant_id,memory_id,user_id,session_id,content,topics,metadata,embedding,version,deleted_at,created_at,updated_at FROM public.runtime_memory WHERE tenant_id=$1 AND memory_id=$2 AND deleted_at IS NULL")).
+		WithArgs("tenant-a", "m1").
+		WillReturnRows(memoryRows().AddRow("tenant-a", "m1", "user", "", "content", []byte("[]"), []byte("{}"), []byte("[1,0]"), int64(1), nil, when, when))
+	if err := runtimepostgres.New(db).EnqueueMemoryIndex(context.Background(), runtimestorage.MemoryRecord{TenantID: "tenant-a", MemoryID: "m1", Version: 1}); err != nil {
+		t.Fatalf("EnqueueMemoryIndex = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSearchVectorsComputesCosineAndScopesTenant(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -238,9 +260,85 @@ func TestPutMemoryNormalizesNilJSONValues(t *testing.T) {
 		WithArgs("tenant-a", sqlmock.AnyArg(), "user", "", "content", []byte("[]"), []byte("{}"), []byte("[]")).
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "memory_id", "user_id", "session_id", "content", "topics", "metadata", "embedding", "version", "deleted_at", "created_at", "updated_at"}).
 			AddRow("tenant-a", "mem-generated", "user", "", "content", []byte("[]"), []byte("{}"), []byte("[]"), int64(1), nil, when, when))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO public.runtime_vector_index")).
+		WithArgs("tenant-a", "mem-generated", int64(1)).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT tenant_id,memory_id,user_id,session_id,content,topics,metadata,embedding,version,deleted_at,created_at,updated_at FROM public.runtime_memory WHERE tenant_id=$1 AND memory_id=$2 AND deleted_at IS NULL")).
+		WithArgs("tenant-a", "mem-generated").
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "memory_id", "user_id", "session_id", "content", "topics", "metadata", "embedding", "version", "deleted_at", "created_at", "updated_at"}).
+			AddRow("tenant-a", "mem-generated", "user", "", "content", []byte("[]"), []byte("{}"), []byte("[]"), int64(1), nil, when, when))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM public.runtime_vector_index WHERE tenant_id=$1 AND source=$2 AND document_id=$3")).
+		WithArgs("tenant-a", runtimestorage.VectorSourceMemory, "mem-generated").
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	value, err := runtimepostgres.New(db).PutMemory(context.Background(), runtimestorage.MemoryInput{TenantID: "tenant-a", UserID: "user", Content: "content"})
 	if err != nil || value.MemoryID != "mem-generated" {
 		t.Fatalf("PutMemory = %+v, %v", value, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPutMemoryEnqueuesEmbeddingProjection(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO public.runtime_memory")).
+		WithArgs("tenant-a", "m1", "user", "", "content", []byte("[]"), []byte("{}"), []byte("[1,0]")).
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "memory_id", "user_id", "session_id", "content", "topics", "metadata", "embedding", "version", "deleted_at", "created_at", "updated_at"}).
+			AddRow("tenant-a", "m1", "user", "", "content", []byte("[]"), []byte("{}"), []byte("[1,0]"), int64(1), nil, when, when))
+	// The memory INSERT returns the durable record that the index operation reads.
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO public.runtime_vector_index")).
+		WithArgs("tenant-a", "m1", int64(1)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	value, err := runtimepostgres.New(db).PutMemory(context.Background(), runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "m1", UserID: "user", Content: "content", Embedding: []float64{1, 0}})
+	if err != nil || value.MemoryID != "m1" {
+		t.Fatalf("PutMemory = %+v, %v", value, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPutSummaryMapsMissingSessionToNotFound(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO public.runtime_summary")).
+		WithArgs("tenant-a", "missing", "", "summary", int64(0)).
+		WillReturnError(&pgconn.PgError{Code: "23503"})
+	if _, err := runtimepostgres.New(db).PutSummary(context.Background(), runtimestorage.SummaryRecord{TenantID: "tenant-a", SessionID: "missing", Text: "summary"}); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("PutSummary missing session = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListArtifactsMapsRowsErrorToStorage(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	rows := sqlmock.NewRows([]string{"tenant_id", "artifact_id", "session_id", "name", "mime_type", "content", "version", "created_at", "updated_at"})
+	rows.AddRow("tenant-a", "a", "", "", "", []byte("x"), int64(1), time.Now(), time.Now())
+	rows.AddRow("tenant-a", "b", "", "", "", []byte("x"), int64(1), time.Now(), time.Now())
+	rows.RowError(1, errors.New("rows failed"))
+	/*
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT tenant_id,artifact_id,session_id,name,mime_type,content,version,created_at,updated_at FROM public.runtime_artifact WHERE tenant_id=$1 AND ($2='' OR session_id=$2) ORDER BY artifact_id")).
+			WithArgs("tenant-a", "").
+			WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "artifact_id", "session_id", "name", "mime_type", "content", "version", "created_at", "updated_at"]).
+				RowError(1, errors.New("rows failed")))
+	*/
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT tenant_id,artifact_id,session_id,name,mime_type,content,version,created_at,updated_at FROM public.runtime_artifact WHERE tenant_id=$1 AND ($2='' OR session_id=$2) ORDER BY artifact_id")).WithArgs("tenant-a", "").WillReturnRows(rows)
+	if _, err := runtimepostgres.New(db).ListArtifacts(context.Background(), "tenant-a", ""); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("ListArtifacts rows error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

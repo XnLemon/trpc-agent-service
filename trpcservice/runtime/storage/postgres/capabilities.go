@@ -17,6 +17,7 @@ import (
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	pgstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func checkCapability(ctx context.Context, store *Store) error {
@@ -74,7 +75,11 @@ func (s *Store) PutMemory(ctx context.Context, input runtimestorage.MemoryInput)
 	if json.Unmarshal(topicsRaw, &value.Topics) != nil || pgstorage.DecodeJSON(metadataRaw, &value.Metadata) != nil || pgstorage.DecodeJSON(embeddingRaw, &value.Embedding) != nil {
 		return runtimestorage.MemoryRecord{}, runtimestorage.ErrStorage
 	}
-	return cloneMemory(value), nil
+	result := cloneMemory(value)
+	if err := s.EnqueueMemoryIndex(ctx, result); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 // GetMemory implements the tenant-scoped runtime storage contract.
@@ -217,6 +222,11 @@ func (s *Store) EnqueueMemoryIndex(ctx context.Context, value runtimestorage.Mem
 	if current.Version != value.Version {
 		return runtimestorage.ErrConflict
 	}
+	if len(current.Embedding) > 0 {
+		// A newer vector projection may already represent this durable version.
+		// Do not remove it merely because this idempotent enqueue was ignored.
+		return nil
+	}
 	// A current memory without an embedding has no vector projection. Remove
 	// any projection left by an earlier version so reads remain monotonic.
 	_, err = s.db.ExecContext(ctx, "DELETE FROM public.runtime_vector_index WHERE tenant_id=$1 AND source=$2 AND document_id=$3", value.TenantID, runtimestorage.VectorSourceMemory, value.MemoryID)
@@ -240,7 +250,7 @@ func (s *Store) PutSummary(ctx context.Context, value runtimestorage.SummaryReco
 		if errors.Is(err, sql.ErrNoRows) {
 			return runtimestorage.SummaryRecord{}, runtimestorage.ErrConflict
 		}
-		return runtimestorage.SummaryRecord{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.SummaryRecord{}, mapSummaryError(ctx, err)
 	}
 	return out, nil
 }
@@ -512,7 +522,18 @@ func (s *Store) ListArtifacts(ctx context.Context, tenantID, sessionID string) (
 		}
 		values = append(values, value)
 	}
-	return values, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, runtimestorage.ErrStorage
+	}
+	return values, nil
+}
+
+func mapSummaryError(ctx context.Context, err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+		return runtimestorage.ErrNotFound
+	}
+	return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 }
 
 // DeleteArtifact implements the tenant-scoped runtime storage contract.

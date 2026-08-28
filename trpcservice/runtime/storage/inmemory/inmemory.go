@@ -15,7 +15,7 @@ import (
 
 // Store is a concurrency-safe in-memory implementation of the runtime store.
 type Store struct {
-	mu           sync.RWMutex
+	mu           *sync.RWMutex
 	sessions     map[string]runtimestorage.Session
 	events       map[string]runtimestorage.MessageEvent
 	histories    map[string][]runtimestorage.EventPayload
@@ -32,33 +32,98 @@ type Store struct {
 	objectData   map[string][]byte
 	indexQueue   chan runtimestorage.MemoryRecord
 	indexDone    chan struct{}
-	indexMu      sync.RWMutex
+	indexMu      *sync.RWMutex
 	closeOnce    sync.Once
+	lifecycle    *backendLifecycle
 }
 
 // Backend owns one in-memory state graph that can be shared by multiple
 // tenant workers in tests, modeling cross-node visibility of a shared store.
-type Backend struct{ store *Store }
+type Backend struct {
+	store     *Store
+	lifecycle *backendLifecycle
+	closeOnce sync.Once
+}
+
+type backendLifecycle struct {
+	mu      sync.Mutex
+	refs    int
+	closed  bool
+	done    chan struct{}
+	indexMu *sync.RWMutex
+}
+
+func (l *backendLifecycle) retain() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return false
+	}
+	l.refs++
+	return true
+}
+
+func (l *backendLifecycle) release() {
+	l.mu.Lock()
+	if l.refs > 0 {
+		l.refs--
+	}
+	if l.refs != 0 || l.closed {
+		l.mu.Unlock()
+		return
+	}
+	l.closed = true
+	l.mu.Unlock()
+	l.indexMu.Lock()
+	close(l.done)
+	l.indexMu.Unlock()
+}
 
 // NewBackend creates an isolated shared in-memory backend.
-func NewBackend() *Backend { return &Backend{store: New()} }
+func NewBackend() *Backend {
+	lifecycle := &backendLifecycle{refs: 1, done: make(chan struct{}), indexMu: &sync.RWMutex{}}
+	store := newStore(lifecycle)
+	return &Backend{store: store, lifecycle: lifecycle}
+}
 
-// NewWithBackend creates a store view over an existing shared backend. Views
-// share the backend worker lifecycle; close the views only after all workers
-// using the backend have stopped.
+// NewWithBackend creates a store view over an existing shared backend. Each
+// view owns its close operation while the backend keeps shared state and one
+// asynchronous index worker alive until the final view closes.
 func NewWithBackend(backend *Backend) *Store {
 	if backend == nil {
 		return New()
 	}
 	if backend.store == nil {
-		backend.store = New()
+		backend.lifecycle = &backendLifecycle{refs: 1, done: make(chan struct{}), indexMu: &sync.RWMutex{}}
+		backend.store = newStore(backend.lifecycle)
 	}
-	return backend.store
+	if backend.lifecycle == nil || !backend.lifecycle.retain() {
+		return New()
+	}
+	view := *backend.store
+	view.closeOnce = sync.Once{}
+	return &view
+}
+
+// Close releases the backend owner. Views remain usable until the final view
+// and the backend owner have both been closed.
+func (backend *Backend) Close() error {
+	if backend == nil || backend.lifecycle == nil {
+		return nil
+	}
+	backend.closeOnce.Do(backend.lifecycle.release)
+	return nil
 }
 
 // New creates an empty runtime store.
 func New() *Store {
+	lifecycle := &backendLifecycle{refs: 1, done: make(chan struct{}), indexMu: &sync.RWMutex{}}
+	return newStore(lifecycle)
+}
+
+func newStore(lifecycle *backendLifecycle) *Store {
 	store := &Store{
+		mu:       &sync.RWMutex{},
 		sessions: map[string]runtimestorage.Session{}, events: map[string]runtimestorage.MessageEvent{},
 		histories: map[string][]runtimestorage.EventPayload{}, messages: map[string]string{},
 		replies: map[string]runtimestorage.ReplyOutbox{}, correlations: map[string]runtimestorage.ReplyCorrelation{},
@@ -66,7 +131,7 @@ func New() *Store {
 		knowledge: map[string]runtimestorage.KnowledgeDocument{}, artifacts: map[string]runtimestorage.ArtifactRecord{},
 		audits: map[string][]runtimestorage.AuditRecord{}, vectors: map[string]runtimestorage.VectorRecord{},
 		objects: map[string]runtimestorage.ObjectInfo{}, objectData: map[string][]byte{},
-		indexQueue: make(chan runtimestorage.MemoryRecord, 128), indexDone: make(chan struct{}),
+		indexQueue: make(chan runtimestorage.MemoryRecord, 128), indexDone: lifecycle.done, indexMu: lifecycle.indexMu, lifecycle: lifecycle,
 	}
 	go store.indexWorker()
 	return store
@@ -611,11 +676,7 @@ func (s *Store) Close() error {
 	if s == nil {
 		return nil
 	}
-	s.closeOnce.Do(func() {
-		s.indexMu.Lock()
-		close(s.indexDone)
-		s.indexMu.Unlock()
-	})
+	s.closeOnce.Do(func() { s.lifecycle.release() })
 	return nil
 }
 func check(ctx context.Context) error {

@@ -8,6 +8,7 @@ import (
 
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	runtimeinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
@@ -50,6 +51,57 @@ func TestCapabilitySetMaterializesExplicitSummary(t *testing.T) {
 	got, err := set.Summary()
 	if err != nil || got != store {
 		t.Fatalf("Summary() = %v, %v", got, err)
+	}
+}
+
+func TestCapabilitySetTypedAccessors(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	store := runtimeinmemory.New()
+	set, err := NewCapabilitySet(tenantID, map[Capability]any{
+		CapabilitySession:   inmemory.NewSessionService(),
+		CapabilityMemory:    store,
+		CapabilitySummary:   store,
+		CapabilityKnowledge: store,
+		CapabilityArtifact:  store,
+		CapabilityAudit:     store,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := []struct {
+		name string
+		call func() error
+	}{
+		{"Session", func() error { _, err := set.Session(); return err }},
+		{"Memory", func() error { _, err := set.Memory(); return err }},
+		{"Summary", func() error { _, err := set.Summary(); return err }},
+		{"Knowledge", func() error { _, err := set.Knowledge(); return err }},
+		{"Artifact", func() error { _, err := set.Artifact(); return err }},
+		{"Audit", func() error { _, err := set.Audit(); return err }},
+		{"Vector", func() error { _, err := set.Vector(); return err }},
+		{"Object", func() error { _, err := set.Object(); return err }},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			if err := check.call(); err != nil {
+				t.Fatalf("%s() = %v", check.name, err)
+			}
+		})
+	}
+	if err := set.Close(); err != nil {
+		t.Fatal(err)
+	}
+	missing, err := NewCapabilitySet(tenantID, map[Capability]any{CapabilitySession: inmemory.NewSessionService()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer missing.Close()
+	for _, check := range checks[1:] {
+		t.Run("missing-"+check.name, func(t *testing.T) {
+			if err := check.call(); !errors.Is(err, ErrCapabilityUnavailable) {
+				t.Fatalf("%s() = %v", check.name, err)
+			}
+		})
 	}
 }
 
@@ -196,6 +248,24 @@ func TestCapabilitySetOwnsValuesAndAggregatesCloseFailures(t *testing.T) {
 	}
 	if _, err := wrongType.Session(); !errors.Is(err, ErrCapabilityUnavailable) {
 		t.Fatalf("wrong-type Session() = %v", err)
+	}
+}
+
+func TestCapabilitySetClosesSharedValueOnce(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	closer := &failingCapabilityCloser{}
+	set, err := NewCapabilitySet(tenantID, map[Capability]any{
+		CapabilitySession: closer,
+		CapabilityMemory:  closer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := set.Close(); !errors.Is(err, ErrStorageFactory) {
+		t.Fatalf("Close() = %v", err)
+	}
+	if closer.calls != 1 {
+		t.Fatalf("shared capability close calls = %d", closer.calls)
 	}
 }
 

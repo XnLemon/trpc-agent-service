@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -182,8 +183,11 @@ func (set *CapabilitySet) Close() error {
 		}
 		clear(set.capabilities)
 		set.mu.Unlock()
-		for _, value := range values {
+		for index, value := range values {
 			if closer, ok := value.(interface{ Close() error }); ok {
+				if alreadyClosed(closer, values[:index]) {
+					continue
+				}
 				if err := closer.Close(); err != nil {
 					set.closeErr = errors.Join(set.closeErr, ErrStorageFactory)
 				}
@@ -191,6 +195,24 @@ func (set *CapabilitySet) Close() error {
 		}
 	})
 	return set.closeErr
+}
+
+func alreadyClosed(closer interface{ Close() error }, values []any) bool {
+	current := reflect.ValueOf(closer)
+	if !current.IsValid() {
+		return false
+	}
+	for _, value := range values {
+		other, ok := value.(interface{ Close() error })
+		if !ok {
+			continue
+		}
+		candidate := reflect.ValueOf(other)
+		if candidate.IsValid() && current.Type() == candidate.Type() && current.Kind() == reflect.Pointer && current.Pointer() == candidate.Pointer() {
+			return true
+		}
+	}
+	return false
 }
 
 // StorageFactory materializes capabilities from a secret-free plan input.

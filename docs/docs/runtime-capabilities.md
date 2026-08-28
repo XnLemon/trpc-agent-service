@@ -12,8 +12,9 @@ trpcservice/runtime/storage defines tenant-scoped contracts for Session,
 Memory, Summary, Knowledge, Artifact, Audit, Vector, and Object storage. Each
 record is defensively copied at the boundary. Writes use stable IDs and
 idempotent upserts where a retry can be safely replayed. Versioned summaries
-reject an older event sequence, and memory writes expose an explicit
-EnqueueMemoryIndex operation for asynchronous vector indexing.
+reject an older event sequence, and memory writes enqueue their durable record
+for asynchronous vector indexing (the explicit EnqueueMemoryIndex operation is
+also available for retries).
 
 Backend profiles select session, memory, summary, knowledge, artifact, and
 audit bindings. backend.CapabilitySet exposes typed accessors for those
@@ -34,7 +35,9 @@ An index or summary failure does not roll back the source event or memory. A
 retry uses the stable memory/document ID and version, so an older queued index
 cannot overwrite a newer record. PostgreSQL readers observe committed rows from
 any worker process; NewBackend in the in-memory adapter provides the equivalent
-shared-state view for multi-node tests.
+shared-state view for multi-node tests. Closing one NewWithBackend view does not
+stop the shared index worker while another view remains active; the backend
+owner and all views must be closed before the worker exits.
 
 ## PostgreSQL Tables
 
