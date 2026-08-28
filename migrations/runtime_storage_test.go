@@ -69,7 +69,7 @@ func TestRuntimeEventHistoryMigrationIsTenantScopedAndCascades(t *testing.T) {
 }
 
 func TestRuntimeCapabilityMigrationNamespacesVectors(t *testing.T) {
-	contents, err := os.ReadFile("0012_runtime_capabilities.up.sql")
+	contents, err := os.ReadFile("0011_runtime_capabilities.up.sql")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -41,7 +41,7 @@ owner and all views must be closed before the worker exits.
 
 ## PostgreSQL Tables
 
-Migration 0012_runtime_capabilities.up.sql adds tenant-keyed Memory, Summary,
+Migration 0011_runtime_capabilities.up.sql adds tenant-keyed Memory, Summary,
 Knowledge, Artifact, Audit, Vector Index, and Object rows. Every table has a
 composite primary key beginning with tenant_id, explicit tenant foreign keys,
 bounded fields, JSON shape checks, and grants limited to the runtime role.

@@ -127,6 +127,45 @@ func TestMigrationHelpersAndSQLMockApplyVerify(t *testing.T) {
 	}
 }
 
+func TestApplyPreservesPreviouslyAppliedRuntimeCapabilitiesMigration(t *testing.T) {
+	files, err := orderedFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files[10].name != "0011_runtime_capabilities.up.sql" || files[11].name != "0012_reply_trace_parent.up.sql" {
+		t.Fatalf("migration order = %q, %q", files[10].name, files[11].name)
+	}
+
+	// Version 11 was already released as runtime capabilities before the trace
+	// parent migration was added. Keep its digest immutable so an upgraded
+	// deployment can apply version 12 without invalidating existing history.
+	const legacyRuntimeCapabilitiesDigest = "2765a07ffd74cd815af04bdab2f7c1c16051061002f48cf07d6ef7a2c12e5cbb"
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectExec(`SELECT pg_advisory_lock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`CREATE TABLE IF NOT EXISTS public.schema_migrations`).WillReturnResult(sqlmock.NewResult(0, 0))
+	historyRows := sqlmock.NewRows([]string{"version", "sha256"})
+	for _, migration := range files[:10] {
+		historyRows.AddRow(migration.version, migration.digest)
+	}
+	historyRows.AddRow(11, legacyRuntimeCapabilitiesDigest)
+	mock.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(historyRows)
+	mock.ExpectBegin()
+	mock.ExpectExec(`(?s).*`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`INSERT INTO public.schema_migrations`).WithArgs(12, files[11].name, files[11].digest, sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	mock.ExpectExec(`SELECT pg_advisory_unlock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := Apply(context.Background(), db); err != nil {
+		t.Fatalf("Apply existing version 11 error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMigrationApplyAndVerifyFailures(t *testing.T) {
 	tests := []struct {
 		name  string

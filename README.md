@@ -121,7 +121,7 @@
 - [x] 将命令行入口改造成持续运行的服务，并支持优雅停机（Issue #41）
 - [x] 增加显式、幂等且并发安全的首次 Tenant/App 初始化命令（Issue #67）
 - [x] 增加 Dockerfile、Docker Compose 最小部署和 Kubernetes 生产部署清单（Issue #74）
-- [x] 增加配置示例、环境变量说明和可验证的端到端快速开始（Issue #74）
+- [x] 增加配置示例、环境变量说明和可验证的部署快速开始（Issue #74）
 
 ### 多租户控制面
 
@@ -347,6 +347,11 @@ cp deploy/example.env deploy/service.env
 脚本会构建服务镜像，等待 PostgreSQL 和服务健康检查，并验证 `/healthz`、`/readyz`；成功后
 服务继续运行在 `http://127.0.0.1:8080`。`deploy/service.env` 仅供本地使用，已被 Git 和
 Docker build context 忽略，不能提交真实凭据。
+
+这个快速开始验证的是数据库迁移、bootstrap 和 HTTP 部署入口，不会自动创建 Tenant、Agent
+App、Model 或 Backend，也不会调用真实模型。要发送第一条对话请求，请先按
+[Issue #67 首次运行初始化](https://xnlemon.github.io/trpc-agent-service/issue-67-first-run-init/)
+初始化控制面，再通过 Admin API 创建并发布运行配置。
 
 ### 源码模式
 

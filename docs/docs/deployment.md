@@ -36,6 +36,12 @@ docker compose --env-file deploy/service.env -f deploy/docker-compose.yml down
 `deploy/example.env` 是仓库内提交的默认参数模板；复制后得到的
 `deploy/service.env` 仅用于本机覆盖值，真实凭据不会随镜像构建上下文提交。
 
+该快速开始的端到端边界是迁移、bootstrap、HTTP 存活/readiness 和容器入口；它不会自动
+创建 Tenant、Agent App、Model 或 Backend，也不会调用真实模型。要发送第一条对话请求，
+请先按 [Issue #67 首次运行初始化](issue-67-first-run-init.md) 初始化控制面，再通过
+Admin API 创建并发布 Model、Backend 和 Agent App。默认的 Tenant/App ID 只是本地占位值，
+不会因为服务启动而自动写入数据库。
+
 ### Compose 验收契约
 
 - `postgres` 使用 PostgreSQL 16，并以 `pg_isready` 作为依赖健康条件。
@@ -118,6 +124,11 @@ curl --fail http://127.0.0.1:8080/readyz
 `TRPC_CONTROL_PLANE_DRIVER=postgres`、`TRPC_SESSION_BACKEND=postgres` 和
 `OTEL_SERVICE_NAME` 已由 ConfigMap 提供；其余非敏感配置可在 overlay 中覆盖。任何缺失的
 数据库、identity、Admin 或模型配置都会在绑定 HTTP 端口前 fail closed。
+
+升级已有环境时不要改写已执行 migration 的版本号。版本 `0011_runtime_capabilities.up.sql`
+属于已发布的运行时能力迁移；本版本新增的 trace-parent 字段使用 `0012_reply_trace_parent.up.sql`，
+因此旧数据库可以继续校验历史并增量升级。首次部署前请确认数据库中的
+`schema_migrations` 没有未经审计的版本或 digest 修改。
 
 ## 配置参考
 
