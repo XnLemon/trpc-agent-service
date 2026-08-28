@@ -10,6 +10,8 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
@@ -273,6 +275,118 @@ func TestEnvironmentSessionCapabilityProviderBoundaries(t *testing.T) {
 	}
 	_ = delegate.Close()
 	_ = store.Close()
+}
+
+func TestEnvironmentRuntimeCapabilityProviderNew(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	store := runtimestorageinmemory.New()
+	delegate := inmemory.NewSessionService()
+	t.Cleanup(func() {
+		_ = delegate.Close()
+		_ = store.Close()
+	})
+	input := backend.StorageFactoryInput{TenantID: tenantID}
+
+	tests := []struct {
+		name       string
+		capability backend.Capability
+		matches    func(any) bool
+	}{
+		{name: "session", capability: backend.CapabilitySession, matches: func(value any) bool { _, ok := value.(*runtimesessionpostgres.Service); return ok }},
+		{name: "memory", capability: backend.CapabilityMemory, matches: func(value any) bool { _, ok := value.(borrowedMemoryStore); return ok }},
+		{name: "summary", capability: backend.CapabilitySummary, matches: func(value any) bool { _, ok := value.(borrowedSummaryStore); return ok }},
+		{name: "knowledge", capability: backend.CapabilityKnowledge, matches: func(value any) bool { _, ok := value.(borrowedKnowledgeStore); return ok }},
+		{name: "artifact", capability: backend.CapabilityArtifact, matches: func(value any) bool { _, ok := value.(borrowedArtifactStore); return ok }},
+		{name: "audit", capability: backend.CapabilityAudit, matches: func(value any) bool { _, ok := value.(borrowedAuditStore); return ok }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value, err := (environmentRuntimeCapabilityProvider{capability: test.capability, delegate: delegate, store: store, backend: "inmemory"}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{})
+			if err != nil || value == nil || !test.matches(value) {
+				t.Fatalf("capability value = %T, %v", value, err)
+			}
+			closer, ok := value.(interface{ Close() error })
+			if !ok {
+				t.Fatalf("capability %T does not expose Close", value)
+			}
+			if err := closer.Close(); err != nil {
+				t.Fatalf("borrowed capability close = %v", err)
+			}
+		})
+	}
+
+	if _, err := (environmentRuntimeCapabilityProvider{capability: backend.CapabilityMemory, store: store}).New(nil, input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("nil provider context = %v", err)
+	}
+	if _, err := (environmentRuntimeCapabilityProvider{capability: backend.CapabilitySession, delegate: delegate, store: store}).New(nil, input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("nil session context = %v", err)
+	}
+	for _, capability := range []backend.Capability{backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit, backend.Capability("unknown")} {
+		if _, err := (environmentRuntimeCapabilityProvider{capability: capability}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, backend.ErrStorageFactory) {
+			t.Fatalf("missing %s store error = %v", capability, err)
+		}
+	}
+	if _, err := (environmentRuntimeCapabilityProvider{capability: backend.CapabilitySession, delegate: delegate}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid session dependencies error = %v", err)
+	}
+
+	knowledgeOnly := &environmentKnowledgeOnlyStore{RuntimeStore: store, knowledge: store}
+	if _, err := (environmentRuntimeCapabilityProvider{capability: backend.CapabilityKnowledge, store: knowledgeOnly}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, backend.ErrStorageFactory) {
+		t.Fatalf("missing vector store error = %v", err)
+	}
+	artifactOnly := &environmentArtifactOnlyStore{RuntimeStore: store, artifact: store}
+	if _, err := (environmentRuntimeCapabilityProvider{capability: backend.CapabilityArtifact, store: artifactOnly}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, backend.ErrStorageFactory) {
+		t.Fatalf("missing object store error = %v", err)
+	}
+	if _, err := (environmentRuntimeCapabilityProvider{capability: backend.Capability("unknown"), store: store}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, backend.ErrStorageFactory) {
+		t.Fatalf("unsupported capability error = %v", err)
+	}
+
+	if _, err := store.PutMemory(context.Background(), runtimestorage.MemoryInput{TenantID: tenantID, UserID: "user", Content: "content"}); err != nil {
+		t.Fatalf("borrowed capability close stopped shared store = %v", err)
+	}
+}
+
+type environmentKnowledgeOnlyStore struct {
+	runtimestorage.RuntimeStore
+	knowledge runtimestorage.KnowledgeStore
+}
+
+func (store *environmentKnowledgeOnlyStore) PutKnowledge(ctx context.Context, document runtimestorage.KnowledgeDocument) (runtimestorage.KnowledgeDocument, error) {
+	return store.knowledge.PutKnowledge(ctx, document)
+}
+
+func (store *environmentKnowledgeOnlyStore) GetKnowledge(ctx context.Context, tenantID, documentID string) (runtimestorage.KnowledgeDocument, error) {
+	return store.knowledge.GetKnowledge(ctx, tenantID, documentID)
+}
+
+func (store *environmentKnowledgeOnlyStore) SearchKnowledge(ctx context.Context, tenantID string, embedding []float64, limit int) ([]runtimestorage.KnowledgeSearchResult, error) {
+	return store.knowledge.SearchKnowledge(ctx, tenantID, embedding, limit)
+}
+
+func (store *environmentKnowledgeOnlyStore) DeleteKnowledge(ctx context.Context, tenantID, documentID string) error {
+	return store.knowledge.DeleteKnowledge(ctx, tenantID, documentID)
+}
+
+type environmentArtifactOnlyStore struct {
+	runtimestorage.RuntimeStore
+	artifact runtimestorage.ArtifactStore
+}
+
+func (store *environmentArtifactOnlyStore) PutArtifact(ctx context.Context, artifact runtimestorage.ArtifactRecord) (runtimestorage.ArtifactRecord, error) {
+	return store.artifact.PutArtifact(ctx, artifact)
+}
+
+func (store *environmentArtifactOnlyStore) GetArtifact(ctx context.Context, tenantID, artifactID string) (runtimestorage.ArtifactRecord, error) {
+	return store.artifact.GetArtifact(ctx, tenantID, artifactID)
+}
+
+func (store *environmentArtifactOnlyStore) ListArtifacts(ctx context.Context, tenantID, sessionID string) ([]runtimestorage.ArtifactRecord, error) {
+	return store.artifact.ListArtifacts(ctx, tenantID, sessionID)
+}
+
+func (store *environmentArtifactOnlyStore) DeleteArtifact(ctx context.Context, tenantID, artifactID string) error {
+	return store.artifact.DeleteArtifact(ctx, tenantID, artifactID)
 }
 
 func TestNewFromEnvironmentMigrationAndReadinessFailures(t *testing.T) {
