@@ -297,6 +297,7 @@ func (s *stubStore) Fail(context.Context, string, string, string, int64, string)
 }
 func (s *stubStore) Close() error { return nil }
 
+//nolint:gocyclo // boundary coverage intentionally exercises independent error paths.
 func TestQueueBoundaryBranches(t *testing.T) {
 	if _, err := New(Config{Store: NewMemory(), Handler: func(context.Context, Task) error { return nil }, Owner: "w", LeaseDuration: time.Second, BackoffBase: 2 * time.Second, BackoffMax: time.Second}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("invalid backoff config = %v", err)
