@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 )
 
@@ -93,4 +94,39 @@ func TestCheckRejectsMalformedURL(t *testing.T) {
 	if !errors.Is(err, errUnhealthy) {
 		t.Fatalf("error = %v, want errUnhealthy", err)
 	}
+}
+
+func TestCheckRejectsTransportError(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("connection reset")
+	})}
+
+	err := check(context.Background(), client, "http://service.invalid/healthz")
+	if !errors.Is(err, errUnhealthy) {
+		t.Fatalf("error = %v, want errUnhealthy", err)
+	}
+}
+
+func TestMainExitsNonZeroOnFailure(t *testing.T) {
+	originalArgs := os.Args
+	originalExit := exitProcess
+	t.Cleanup(func() {
+		os.Args = originalArgs
+		exitProcess = originalExit
+	})
+
+	os.Args = []string{"trpc-healthcheck", "://invalid"}
+	exitCode := 0
+	exitProcess = func(code int) { exitCode = code }
+	main()
+
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
 }

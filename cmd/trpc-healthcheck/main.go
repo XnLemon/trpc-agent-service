@@ -20,10 +20,11 @@ const (
 )
 
 var errUnhealthy = errors.New("health check failed")
+var exitProcess = os.Exit
 
 func main() {
 	if err := run(os.Args[1:], os.Stderr); err != nil {
-		os.Exit(1)
+		exitProcess(1)
 	}
 }
 
