@@ -29,6 +29,7 @@ type Provider struct {
 	mu          sync.Mutex
 	token       string
 	tokenExpiry time.Time
+	receipts    map[string]string
 }
 
 var _ outbox.Provider = (*Provider)(nil)
@@ -42,7 +43,16 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 	if p == nil || strings.TrimSpace(p.CorpID) == "" || strings.TrimSpace(p.AgentID) == "" || strings.TrimSpace(p.AppSecret) == "" || ctx == nil {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
 	}
-	if value.ReplyTarget.ConversationKind != "direct" || value.ReplyTarget.ReceiverID == "" {
+	key := deliveryKey(value)
+	p.mu.Lock()
+	if value.ReplyID != "" && p.receipts != nil {
+		if receipt := p.receipts[key]; receipt != "" {
+			p.mu.Unlock()
+			return receipt, nil
+		}
+	}
+	p.mu.Unlock()
+	if (value.ReplyTarget.ConversationKind != "direct" && value.ReplyTarget.ConversationKind != "group") || value.ReplyTarget.ReceiverID == "" || (value.ReplyTarget.ConversationKind == "group" && value.ReplyTarget.BindingID == "") {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
 	}
 	if len([]byte(value.Payload)) == 0 || len([]byte(value.Payload)) > maximumTextBytes {
@@ -56,17 +66,24 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 	if parseErr != nil || agentID <= 0 || strconv.Itoa(agentID) != strings.TrimSpace(p.AgentID) {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
 	}
-	body, _ := json.Marshal(struct {
-		ToUser  string `json:"touser"`
+	target := struct {
+		ToUser  string `json:"touser,omitempty"`
+		ChatID  string `json:"chatid,omitempty"`
 		MsgType string `json:"msgtype"`
 		AgentID int    `json:"agentid"`
 		Text    struct {
 			Content string `json:"content"`
 		} `json:"text"`
 		Safe int `json:"safe"`
-	}{value.ReplyTarget.ReceiverID, "text", agentID, struct {
+	}{MsgType: "text", AgentID: agentID, Text: struct {
 		Content string `json:"content"`
-	}{value.Payload}, 0})
+	}{value.Payload}, Safe: 0}
+	if value.ReplyTarget.ConversationKind == "group" {
+		target.ChatID = value.ReplyTarget.ReceiverID
+	} else {
+		target.ToUser = value.ReplyTarget.ReceiverID
+	}
+	body, _ := json.Marshal(target)
 	endpoint := p.baseURL() + "/cgi-bin/message/send?access_token=" + url.QueryEscape(token)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -108,12 +125,32 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 	if result.MsgID == "" {
 		return "", &outbox.DeliveryError{Class: "provider_error", Retryable: true}
 	}
+	p.mu.Lock()
+	if value.ReplyID != "" {
+		if p.receipts == nil {
+			p.receipts = make(map[string]string)
+		}
+		p.receipts[key] = result.MsgID
+	}
+	p.mu.Unlock()
 	return result.MsgID, nil
 }
 
 // Reconcile reports unknown because WeCom does not expose a stable receipt query for app text sends.
-func (p *Provider) Reconcile(context.Context, storage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
+func (p *Provider) Reconcile(_ context.Context, value storage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
+	if p == nil {
+		return outbox.DeliveryUnknown, "", nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if receipt := p.receipts[deliveryKey(value)]; receipt != "" {
+		return outbox.DeliveryAccepted, receipt, nil
+	}
 	return outbox.DeliveryUnknown, "", nil
+}
+
+func deliveryKey(value storage.ReplyOutbox) string {
+	return value.TenantID + "\x00" + value.ReplyID + "\x00" + strconv.Itoa(value.SegmentIndex)
 }
 
 func (p *Provider) accessToken(ctx context.Context) (string, error) {
