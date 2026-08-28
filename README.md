@@ -153,6 +153,7 @@
 - [x] 实现 Gateway 的鉴权、租户解析、Agent 路由、限流和请求去重
 - [x] 实现普通及流式对话 API，并贯穿 `request_id` / `trace_id`
 - [ ] 实现无状态 Worker 和基于共享 Session/Memory 后端的水平扩展
+- [ ] 实现 Durable execution queue 的 lease、fencing、retry 和 shutdown（Issue #76）
 - [x] 实现 `context.Context` 取消、Runner Event 通道排空和 goroutine 生命周期管理
 - [x] 实现健康检查、readiness、优雅摘流和服务关闭（生产入口缺少 bootstrap 配置时快速失败）
 
@@ -173,6 +174,7 @@
 - [x] 实现 Memory 写入后的跨节点可见性和异步向量索引
 - [ ] 实现 Redis 到 SQL、以及本地到远端向量库的租户级迁移流程
 - [ ] 实现全量复制、双写、增量追平、校验、切读和回滚工具
+- [ ] 实现 Issue #76 Redis/SQL、向量迁移与租户级 cutover/rollback 工具
 
 ### IM Channel Adapter
 
