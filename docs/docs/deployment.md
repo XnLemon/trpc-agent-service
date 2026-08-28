@@ -125,9 +125,9 @@ curl --fail http://127.0.0.1:8080/readyz
 `OTEL_SERVICE_NAME` 已由 ConfigMap 提供；其余非敏感配置可在 overlay 中覆盖。任何缺失的
 数据库、identity、Admin 或模型配置都会在绑定 HTTP 端口前 fail closed。
 
-升级已有环境时不要改写已执行 migration 的版本号。版本 `0011_runtime_capabilities.up.sql`
-属于已发布的运行时能力迁移；本版本新增的 trace-parent 字段使用 `0012_reply_trace_parent.up.sql`，
-因此旧数据库可以继续校验历史并增量升级。首次部署前请确认数据库中的
+升级已有环境时不要改写已执行 migration 的版本号。当前发布顺序中 trace-parent 使用
+`0011_reply_trace_parent.up.sql`，运行时能力使用 `0012_runtime_capabilities.up.sql`；这两个
+文件的版本与 digest 必须保持不变，数据库应通过服务 bootstrap 继续增量升级。首次部署前请确认
 `schema_migrations` 没有未经审计的版本或 digest 修改。
 
 ## 配置参考

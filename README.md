@@ -201,7 +201,7 @@
 - [x] 采集请求量、延迟、终态错误率、IM 成功/重试/死信、token、成本和实际 Session/Storage 后端延迟指标（Issue #79 / PR #85）
 - [x] 提供通过授权 query adapter 的租户 usage dashboard、平台运维 process dashboard、告警规则并控制 provider/channel/model label 基数（Issue #79 / PR #85）
 - [x] 提供 Prometheus 可抓取的运行时指标路径，并保持默认 no-op 配置兼容（Issue #88 / PR #89；通过 OTLP Collector → Prometheus）
-- [ ] 持久化并恢复 Reply Outbox 的 W3C trace parent（Issue #91 / PR #92；等待合并）
+- [x] 持久化并恢复 Reply Outbox 的 W3C trace parent（Issue #91 / PR #92）
 
 ### 可靠性、运维与测试
 
@@ -235,9 +235,9 @@
 > Issue #31 的 Telegram long polling 文本 Adapter、Issue #37/#41 的 PostgreSQL 控制面与 Admin/
 > Bootstrap、Issue #45 的运行时 observability 阶段 A，以及 Issue #49/#50 的 Session/Event/
 > Reply Outbox 持久化和可靠投递。Issue #79/#88 已补齐运行时 trace、metrics、dashboard/alert
-> 及 Prometheus 导出路径；Issue #91 的跨 Outbox trace-parent 传递仍在 PR #92。完整
+> 及 Prometheus 导出路径；Issue #91 的跨 Outbox trace-parent 传递已由 PR #92 交付。完整
 > WeCom/Telegram webhook、rich update 和迁移工具仍未实现；Memory/Knowledge/Artifact 运行时
-> 能力在开放 PR #90 中，待合并后再视为主线交付。业务审计与用量成本已由 Issue #54/PR #55 交付。
+> 能力已由 Issue #75/PR #90 交付。业务审计与用量成本已由 Issue #54/PR #55 交付。
 
 ## 当前 PR 实现记录（不改变原验收要求）
 
@@ -266,9 +266,9 @@
   但这不代表 WeCom/Telegram webhook、媒体能力或完整业务观测
   能力已满足 README 原验收要求。
 
-> 当前开放 PR #90（Issue #75，运行时 Memory/Knowledge/Artifact 等能力）和 PR #92
-> （Issue #91，Outbox trace parent）尚未合并；它们不计入上方完成度。PR #90 当前 patch
-> coverage 约 80.4%，CI 的 Codecov patch 检查失败；PR #92 的当前检查已通过。
+> Issue #75（运行时 Memory/Knowledge/Artifact 等能力）已由 PR #90 合并，Issue #91
+>（Outbox trace parent）已由 PR #92 合并；它们已计入上方完成度。后续开放 PR 不计入
+>完成度，直到合并并有对应验证证据。
 
 ## 代码目录
 

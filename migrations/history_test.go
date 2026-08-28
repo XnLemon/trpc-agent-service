@@ -127,18 +127,17 @@ func TestMigrationHelpersAndSQLMockApplyVerify(t *testing.T) {
 	}
 }
 
-func TestApplyPreservesPreviouslyAppliedRuntimeCapabilitiesMigration(t *testing.T) {
+func TestApplyAcceptsReleasedTraceAndRuntimeHistory(t *testing.T) {
 	files, err := orderedFiles()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if files[10].name != "0011_runtime_capabilities.up.sql" || files[11].name != "0012_reply_trace_parent.up.sql" {
-		t.Fatalf("migration order = %q, %q", files[10].name, files[11].name)
+	if files[10].name != "0011_reply_trace_parent.up.sql" || files[11].name != "0012_runtime_capabilities.up.sql" {
+		t.Fatalf("released migration order = %q, %q", files[10].name, files[11].name)
 	}
 
-	// Version 11 was already released as runtime capabilities before the trace
-	// parent migration was added. Keep its digest immutable so an upgraded
-	// deployment can apply version 12 without invalidating existing history.
+	// The latest main release records both migrations in this order. Applying
+	// again must validate the immutable history without attempting either SQL.
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -147,18 +146,13 @@ func TestApplyPreservesPreviouslyAppliedRuntimeCapabilitiesMigration(t *testing.
 	mock.ExpectExec(`SELECT pg_advisory_lock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(`CREATE TABLE IF NOT EXISTS public.schema_migrations`).WillReturnResult(sqlmock.NewResult(0, 0))
 	historyRows := sqlmock.NewRows([]string{"version", "sha256"})
-	for _, migration := range files[:10] {
+	for _, migration := range files {
 		historyRows.AddRow(migration.version, migration.digest)
 	}
-	historyRows.AddRow(11, files[10].digest)
 	mock.ExpectQuery(`SELECT version, sha256 FROM public.schema_migrations`).WillReturnRows(historyRows)
-	mock.ExpectBegin()
-	mock.ExpectExec(`(?s).*`).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(`INSERT INTO public.schema_migrations`).WithArgs(12, files[11].name, files[11].digest, sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
 	mock.ExpectExec(`SELECT pg_advisory_unlock`).WithArgs(lockKey).WillReturnResult(sqlmock.NewResult(0, 1))
 	if err := Apply(context.Background(), db); err != nil {
-		t.Fatalf("Apply existing version 11 error = %v", err)
+		t.Fatalf("Apply released history error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
