@@ -12,11 +12,21 @@ assert_dockerignore_entry() {
   fi
 }
 
+assert_gitignore_entry() {
+  local entry="$1"
+  if ! grep -Fqx "$entry" .gitignore; then
+    echo "::error::.gitignore is missing: $entry" >&2
+    exit 1
+  fi
+}
+
 # A developer may copy the example to deploy/service.env before starting
 # Compose. Keep both the concrete file and other populated env files out of
 # the Docker build context while retaining *.env.example documentation.
 assert_dockerignore_entry "deploy/service.env"
 assert_dockerignore_entry "deploy/*.env"
+assert_gitignore_entry "deploy/service.env"
+assert_gitignore_entry "deploy/*.env"
 
 compose_config="$(mktemp)"
 custom_compose_config="$(mktemp)"
