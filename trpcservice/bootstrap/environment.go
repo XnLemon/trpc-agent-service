@@ -77,6 +77,7 @@ var (
 	openEnvironmentDatabase     = postgres.Open
 	applyEnvironmentMigrations  = migrations.Apply
 	verifyEnvironmentMigrations = migrations.Verify
+	newEnvironmentRuntimeStore  = environmentRuntimeStore
 	environmentWeComOwnerFunc   = environmentWeComOwner
 	newEnvironmentWeComWorker   = outbox.New
 )
@@ -142,7 +143,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, fmt.Errorf("%w: PostgreSQL control plane is unavailable", ErrInvalidConfig)
 	}
 	delegateSessions := inmemory.NewSessionService()
-	runtimeStore, err := environmentRuntimeStore(config.runtimeStorage, db)
+	runtimeStore, err := newEnvironmentRuntimeStore(config.runtimeStorage, db)
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = db.Close()
@@ -216,6 +217,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	})
 	if err != nil {
 		_ = delegateSessions.Close()
+		_ = runtimeStore.Close()
 		_ = db.Close()
 		return nil, err
 	}

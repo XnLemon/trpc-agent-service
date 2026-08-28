@@ -803,19 +803,32 @@ func TestNewFromEnvironmentBuildsRealGraphWhenDatabaseOpens(t *testing.T) {
 
 func TestNewFromEnvironmentClosesDatabaseWhenGraphConstructionFails(t *testing.T) {
 	setRequiredEnvironment(t)
-	registerBootstrapFailingPingDriver.Do(func() {
-		sql.Register("trpc-service-bootstrap-failing-ping", bootstrapFailingPingDriver{})
+	registerBootstrapPingDriver.Do(func() {
+		sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{})
 	})
-	db, err := sql.Open("trpc-service-bootstrap-failing-ping", "")
+	db, err := sql.Open("trpc-service-bootstrap-ping", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousStore := newEnvironmentRuntimeStore
+	tracker := &trackingRuntimeStore{RuntimeStore: runtimestorageinmemory.New()}
 	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
-	defer func() { openEnvironmentDatabase = previousOpen }()
+	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return errors.New("migration failed") }
+	newEnvironmentRuntimeStore = func(string, *sql.DB) (runtimestorage.RuntimeStore, error) { return tracker, nil }
+	defer func() {
+		openEnvironmentDatabase = previousOpen
+		applyEnvironmentMigrations = previousApply
+		newEnvironmentRuntimeStore = previousStore
+		_ = tracker.RuntimeStore.Close()
+	}()
 
-	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, postgres.ErrStorage) {
+	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("graph construction error = %v", err)
+	}
+	if !tracker.closed.Load() {
+		t.Fatal("runtime store remained open after graph construction failure")
 	}
 	if err := db.Ping(); err == nil {
 		t.Fatal("database remained open after graph construction failure")
@@ -943,7 +956,6 @@ func TestNewFromEnvironmentCleansUpWhenWeComWorkerSetupFails(t *testing.T) {
 }
 
 var registerBootstrapPingDriver sync.Once
-var registerBootstrapFailingPingDriver sync.Once
 
 func TestNewUsesDatabasePingAndBuildsPostgreSQLRepositories(t *testing.T) {
 	registerBootstrapPingDriver.Do(func() {
@@ -985,18 +997,15 @@ func (bootstrapPingConn) Close() error                        { return nil }
 func (bootstrapPingConn) Begin() (driver.Tx, error)           { return nil, driver.ErrSkip }
 func (bootstrapPingConn) Ping(context.Context) error          { return nil }
 
-type bootstrapFailingPingDriver struct{}
-
-func (bootstrapFailingPingDriver) Open(string) (driver.Conn, error) {
-	return bootstrapFailingPingConn{}, nil
+type trackingRuntimeStore struct {
+	runtimestorage.RuntimeStore
+	closed atomic.Bool
 }
 
-type bootstrapFailingPingConn struct{}
-
-func (bootstrapFailingPingConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
-func (bootstrapFailingPingConn) Close() error                        { return nil }
-func (bootstrapFailingPingConn) Begin() (driver.Tx, error)           { return nil, driver.ErrSkip }
-func (bootstrapFailingPingConn) Ping(context.Context) error          { return errors.New("ping failed") }
+func (store *trackingRuntimeStore) Close() error {
+	store.closed.Store(true)
+	return nil
+}
 
 func testConfig(t *testing.T) (Config, func()) {
 	t.Helper()
