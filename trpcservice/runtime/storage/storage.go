@@ -4,11 +4,31 @@ package storage
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"time"
 
 	pgstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
+
+// ValidateText enforces the same character bounds used by the runtime DDL.
+func ValidateText(value string, max int, requireNonEmpty bool) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return !requireNonEmpty && value == ""
+	}
+	return max <= 0 || len([]rune(value)) <= max
+}
+
+// ValidateEmbedding rejects non-finite values that JSON/PostgreSQL cannot represent.
+func ValidateEmbedding(values []float64) bool {
+	for _, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return false
+		}
+	}
+	return true
+}
 
 const maxReplyTargetIDRunes = 1024
 
