@@ -102,6 +102,30 @@ func TestStoreReplyCorrelationIsIdempotentAndConflictSafe(t *testing.T) {
 	}
 }
 
+func TestStoreReplyCorrelationNormalizesTraceParentAtPersistenceBoundary(t *testing.T) {
+	store := inmemory.New()
+	seedEvent(t, store, "tenant-a", "session-trace-parent", "event-trace-parent")
+	batch := []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "reply-trace-parent", EventID: "event-trace-parent", SegmentIndex: 0, SegmentCount: 1, Payload: "payload"}}
+	valid := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event-trace-parent", RequestID: "request", TraceParent: valid}, batch); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetReplyCorrelation(context.Background(), "tenant-a", "event-trace-parent")
+	if err != nil || got.TraceParent != valid {
+		t.Fatalf("valid traceparent = %q, %v", got.TraceParent, err)
+	}
+	seedEvent(t, store, "tenant-a", "session-invalid-trace-parent", "event-invalid-trace-parent")
+	invalid := runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event-invalid-trace-parent", RequestID: "request", TraceParent: "malformed"}
+	invalidBatch := []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "reply-invalid-trace-parent", EventID: invalid.EventID, SegmentIndex: 0, SegmentCount: 1, Payload: "payload"}}
+	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), invalid, invalidBatch); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.GetReplyCorrelation(context.Background(), invalid.TenantID, invalid.EventID)
+	if err != nil || got.TraceParent != "" {
+		t.Fatalf("invalid traceparent persisted as %q, %v", got.TraceParent, err)
+	}
+}
+
 func TestStoreDuplicateMessageAndConcurrentSequence(t *testing.T) {
 	store := inmemory.New()
 	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-1", nil); err != nil {

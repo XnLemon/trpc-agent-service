@@ -538,6 +538,12 @@ func ContextWithTraceParent(ctx context.Context, value string) context.Context {
 	return propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": value})
 }
 
+// NormalizeTraceParent returns a canonical valid W3C traceparent carrier, or
+// an empty string when value is missing or malformed.
+func NormalizeTraceParent(value string) string {
+	return TraceParentFromContext(ContextWithTraceParent(context.Background(), value))
+}
+
 func validTraceParent(value string) bool {
 	if value == "" {
 		return false

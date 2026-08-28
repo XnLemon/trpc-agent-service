@@ -8,6 +8,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	pgstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
@@ -34,6 +35,7 @@ func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID strin
 	if err != nil {
 		return runtimestorage.ReplyCorrelation{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
+	value.TraceParent = observability.NormalizeTraceParent(value.TraceParent)
 	return value, nil
 }
 
@@ -400,6 +402,7 @@ func (s *Store) EnqueueRepliesWithCorrelation(ctx context.Context, correlation r
 	if correlation.TenantID == "" || correlation.EventID == "" || correlation.RequestID == "" {
 		return nil, runtimestorage.ErrInvalid
 	}
+	correlation.TraceParent = observability.NormalizeTraceParent(correlation.TraceParent)
 	first, err := validateReplyBatchForCorrelation(correlation, values)
 	if err != nil {
 		return nil, err
