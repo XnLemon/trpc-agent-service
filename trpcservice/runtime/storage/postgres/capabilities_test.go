@@ -135,6 +135,94 @@ func TestPostgresCapabilityValidationRejectsMalformedInput(t *testing.T) {
 	}
 }
 
+// Exercise database-error branches for every capability method. sqlmock's
+// default unexpected-call error is sufficient to drive the repository mapping
+// paths without coupling this contract test to driver-specific messages.
+func TestPostgresCapabilityDatabaseErrorBranches(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name string
+		call func(*runtimepostgres.Store) error
+	}{
+		{"PutMemory", func(s *runtimepostgres.Store) error {
+			_, err := s.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", UserID: "user", Content: "content"})
+			return err
+		}},
+		{"GetMemory", func(s *runtimepostgres.Store) error { _, err := s.GetMemory(ctx, "tenant-a", "memory"); return err }},
+		{"ListMemories", func(s *runtimepostgres.Store) error { _, err := s.ListMemories(ctx, "tenant-a", "user", 1); return err }},
+		{"SearchMemories", func(s *runtimepostgres.Store) error {
+			_, err := s.SearchMemories(ctx, "tenant-a", "user", "query", 1)
+			return err
+		}},
+		{"DeleteMemory", func(s *runtimepostgres.Store) error { return s.DeleteMemory(ctx, "tenant-a", "memory") }},
+		{"EnqueueMemoryIndex", func(s *runtimepostgres.Store) error {
+			return s.EnqueueMemoryIndex(ctx, runtimestorage.MemoryRecord{TenantID: "tenant-a", MemoryID: "memory", Version: 1})
+		}},
+		{"PutSummary", func(s *runtimepostgres.Store) error {
+			_, err := s.PutSummary(ctx, runtimestorage.SummaryRecord{TenantID: "tenant-a", SessionID: "session", Text: "summary"})
+			return err
+		}},
+		{"GetSummary", func(s *runtimepostgres.Store) error {
+			_, err := s.GetSummary(ctx, "tenant-a", "session", "default")
+			return err
+		}},
+		{"PutKnowledge", func(s *runtimepostgres.Store) error {
+			_, err := s.PutKnowledge(ctx, runtimestorage.KnowledgeDocument{TenantID: "tenant-a", DocumentID: "document", Content: "content"})
+			return err
+		}},
+		{"GetKnowledge", func(s *runtimepostgres.Store) error {
+			_, err := s.GetKnowledge(ctx, "tenant-a", "document")
+			return err
+		}},
+		{"SearchKnowledge", func(s *runtimepostgres.Store) error {
+			_, err := s.SearchKnowledge(ctx, "tenant-a", []float64{1}, 1)
+			return err
+		}},
+		{"DeleteKnowledge", func(s *runtimepostgres.Store) error { return s.DeleteKnowledge(ctx, "tenant-a", "document") }},
+		{"PutArtifact", func(s *runtimepostgres.Store) error {
+			_, err := s.PutArtifact(ctx, runtimestorage.ArtifactRecord{TenantID: "tenant-a", ArtifactID: "artifact", Content: []byte("x")})
+			return err
+		}},
+		{"GetArtifact", func(s *runtimepostgres.Store) error { _, err := s.GetArtifact(ctx, "tenant-a", "artifact"); return err }},
+		{"ListArtifacts", func(s *runtimepostgres.Store) error { _, err := s.ListArtifacts(ctx, "tenant-a", ""); return err }},
+		{"DeleteArtifact", func(s *runtimepostgres.Store) error { return s.DeleteArtifact(ctx, "tenant-a", "artifact") }},
+		{"AppendAudit", func(s *runtimepostgres.Store) error {
+			_, err := s.AppendAudit(ctx, runtimestorage.AuditRecord{TenantID: "tenant-a", AuditID: "audit", EventType: "event"})
+			return err
+		}},
+		{"ListAudit", func(s *runtimepostgres.Store) error {
+			_, err := s.ListAudit(ctx, "tenant-a", time.Time{}, 1)
+			return err
+		}},
+		{"UpsertVector", func(s *runtimepostgres.Store) error {
+			return s.UpsertVector(ctx, runtimestorage.VectorRecord{TenantID: "tenant-a", DocumentID: "document", Embedding: []float64{1}})
+		}},
+		{"SearchVectors", func(s *runtimepostgres.Store) error {
+			_, err := s.SearchVectors(ctx, "tenant-a", []float64{1}, 1)
+			return err
+		}},
+		{"DeleteVector", func(s *runtimepostgres.Store) error { return s.DeleteVector(ctx, "tenant-a", "document") }},
+		{"PutObject", func(s *runtimepostgres.Store) error {
+			_, err := s.PutObject(ctx, "tenant-a", "object", strings.NewReader("x"), "text/plain")
+			return err
+		}},
+		{"GetObject", func(s *runtimepostgres.Store) error { _, _, err := s.GetObject(ctx, "tenant-a", "object"); return err }},
+		{"DeleteObject", func(s *runtimepostgres.Store) error { return s.DeleteObject(ctx, "tenant-a", "object") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err := tc.call(runtimepostgres.New(db)); err == nil {
+				t.Fatalf("%s unexpectedly succeeded against an unconfigured database", tc.name)
+			}
+		})
+	}
+}
+
 func TestPostgresCapabilityMethodsHonorCanceledContext(t *testing.T) {
 	db, _, err := sqlmock.New()
 	if err != nil {
