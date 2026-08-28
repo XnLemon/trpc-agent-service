@@ -61,9 +61,12 @@ leased (lease expired) -> leased  (new fencing token)
 `trpcservice/runtime/migration` 将迁移拆成可重放阶段，每一步都按租户隔离并产生
 `Report`：
 
-1. **copy**：读取源快照，按 `(tenant_id, kind, key)` 排序写入目标；重复执行安全。
-2. **dual-write**：在切换前由应用同时写 source/destination，记录单调 watermark。
-3. **catch-up**：从 watermark 继续增量，直到 source/destination 的 watermark 相等。
+1. **dual-write barrier**：先在源端记录初始 watermark，再启用应用的
+   source/destination 双写；在屏障建立前拒绝（或短暂排队）不可追踪的写入。
+2. **copy**：读取带快照 watermark 的源快照，按 `(tenant_id, kind, key)` 排序写入
+   目标；重复执行安全。快照期间的写入都由双写记录在 watermark 之后。
+3. **catch-up**：从初始 watermark（含快照期间的增量）继续增量，直到
+   source/destination 的 watermark 相等。
 4. **validate**：按规范化 JSON 计算 SHA-256 checksum，比较记录数、字节数和 digest；
    任一租户失败都阻止切换。
 5. **cutover**：原子地把租户路由标记为 destination，并保留旧 source 的只读窗口。
