@@ -29,18 +29,21 @@ type Phase string
 const (
 	// PhaseDualWrite establishes the source write barrier.
 	PhaseDualWrite Phase = "dual_write"
-	PhaseCopy      Phase = "copy"
-	PhaseCatchUp   Phase = "catch_up"
-	PhaseValidate  Phase = "validate"
-	PhaseCutover   Phase = "cutover"
-	PhaseRollback  Phase = "rollback"
+	// PhaseCopy copies the source snapshot after the barrier.
+	PhaseCopy     Phase = "copy"
+	PhaseCatchUp  Phase = "catch_up"
+	PhaseValidate Phase = "validate"
+	PhaseCutover  Phase = "cutover"
+	PhaseRollback Phase = "rollback"
 )
 
+// Backend identifies a migration route endpoint.
 type Backend string
 
 const (
 	// BackendSource identifies the original provider.
-	BackendSource      Backend = "source"
+	BackendSource Backend = "source"
+	// BackendDestination identifies the target provider.
 	BackendDestination Backend = "destination"
 )
 
