@@ -593,15 +593,43 @@ func (provider environmentRuntimeCapabilityProvider) New(ctx context.Context, in
 	// workers when one runner is torn down.
 	switch provider.capability {
 	case backend.CapabilityMemory:
-		return borrowedMemoryStore{MemoryStore: provider.store}, nil
+		store, ok := provider.store.(runtimestorage.MemoryStore)
+		if !ok {
+			return nil, backend.ErrStorageFactory
+		}
+		return borrowedMemoryStore{MemoryStore: store}, nil
 	case backend.CapabilitySummary:
-		return borrowedSummaryStore{SummaryStore: provider.store}, nil
+		store, ok := provider.store.(runtimestorage.SummaryStore)
+		if !ok {
+			return nil, backend.ErrStorageFactory
+		}
+		return borrowedSummaryStore{SummaryStore: store}, nil
 	case backend.CapabilityKnowledge:
-		return borrowedKnowledgeStore{KnowledgeStore: provider.store, VectorStore: provider.store}, nil
+		knowledge, ok := provider.store.(runtimestorage.KnowledgeStore)
+		if !ok {
+			return nil, backend.ErrStorageFactory
+		}
+		vector, ok := provider.store.(runtimestorage.VectorStore)
+		if !ok {
+			return nil, backend.ErrStorageFactory
+		}
+		return borrowedKnowledgeStore{KnowledgeStore: knowledge, VectorStore: vector}, nil
 	case backend.CapabilityArtifact:
-		return borrowedArtifactStore{ArtifactStore: provider.store, ObjectStore: provider.store}, nil
+		artifact, ok := provider.store.(runtimestorage.ArtifactStore)
+		if !ok {
+			return nil, backend.ErrStorageFactory
+		}
+		object, ok := provider.store.(runtimestorage.ObjectStore)
+		if !ok {
+			return nil, backend.ErrStorageFactory
+		}
+		return borrowedArtifactStore{ArtifactStore: artifact, ObjectStore: object}, nil
 	case backend.CapabilityAudit:
-		return borrowedAuditStore{AuditStore: provider.store}, nil
+		store, ok := provider.store.(runtimestorage.AuditStore)
+		if !ok {
+			return nil, backend.ErrStorageFactory
+		}
+		return borrowedAuditStore{AuditStore: store}, nil
 	default:
 		return nil, backend.ErrStorageFactory
 	}
