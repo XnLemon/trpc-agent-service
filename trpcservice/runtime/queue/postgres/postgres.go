@@ -89,20 +89,20 @@ func (s *Store) Claim(ctx context.Context, tenantID, owner string, lease time.Du
 
 // Complete marks a fenced task complete.
 func (s *Store) Complete(ctx context.Context, tenantID, taskID, owner string, fence int64) (queue.Task, error) {
-	return s.transition(ctx, tenantID, taskID, owner, fence, queue.StatusCompleted, "", "NULL")
+	return s.transition(ctx, tenantID, taskID, owner, fence, queue.StatusCompleted, "", "NULL", time.Time{})
 }
 
 // Retry schedules a fenced task for another attempt.
 func (s *Store) Retry(ctx context.Context, tenantID, taskID, owner string, fence int64, next time.Time, class string) (queue.Task, error) {
-	return s.transition(ctx, tenantID, taskID, owner, fence, queue.StatusRetryable, class, "$6")
+	return s.transition(ctx, tenantID, taskID, owner, fence, queue.StatusRetryable, class, "$6", next)
 }
 
 // Fail dead-letters a fenced task.
 func (s *Store) Fail(ctx context.Context, tenantID, taskID, owner string, fence int64, class string) (queue.Task, error) {
-	return s.transition(ctx, tenantID, taskID, owner, fence, queue.StatusFailed, class, "NULL")
+	return s.transition(ctx, tenantID, taskID, owner, fence, queue.StatusFailed, class, "NULL", time.Time{})
 }
 
-func (s *Store) transition(ctx context.Context, tenantID, taskID, owner string, fence int64, status queue.Status, class, nextExpr string) (queue.Task, error) {
+func (s *Store) transition(ctx context.Context, tenantID, taskID, owner string, fence int64, status queue.Status, class, nextExpr string, next time.Time) (queue.Task, error) {
 	if err := check(ctx); err != nil {
 		return queue.Task{}, err
 	}
@@ -113,7 +113,7 @@ func (s *Store) transition(ctx context.Context, tenantID, taskID, owner string, 
 	argsList := []any{tenantID, taskID, owner, string(status), class, fence}
 	if nextExpr == "$6" {
 		query = "UPDATE public.runtime_execution_queue SET status=$4,lease_owner='',lease_expires_at=NULL,next_attempt_at=$6,last_error_class=COALESCE(NULLIF($5,''),last_error_class),updated_at=now() WHERE tenant_id=$1 AND task_id=$2 AND status='leased' AND lease_owner=$3 AND fencing_token=$7 AND lease_expires_at>now() RETURNING " + columns
-		argsList = []any{tenantID, taskID, owner, string(status), class, time.Now().UTC(), fence}
+		argsList = []any{tenantID, taskID, owner, string(status), class, next, fence}
 	}
 	var value queue.Task
 	err := s.db.QueryRowContext(ctx, query, argsList...).Scan(args(&value)...)

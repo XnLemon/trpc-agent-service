@@ -85,7 +85,7 @@ func TestPostgresQueueRetryFailAndClaimEmpty(t *testing.T) {
 	row := func(status string) *sqlmock.Rows {
 		return sqlmock.NewRows(columns).AddRow("tenant-a", "task-1", "run", []byte("payload"), status, 1, 2, "", nil, now, "temporary", now, now)
 	}
-	mock.ExpectQuery(regexp.QuoteMeta("UPDATE public.runtime_execution_queue SET status=$4")).WillReturnRows(row("retryable"))
+	mock.ExpectQuery(regexp.QuoteMeta("UPDATE public.runtime_execution_queue SET status=$4")).WithArgs("tenant-a", "task-1", "worker", string(queue.StatusRetryable), "temporary", now, int64(2)).WillReturnRows(row("retryable"))
 	if _, err := store.Retry(context.Background(), "tenant-a", "task-1", "worker", 2, now, "temporary"); err != nil {
 		t.Fatal(err)
 	}

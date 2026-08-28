@@ -53,6 +53,9 @@ func TestMigrationChecksumBlocksCutover(t *testing.T) {
 	source, destination, router := NewMemorySource(), NewMemoryDestination(), NewMemoryRouter()
 	_ = source.Put("tenant-a", Record{Kind: "session", Key: "s1", Payload: []byte("one")})
 	tool, _ := NewTool(source, destination, router)
+	if _, err := tool.Cutover(context.Background(), "tenant-a"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("cutover before dual-write = %v", err)
+	}
 	_, _ = tool.Begin(ctx, "tenant-a")
 	_, _ = tool.Copy(ctx, "tenant-a")
 	_ = source.Put("tenant-a", Record{Kind: "session", Key: "s1", Payload: []byte("two")})

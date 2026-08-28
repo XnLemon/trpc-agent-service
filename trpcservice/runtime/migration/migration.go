@@ -30,10 +30,14 @@ const (
 	// PhaseDualWrite establishes the source write barrier.
 	PhaseDualWrite Phase = "dual_write"
 	// PhaseCopy copies the source snapshot after the barrier.
-	PhaseCopy     Phase = "copy"
-	PhaseCatchUp  Phase = "catch_up"
+	PhaseCopy Phase = "copy"
+	// PhaseCatchUp applies source changes after the initial watermark.
+	PhaseCatchUp Phase = "catch_up"
+	// PhaseValidate compares canonical source and destination digests.
 	PhaseValidate Phase = "validate"
-	PhaseCutover  Phase = "cutover"
+	// PhaseCutover switches a tenant to the destination backend.
+	PhaseCutover Phase = "cutover"
+	// PhaseRollback restores the pre-cutover backend.
 	PhaseRollback Phase = "rollback"
 )
 
@@ -216,6 +220,12 @@ func (t *Tool) Validate(ctx context.Context, tenantID string) (Report, error) {
 func (t *Tool) Cutover(ctx context.Context, tenantID string) (Report, error) {
 	if err := validate(ctx, tenantID); err != nil {
 		return Report{}, err
+	}
+	t.mu.Lock()
+	_, barrierKnown := t.barriers[tenantID]
+	t.mu.Unlock()
+	if !barrierKnown {
+		return Report{}, ErrConflict
 	}
 	validation, err := t.Validate(ctx, tenantID)
 	if err != nil {
