@@ -38,7 +38,6 @@ import (
 	tenantmysql "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/mysql"
 	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
-	"trpc.group/trpc-go/trpc-agent-go/model/openai"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
@@ -184,7 +183,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = delegateSessions.Close()
 		_ = runtimeStore.Close()
 		_ = db.Close()
-		return nil, ErrInvalidConfig
+		return nil, fmt.Errorf("%w: environment repositories: %v", ErrInvalidConfig, err)
 	}
 	auditWriter = metrics.WrapAuditWriter(auditWriter, config.telemetry)
 	wecomFactory, wecomWorker, err := environmentWeComComponents(config, channelRepo, tenantRepo, appRepo, runtimeStore, auditWriter)
@@ -192,21 +191,21 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = delegateSessions.Close()
 		_ = runtimeStore.Close()
 		_ = db.Close()
-		return nil, ErrInvalidConfig
+		return nil, fmt.Errorf("%w: wecom components: %v", ErrInvalidConfig, err)
 	}
 	secretRegistry, modelRegistry, backendRegistry, err := environmentRegistries(config, delegateSessions, runtimeStore)
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = runtimeStore.Close()
 		_ = db.Close()
-		return nil, ErrInvalidConfig
+		return nil, fmt.Errorf("%w: environment registries: %v", ErrInvalidConfig, err)
 	}
 	storageFactory, err := backend.NewRegistryStorageFactory(backendRegistry, secretRegistry)
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = runtimeStore.Close()
 		_ = db.Close()
-		return nil, ErrInvalidConfig
+		return nil, fmt.Errorf("%w: storage factory: %v", ErrInvalidConfig, err)
 	}
 	graph, err := NewWithDatabase(ctx, db, Config{
 		OwnDB:               true,
@@ -849,9 +848,9 @@ func (environmentModelFactory) New(ctx context.Context, input modelprofile.Model
 	if provider != "" && provider != defaultModelProvider {
 		return nil, fmt.Errorf("model factory provider %q is unsupported", input.Provider)
 	}
-	options := []openai.Option{openai.WithAPIKey(apiKey)}
-	if endpoint := strings.TrimSpace(input.Endpoint); endpoint != "" {
-		options = append(options, openai.WithBaseURL(endpoint))
+	endpoint := strings.TrimSpace(input.Endpoint)
+	if endpoint == "" {
+		endpoint = "https://api.openai.com/v1"
 	}
-	return openai.New(input.Model, options...), nil
+	return &responsesModel{apiKey: apiKey, endpoint: endpoint, model: input.Model}, nil
 }

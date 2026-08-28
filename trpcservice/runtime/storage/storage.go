@@ -183,10 +183,11 @@ type ReplyOutbox struct {
 // asynchronously delivered reply. It is kept separately so existing reply
 // rows remain backwards compatible.
 type ReplyCorrelation struct {
-	TenantID  string
-	EventID   string
-	RequestID string
-	TraceID   string
+	TenantID    string
+	EventID     string
+	RequestID   string
+	TraceID     string
+	TraceParent string
 }
 
 // ReplyTransition requests a fenced reply lifecycle transition.

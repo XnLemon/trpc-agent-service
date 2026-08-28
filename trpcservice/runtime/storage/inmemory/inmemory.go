@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 )
 
@@ -156,6 +157,7 @@ func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID strin
 	if !ok {
 		return runtimestorage.ReplyCorrelation{}, runtimestorage.ErrNotFound
 	}
+	value.TraceParent = observability.NormalizeTraceParent(value.TraceParent)
 	return value, nil
 }
 
@@ -483,6 +485,7 @@ func (s *Store) EnqueueRepliesWithCorrelation(ctx context.Context, correlation r
 	if correlation.TenantID == "" || correlation.EventID == "" || correlation.RequestID == "" {
 		return nil, runtimestorage.ErrInvalid
 	}
+	correlation.TraceParent = observability.NormalizeTraceParent(correlation.TraceParent)
 	return s.enqueueReplies(ctx, correlation, values)
 }
 

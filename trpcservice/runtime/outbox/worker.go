@@ -256,6 +256,7 @@ func (w *Worker) claimCandidate(ctx context.Context, candidate runtimestorage.Re
 }
 
 func (w *Worker) processClaimed(ctx context.Context, candidate, claimed runtimestorage.ReplyOutbox) (err error) {
+	ctx = restoreCorrelationContext(ctx, w.store, claimed)
 	started := time.Now()
 	operationCtx, _, finishOperation := observability.StartOperation(ctx, w.telemetry, observability.OperationChannelSend, "channel")
 	labels := map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "channel": w.channel, "provider": w.providerName}
@@ -287,6 +288,23 @@ func (w *Worker) processClaimed(ctx context.Context, candidate, claimed runtimes
 		return w.acceptDelivery(ctx, operationCtx, claimed, providerID)
 	}
 	return w.rejectDelivery(ctx, operationCtx, claimed, deliveryErr)
+}
+
+func restoreCorrelationContext(ctx context.Context, store runtimestorage.RuntimeStore, value runtimestorage.ReplyOutbox) context.Context {
+	ctx = observability.ContextWithoutTraceParent(ctx)
+	correlations, ok := store.(runtimestorage.ReplyCorrelationStore)
+	if !ok {
+		return ctx
+	}
+	correlation, err := correlations.GetReplyCorrelation(ctx, value.TenantID, value.EventID)
+	if err != nil {
+		return ctx
+	}
+	if correlation.TraceParent == "" {
+		return observability.WithCorrelation(ctx, correlation.RequestID, correlation.TraceID)
+	}
+	ctx = observability.ContextWithTraceParent(ctx, correlation.TraceParent)
+	return observability.WithCorrelation(ctx, correlation.RequestID, correlation.TraceID)
 }
 
 func (w *Worker) acceptDelivery(ctx, operationCtx context.Context, claimed runtimestorage.ReplyOutbox, providerID string) error {

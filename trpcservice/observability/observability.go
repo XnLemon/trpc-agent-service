@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/metric"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -508,6 +509,56 @@ func TraceID(ctx context.Context) string {
 	}
 	value, _ := ctx.Value(traceIDKey).(string)
 	return value
+}
+
+// TraceParentFromContext returns a valid W3C traceparent carrier value, or an
+// empty string when ctx has no valid remote/local span context.
+func TraceParentFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	carrier := propagation.MapCarrier{}
+	propagation.TraceContext{}.Inject(ctx, carrier)
+	value := carrier.Get("traceparent")
+	if !validTraceParent(value) {
+		return ""
+	}
+	return value
+}
+
+// ContextWithTraceParent restores a valid W3C traceparent without retaining
+// baggage. Invalid values leave ctx unchanged.
+func ContextWithTraceParent(ctx context.Context, value string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !validTraceParent(value) {
+		return ctx
+	}
+	return propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": value})
+}
+
+// NormalizeTraceParent returns a canonical valid W3C traceparent carrier, or
+// an empty string when value is missing or malformed.
+func NormalizeTraceParent(value string) string {
+	return TraceParentFromContext(ContextWithTraceParent(context.Background(), value))
+}
+
+// ContextWithoutTraceParent preserves cancellation and values while removing
+// any ambient span, so a subsequent operation starts a new root trace.
+func ContextWithoutTraceParent(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return trace.ContextWithSpanContext(ctx, trace.SpanContext{})
+}
+
+func validTraceParent(value string) bool {
+	if value == "" {
+		return false
+	}
+	ctx := propagation.TraceContext{}.Extract(context.Background(), propagation.MapCarrier{"traceparent": value})
+	return trace.SpanContextFromContext(ctx).IsValid()
 }
 
 // ErrorClass maps an error to a stable telemetry class.
