@@ -223,6 +223,27 @@ func TestPostgresCapabilityDatabaseErrorBranches(t *testing.T) {
 	}
 }
 
+func TestPutKnowledgeProjectionErrorIsReported(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mock.ExpectQuery(regexp.QuoteMeta("INSERT INTO public.runtime_knowledge")).
+		WithArgs("tenant-a", "doc", "content", []byte("{}"), []byte("[1,0]"), sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "document_id", "content", "metadata", "embedding", "digest", "version", "created_at", "updated_at"}).
+			AddRow("tenant-a", "doc", "content", []byte("{}"), []byte("[1,0]"), "digest", int64(1), when, when))
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO public.runtime_vector_index")).
+		WithArgs("tenant-a", "doc", int64(1)).WillReturnError(errors.New("projection failed"))
+	if _, err := runtimepostgres.New(db).PutKnowledge(context.Background(), runtimestorage.KnowledgeDocument{TenantID: "tenant-a", DocumentID: "doc", Content: "content", Embedding: []float64{1, 0}}); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("projection error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPostgresCapabilityMethodsHonorCanceledContext(t *testing.T) {
 	db, _, err := sqlmock.New()
 	if err != nil {
