@@ -10,34 +10,43 @@ import (
 	"strings"
 )
 
+// ErrInvalid reports malformed provider configuration or message input.
 var ErrInvalid = errors.New("invalid wechat provider")
 
+// Product identifies the WeChat product boundary.
 type Product string
 
 const (
-	ProductPublicAccount   Product = "public_account"
+	// ProductPublicAccount identifies an official/public account.
+	ProductPublicAccount Product = "public_account"
+	// ProductCustomerService identifies the customer-service API.
 	ProductCustomerService Product = "customer_service"
 )
 
+// Message is the minimal provider-neutral outbound message.
 type Message struct {
 	ToUser string
 	Text   string
 }
 
+// PublicConfig configures a public account provider.
 type PublicConfig struct {
 	AppID     string
 	AppSecret string
 }
 
+// CustomerServiceConfig configures a customer-service provider.
 type CustomerServiceConfig struct {
 	AppID     string
 	AppSecret string
 }
 
+// PublicSender is the public-account transport owned by the caller.
 type PublicSender interface {
 	SendPublic(context.Context, Message) (string, error)
 }
 
+// CustomerServiceSender is the customer-service transport owned by the caller.
 type CustomerServiceSender interface {
 	SendCustomerService(context.Context, Message) (string, error)
 }

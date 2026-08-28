@@ -9,7 +9,9 @@ import (
 )
 
 const (
-	KindText     = "text"
+	// KindText identifies a rendered text reply.
+	KindText = "text"
+	// KindFallback identifies a deterministic safe fallback reply.
 	KindFallback = "fallback"
 
 	// StableFallback is used when a stream has no renderable text or contains a

@@ -639,7 +639,15 @@ func hasMedia(message *models.Message) bool {
 			}
 		}
 	}
-	return message.Animation != nil || message.Audio != nil || message.Document != nil || message.PaidMedia != nil || message.Sticker != nil || message.Story != nil || message.Video != nil || message.VideoNote != nil || message.Voice != nil || message.Checklist != nil || message.Contact != nil || message.Dice != nil || message.Game != nil || message.Poll != nil || message.Venue != nil || message.Location != nil || message.Invoice != nil || message.SuccessfulPayment != nil || message.RefundedPayment != nil || message.UsersShared != nil || message.ChatShared != nil || message.Gift != nil || message.UniqueGift != nil || message.GiftUpgradeSent != nil || message.LivePhoto != nil
+	return hasPrimaryMedia(message) || hasSecondaryMedia(message)
+}
+
+func hasPrimaryMedia(message *models.Message) bool {
+	return message.Animation != nil || message.Audio != nil || message.Document != nil || message.PaidMedia != nil || message.Sticker != nil || message.Story != nil || message.Video != nil || message.VideoNote != nil || message.Voice != nil || message.Checklist != nil || message.Contact != nil
+}
+
+func hasSecondaryMedia(message *models.Message) bool {
+	return message.Dice != nil || message.Game != nil || message.Poll != nil || message.Venue != nil || message.Location != nil || message.Invoice != nil || message.SuccessfulPayment != nil || message.RefundedPayment != nil || message.UsersShared != nil || message.ChatShared != nil || message.Gift != nil || message.UniqueGift != nil || message.GiftUpgradeSent != nil || message.LivePhoto != nil
 }
 
 func hasUnsupportedMessage(message *models.Message) bool {
