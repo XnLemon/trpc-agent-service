@@ -588,8 +588,15 @@ func (provider environmentRuntimeCapabilityProvider) New(ctx context.Context, in
 	if provider.capability == backend.CapabilitySession {
 		return runtimesessionpostgres.NewWithObservability(input.TenantID, provider.delegate, provider.store, provider.telemetry, provider.backend)
 	}
-	return provider.store, nil
+	// The runtime store is owned by the environment, not by an individual
+	// tenant CapabilitySet. Wrap it so factory cleanup cannot stop shared
+	// workers when one runner is torn down.
+	return borrowedRuntimeStore{RuntimeStore: provider.store}, nil
 }
+
+type borrowedRuntimeStore struct{ runtimestorage.RuntimeStore }
+
+func (borrowedRuntimeStore) Close() error { return nil }
 
 func (provider environmentSessionCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, _ backend.CapabilityBinding, _ modelprofile.SecretValue) (any, error) {
 	if ctx == nil {
