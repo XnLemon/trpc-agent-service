@@ -9,8 +9,11 @@ import (
 )
 
 var (
+	// ErrRegistryClosed reports operations attempted after registry shutdown.
 	ErrRegistryClosed = errors.New("wecom registry is closed")
-	ErrAccountExists  = errors.New("wecom account already exists")
+	// ErrAccountExists reports a duplicate tenant/account registration.
+	ErrAccountExists = errors.New("wecom account already exists")
+	// ErrAccountMissing reports an unknown tenant/account registration.
 	ErrAccountMissing = errors.New("wecom account not found")
 )
 
@@ -30,10 +33,12 @@ type Registry struct {
 	accounts map[string]*Provider
 }
 
+// NewRegistry creates an empty tenant/account provider registry.
 func NewRegistry() *Registry { return &Registry{accounts: make(map[string]*Provider)} }
 
 func accountKey(tenantID, accountID string) string { return tenantID + "\x00" + accountID }
 
+// Register adds one tenant/account provider to the registry.
 func (r *Registry) Register(account Account) error {
 	if r == nil || strings.TrimSpace(account.TenantID) == "" || strings.TrimSpace(account.AccountID) == "" || account.Provider == nil {
 		return fmt.Errorf("%w: account is invalid", ErrInvalid)
@@ -54,6 +59,7 @@ func (r *Registry) Register(account Account) error {
 	return nil
 }
 
+// Resolve returns the provider scoped to one tenant and account.
 func (r *Registry) Resolve(tenantID, accountID string) (*Provider, error) {
 	if r == nil {
 		return nil, ErrAccountMissing
@@ -70,6 +76,7 @@ func (r *Registry) Resolve(tenantID, accountID string) (*Provider, error) {
 	return provider, nil
 }
 
+// Remove unregisters one tenant/account provider.
 func (r *Registry) Remove(tenantID, accountID string) error {
 	if r == nil {
 		return ErrAccountMissing
@@ -87,6 +94,7 @@ func (r *Registry) Remove(tenantID, accountID string) error {
 	return nil
 }
 
+// Close rejects new registry operations and releases account references.
 func (r *Registry) Close() error {
 	if r == nil {
 		return nil
@@ -108,6 +116,7 @@ type WorkerGroup struct {
 	wg       sync.WaitGroup
 }
 
+// NewWorkerGroup creates a bounded worker group for one provider registry.
 func NewWorkerGroup(registry *Registry, limit int) (*WorkerGroup, error) {
 	if registry == nil || limit < 1 {
 		return nil, fmt.Errorf("%w: worker group configuration is invalid", ErrInvalid)
@@ -115,6 +124,7 @@ func NewWorkerGroup(registry *Registry, limit int) (*WorkerGroup, error) {
 	return &WorkerGroup{registry: registry, sem: make(chan struct{}, limit)}, nil
 }
 
+// Dispatch admits one bounded operation against a tenant/account provider.
 func (g *WorkerGroup) Dispatch(ctx context.Context, tenantID, accountID string, fn func(context.Context, *Provider) error) error {
 	if g == nil || ctx == nil || fn == nil {
 		return fmt.Errorf("%w: dispatch is invalid", ErrInvalid)
@@ -140,6 +150,7 @@ func (g *WorkerGroup) Dispatch(ctx context.Context, tenantID, accountID string, 
 	return fn(ctx, provider)
 }
 
+// Close rejects admissions and waits for accepted work to finish.
 func (g *WorkerGroup) Close() error {
 	if g == nil {
 		return nil

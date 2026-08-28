@@ -58,6 +58,7 @@ type PublicProvider struct {
 	sender PublicSender
 }
 
+// NewPublicProvider constructs a public-account provider boundary.
 func NewPublicProvider(config PublicConfig, sender PublicSender) (*PublicProvider, error) {
 	if err := validateConfig(config.AppID, config.AppSecret); err != nil || sender == nil {
 		return nil, fmt.Errorf("%w: public account configuration is invalid", ErrInvalid)
@@ -65,8 +66,10 @@ func NewPublicProvider(config PublicConfig, sender PublicSender) (*PublicProvide
 	return &PublicProvider{config: config, sender: sender}, nil
 }
 
+// Product returns the public-account product marker.
 func (p *PublicProvider) Product() Product { return ProductPublicAccount }
 
+// Send sends one public-account message.
 func (p *PublicProvider) Send(ctx context.Context, message Message) (string, error) {
 	if p == nil || p.sender == nil || ctx == nil || !validMessage(message) {
 		return "", ErrInvalid
@@ -80,6 +83,7 @@ type CustomerServiceProvider struct {
 	sender CustomerServiceSender
 }
 
+// NewCustomerServiceProvider constructs a customer-service provider boundary.
 func NewCustomerServiceProvider(config CustomerServiceConfig, sender CustomerServiceSender) (*CustomerServiceProvider, error) {
 	if err := validateConfig(config.AppID, config.AppSecret); err != nil || sender == nil {
 		return nil, fmt.Errorf("%w: customer service configuration is invalid", ErrInvalid)
@@ -87,8 +91,10 @@ func NewCustomerServiceProvider(config CustomerServiceConfig, sender CustomerSer
 	return &CustomerServiceProvider{config: config, sender: sender}, nil
 }
 
+// Product returns the customer-service product marker.
 func (p *CustomerServiceProvider) Product() Product { return ProductCustomerService }
 
+// Send sends one customer-service message.
 func (p *CustomerServiceProvider) Send(ctx context.Context, message Message) (string, error) {
 	if p == nil || p.sender == nil || ctx == nil || !validMessage(message) {
 		return "", ErrInvalid
