@@ -273,7 +273,8 @@ func TestMaterializerDefaultSegmentSizeAndUnicodeSplit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	count, err := m.Materialize(context.Background(), MaterializeInput{TenantID: "tenant-a", EventID: "event-default", ReplyID: "reply-default", RequestID: "request-default", TraceID: "trace-default", Payload: "你好"})
+	validTraceParent := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	count, err := m.Materialize(context.Background(), MaterializeInput{TenantID: "tenant-a", EventID: "event-default", ReplyID: "reply-default", RequestID: "request-default", TraceID: "trace-default", TraceParent: validTraceParent, Payload: "你好"})
 	if err != nil || count != 1 {
 		t.Fatalf("default materialization = %d/%v", count, err)
 	}
@@ -282,7 +283,7 @@ func TestMaterializerDefaultSegmentSizeAndUnicodeSplit(t *testing.T) {
 		t.Fatalf("unicode row = %+v/%v", rows, err)
 	}
 	correlation, err := store.GetReplyCorrelation(context.Background(), "tenant-a", "event-default")
-	if err != nil || correlation.RequestID != "request-default" || correlation.TraceID != "trace-default" {
+	if err != nil || correlation.RequestID != "request-default" || correlation.TraceID != "trace-default" || correlation.TraceParent != validTraceParent {
 		t.Fatalf("materializer correlation = %+v/%v", correlation, err)
 	}
 	if got := splitRunes("  ", 2); got != nil {
@@ -455,6 +456,16 @@ func TestWorkerTelemetryPropagatesCorrelationAndRedactsProviderClasses(t *testin
 		if labels["error_class"] == "provider_error" {
 			t.Fatalf("unbounded provider class leaked into metric labels: %+v", labels)
 		}
+	}
+}
+
+func TestRestoreCorrelationContextDropsAmbientSpanWhenCorrelationUnavailable(t *testing.T) {
+	valid := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	ambient := observability.ContextWithTraceParent(context.Background(), valid)
+	value := runtimestorage.ReplyOutbox{TenantID: "tenant-a", EventID: "event-legacy"}
+	ctx := restoreCorrelationContext(ambient, inmemory.New(), value)
+	if got := observability.TraceParentFromContext(ctx); got != "" {
+		t.Fatalf("ambient traceparent retained for legacy correlation: %q", got)
 	}
 }
 

@@ -658,12 +658,33 @@ func TestRuntimeStoreEnqueueRepliesWithCorrelationIsAtomic(t *testing.T) {
 	store := runtimepostgres.New(db)
 	when := time.Now().UTC()
 	mock.ExpectBegin()
-	mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant-a"))
+	mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace", "").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant-a"))
 	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply", "event", 0, 1, "payload", "", "", "", "").WillReturnRows(replyRow(when))
 	mock.ExpectCommit()
 	rows, err := store.EnqueueRepliesWithCorrelation(context.Background(), runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event", RequestID: "request", TraceID: "trace"}, []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 1, Payload: "payload"}})
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("atomic materialization = %+v err=%v", rows, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeStoreEnqueueRepliesWithCorrelationNormalizesTraceParent(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := runtimepostgres.New(db)
+	when := time.Now().UTC()
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace", "").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant-a"))
+	mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply", "event", 0, 1, "payload", "", "", "", "").WillReturnRows(replyRow(when))
+	mock.ExpectCommit()
+	correlation := runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event", RequestID: "request", TraceID: "trace", TraceParent: "malformed"}
+	if _, err := store.EnqueueRepliesWithCorrelation(context.Background(), correlation, []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 1, Payload: "payload"}}); err != nil {
+		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -706,24 +727,24 @@ func TestRuntimeStoreEnqueueRepliesWithCorrelationFailureBoundaries(t *testing.T
 		}},
 		{name: "correlation conflict", setup: func(mock sqlmock.Sqlmock, _ time.Time) {
 			mock.ExpectBegin()
-			mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace").WillReturnError(sql.ErrNoRows)
+			mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace", "").WillReturnError(sql.ErrNoRows)
 			mock.ExpectRollback()
 		}},
 		{name: "correlation storage failure", setup: func(mock sqlmock.Sqlmock, _ time.Time) {
 			mock.ExpectBegin()
-			mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace").WillReturnError(errors.New("correlation failed"))
+			mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace", "").WillReturnError(errors.New("correlation failed"))
 			mock.ExpectRollback()
 		}},
 		{name: "segment failure", setup: func(mock sqlmock.Sqlmock, when time.Time) {
 			mock.ExpectBegin()
-			mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant-a"))
+			mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace", "").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant-a"))
 			mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply", "event", 0, 1, "payload", "", "", "", "").WillReturnError(errors.New("segment failed"))
 			mock.ExpectRollback()
 			_ = when
 		}},
 		{name: "commit failure", setup: func(mock sqlmock.Sqlmock, when time.Time) {
 			mock.ExpectBegin()
-			mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant-a"))
+			mock.ExpectQuery("INSERT INTO public.runtime_reply_correlation").WithArgs("tenant-a", "event", "request", "trace", "").WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow("tenant-a"))
 			mock.ExpectQuery("INSERT INTO public.reply_outbox").WithArgs("tenant-a", "reply", "event", 0, 1, "payload", "", "", "", "").WillReturnRows(replyRow(when))
 			mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
 		}},
@@ -753,14 +774,14 @@ func TestRuntimeStoreReplyCorrelationGet(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	store := runtimepostgres.New(db)
 	value := runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event", RequestID: "request", TraceID: "trace"}
-	mock.ExpectQuery("SELECT tenant_id,event_id,request_id,trace_id FROM public.runtime_reply_correlation").WithArgs(value.TenantID, value.EventID).WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "event_id", "request_id", "trace_id"}).AddRow(value.TenantID, value.EventID, value.RequestID, value.TraceID))
+	mock.ExpectQuery("SELECT tenant_id,event_id,request_id,trace_id,trace_parent FROM public.runtime_reply_correlation").WithArgs(value.TenantID, value.EventID).WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "event_id", "request_id", "trace_id", "trace_parent"}).AddRow(value.TenantID, value.EventID, value.RequestID, value.TraceID, ""))
 	if got, err := store.GetReplyCorrelation(context.Background(), value.TenantID, value.EventID); err != nil || got != value {
 		t.Fatalf("get = %+v, %v", got, err)
 	}
 	if _, err := store.GetReplyCorrelation(context.Background(), "", value.EventID); !errors.Is(err, runtimestorage.ErrInvalid) {
 		t.Fatalf("invalid get = %v", err)
 	}
-	mock.ExpectQuery("SELECT tenant_id,event_id,request_id,trace_id FROM public.runtime_reply_correlation").WithArgs(value.TenantID, "missing").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT tenant_id,event_id,request_id,trace_id,trace_parent FROM public.runtime_reply_correlation").WithArgs(value.TenantID, "missing").WillReturnError(sql.ErrNoRows)
 	if _, err := store.GetReplyCorrelation(context.Background(), value.TenantID, "missing"); !errors.Is(err, runtimestorage.ErrNotFound) {
 		t.Fatalf("missing get = %v", err)
 	}

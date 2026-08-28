@@ -466,7 +466,7 @@ func (dispatcher *Dispatcher) finishDurable(ctx context.Context, requestID, trac
 	replyID := ""
 	if terminalErr == nil && dispatcher.materializer != nil && strings.TrimSpace(reply) != "" {
 		var err error
-		segments, err = dispatcher.materializer.Materialize(durableCtx, outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: requestID, TraceID: traceID, Payload: reply, ReplyTarget: durable.replyTarget})
+		segments, err = dispatcher.materializer.Materialize(durableCtx, outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: requestID, TraceID: traceID, TraceParent: observability.TraceParentFromContext(durableCtx), Payload: reply, ReplyTarget: durable.replyTarget})
 		if err != nil {
 			terminalErr = err
 		} else {
