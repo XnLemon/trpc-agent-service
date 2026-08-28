@@ -115,7 +115,8 @@ curl --fail http://127.0.0.1:8080/readyz
 | --- | --- | --- |
 | `POSTGRES_DB` | `trpc_agent` | PostgreSQL 容器初始化数据库名 |
 | `POSTGRES_USER` | `trpc` | PostgreSQL 容器初始化用户 |
-| `POSTGRES_PASSWORD` | `trpc-local-password` | 本地演示密码；生产使用 Secret Manager |
+| `POSTGRES_PASSWORD` | `trpc-local-password` | 本地演示密码；生产使用 Secret Manager；默认 DSN 会同步使用它 |
+| `TRPC_POSTGRES_DSN` | 由上面三个变量派生 | PostgreSQL 服务连接；显式设置时覆盖派生值，不要放进参数或日志 |
 | `TRPC_HTTP_PORT` | `8080` | 宿主机映射端口，容器内固定为 8080 |
 | `TRPC_SERVICE_IMAGE` | `trpc-agent-service:local` | 服务镜像名/标签，供 CI 或本地覆盖 |
 
@@ -124,7 +125,7 @@ curl --fail http://127.0.0.1:8080/readyz
 | 变量 | 必需/默认 | 说明 |
 | --- | --- | --- |
 | `TRPC_CONTROL_PLANE_DRIVER` | 否，`postgres` | `postgres` 或 `mysql` |
-| `TRPC_POSTGRES_DSN` | PostgreSQL 时必需 | 控制面和 PostgreSQL runtime 的连接；不要放进参数或日志 |
+| `TRPC_POSTGRES_DSN` | PostgreSQL 时必需 | 控制面和 PostgreSQL runtime 的连接；Compose 未显式设置时由 `POSTGRES_USER/PASSWORD/DB` 派生；不要放进参数或日志 |
 | `TRPC_MYSQL_DSN` | MySQL 时必需 | 应用账号连接 |
 | `TRPC_MYSQL_MIGRATION_DSN` | MySQL 时必需 | 独立 migration 账号连接；不能与应用账号复用 |
 | `TRPC_API_IDENTITIES` | 多租户可选 | 逗号分隔 `token\|tenant\|app\|subject`；设置后替代旧 identity 字段 |
