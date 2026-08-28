@@ -254,3 +254,19 @@ func TestQueueErrorHelpersAndInvalidContext(t *testing.T) {
 		t.Fatalf("tenant hint = %q", got)
 	}
 }
+
+func TestWorkerCloseBeforeStartPreventsRun(t *testing.T) {
+	store := NewMemory()
+	defer store.Close()
+	_, _, _ = store.Enqueue(context.Background(), TaskInput{TenantID: "tenant-a", TaskID: "task-1", Kind: "run", Payload: []byte("payload")})
+	worker, err := New(Config{Store: store, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, Handler: func(context.Context, Task) error { t.Fatal("handler ran after close"); return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := worker.RunOnce(context.Background()); ok || !errors.Is(err, ErrClosed) {
+		t.Fatalf("run after close = ok=%v err=%v", ok, err)
+	}
+}

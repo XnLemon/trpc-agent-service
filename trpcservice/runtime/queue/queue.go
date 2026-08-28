@@ -162,6 +162,12 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	if w == nil || ctx == nil {
 		return false, ErrInvalid
 	}
+	w.mu.Lock()
+	closed := w.closed
+	w.mu.Unlock()
+	if closed {
+		return false, ErrClosed
+	}
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
