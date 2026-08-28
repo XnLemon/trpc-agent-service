@@ -135,6 +135,13 @@ func TestApplyAcceptsReleasedTraceAndRuntimeHistory(t *testing.T) {
 	if files[10].name != "0011_reply_trace_parent.up.sql" || files[11].name != "0012_runtime_capabilities.up.sql" {
 		t.Fatalf("released migration order = %q, %q", files[10].name, files[11].name)
 	}
+	const (
+		releasedTraceDigest   = "6022eecd427ab1f6528f77284874ea97f85370f9dba646cd1c9de3ee93975557"
+		releasedRuntimeDigest = "b4cc9f948d2595e5552cfef58c1f6be668f79f783463db006a5123627c95632c"
+	)
+	if files[10].digest != releasedTraceDigest || files[11].digest != releasedRuntimeDigest {
+		t.Fatalf("released migration digest changed = %q, %q", files[10].digest, files[11].digest)
+	}
 
 	// The latest main release records both migrations in this order. Applying
 	// again must validate the immutable history without attempting either SQL.

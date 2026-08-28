@@ -2,6 +2,7 @@
 # "set: pipefail: invalid option name" on CRLF checkouts (e.g. Windows).
 *.sh text eol=lf
 *.go text eol=lf
+*.sql text eol=lf
 
 # GitHub Actions workflows
 *.yml text eol=lf
