@@ -49,6 +49,38 @@ Collector 导出的名称和 labels 必须保持 `deploy/observability/grafana-d
 与 `deploy/observability/prometheus-rules.yml` 中的 `trpcservice_*` 查询兼容。指标的
 属性继续由 observability 白名单过滤，高基数或敏感值被丢弃/脱敏。
 
+## 本地验收证据（Mock 数据）
+
+以下截图证明本地的 metrics 和 trace 链路已经打通。截图均来自 localhost 上的
+Grafana、Prometheus、OTel Collector 和 Tempo；请求、延迟、token、cost、Runner、
+backend、delivery 以及 trace span 都是人工生成的 mock 数据，不代表生产流量或真实
+租户成本。
+
+### 图 1：Metrics 采集
+
+Grafana Explore 的 Metrics 页面可以直接查询 trpcservice_* 时序，说明数据已经
+经过 OTel Collector 转换并被 Prometheus scrape：
+
+![图 1：Prometheus metrics mock 采集](assets/issue-88/metrics-explore.png)
+
+### 图 2：Runtime Dashboard
+
+平台级 runtime dashboard 展示请求速率、Operation p95、Runner、token/cost、Channel
+delivery 和 backend latency 等固定低基数聚合：
+
+![图 2：Runtime dashboard mock 数据](assets/issue-88/runtime-dashboard.png)
+
+### 图 3：Trace 泳道
+
+Tempo Explore 中的测试 Trace ID 为 6309a3ed2e3d53cfb3965bd07135367e，可以看到
+http.request、gateway.dispatch、runner.execution、model.call 和 tool.call 的父子层级：
+
+![图 3：Tempo trace mock 泳道](assets/issue-88/trace-explore.png)
+
+Trace 截图同样是 mock span。真实 WeCom/Telegram 请求需要在服务进程配置 OTLP endpoint
+后，通过 Grafana Explore → Tempo 按时间或 Trace ID 查询；异步 Outbox channel.send
+的跨进程 parent context 持久化由 follow-up Issue #91 跟踪。
+
 ## Issue #88 台账
 
 - [x] OTLP metric exporter 与 provider shutdown 生命周期
