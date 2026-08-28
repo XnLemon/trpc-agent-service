@@ -85,11 +85,19 @@ images:
     digest: sha256:<published-image-digest>
 ```
 
+镜像发布是应用前的外部前置条件：当前仓库没有 GHCR 镜像发布 workflow，CI 只构建本地
+`trpc-agent-service:ci` 并执行 smoke test。因此，只有在
+`ghcr.io/xnlemon/trpc-agent-service:0.1.0` 已经由发布系统推送且集群具备 registry 拉取权限时，
+才能直接应用下面的 base。没有该外部 artifact 时，必须先在生产 overlay 中覆盖为已发布的
+tag 或 digest，再应用 overlay；不能把本地 CI 镜像名当作集群镜像。
+
 准备好 namespace、Secret 和 overlay 后：
 
 ```bash
 kubectl -n trpc-agent create namespace trpc-agent --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n trpc-agent apply -f deploy/kubernetes/secret.example.yaml # 仅适用于已替换且受控的副本
+# 仅当上面的 0.1.0 GHCR 镜像已发布时直接使用 base；否则改为你的 overlay：
+# kubectl -n trpc-agent apply -k deploy/kubernetes/overlays/production
 kubectl -n trpc-agent apply -k deploy/kubernetes
 kubectl -n trpc-agent rollout status deployment/trpc-agent-service --timeout=5m
 kubectl -n trpc-agent get pods -l app.kubernetes.io/name=trpc-agent-service
