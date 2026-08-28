@@ -128,6 +128,18 @@ func TestTraceParentRoundTripRejectsInvalidValues(t *testing.T) {
 			t.Fatalf("invalid traceparent %q was retained as %q", invalid, got)
 		}
 	}
+	if got := NormalizeTraceParent(valid); got != valid {
+		t.Fatalf("normalized traceparent = %q, want %q", got, valid)
+	}
+	if got := NormalizeTraceParent("malformed"); got != "" {
+		t.Fatalf("malformed traceparent normalized as %q", got)
+	}
+	if got := TraceParentFromContext(ContextWithoutTraceParent(ctx)); got != "" {
+		t.Fatalf("ambient traceparent retained after reset: %q", got)
+	}
+	if ContextWithoutTraceParent(nil) == nil {
+		t.Fatal("nil context reset returned nil")
+	}
 }
 
 func TestTelemetryAdaptersEnforceSafeFieldsAndWrapSDKPrimitives(t *testing.T) {
