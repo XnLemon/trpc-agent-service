@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -584,5 +585,27 @@ func TestInMemoryCapabilityValidationAndOrderingBranches(t *testing.T) {
 	}
 	if _, err := store.PutObject(ctx, "tenant-a", "broken", failingReader{}, ""); !errors.Is(err, runtimestorage.ErrStorage) {
 		t.Fatalf("failing object reader = %v", err)
+	}
+}
+
+func TestInMemoryRejectsNonFiniteAndOversizedFields(t *testing.T) {
+	store := inmemory.New()
+	defer store.Close()
+	ctx := context.Background()
+	long := strings.Repeat("x", 300)
+	if _, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: long, UserID: "user", Content: "x"}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatal(err)
+	}
+	if _, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", UserID: "user", Content: "x", Embedding: []float64{math.NaN()}}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatal(err)
+	}
+	if _, err := store.PutKnowledge(ctx, runtimestorage.KnowledgeDocument{TenantID: "tenant-a", DocumentID: "doc", Content: "x", Digest: long}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatal(err)
+	}
+	if err := store.UpsertVector(ctx, runtimestorage.VectorRecord{TenantID: "tenant-a", DocumentID: "doc", Embedding: []float64{math.Inf(1)}}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatal(err)
+	}
+	if _, err := store.PutObject(ctx, "tenant-a", long, strings.NewReader("x"), ""); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatal(err)
 	}
 }
