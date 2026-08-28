@@ -1,0 +1,54 @@
+name: trpc-agent-service
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-trpc_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-trpc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trpc-local-password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: trpc-agent-service:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      TRPC_POSTGRES_DSN: ${TRPC_POSTGRES_DSN:-postgres://trpc:trpc-local-password@postgres:5432/trpc_agent?sslmode=disable}
+      TRPC_API_TOKEN: ${TRPC_API_TOKEN:-local-api-token}
+      TRPC_TENANT_ID: ${TRPC_TENANT_ID:-t_01ARZ3NDEKTSV4RRFFQ69G5FAV}
+      TRPC_APP_ID: ${TRPC_APP_ID:-app_01ARZ3NDEKTSV4RRFFQ69G5FAV}
+      TRPC_ADMIN_TOKEN: ${TRPC_ADMIN_TOKEN:-local-admin-token}
+      TRPC_ADMIN_TENANTS: ${TRPC_ADMIN_TENANTS:-*}
+      TRPC_MODEL_API_KEY: ${TRPC_MODEL_API_KEY:-local-development-key}
+      TRPC_SESSION_BACKEND: ${TRPC_SESSION_BACKEND:-postgres}
+      TRPC_MODEL_PROVIDER: ${TRPC_MODEL_PROVIDER:-openai}
+      TRPC_MODEL_NAMES: ${TRPC_MODEL_NAMES:-gpt-4o-mini}
+      TRPC_MODEL_ENDPOINT_HOSTS: ${TRPC_MODEL_ENDPOINT_HOSTS:-api.openai.com}
+      TRPC_MODEL_SECRET_REF: ${TRPC_MODEL_SECRET_REF:-env/trpc-model-api-key}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-trpc-agent-service}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_EXPORTER_OTLP_INSECURE: ${OTEL_EXPORTER_OTLP_INSECURE:-false}
+    ports:
+      - "${TRPC_HTTP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "/app/trpc-healthcheck", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
+
+volumes:
+  postgres-data:
