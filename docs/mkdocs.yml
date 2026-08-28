@@ -52,6 +52,7 @@ nav:
       - 租户审计与用量成本: audit-usage.md
       - 运行时可观测性契约: observability.md
       - "Issue #79 生产可观测性": issue-79-observability.md
+      - "Issue #88 Prometheus 可观测性": issue-88-prometheus.md
   - 运维与验证:
       - 运维方案: ops.md
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -72,7 +73,11 @@ const (
 	// #nosec G101 -- environment variable name, not a secret.
 	envWeComAppSecret = "WECOM_APP_SECRET"
 	// #nosec G101 -- environment variable name, not a secret.
-	envWeComSecretRef = "WECOM_SECRET_REF"
+	envWeComSecretRef  = "WECOM_SECRET_REF"
+	envOTLPEndpoint    = "OTEL_EXPORTER_OTLP_ENDPOINT"
+	envOTLPHeaders     = "OTEL_EXPORTER_OTLP_HEADERS"
+	envOTLPInsecure    = "OTEL_EXPORTER_OTLP_INSECURE"
+	envOTELServiceName = "OTEL_SERVICE_NAME"
 
 	defaultModelProvider = "openai"
 	defaultModelNames    = "gpt-4o-mini"
@@ -116,6 +121,7 @@ type environmentConfig struct {
 	runtimeStorage string
 	wecom          *environmentWeComConfig
 	telemetry      observability.Provider
+	otlp           observability.OTLPConfig
 }
 
 type environmentWeComConfig struct {
@@ -136,6 +142,19 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	telemetry, err := observability.NewOTLPProvider(ctx, config.otlp)
+	if err != nil {
+		return nil, fmt.Errorf("%w: telemetry exporter configuration is invalid", ErrInvalidConfig)
+	}
+	config.telemetry = telemetry
+	telemetryOwned := true
+	defer func() {
+		if telemetryOwned {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = telemetry.Shutdown(shutdownCtx)
+			cancel()
+		}
+	}()
 	modelCatalog, backendCatalog, err := environmentCatalogs(config)
 	if err != nil {
 		return nil, err
@@ -226,6 +245,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	telemetryOwned = false
 	return graph, nil
 }
 
@@ -359,7 +379,58 @@ func loadEnvironment() (environmentConfig, error) {
 			return environmentConfig{}, err
 		}
 	}
+	if err := config.loadTelemetry(); err != nil {
+		return environmentConfig{}, err
+	}
 	return config, nil
+}
+
+func (config *environmentConfig) loadTelemetry() error {
+	endpoint := strings.TrimSpace(os.Getenv(envOTLPEndpoint))
+	serviceName := strings.TrimSpace(environmentOrDefault(envOTELServiceName, "trpc-agent-service"))
+	if strings.ContainsAny(serviceName, "\r\n") || serviceName == "" {
+		return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envOTELServiceName)
+	}
+	headers, err := parseEnvironmentOTLPHeaders(os.Getenv(envOTLPHeaders))
+	if err != nil {
+		return err
+	}
+	insecure := false
+	if value := strings.TrimSpace(os.Getenv(envOTLPInsecure)); value != "" {
+		insecure, err = strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("%w: %s must be true or false", ErrInvalidConfig, envOTLPInsecure)
+		}
+	}
+	config.otlp = observability.OTLPConfig{ServiceName: serviceName, Endpoint: endpoint, Headers: headers, Insecure: insecure}
+	return nil
+}
+
+func parseEnvironmentOTLPHeaders(value string) (map[string]string, error) {
+	if strings.ContainsAny(value, "\r\n") {
+		return nil, fmt.Errorf("%w: %s contains an invalid entry", ErrInvalidConfig, envOTLPHeaders)
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	result := make(map[string]string)
+	for _, entry := range strings.Split(value, ",") {
+		entry = strings.TrimSpace(entry)
+		separator := strings.IndexByte(entry, '=')
+		if separator <= 0 || separator == len(entry)-1 {
+			return nil, fmt.Errorf("%w: %s entries must use key=value", ErrInvalidConfig, envOTLPHeaders)
+		}
+		key, headerValue := strings.TrimSpace(entry[:separator]), strings.TrimSpace(entry[separator+1:])
+		if key == "" || headerValue == "" || strings.ContainsAny(key, "\r\n\t ") || strings.ContainsAny(headerValue, "\r\n") {
+			return nil, fmt.Errorf("%w: %s contains an invalid entry", ErrInvalidConfig, envOTLPHeaders)
+		}
+		if _, exists := result[key]; exists {
+			return nil, fmt.Errorf("%w: %s contains duplicate keys", ErrInvalidConfig, envOTLPHeaders)
+		}
+		result[key] = headerValue
+	}
+	return result, nil
 }
 
 func (config *environmentConfig) loadDatabase() error {

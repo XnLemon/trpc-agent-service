@@ -5,8 +5,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -178,5 +181,49 @@ func TestProviderBranchesAndOTLPConstruction(t *testing.T) {
 	ctx := WithCorrelation(context.TODO(), "req", "trace")
 	if RequestID(ctx) != "req" || TraceID(ctx) != "trace" {
 		t.Fatal("nil/correlation context handling failed")
+	}
+}
+
+func TestOTLPProviderExportsMetricsToURLAndRejectsInvalidEndpoint(t *testing.T) {
+	var metricsRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/v1/metrics" {
+			metricsRequests.Add(1)
+		}
+		writer.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	provider, err := NewOTLPProvider(context.Background(), OTLPConfig{Endpoint: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.Meter("test").Counter("trpcservice_requests_total").Add(context.Background(), 1, Attribute{Key: "component", Value: "http"})
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := provider.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("provider shutdown = %v", err)
+	}
+	if metricsRequests.Load() == 0 {
+		t.Fatal("provider did not export an OTLP metrics request")
+	}
+	for _, endpoint := range []string{"collector/path", "http://", "ftp://collector:4318", "http://collector:bad path"} {
+		if _, err := NewOTLPProvider(context.Background(), OTLPConfig{Endpoint: endpoint}); err == nil {
+			t.Fatalf("invalid OTLP endpoint %q was accepted", endpoint)
+		}
+	}
+}
+
+func TestOTLPSignalEndpointURLAddsProtocolPaths(t *testing.T) {
+	for _, test := range []struct {
+		endpoint, suffix, want string
+	}{
+		{"http://collector:4318", "/v1/metrics", "http://collector:4318/v1/metrics"},
+		{"http://collector:4318/", "/v1/traces", "http://collector:4318/v1/traces"},
+		{"http://collector:4318/v1/otlp", "/v1/metrics", "http://collector:4318/v1/otlp/v1/metrics"},
+		{"http://collector:4318/v1/metrics", "/v1/metrics", "http://collector:4318/v1/metrics"},
+	} {
+		if got := otlpSignalEndpointURL(test.endpoint, test.suffix); got != test.want {
+			t.Fatalf("otlpSignalEndpointURL(%q, %q) = %q, want %q", test.endpoint, test.suffix, got, test.want)
+		}
 	}
 }
