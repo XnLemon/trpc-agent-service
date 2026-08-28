@@ -91,11 +91,11 @@ ETag，元数据事务仍由 SQL 负责。迁移工具不会把 secret、原始�
 | 项目 | 阶段 | 证据 | 状态 |
 | --- | --- | --- | --- |
 | 无状态 Gateway/Worker 角色和共享后端边界 | 文档 | 本页角色与拓扑 | ✅ |
-| Durable queue lease/fencing/retry/shutdown | 代码 | `runtime/queue` 契约与测试 | ⏳ |
-| Redis/SQL 与向量迁移、校验、切换、回滚 | 代码 | `runtime/migration` 契约与测试 | ⏳ |
-| copy、dual-write、catch-up、checksum 工具 | 代码 | 迁移报告和阶段测试 | ⏳ |
-| Session/IM 容量与故障测试 | 代码 | 队列/迁移并发、取消测试 | ⏳ |
-| migration DDL 与权限 | 代码 | `0013_execution_queue.up.sql` 和 migration 测试 | ⏳ |
+| Durable queue lease/fencing/retry/shutdown | 代码 | `runtime/queue` 契约与测试 | ✅ |
+| Redis/SQL 与向量迁移、校验、切换、回滚 | 代码 | `runtime/migration` 契约与测试 | ✅ |
+| copy、dual-write、catch-up、checksum 工具 | 代码 | 迁移报告和阶段测试 | ✅ |
+| Session/IM 容量与故障测试 | 代码 | 队列/迁移并发、取消测试 | ✅ |
+| migration DDL 与权限 | 代码 | `0013_execution_queue.up.sql` 和 migration 测试 | ✅ |
 
 完成代码阶段后，本表与 PR 描述同步；未实现的生产 provider、分布式锁和压测环境不
 会被标记为已交付。
