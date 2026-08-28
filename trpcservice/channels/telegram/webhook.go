@@ -35,6 +35,8 @@ type Webhook struct {
 	path    string
 	secret  []byte
 	maxBody int64
+	baseCtx context.Context
+	cancel  context.CancelFunc
 
 	mu      sync.Mutex
 	closing bool
@@ -59,7 +61,8 @@ func NewWebhook(adapter *Adapter, config WebhookConfig) (*Webhook, error) {
 	if path == "" {
 		return nil, fmt.Errorf("%w: webhook path is invalid", ErrInvalid)
 	}
-	return &Webhook{adapter: adapter, path: path, secret: []byte(config.SecretToken), maxBody: config.MaxBodyBytes}, nil
+	baseCtx, cancel := context.WithCancel(context.Background())
+	return &Webhook{adapter: adapter, path: path, secret: []byte(config.SecretToken), maxBody: config.MaxBodyBytes, baseCtx: baseCtx, cancel: cancel}, nil
 }
 
 // Channel identifies the wrapped Telegram adapter.
@@ -106,7 +109,15 @@ func (w *Webhook) ServeHTTP(response http.ResponseWriter, request *http.Request)
 	w.wg.Add(1)
 	w.mu.Unlock()
 	defer w.wg.Done()
-	err = w.adapter.HandleUpdate(request.Context(), &update)
+	operationCtx, operationCancel := context.WithCancel(context.WithoutCancel(request.Context()))
+	stopRequest := context.AfterFunc(request.Context(), operationCancel)
+	stopBase := context.AfterFunc(w.baseCtx, operationCancel)
+	defer func() {
+		stopRequest()
+		stopBase()
+		operationCancel()
+	}()
+	err = w.adapter.HandleUpdate(operationCtx, &update)
 	switch {
 	case err == nil, errors.Is(err, ErrDuplicateUpdate):
 		response.WriteHeader(http.StatusOK)
@@ -130,7 +141,11 @@ func (w *Webhook) BeginShutdown() {
 	}
 	w.mu.Lock()
 	w.closing = true
+	cancel := w.cancel
 	w.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // Close stops admissions, waits for accepted updates, and closes the wrapped

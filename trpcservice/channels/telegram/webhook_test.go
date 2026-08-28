@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
@@ -51,4 +53,51 @@ func TestWebhookAuthenticatesPathAndReplaysSafely(t *testing.T) {
 	}
 }
 
+func TestWebhookCloseCancelsAcceptedDispatch(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "webhook-close", "12345")
+	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
+	dispatcher := &dispatchStub{stream: func(ctx context.Context, _ gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+		stream := make(chan gateway.DispatchEvent)
+		go func() {
+			<-ctx.Done()
+			close(stream)
+		}()
+		return stream, nil
+	}}
+	adapter := newTestAdapter(t, target, dispatcher, client)
+	defer adapter.Close()
+	webhook, err := NewWebhook(adapter, WebhookConfig{Path: "/telegram/close", SecretToken: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(models.Update{ID: 101, Message: &models.Message{ID: 1, Chat: models.Chat{ID: 100, Type: models.ChatTypePrivate}, From: &models.User{ID: 42}, Text: "hello"}})
+	request := httptest.NewRequest(http.MethodPost, "http://example.test/telegram/close", bytesReader(body))
+	request.Header.Set("X-Telegram-Bot-Api-Secret-Token", "secret")
+	done := make(chan struct{})
+	go func() { webhook.ServeHTTP(httptest.NewRecorder(), request); close(done) }()
+	if err := waitForDispatch(t, dispatcher); err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan struct{})
+	go func() { _ = webhook.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("webhook close did not cancel accepted dispatch")
+	}
+	<-done
+}
+
 func bytesReader(value []byte) *bytes.Reader { return bytes.NewReader(value) }
+
+func waitForDispatch(t *testing.T, dispatcher *dispatchStub) error {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(dispatcher.requests()) > 0 {
+			return nil
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return errors.New("dispatch was not admitted")
+}
