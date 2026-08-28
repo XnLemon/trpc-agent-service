@@ -136,3 +136,121 @@ func TestWorkerCancellationLeavesRecoverableLease(t *testing.T) {
 		t.Fatalf("reclaim after cancellation = %v", err)
 	}
 }
+
+func TestSharedWorkersProcessSessionIMWorkload(t *testing.T) {
+	store := NewMemory()
+	defer store.Close()
+	const total = 64
+	for i := 0; i < total; i++ {
+		if _, _, err := store.Enqueue(context.Background(), TaskInput{TenantID: "tenant-a", TaskID: FormatTaskKey("im", string(rune(i))), Kind: "session.im", Payload: []byte("message")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var mu sync.Mutex
+	completed := 0
+	handler := func(context.Context, Task) error {
+		mu.Lock()
+		completed++
+		mu.Unlock()
+		return nil
+	}
+	workers := make([]*Worker, 2)
+	for i := range workers {
+		worker, err := New(Config{Store: store, TenantID: "tenant-a", Owner: FormatTaskKey("worker", string(rune('a'+i))), LeaseDuration: time.Second, Handler: handler})
+		if err != nil {
+			t.Fatal(err)
+		}
+		workers[i] = worker
+	}
+	var wg sync.WaitGroup
+	for _, worker := range workers {
+		wg.Add(1)
+		go func(worker *Worker) {
+			defer wg.Done()
+			for {
+				ok, err := worker.RunOnce(context.Background())
+				if err != nil {
+					t.Errorf("workload RunOnce = %v", err)
+					return
+				}
+				if !ok {
+					return
+				}
+			}
+		}(worker)
+	}
+	wg.Wait()
+	for _, worker := range workers {
+		_ = worker.Close()
+	}
+	if completed != total {
+		t.Fatalf("session/im workload completed=%d want=%d", completed, total)
+	}
+}
+
+func TestWorkerValidationAndDeadLetter(t *testing.T) {
+	store := NewMemory()
+	defer store.Close()
+	if _, err := New(Config{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid worker = %v", err)
+	}
+	_, _, _ = store.Enqueue(context.Background(), TaskInput{TenantID: "tenant-a", TaskID: "task-1", Kind: "run", Payload: []byte("payload")})
+	worker, err := New(Config{Store: store, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, Handler: func(context.Context, Task) error { return errors.New("permanent") }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := worker.RunOnce(context.Background()); !ok || err != nil {
+		t.Fatalf("dead-letter run = %v %v", ok, err)
+	}
+	value, err := store.Get(context.Background(), "tenant-a", "task-1")
+	if err != nil || value.Status != StatusFailed || value.LastErrorClass != "handler_error" {
+		t.Fatalf("dead-letter task = %+v err=%v", value, err)
+	}
+	if err := worker.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Start(context.Background()); !errors.Is(err, ErrClosed) {
+		t.Fatalf("second start = %v", err)
+	}
+	_ = worker.Close()
+}
+
+func TestMemoryStoreSharedBackendLifecycle(t *testing.T) {
+	backend := NewBackend()
+	first, second := NewMemoryWithBackend(backend), NewMemoryWithBackend(backend)
+	if _, _, err := first.Enqueue(context.Background(), TaskInput{TenantID: "tenant-a", TaskID: "task-1", Kind: "run", Payload: []byte("payload")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Get(context.Background(), "tenant-a", "task-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Claim(context.Background(), "tenant-a", "worker", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	_ = second.Close()
+}
+
+func TestQueueErrorHelpersAndInvalidContext(t *testing.T) {
+	var nilRetry *RetryableError
+	if nilRetry.Error() == "" || nilRetry.Unwrap() != nil || Retry(nil) != nil {
+		t.Fatal("nil retry helper contract failed")
+	}
+	wrapped := Retry(context.DeadlineExceeded)
+	if !errors.Is(wrapped, context.DeadlineExceeded) {
+		t.Fatal("retry wrapper lost cause")
+	}
+	store := NewMemory()
+	defer store.Close()
+	if _, err := store.Get(nil, "tenant", "task"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil context get = %v", err)
+	}
+	if _, err := store.Claim(context.Background(), "", "", time.Second); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid claim = %v", err)
+	}
+	if got := taskTenantHint(WithTenant(context.Background(), "tenant-a")); got != "tenant-a" {
+		t.Fatalf("tenant hint = %q", got)
+	}
+}

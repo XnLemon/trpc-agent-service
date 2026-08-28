@@ -11,20 +11,30 @@ import (
 )
 
 var (
-	ErrInvalid  = errors.New("invalid queue task")
+	// ErrInvalid reports malformed queue input.
+	ErrInvalid = errors.New("invalid queue task")
+	// ErrNotFound reports that no task matched the requested identity or claim.
 	ErrNotFound = errors.New("queue task not found")
+	// ErrConflict reports a stale lease or idempotency payload mismatch.
 	ErrConflict = errors.New("queue task lease conflict")
-	ErrClosed   = errors.New("queue is closed")
+	// ErrClosed reports use of a closed queue backend.
+	ErrClosed = errors.New("queue is closed")
 )
 
+// Status is the durable execution task lifecycle state.
 type Status string
 
 const (
-	StatusQueued    Status = "queued"
-	StatusLeased    Status = "leased"
+	// StatusQueued is an enqueued task awaiting its first lease.
+	StatusQueued Status = "queued"
+	// StatusLeased is a task currently owned by one worker fence.
+	StatusLeased Status = "leased"
+	// StatusRetryable is a task waiting for a retry backoff.
 	StatusRetryable Status = "retryable"
+	// StatusCompleted is a task successfully handled.
 	StatusCompleted Status = "completed"
-	StatusFailed    Status = "failed"
+	// StatusFailed is a terminal dead-letter task.
+	StatusFailed Status = "failed"
 )
 
 // Task is an immutable execution payload plus its durable lease metadata.
@@ -44,6 +54,7 @@ type Task struct {
 	UpdatedAt      time.Time
 }
 
+// TaskInput contains the identity and payload selected by a caller.
 type TaskInput struct {
 	TenantID string
 	TaskID   string
@@ -66,6 +77,7 @@ type Store interface {
 // until MaxAttempts is reached; other errors are dead-lettered immediately.
 type Handler func(context.Context, Task) error
 
+// RetryableError marks a handler failure eligible for another attempt.
 type RetryableError struct{ Cause error }
 
 func (e *RetryableError) Error() string {
@@ -82,6 +94,7 @@ func (e *RetryableError) Unwrap() error {
 	return e.Cause
 }
 
+// Retry wraps an error as retryable for a Worker.
 func Retry(err error) error {
 	if err == nil {
 		return nil
@@ -89,6 +102,7 @@ func Retry(err error) error {
 	return &RetryableError{Cause: err}
 }
 
+// Config configures a Worker lifecycle and retry policy.
 type Config struct {
 	Store         Store
 	Handler       Handler
@@ -101,6 +115,7 @@ type Config struct {
 	BackoffMax    time.Duration
 }
 
+// Worker owns one queue consumption loop and its handler leases.
 type Worker struct {
 	store         Store
 	handler       Handler
@@ -118,6 +133,7 @@ type Worker struct {
 	closed        bool
 }
 
+// New validates configuration and creates a Worker.
 func New(config Config) (*Worker, error) {
 	if config.Store == nil || config.Handler == nil || config.Owner == "" || config.LeaseDuration <= 0 {
 		return nil, ErrInvalid
@@ -268,6 +284,7 @@ func errorClass(err error) string {
 // view; an unscoped view may use the empty hint to claim any tenant.
 type tenantContextKey struct{}
 
+// WithTenant scopes a shared Store claim to one tenant for a single call.
 func WithTenant(ctx context.Context, tenantID string) context.Context {
 	return context.WithValue(ctx, tenantContextKey{}, tenantID)
 }
@@ -293,6 +310,7 @@ func validateInput(value TaskInput) error {
 	return nil
 }
 
+// Backend owns a shared in-memory task graph used by multiple store views.
 type Backend struct {
 	mu     sync.Mutex
 	tasks  map[string]Task
@@ -300,15 +318,19 @@ type Backend struct {
 	closed bool
 }
 
+// NewBackend creates an isolated shared in-memory task graph.
 func NewBackend() *Backend { return &Backend{tasks: map[string]Task{}, refs: 1} }
 
+// MemoryStore is a concurrency-safe queue.Store implementation.
 type MemoryStore struct {
 	backend   *Backend
 	closeOnce sync.Once
 }
 
+// NewMemory creates an in-memory queue store.
 func NewMemory() *MemoryStore { return &MemoryStore{backend: NewBackend()} }
 
+// NewMemoryWithBackend creates a store view over a shared backend.
 func NewMemoryWithBackend(backend *Backend) *MemoryStore {
 	if backend == nil {
 		backend = NewBackend()
@@ -322,6 +344,7 @@ func NewMemoryWithBackend(backend *Backend) *MemoryStore {
 	return &MemoryStore{backend: backend}
 }
 
+// Enqueue durably records one idempotent task.
 func (s *MemoryStore) Enqueue(ctx context.Context, input TaskInput) (Task, bool, error) {
 	if err := contextErr(ctx); err != nil {
 		return Task{}, false, err
@@ -347,6 +370,7 @@ func (s *MemoryStore) Enqueue(ctx context.Context, input TaskInput) (Task, bool,
 	return cloneTask(task), false, nil
 }
 
+// Get reads one tenant-scoped task snapshot.
 func (s *MemoryStore) Get(ctx context.Context, tenantID, taskID string) (Task, error) {
 	if err := contextErr(ctx); err != nil {
 		return Task{}, err
@@ -363,6 +387,7 @@ func (s *MemoryStore) Get(ctx context.Context, tenantID, taskID string) (Task, e
 	return cloneTask(task), nil
 }
 
+// Claim atomically leases the oldest eligible task and advances its fence.
 func (s *MemoryStore) Claim(ctx context.Context, tenantID, owner string, leaseDuration time.Duration) (Task, error) {
 	if err := contextErr(ctx); err != nil {
 		return Task{}, err
@@ -407,14 +432,17 @@ func (s *MemoryStore) Claim(ctx context.Context, tenantID, owner string, leaseDu
 	return cloneTask(task), nil
 }
 
+// Complete commits a successful task under the current lease fence.
 func (s *MemoryStore) Complete(ctx context.Context, tenantID, taskID, owner string, fence int64) (Task, error) {
 	return s.transition(ctx, tenantID, taskID, owner, fence, StatusCompleted, "", time.Time{})
 }
 
+// Retry returns a leased task to the retryable state.
 func (s *MemoryStore) Retry(ctx context.Context, tenantID, taskID, owner string, fence int64, next time.Time, class string) (Task, error) {
 	return s.transition(ctx, tenantID, taskID, owner, fence, StatusRetryable, class, next)
 }
 
+// Fail dead-letters a leased task under the current fence.
 func (s *MemoryStore) Fail(ctx context.Context, tenantID, taskID, owner string, fence int64, class string) (Task, error) {
 	return s.transition(ctx, tenantID, taskID, owner, fence, StatusFailed, class, time.Time{})
 }
@@ -441,6 +469,7 @@ func (s *MemoryStore) transition(ctx context.Context, tenantID, taskID, owner st
 	return cloneTask(task), nil
 }
 
+// Close releases this store view; shared state closes after the final view.
 func (s *MemoryStore) Close() error {
 	if s == nil || s.backend == nil {
 		return nil

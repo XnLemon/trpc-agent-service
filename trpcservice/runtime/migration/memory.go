@@ -7,6 +7,7 @@ import (
 
 // MemorySource and MemoryDestination are deterministic adapters for tests and
 // local dry-runs. They model a monotonic source change log and idempotent sink.
+// MemorySource is a deterministic source adapter for tests and dry-runs.
 type MemorySource struct {
 	mu      sync.Mutex
 	records map[string]map[string]Record
@@ -15,10 +16,12 @@ type MemorySource struct {
 	dual    map[string]bool
 }
 
+// NewMemorySource creates an empty source adapter.
 func NewMemorySource() *MemorySource {
 	return &MemorySource{records: map[string]map[string]Record{}, changes: map[string][]Change{}, seq: map[string]int64{}, dual: map[string]bool{}}
 }
 
+// BeginDualWrite records the current source watermark.
 func (s *MemorySource) BeginDualWrite(_ context.Context, tenantID string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -29,6 +32,7 @@ func (s *MemorySource) BeginDualWrite(_ context.Context, tenantID string) (int64
 	return s.seq[tenantID], nil
 }
 
+// Put appends one source record and advances its watermark.
 func (s *MemorySource) Put(tenantID string, record Record) error {
 	if tenantID == "" || record.Kind == "" || record.Key == "" {
 		return ErrInvalid
@@ -46,6 +50,7 @@ func (s *MemorySource) Put(tenantID string, record Record) error {
 	return nil
 }
 
+// Snapshot returns the current tenant records and watermark.
 func (s *MemorySource) Snapshot(_ context.Context, tenantID string) (Snapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -59,6 +64,7 @@ func (s *MemorySource) Snapshot(_ context.Context, tenantID string) (Snapshot, e
 	return Snapshot{Records: result, Watermark: s.seq[tenantID]}, nil
 }
 
+// Changes returns source log entries after a watermark.
 func (s *MemorySource) Changes(_ context.Context, tenantID string, after int64) ([]Change, int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -74,16 +80,19 @@ func (s *MemorySource) Changes(_ context.Context, tenantID string, after int64) 
 	return result, s.seq[tenantID], nil
 }
 
+// MemoryDestination is an idempotent destination adapter for tests.
 type MemoryDestination struct {
 	mu      sync.Mutex
 	records map[string]map[string]Record
 	water   map[string]int64
 }
 
+// NewMemoryDestination creates an empty destination adapter.
 func NewMemoryDestination() *MemoryDestination {
 	return &MemoryDestination{records: map[string]map[string]Record{}, water: map[string]int64{}}
 }
 
+// Apply upserts tenant records into the destination.
 func (d *MemoryDestination) Apply(_ context.Context, records []Record) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -102,6 +111,7 @@ func (d *MemoryDestination) Apply(_ context.Context, records []Record) error {
 	return nil
 }
 
+// Snapshot returns destination records and its applied watermark.
 func (d *MemoryDestination) Snapshot(_ context.Context, tenantID string) (Snapshot, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -115,13 +125,16 @@ func (d *MemoryDestination) Snapshot(_ context.Context, tenantID string) (Snapsh
 	return Snapshot{Records: result, Watermark: d.water[tenantID]}, nil
 }
 
+// MemoryRouter stores tenant backend selection for tests.
 type MemoryRouter struct {
 	mu      sync.Mutex
 	backend map[string]Backend
 }
 
+// NewMemoryRouter creates a source-default router.
 func NewMemoryRouter() *MemoryRouter { return &MemoryRouter{backend: map[string]Backend{}} }
 
+// Current reads the tenant's active backend.
 func (r *MemoryRouter) Current(_ context.Context, tenantID string) (Backend, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -135,6 +148,7 @@ func (r *MemoryRouter) Current(_ context.Context, tenantID string) (Backend, err
 	return value, nil
 }
 
+// Set changes the tenant's active backend.
 func (r *MemoryRouter) Set(_ context.Context, tenantID string, backend Backend) error {
 	if tenantID == "" || (backend != BackendSource && backend != BackendDestination) {
 		return ErrInvalid

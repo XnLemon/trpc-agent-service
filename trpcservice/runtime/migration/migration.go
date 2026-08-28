@@ -13,15 +13,21 @@ import (
 )
 
 var (
-	ErrInvalid    = errors.New("invalid migration request")
-	ErrConflict   = errors.New("migration conflict")
+	// ErrInvalid reports malformed migration input.
+	ErrInvalid = errors.New("invalid migration request")
+	// ErrConflict reports an invalid phase transition or missing barrier.
+	ErrConflict = errors.New("migration conflict")
+	// ErrValidation reports source/destination checksum divergence.
 	ErrValidation = errors.New("migration validation failed")
-	ErrNotFound   = errors.New("migration record not found")
+	// ErrNotFound reports missing migration state.
+	ErrNotFound = errors.New("migration record not found")
 )
 
+// Phase identifies a migration operation stage.
 type Phase string
 
 const (
+	// PhaseDualWrite establishes the source write barrier.
 	PhaseDualWrite Phase = "dual_write"
 	PhaseCopy      Phase = "copy"
 	PhaseCatchUp   Phase = "catch_up"
@@ -33,12 +39,14 @@ const (
 type Backend string
 
 const (
+	// BackendSource identifies the original provider.
 	BackendSource      Backend = "source"
 	BackendDestination Backend = "destination"
 )
 
 // Record is the provider-neutral migration unit. Payload is opaque to the
 // tool and is never copied into logs or reports.
+// Record is one tenant-scoped migration record.
 type Record struct {
 	TenantID string
 	Kind     string
@@ -47,32 +55,38 @@ type Record struct {
 	Version  int64
 }
 
+// Change is one monotonic source-log entry.
 type Change struct {
 	Sequence int64
 	Record   Record
 }
 
+// Snapshot is a point-in-time record set and source watermark.
 type Snapshot struct {
 	Records   []Record
 	Watermark int64
 }
 
+// Source reads snapshots and changes from the original backend.
 type Source interface {
 	BeginDualWrite(context.Context, string) (int64, error)
 	Snapshot(context.Context, string) (Snapshot, error)
 	Changes(context.Context, string, int64) ([]Change, int64, error)
 }
 
+// Destination applies records to the target backend.
 type Destination interface {
 	Apply(context.Context, []Record) error
 	Snapshot(context.Context, string) (Snapshot, error)
 }
 
+// Router controls the tenant's active backend selection.
 type Router interface {
 	Current(context.Context, string) (Backend, error)
 	Set(context.Context, string, Backend) error
 }
 
+// Report summarizes one migration phase without payload contents.
 type Report struct {
 	TenantID             string
 	Phase                Phase
@@ -87,6 +101,7 @@ type Report struct {
 	Validated            bool
 }
 
+// Tool orchestrates tenant-scoped migration phases.
 type Tool struct {
 	source      Source
 	destination Destination
@@ -96,6 +111,7 @@ type Tool struct {
 	cutovers    map[string]Backend
 }
 
+// NewTool validates migration adapters and creates a Tool.
 func NewTool(source Source, destination Destination, router Router) (*Tool, error) {
 	if source == nil || destination == nil || router == nil {
 		return nil, ErrInvalid
@@ -103,6 +119,7 @@ func NewTool(source Source, destination Destination, router Router) (*Tool, erro
 	return &Tool{source: source, destination: destination, router: router, barriers: map[string]int64{}, cutovers: map[string]Backend{}}, nil
 }
 
+// Begin establishes the source dual-write watermark barrier.
 func (t *Tool) Begin(ctx context.Context, tenantID string) (Report, error) {
 	if err := validate(ctx, tenantID); err != nil {
 		return Report{}, err
@@ -117,6 +134,7 @@ func (t *Tool) Begin(ctx context.Context, tenantID string) (Report, error) {
 	return Report{TenantID: tenantID, Phase: PhaseDualWrite, SourceWatermark: watermark}, nil
 }
 
+// Copy idempotently copies the source snapshot after the barrier.
 func (t *Tool) Copy(ctx context.Context, tenantID string) (Report, error) {
 	if err := validate(ctx, tenantID); err != nil {
 		return Report{}, err
@@ -141,6 +159,7 @@ func (t *Tool) Copy(ctx context.Context, tenantID string) (Report, error) {
 	return Report{TenantID: tenantID, Phase: PhaseCopy, Copied: len(records), SourceWatermark: snapshot.Watermark}, nil
 }
 
+// CatchUp applies source changes after the initial watermark.
 func (t *Tool) CatchUp(ctx context.Context, tenantID string) (Report, error) {
 	if err := validate(ctx, tenantID); err != nil {
 		return Report{}, err
@@ -168,6 +187,7 @@ func (t *Tool) CatchUp(ctx context.Context, tenantID string) (Report, error) {
 	return Report{TenantID: tenantID, Phase: PhaseCatchUp, CaughtUp: len(records), SourceWatermark: watermark, DestinationWatermark: watermark}, nil
 }
 
+// Validate compares canonical source and destination digests.
 func (t *Tool) Validate(ctx context.Context, tenantID string) (Report, error) {
 	if err := validate(ctx, tenantID); err != nil {
 		return Report{}, err
@@ -189,6 +209,7 @@ func (t *Tool) Validate(ctx context.Context, tenantID string) (Report, error) {
 	return report, nil
 }
 
+// Cutover switches a validated tenant to the destination backend.
 func (t *Tool) Cutover(ctx context.Context, tenantID string) (Report, error) {
 	if err := validate(ctx, tenantID); err != nil {
 		return Report{}, err
@@ -201,6 +222,16 @@ func (t *Tool) Cutover(ctx context.Context, tenantID string) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
+	if previous == BackendDestination {
+		t.mu.Lock()
+		_, rollbackKnown := t.cutovers[tenantID]
+		t.mu.Unlock()
+		if !rollbackKnown {
+			return Report{}, ErrConflict
+		}
+		validation.Phase, validation.CutoverBackend, validation.RollbackAllowed = PhaseCutover, BackendDestination, true
+		return validation, nil
+	}
 	if err := t.router.Set(ctx, tenantID, BackendDestination); err != nil {
 		return Report{}, err
 	}
@@ -211,6 +242,7 @@ func (t *Tool) Cutover(ctx context.Context, tenantID string) (Report, error) {
 	return validation, nil
 }
 
+// Rollback restores the pre-cutover backend after validation.
 func (t *Tool) Rollback(ctx context.Context, tenantID string) (Report, error) {
 	if err := validate(ctx, tenantID); err != nil {
 		return Report{}, err
@@ -230,6 +262,7 @@ func (t *Tool) Rollback(ctx context.Context, tenantID string) (Report, error) {
 	return Report{TenantID: tenantID, Phase: PhaseRollback, CutoverBackend: previous, RollbackAllowed: false, Validated: true}, nil
 }
 
+// Digest returns an order-independent SHA-256 digest of canonical records.
 func Digest(records []Record) string {
 	ordered := normalizeRecords("", records)
 	hash := sha256.New()
