@@ -287,6 +287,7 @@ func TestCapabilityCanonicalOrderCoversClosedSet(t *testing.T) {
 		{Capability: CapabilityAudit, Provider: "inmemory"},
 		{Capability: CapabilityArtifact, Provider: "inmemory"},
 		{Capability: CapabilityKnowledge, Provider: "inmemory"},
+		{Capability: CapabilitySummary, Provider: "inmemory"},
 		{Capability: CapabilityMemory, Provider: "inmemory"},
 		{Capability: CapabilitySession, Provider: "inmemory"},
 	}
@@ -294,7 +295,7 @@ func TestCapabilityCanonicalOrderCoversClosedSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []Capability{CapabilitySession, CapabilityMemory, CapabilityKnowledge, CapabilityArtifact, CapabilityAudit}
+	want := []Capability{CapabilitySession, CapabilityMemory, CapabilitySummary, CapabilityKnowledge, CapabilityArtifact, CapabilityAudit}
 	for i, capability := range want {
 		if normalized[i].Capability != capability {
 			t.Fatalf("normalized capability %d = %q, want %q", i, normalized[i].Capability, capability)
@@ -696,7 +697,7 @@ func newTestCatalog(t *testing.T) *ProviderCatalog {
 		ProviderSpec{
 			Provider: "inmemory",
 			Capabilities: []Capability{
-				CapabilitySession, CapabilityMemory, CapabilityKnowledge, CapabilityArtifact, CapabilityAudit,
+				CapabilitySession, CapabilityMemory, CapabilitySummary, CapabilityKnowledge, CapabilityArtifact, CapabilityAudit,
 			},
 			EndpointPolicy: FieldForbidden, SecretRefPolicy: FieldForbidden,
 			Options: map[string]OptionSpec{"namespace": {Kind: OptionString}},

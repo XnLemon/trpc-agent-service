@@ -163,14 +163,14 @@
 - [x] 完成 Backend Profile 的 PostgreSQL DDL、生命周期、运行时快照和框架映射设计
 - [x] 完成 Model Profile 的无密钥 PostgreSQL 目标形状、Repository 事务和启动装配设计（Issue #37）
 - [x] 将 Tenant、Agent App/Revision、Model、Backend、Channel Binding DDL 和受控写入口落地为 PostgreSQL migration（Issue #37）
-- [ ] 补齐 channel binding、session、event、memory、summary、artifact 和 audit log 的可执行 DDL
-- [ ] 定义 Session、Memory、Summary、Knowledge、Artifact 和 Audit 的统一访问接口
-- [ ] 实现租户级 Backend Registry/Factory 和后端路由
+- [x] 补齐 channel binding、session、event、memory、summary、artifact 和 audit log 的可执行 DDL
+- [x] 定义 Session、Memory、Summary、Knowledge、Artifact 和 Audit 的统一访问接口
+- [x] 实现租户级 Backend Registry/Factory 和后端路由
 - [x] 接入 InMemory 与 PostgreSQL Session/Event/Reply Outbox 运行时后端（Issue #49/#50）
-- [ ] 接入至少一种向量库和一种对象存储
+- [x] 接入至少一种向量库和一种对象存储
 - [x] 实现同一 Session 并发写入的版本/CAS/事务控制和事件序号（Issue #49）
-- [ ] 明确并实现 event、state、summary 的更新顺序及冲突重放
-- [ ] 实现 Memory 写入后的跨节点可见性和异步向量索引
+- [x] 明确并实现 event、state、summary 的更新顺序及冲突重放
+- [x] 实现 Memory 写入后的跨节点可见性和异步向量索引
 - [ ] 实现 Redis 到 SQL、以及本地到远端向量库的租户级迁移流程
 - [ ] 实现全量复制、双写、增量追平、校验、切读和回滚工具
 
@@ -197,9 +197,11 @@
 - [ ] 实现 IM 用户权限校验、敏感信息脱敏和租户级预算控制
 - [x] 实现包含 README 指定字段的不可篡改审计日志（Issue #54/#55）
 - [x] 接入运行时 OpenTelemetry tracing、metrics 和结构化日志（Issue #45 阶段 A）
-- [ ] 串联 HTTP/IM callback、Gateway、Runner、Model、Tool、Storage 和 IM reply 的 trace（Issue #79；含流式模型调用、创建流失败和 WeCom context 继承）
-- [ ] 采集请求量、延迟、终态错误率、IM 成功/重试/死信、token、成本和实际 Session/Storage 后端延迟指标（Issue #79）
-- [ ] 提供通过授权 query adapter 的租户 usage dashboard、平台运维 process dashboard、告警规则并控制 provider/channel/model label 基数（Issue #79）
+- [x] 串联 HTTP/IM callback、Gateway、Runner、Model、Tool、Storage 和 IM reply 的 trace（Issue #79 / PR #85；含流式模型调用、创建流失败和 WeCom context 继承）
+- [x] 采集请求量、延迟、终态错误率、IM 成功/重试/死信、token、成本和实际 Session/Storage 后端延迟指标（Issue #79 / PR #85）
+- [x] 提供通过授权 query adapter 的租户 usage dashboard、平台运维 process dashboard、告警规则并控制 provider/channel/model label 基数（Issue #79 / PR #85）
+- [x] 提供 Prometheus 可抓取的运行时指标路径，并保持默认 no-op 配置兼容（Issue #88 / PR #89；通过 OTLP Collector → Prometheus）
+- [ ] 持久化并恢复 Reply Outbox 的 W3C trace parent（Issue #91 / PR #92；等待合并）
 
 ### 可靠性、运维与测试
 
@@ -232,8 +234,10 @@
 > Issue #24 只完成架构、数据模型和运维文档；当前仓库另外交付了 Issue #28 的 Gateway/API、
 > Issue #31 的 Telegram long polling 文本 Adapter、Issue #37/#41 的 PostgreSQL 控制面与 Admin/
 > Bootstrap、Issue #45 的运行时 observability 阶段 A，以及 Issue #49/#50 的 Session/Event/
-> Reply Outbox 持久化和可靠投递。完整 WeCom/Telegram webhook、rich update、Memory/Knowledge/
-> Artifact 后端、迁移工具和生产告警仍未实现；业务审计与用量成本已由 Issue #54/PR #55 交付。
+> Reply Outbox 持久化和可靠投递。Issue #79/#88 已补齐运行时 trace、metrics、dashboard/alert
+> 及 Prometheus 导出路径；Issue #91 的跨 Outbox trace-parent 传递仍在 PR #92。完整
+> WeCom/Telegram webhook、rich update 和迁移工具仍未实现；Memory/Knowledge/Artifact 运行时
+> 能力在开放 PR #90 中，待合并后再视为主线交付。业务审计与用量成本已由 Issue #54/PR #55 交付。
 
 ## 当前 PR 实现记录（不改变原验收要求）
 
@@ -261,6 +265,10 @@
 - Issue #26 的 fake candidate resolver/verifier 与 proof-bearing routing 边界有独立测试，
   但这不代表 WeCom/Telegram webhook、媒体能力或完整业务观测
   能力已满足 README 原验收要求。
+
+> 当前开放 PR #90（Issue #75，运行时 Memory/Knowledge/Artifact 等能力）和 PR #92
+> （Issue #91，Outbox trace parent）尚未合并；它们不计入上方完成度。PR #90 当前 patch
+> coverage 约 80.4%，CI 的 Codecov patch 检查失败；PR #92 的当前检查已通过。
 
 ## 代码目录
 

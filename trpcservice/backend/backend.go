@@ -47,6 +47,8 @@ const (
 	CapabilitySession Capability = "session"
 	// CapabilityMemory permits memory-aware backend execution.
 	CapabilityMemory Capability = "memory"
+	// CapabilitySummary permits summary-aware backend execution.
+	CapabilitySummary Capability = "summary"
 	// CapabilityKnowledge permits knowledge-aware backend execution.
 	CapabilityKnowledge Capability = "knowledge"
 	// CapabilityArtifact permits artifact-aware backend execution.
@@ -275,7 +277,7 @@ func validStatus(status Status) bool {
 
 func validCapability(capability Capability) bool {
 	switch capability {
-	case CapabilitySession, CapabilityMemory, CapabilityKnowledge, CapabilityArtifact, CapabilityAudit:
+	case CapabilitySession, CapabilityMemory, CapabilitySummary, CapabilityKnowledge, CapabilityArtifact, CapabilityAudit:
 		return true
 	default:
 		return false
@@ -288,14 +290,16 @@ func capabilityRank(capability Capability) int {
 		return 0
 	case CapabilityMemory:
 		return 1
-	case CapabilityKnowledge:
+	case CapabilitySummary:
 		return 2
-	case CapabilityArtifact:
+	case CapabilityKnowledge:
 		return 3
-	case CapabilityAudit:
+	case CapabilityArtifact:
 		return 4
-	default:
+	case CapabilityAudit:
 		return 5
+	default:
+		return 6
 	}
 }
 

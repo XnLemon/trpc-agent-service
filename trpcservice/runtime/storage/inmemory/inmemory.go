@@ -16,18 +16,131 @@ import (
 
 // Store is a concurrency-safe in-memory implementation of the runtime store.
 type Store struct {
-	mu           sync.RWMutex
+	mu           *sync.RWMutex
 	sessions     map[string]runtimestorage.Session
 	events       map[string]runtimestorage.MessageEvent
 	histories    map[string][]runtimestorage.EventPayload
 	messages     map[string]string
 	replies      map[string]runtimestorage.ReplyOutbox
 	correlations map[string]runtimestorage.ReplyCorrelation
+	memories     map[string]runtimestorage.MemoryRecord
+	summaries    map[string]runtimestorage.SummaryRecord
+	knowledge    map[string]runtimestorage.KnowledgeDocument
+	artifacts    map[string]runtimestorage.ArtifactRecord
+	audits       map[string][]runtimestorage.AuditRecord
+	vectors      map[string]runtimestorage.VectorRecord
+	objects      map[string]runtimestorage.ObjectInfo
+	objectData   map[string][]byte
+	indexQueue   chan runtimestorage.MemoryRecord
+	indexDone    chan struct{}
+	indexMu      *sync.RWMutex
+	closeOnce    *sync.Once
+	lifecycle    *backendLifecycle
+}
+
+// Backend owns one in-memory state graph that can be shared by multiple
+// tenant workers in tests, modeling cross-node visibility of a shared store.
+type Backend struct {
+	store     *Store
+	lifecycle *backendLifecycle
+	closeOnce sync.Once
+}
+
+type backendLifecycle struct {
+	mu      sync.Mutex
+	refs    int
+	closed  bool
+	done    chan struct{}
+	indexMu *sync.RWMutex
+}
+
+func (l *backendLifecycle) retain() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return false
+	}
+	l.refs++
+	return true
+}
+
+func (l *backendLifecycle) release() {
+	l.mu.Lock()
+	if l.refs > 0 {
+		l.refs--
+	}
+	if l.refs != 0 || l.closed {
+		l.mu.Unlock()
+		return
+	}
+	l.closed = true
+	l.mu.Unlock()
+	l.indexMu.Lock()
+	close(l.done)
+	l.indexMu.Unlock()
+}
+
+// NewBackend creates an isolated shared in-memory backend.
+func NewBackend() *Backend {
+	lifecycle := &backendLifecycle{refs: 1, done: make(chan struct{}), indexMu: &sync.RWMutex{}}
+	store := newStore(lifecycle)
+	return &Backend{store: store, lifecycle: lifecycle}
+}
+
+// NewWithBackend creates a store view over an existing shared backend. Each
+// view owns its close operation while the backend keeps shared state and one
+// asynchronous index worker alive until the final view closes.
+func NewWithBackend(backend *Backend) *Store {
+	if backend == nil {
+		return New()
+	}
+	if backend.store == nil {
+		backend.lifecycle = &backendLifecycle{refs: 1, done: make(chan struct{}), indexMu: &sync.RWMutex{}}
+		backend.store = newStore(backend.lifecycle)
+	}
+	if backend.lifecycle == nil || !backend.lifecycle.retain() {
+		// Keep closed-backend views attached to the same state graph. They
+		// cannot enqueue new index work, but reads remain consistent with
+		// other views instead of silently switching to an unrelated store.
+		view := *backend.store
+		view.closeOnce = &sync.Once{}
+		return &view
+	}
+	view := *backend.store
+	view.closeOnce = &sync.Once{}
+	return &view
+}
+
+// Close releases the backend owner. Views remain usable until the final view
+// and the backend owner have both been closed.
+func (backend *Backend) Close() error {
+	if backend == nil || backend.lifecycle == nil {
+		return nil
+	}
+	backend.closeOnce.Do(backend.lifecycle.release)
+	return nil
 }
 
 // New creates an empty runtime store.
 func New() *Store {
-	return &Store{sessions: map[string]runtimestorage.Session{}, events: map[string]runtimestorage.MessageEvent{}, histories: map[string][]runtimestorage.EventPayload{}, messages: map[string]string{}, replies: map[string]runtimestorage.ReplyOutbox{}, correlations: map[string]runtimestorage.ReplyCorrelation{}}
+	lifecycle := &backendLifecycle{refs: 1, done: make(chan struct{}), indexMu: &sync.RWMutex{}}
+	return newStore(lifecycle)
+}
+
+func newStore(lifecycle *backendLifecycle) *Store {
+	store := &Store{
+		mu:       &sync.RWMutex{},
+		sessions: map[string]runtimestorage.Session{}, events: map[string]runtimestorage.MessageEvent{},
+		histories: map[string][]runtimestorage.EventPayload{}, messages: map[string]string{},
+		replies: map[string]runtimestorage.ReplyOutbox{}, correlations: map[string]runtimestorage.ReplyCorrelation{},
+		memories: map[string]runtimestorage.MemoryRecord{}, summaries: map[string]runtimestorage.SummaryRecord{},
+		knowledge: map[string]runtimestorage.KnowledgeDocument{}, artifacts: map[string]runtimestorage.ArtifactRecord{},
+		audits: map[string][]runtimestorage.AuditRecord{}, vectors: map[string]runtimestorage.VectorRecord{},
+		objects: map[string]runtimestorage.ObjectInfo{}, objectData: map[string][]byte{},
+		indexQueue: make(chan runtimestorage.MemoryRecord, 128), indexDone: lifecycle.done, indexMu: lifecycle.indexMu, lifecycle: lifecycle, closeOnce: &sync.Once{},
+	}
+	go store.indexWorker()
+	return store
 }
 
 // GetReplyCorrelation loads a durable execution-to-reply correlation.
@@ -124,6 +237,11 @@ func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) e
 	}
 	delete(s.sessions, key(tenantID, sessionID))
 	delete(s.histories, key(tenantID, sessionID))
+	for summaryKey, summary := range s.summaries {
+		if summary.TenantID == tenantID && summary.SessionID == sessionID {
+			delete(s.summaries, summaryKey)
+		}
+	}
 	for eventKey, event := range s.events {
 		if event.TenantID != tenantID || event.SessionID != sessionID {
 			continue
@@ -561,8 +679,21 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 	return cloneReply(value), nil
 }
 
-// Close releases store resources; the in-memory store has none to release.
-func (s *Store) Close() error { return nil }
+// Close stops the asynchronous memory index worker. It is idempotent.
+func (s *Store) Close() error {
+	if s == nil {
+		return nil
+	}
+	if s.closeOnce == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		if s.lifecycle != nil {
+			s.lifecycle.release()
+		}
+	})
+	return nil
+}
 func check(ctx context.Context) error {
 	if ctx == nil {
 		return runtimestorage.ErrInvalid

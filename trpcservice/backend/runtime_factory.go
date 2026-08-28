@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 )
 
@@ -21,6 +23,7 @@ var (
 // Values are inaccessible after Close and are never shared across tenants.
 type CapabilitySet struct {
 	tenantID     string
+	mu           sync.RWMutex
 	capabilities map[Capability]any
 	closeOnce    sync.Once
 	closeErr     error
@@ -48,8 +51,25 @@ func (set *CapabilitySet) Capability(kind Capability) (any, bool) {
 	if set == nil {
 		return nil, false
 	}
+	set.mu.RLock()
+	defer set.mu.RUnlock()
 	value, ok := set.capabilities[kind]
+	if ok && isNilCapability(value) {
+		return nil, false
+	}
 	return value, ok
+}
+
+func isNilCapability(value any) bool {
+	if value == nil {
+		return true
+	}
+	v := reflect.ValueOf(value)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	}
+	return false
 }
 
 // Session returns the tenant-scoped session.Service capability.
@@ -65,6 +85,105 @@ func (set *CapabilitySet) Session() (session.Service, error) {
 	return service, nil
 }
 
+// Memory returns the tenant-scoped memory capability.
+func (set *CapabilitySet) Memory() (runtimestorage.MemoryStore, error) {
+	value, ok := set.Capability(CapabilityMemory)
+	if !ok {
+		return nil, ErrCapabilityUnavailable
+	}
+	service, ok := value.(runtimestorage.MemoryStore)
+	if !ok || service == nil {
+		return nil, ErrCapabilityUnavailable
+	}
+	return service, nil
+}
+
+// Summary returns the tenant-scoped summary capability. The direct summary
+// binding is preferred; the Session/Memory fallback keeps older providers
+// compatible while they migrate to the explicit capability.
+func (set *CapabilitySet) Summary() (runtimestorage.SummaryStore, error) {
+	value, ok := set.Capability(CapabilitySummary)
+	if !ok {
+		value, ok = set.Capability(CapabilitySession)
+	}
+	if !ok {
+		value, ok = set.Capability(CapabilityMemory)
+	}
+	if !ok {
+		return nil, ErrCapabilityUnavailable
+	}
+	service, ok := value.(runtimestorage.SummaryStore)
+	if !ok || service == nil {
+		return nil, ErrCapabilityUnavailable
+	}
+	return service, nil
+}
+
+// Knowledge returns the tenant-scoped knowledge capability.
+func (set *CapabilitySet) Knowledge() (runtimestorage.KnowledgeStore, error) {
+	value, ok := set.Capability(CapabilityKnowledge)
+	if !ok {
+		return nil, ErrCapabilityUnavailable
+	}
+	service, ok := value.(runtimestorage.KnowledgeStore)
+	if !ok || service == nil {
+		return nil, ErrCapabilityUnavailable
+	}
+	return service, nil
+}
+
+// Artifact returns the tenant-scoped artifact capability.
+func (set *CapabilitySet) Artifact() (runtimestorage.ArtifactStore, error) {
+	value, ok := set.Capability(CapabilityArtifact)
+	if !ok {
+		return nil, ErrCapabilityUnavailable
+	}
+	service, ok := value.(runtimestorage.ArtifactStore)
+	if !ok || service == nil {
+		return nil, ErrCapabilityUnavailable
+	}
+	return service, nil
+}
+
+// Audit returns the tenant-scoped audit capability.
+func (set *CapabilitySet) Audit() (runtimestorage.AuditStore, error) {
+	value, ok := set.Capability(CapabilityAudit)
+	if !ok {
+		return nil, ErrCapabilityUnavailable
+	}
+	service, ok := value.(runtimestorage.AuditStore)
+	if !ok || service == nil {
+		return nil, ErrCapabilityUnavailable
+	}
+	return service, nil
+}
+
+// Vector returns a vector adapter carried by the knowledge capability.
+func (set *CapabilitySet) Vector() (runtimestorage.VectorStore, error) {
+	value, ok := set.Capability(CapabilityKnowledge)
+	if !ok {
+		return nil, ErrCapabilityUnavailable
+	}
+	service, ok := value.(runtimestorage.VectorStore)
+	if !ok || service == nil {
+		return nil, ErrCapabilityUnavailable
+	}
+	return service, nil
+}
+
+// Object returns an object adapter carried by the artifact capability.
+func (set *CapabilitySet) Object() (runtimestorage.ObjectStore, error) {
+	value, ok := set.Capability(CapabilityArtifact)
+	if !ok {
+		return nil, ErrCapabilityUnavailable
+	}
+	service, ok := value.(runtimestorage.ObjectStore)
+	if !ok || service == nil {
+		return nil, ErrCapabilityUnavailable
+	}
+	return service, nil
+}
+
 // Close releases all owned capability values exactly once. Capabilities that
 // do not expose Close are intentionally left untouched.
 func (set *CapabilitySet) Close() error {
@@ -72,16 +191,43 @@ func (set *CapabilitySet) Close() error {
 		return nil
 	}
 	set.closeOnce.Do(func() {
+		set.mu.Lock()
+		values := make([]any, 0, len(set.capabilities))
 		for _, value := range set.capabilities {
+			values = append(values, value)
+		}
+		clear(set.capabilities)
+		set.mu.Unlock()
+		for index, value := range values {
 			if closer, ok := value.(interface{ Close() error }); ok {
+				if alreadyClosed(closer, values[:index]) {
+					continue
+				}
 				if err := closer.Close(); err != nil {
 					set.closeErr = errors.Join(set.closeErr, ErrStorageFactory)
 				}
 			}
 		}
-		clear(set.capabilities)
 	})
 	return set.closeErr
+}
+
+func alreadyClosed(closer interface{ Close() error }, values []any) bool {
+	current := reflect.ValueOf(closer)
+	if !current.IsValid() {
+		return false
+	}
+	for _, value := range values {
+		other, ok := value.(interface{ Close() error })
+		if !ok {
+			continue
+		}
+		candidate := reflect.ValueOf(other)
+		if candidate.IsValid() && current.Type() == candidate.Type() && current.Kind() == reflect.Pointer && current.Pointer() == candidate.Pointer() {
+			return true
+		}
+	}
+	return false
 }
 
 // StorageFactory materializes capabilities from a secret-free plan input.
@@ -129,6 +275,10 @@ func (factory *RegistryStorageFactory) New(ctx context.Context, input StorageFac
 		if err := ctx.Err(); err != nil {
 			_ = set.Close()
 			return nil, err
+		}
+		if _, exists := set.capabilities[binding.Capability]; exists {
+			_ = set.Close()
+			return nil, fmt.Errorf("%w: duplicate capability", ErrStorageFactory)
 		}
 		value, err := factory.materializeBinding(ctx, input, binding)
 		if err != nil {
@@ -178,5 +328,47 @@ func (factory *RegistryStorageFactory) materializeBinding(ctx context.Context, i
 		}
 		return nil, err
 	}
+	if !matchesCapability(binding.Capability, value) {
+		if closer, ok := value.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+		return nil, ErrStorageFactory
+	}
 	return value, nil
+}
+
+func matchesCapability(kind Capability, value any) bool {
+	if isNilCapability(value) {
+		return false
+	}
+	switch kind {
+	case CapabilitySession:
+		_, ok := value.(session.Service)
+		return ok
+	case CapabilityMemory:
+		_, ok := value.(runtimestorage.MemoryStore)
+		return ok
+	case CapabilitySummary:
+		_, ok := value.(runtimestorage.SummaryStore)
+		return ok
+	case CapabilityKnowledge:
+		_, ok := value.(runtimestorage.KnowledgeStore)
+		if !ok {
+			return false
+		}
+		_, ok = value.(runtimestorage.VectorStore)
+		return ok
+	case CapabilityArtifact:
+		_, ok := value.(runtimestorage.ArtifactStore)
+		if !ok {
+			return false
+		}
+		_, ok = value.(runtimestorage.ObjectStore)
+		return ok
+	case CapabilityAudit:
+		_, ok := value.(runtimestorage.AuditStore)
+		return ok
+	default:
+		return false
+	}
 }

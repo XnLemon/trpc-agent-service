@@ -668,6 +668,74 @@ func TestEnvironmentDependencyErrorBoundaries(t *testing.T) {
 	}
 }
 
+func TestNewFromEnvironmentRejectsInvalidConfigurationBeforeOpeningDatabase(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T)
+	}{
+		{
+			name:  "catalog",
+			setup: func(t *testing.T) { t.Setenv(envModelProvider, "anthropic") },
+		},
+		{
+			name: "api authenticator",
+			setup: func(t *testing.T) {
+				t.Setenv(envAPIIdentities, "api-token|invalid-tenant|app_01ARZ3NDEKTSV4RRFFQ69G5FAV|service")
+			},
+		},
+		{
+			name:  "admin authenticator",
+			setup: func(t *testing.T) { t.Setenv(envAdminToken, "admin-token\ninvalid") },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			tt.setup(t)
+			previousOpen := openEnvironmentDatabase
+			var openCalls atomic.Int32
+			openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) {
+				openCalls.Add(1)
+				return nil, errors.New("database should not be opened")
+			}
+			defer func() { openEnvironmentDatabase = previousOpen }()
+
+			_, err := NewFromEnvironment(context.Background())
+			if !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("configuration error = %v", err)
+			}
+			if openCalls.Load() != 0 {
+				t.Fatalf("database opened %d times for preflight error", openCalls.Load())
+			}
+		})
+	}
+}
+
+func TestNewFromEnvironmentDatabaseOpenErrorPreservesCancellation(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		ctx       func() context.Context
+		wantError error
+	}{
+		{name: "unavailable", ctx: context.Background, wantError: ErrInvalidConfig},
+		{name: "canceled", ctx: func() context.Context { ctx, cancel := context.WithCancel(context.Background()); cancel(); return ctx }, wantError: context.Canceled},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			previousOpen := openEnvironmentDatabase
+			openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) {
+				return nil, errors.New("database unavailable")
+			}
+			defer func() { openEnvironmentDatabase = previousOpen }()
+
+			_, err := NewFromEnvironment(tt.ctx())
+			if !errors.Is(err, tt.wantError) {
+				t.Fatalf("database open error = %v, want %v", err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestEnvironmentRuntimeStoreSelection(t *testing.T) {
 	db, _, err := sqlmock.New()
 	if err != nil {
@@ -1067,6 +1135,40 @@ func TestNewFromEnvironmentBuildsRealGraphWhenDatabaseOpens(t *testing.T) {
 	}
 }
 
+func TestNewFromEnvironmentClosesDatabaseWhenGraphConstructionFails(t *testing.T) {
+	setRequiredEnvironment(t)
+	registerBootstrapPingDriver.Do(func() {
+		sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{})
+	})
+	db, err := sql.Open("trpc-service-bootstrap-ping", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousStore := newEnvironmentRuntimeStore
+	tracker := &trackingRuntimeStore{RuntimeStore: runtimestorageinmemory.New()}
+	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return errors.New("migration failed") }
+	newEnvironmentRuntimeStore = func(string, *sql.DB) (runtimestorage.RuntimeStore, error) { return tracker, nil }
+	defer func() {
+		openEnvironmentDatabase = previousOpen
+		applyEnvironmentMigrations = previousApply
+		newEnvironmentRuntimeStore = previousStore
+		_ = tracker.RuntimeStore.Close()
+	}()
+
+	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("graph construction error = %v", err)
+	}
+	if !tracker.closed.Load() {
+		t.Fatal("runtime store remained open after graph construction failure")
+	}
+	if err := db.Ping(); err == nil {
+		t.Fatal("database remained open after graph construction failure")
+	}
+}
+
 func TestNewFromEnvironmentInstallsWeComCallbackAndOutboxWorker(t *testing.T) {
 	setRequiredEnvironment(t)
 	t.Setenv(envWeComCallbackToken, "callback-token")
@@ -1228,6 +1330,16 @@ func (bootstrapPingConn) Prepare(string) (driver.Stmt, error) { return nil, driv
 func (bootstrapPingConn) Close() error                        { return nil }
 func (bootstrapPingConn) Begin() (driver.Tx, error)           { return nil, driver.ErrSkip }
 func (bootstrapPingConn) Ping(context.Context) error          { return nil }
+
+type trackingRuntimeStore struct {
+	runtimestorage.RuntimeStore
+	closed atomic.Bool
+}
+
+func (store *trackingRuntimeStore) Close() error {
+	store.closed.Store(true)
+	return nil
+}
 
 func testConfig(t *testing.T) (Config, func()) {
 	t.Helper()

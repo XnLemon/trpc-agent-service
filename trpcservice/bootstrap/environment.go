@@ -94,6 +94,7 @@ var (
 	applyMySQLEnvironmentMigrations  = migrations.ApplyMySQL
 	verifyEnvironmentMigrations      = migrations.Verify
 	verifyMySQLEnvironmentMigrations = migrations.VerifyMySQL
+	newEnvironmentRuntimeStore       = environmentRuntimeStore
 	environmentWeComOwnerFunc        = environmentWeComOwner
 	newEnvironmentWeComWorker        = outbox.New
 )
@@ -172,7 +173,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, err
 	}
 	delegateSessions := inmemory.NewSessionService()
-	runtimeStore, err := environmentRuntimeStore(config.runtimeStorage, db)
+	runtimeStore, err := newEnvironmentRuntimeStore(config.runtimeStorage, db)
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = db.Close()
@@ -242,6 +243,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	})
 	if err != nil {
 		_ = delegateSessions.Close()
+		_ = runtimeStore.Close()
 		_ = db.Close()
 		return nil, err
 	}
@@ -357,8 +359,11 @@ func environmentRegistries(config environmentConfig, delegateSessions session.Se
 		if err := modelRegistry.Register(identity.TenantID, config.modelProvider, environmentModelFactory{}); err != nil {
 			return nil, nil, nil, err
 		}
-		if err := backendRegistry.Register(identity.TenantID, backend.CapabilitySession, "inmemory", environmentSessionCapabilityProvider{delegate: delegateSessions, store: runtimeStore, telemetry: config.telemetry, backend: config.runtimeStorage}); err != nil {
-			return nil, nil, nil, err
+		for _, capability := range []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit} {
+			provider := environmentRuntimeCapabilityProvider{capability: capability, delegate: delegateSessions, store: runtimeStore, telemetry: config.telemetry, backend: config.runtimeStorage}
+			if err := backendRegistry.Register(identity.TenantID, capability, "inmemory", provider); err != nil {
+				return nil, nil, nil, err
+			}
 		}
 	}
 	return secretRegistry, modelRegistry, backendRegistry, nil
@@ -619,7 +624,7 @@ func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalo
 	}
 	backendCatalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
 		Provider:        "inmemory",
-		Capabilities:    []backend.Capability{backend.CapabilitySession},
+		Capabilities:    []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit},
 		EndpointPolicy:  backend.FieldForbidden,
 		SecretRefPolicy: backend.FieldForbidden,
 		Options:         map[string]backend.OptionSpec{},
@@ -741,6 +746,86 @@ type environmentSessionCapabilityProvider struct {
 	telemetry observability.Provider
 	backend   string
 }
+
+type environmentRuntimeCapabilityProvider struct {
+	capability backend.Capability
+	delegate   session.Service
+	store      runtimestorage.RuntimeStore
+	telemetry  observability.Provider
+	backend    string
+}
+
+func (provider environmentRuntimeCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, _ backend.CapabilityBinding, _ modelprofile.SecretValue) (any, error) {
+	if ctx == nil {
+		return nil, context.Canceled
+	}
+	if provider.capability == backend.CapabilitySession {
+		return runtimesessionpostgres.NewWithObservability(input.TenantID, provider.delegate, provider.store, provider.telemetry, provider.backend)
+	}
+	// The runtime store is owned by the environment, not by an individual
+	// tenant CapabilitySet. Wrap it so factory cleanup cannot stop shared
+	// workers when one runner is torn down.
+	switch provider.capability {
+	case backend.CapabilityMemory:
+		store, ok := provider.store.(runtimestorage.MemoryStore)
+		if !ok {
+			return nil, backend.ErrStorageFactory
+		}
+		return borrowedMemoryStore{MemoryStore: store}, nil
+	case backend.CapabilitySummary:
+		store, ok := provider.store.(runtimestorage.SummaryStore)
+		if !ok {
+			return nil, backend.ErrStorageFactory
+		}
+		return borrowedSummaryStore{SummaryStore: store}, nil
+	case backend.CapabilityKnowledge:
+		knowledge, ok := provider.store.(runtimestorage.KnowledgeStore)
+		if !ok {
+			return nil, backend.ErrStorageFactory
+		}
+		vector, ok := provider.store.(runtimestorage.VectorStore)
+		if !ok {
+			return nil, backend.ErrStorageFactory
+		}
+		return borrowedKnowledgeStore{KnowledgeStore: knowledge, VectorStore: vector}, nil
+	case backend.CapabilityArtifact:
+		artifact, ok := provider.store.(runtimestorage.ArtifactStore)
+		if !ok {
+			return nil, backend.ErrStorageFactory
+		}
+		object, ok := provider.store.(runtimestorage.ObjectStore)
+		if !ok {
+			return nil, backend.ErrStorageFactory
+		}
+		return borrowedArtifactStore{ArtifactStore: artifact, ObjectStore: object}, nil
+	case backend.CapabilityAudit:
+		store, ok := provider.store.(runtimestorage.AuditStore)
+		if !ok {
+			return nil, backend.ErrStorageFactory
+		}
+		return borrowedAuditStore{AuditStore: store}, nil
+	default:
+		return nil, backend.ErrStorageFactory
+	}
+}
+
+type borrowedMemoryStore struct{ runtimestorage.MemoryStore }
+type borrowedSummaryStore struct{ runtimestorage.SummaryStore }
+type borrowedKnowledgeStore struct {
+	runtimestorage.KnowledgeStore
+	runtimestorage.VectorStore
+}
+type borrowedArtifactStore struct {
+	runtimestorage.ArtifactStore
+	runtimestorage.ObjectStore
+}
+type borrowedAuditStore struct{ runtimestorage.AuditStore }
+
+func (borrowedMemoryStore) Close() error    { return nil }
+func (borrowedSummaryStore) Close() error   { return nil }
+func (borrowedKnowledgeStore) Close() error { return nil }
+func (borrowedArtifactStore) Close() error  { return nil }
+func (borrowedAuditStore) Close() error     { return nil }
 
 func (provider environmentSessionCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, _ backend.CapabilityBinding, _ modelprofile.SecretValue) (any, error) {
 	if ctx == nil {

@@ -44,7 +44,7 @@ func NewProviderRegistry() *ProviderRegistry {
 
 // Register installs or replaces one tenant/capability/provider implementation.
 func (registry *ProviderRegistry) Register(tenantID string, capability Capability, provider string, value CapabilityProvider) error {
-	if registry == nil || validateTenantID(tenantID) != nil || capability == "" || value == nil {
+	if registry == nil || validateTenantID(tenantID) != nil || !validCapability(capability) || value == nil {
 		return fmt.Errorf("%w: invalid backend provider registration", ErrInvalid)
 	}
 	provider = strings.ToLower(strings.TrimSpace(provider))
