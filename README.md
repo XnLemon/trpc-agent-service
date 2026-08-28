@@ -142,7 +142,7 @@
 - [x] 实现租户、Agent、通道和后端配置的 Admin API（Issue #41）
 - [x] 实现 Agent App 草稿更新、原子发布和版本回滚
 - [x] 实现配置缓存失效、租户级灰度和租户配置版本回滚（Issue #82；当前灰度为租户/App 全量候选 revision 选择，不含百分比分流）
-- [x] 接入 KMS/Secret Manager，禁止密钥进入运行时快照、日志和 trace（SecretManager 契约与 Vault KV v2 adapter；租户级灰度仍需独立治理能力）
+- [x] 接入 KMS/Secret Manager，禁止密钥进入运行时快照、日志和 trace（SecretManager 契约与 Vault KV v2 adapter）
 
 ### Gateway 与 Agent Worker
 
@@ -167,7 +167,7 @@
 - [x] 定义 Session、Memory、Summary、Knowledge、Artifact 和 Audit 的统一访问接口
 - [x] 实现租户级 Backend Registry/Factory 和后端路由
 - [x] 接入 InMemory 与 PostgreSQL Session/Event/Reply Outbox 运行时后端（Issue #49/#50）
-- [x] 接入至少一种向量库和一种对象存储
+- [x] 接入 PostgreSQL runtime vector index/object storage 与 InMemory adapter
 - [x] 实现同一 Session 并发写入的版本/CAS/事务控制和事件序号（Issue #49）
 - [x] 明确并实现 event、state、summary 的更新顺序及冲突重放
 - [x] 实现 Memory 写入后的跨节点可见性和异步向量索引
@@ -178,7 +178,8 @@
 
 - [x] 定义统一 Channel Adapter 生命周期、共享入站消息和持久化出站回复契约（Issue #60）
 - [x] 实现外部消息到 `model.Message` / `runner.Runner.Run` 的转换
-- [ ] 实现 Runner Event 到文本、流式消息和卡片消息的转换
+- [x] 将 Runner Event 聚合为文本并通过 Reply Outbox 投递到 Telegram/企业微信
+- [ ] 实现 IM 流式消息和卡片消息的转换
 - [x] 接入企业微信自建应用文本 webhook（Issue #60；仅直聊文本）
 - [x] 接入 Telegram long polling 文本通道（Issue #31；单 Binding、Gateway Dispatch、进程内幂等）
 - [x] 增加真实 Telegram live E2E 示例与 CI workflow（Issue #33；根目录 `examples/telegram-e2e`）
@@ -201,7 +202,7 @@
 - [x] 采集请求量、延迟、终态错误率、IM 成功/重试/死信、token、成本和实际 Session/Storage 后端延迟指标（Issue #79 / PR #85）
 - [x] 提供通过授权 query adapter 的租户 usage dashboard、平台运维 process dashboard、告警规则并控制 provider/channel/model label 基数（Issue #79 / PR #85）
 - [x] 提供 Prometheus 可抓取的运行时指标路径，并保持默认 no-op 配置兼容（Issue #88 / PR #89；通过 OTLP Collector → Prometheus）
-- [ ] 持久化并恢复 Reply Outbox 的 W3C trace parent（Issue #91 / PR #92；等待合并）
+- [x] 持久化并恢复 Reply Outbox 的 W3C trace parent（Issue #91 / PR #92）
 
 ### 可靠性、运维与测试
 
@@ -230,23 +231,31 @@
 - [x] 完成 Issue #45 运行时 observability、指标、脱敏日志和 OTLP 配置契约
 - [x] 完成 Issue #54 租户审计、用量成本、失败处理、保留与访问控制的文档先行契约
 - [x] 实现 Issue #54 租户审计、用量成本、失败处理、保留与访问控制（PR #55）
+- [x] 完成 Issue #75 Runtime Capabilities 的统一接口、PostgreSQL/InMemory 实现和租户边界契约
+- [x] 完成 Issue #79/#88 运行时可观测性、Prometheus 导出、Dashboard 与告警契约
+- [x] 完成 Issue #81 MySQL 控制面 Repository、迁移和最小权限契约
+- [x] 完成 Issue #82 Agent App Registry、租户级 candidate revision 与 lease-safe 回滚契约
+- [x] 完成 Issue #91 Reply Outbox 跨进程 Trace Context 契约
 
 > Issue #24 只完成架构、数据模型和运维文档；当前仓库另外交付了 Issue #28 的 Gateway/API、
 > Issue #31 的 Telegram long polling 文本 Adapter、Issue #37/#41 的 PostgreSQL 控制面与 Admin/
 > Bootstrap、Issue #45 的运行时 observability 阶段 A，以及 Issue #49/#50 的 Session/Event/
-> Reply Outbox 持久化和可靠投递。Issue #79/#88 已补齐运行时 trace、metrics、dashboard/alert
-> 及 Prometheus 导出路径；Issue #91 的跨 Outbox trace-parent 传递仍在 PR #92。完整
-> WeCom/Telegram webhook、rich update 和迁移工具仍未实现；Memory/Knowledge/Artifact 运行时
-> 能力在开放 PR #90 中，待合并后再视为主线交付。业务审计与用量成本已由 Issue #54/PR #55 交付。
+> Reply Outbox 持久化和可靠投递。Issue #75 已补齐租户级 Memory、Summary、Knowledge、Artifact、
+> Audit、Vector 和 Object runtime capabilities；Issue #79/#88 已补齐运行时 trace、metrics、
+> dashboard/alert 及 Prometheus 导出路径；Issue #91 已补齐跨 Outbox trace-parent 传递；Issue
+> #81/#82 分别交付了 MySQL 控制面和实例内 Agent App Registry。Telegram webhook、多账号/HA
+> Channel 调度、媒体/rich update、Redis/向量库/对象存储迁移工具、无状态 Worker 水平扩展和治理
+> 策略链仍未实现。
+> 业务审计与用量成本已由 Issue #54/PR #55 交付。
 
-## 当前 PR 实现记录（不改变原验收要求）
+## 当前实现记录（不改变原验收要求）
 
-> 以下内容仅索引当前实现 PR 的 head 和测试范围，不替代、收窄或修改上方原验收要求；
-> 上方勾选仅表示该原条目已有完整证据。以下实现已经合并到当前主线；当前阶段实现仍不等同于全部原验收项已完成。
+> 以下内容仅索引当前实现的代码、文档和测试范围，不替代、收窄或修改上方原验收要求；
+> 上方勾选仅表示该原条目已有代码或测试证据。当前实现已合并到主线，但仍不等同于全部原验收项已完成。
 
 - `trpcservice/gateway/auth.go` 的 proof-bearing API 身份校验对应
   `trpcservice/gateway/auth_test.go`；`resolver.go` 对应 `resolver_test.go`。
-- 当前 PR 包含 Gateway、HTTP/SSE、进程内限流/幂等和 Channel trusted-principal 的阶段性代码，
+- 当前实现包含 Gateway、HTTP/SSE、进程内限流/幂等和 Channel trusted-principal 的阶段性代码，
   具体边界以 `docs/docs/gateway.md` 为准。
 - Issue #31 的 `trpcservice/channels/telegram` 提供单 Binding、`getMe` 身份校验、普通文本
   long polling、Gateway Dispatch、进程内幂等和脱敏分段回复；具体边界以
@@ -255,24 +264,33 @@
   `getMe -> getUpdates -> sendMessage`；live workflow 只手动触发并使用受保护 Environment，
   不替代完整模型供应商或生产控制面 E2E。
 - Issue #37/#41 的 PostgreSQL 控制面、可重启 Bootstrap、readiness 和最小 Admin API 已合并；
-  控制面持久化不等同于 Memory/Knowledge/Artifact 的生产运行时存储；审计事实由 Issue #54/PR #55 单独持久化。
+  Issue #75 的 Memory/Knowledge/Artifact 等 runtime capabilities 通过独立的
+  `trpcservice/runtime/storage` 契约接入 InMemory 与 PostgreSQL，审计事实仍由 Issue #54/PR #55
+  单独持久化。
 - Issue #45 的运行时 observability 阶段 A 已合并，提供 no-op/OTLP provider、低基数指标、
   trace context 和脱敏结构化日志；Issue #54/PR #55 已补齐 Stage B 的 AuditEvent、usage/cost、
   审计持久化、执行/IM 生产者和失败处理。
 - Issue #52 的 examples/telegram-e2e 增加 Runner -> reply outbox -> Telegram Provider ->
   provider_message_id -> sent -> message_event=replied 的受保护 live E2E；它不替代无凭证的
   确定性单元测试，也不承诺外部 Telegram exactly-once 投递。
+- Issue #75 的 runtime capabilities 使用显式 `tenant_id` 和复合键；PostgreSQL 版本提供
+  Memory/Summary/Knowledge/Artifact/Audit/Vector/Object 存储，InMemory 版本提供共享 backend
+  视图、异步向量索引和相同的租户边界。它不等同于 Redis、独立向量数据库或对象存储服务的适配器。
+- Issue #79/#88 提供低基数 OpenTelemetry telemetry、OTLP Collector 到 Prometheus 的导出路径、
+  Grafana Dashboard/Tempo 查询资源和 tenant-authorized usage query adapter；tenant ID 等高基数
+  关联不会进入 Prometheus label。
+- Issue #91 将经过 W3C 校验的 `traceparent` 写入 ReplyCorrelation，并由 Outbox Worker 在
+  `channel.send` 前恢复；旧记录或非法 parent 会从新的 root span 投递，不阻塞回复。
 - Issue #26 的 fake candidate resolver/verifier 与 proof-bearing routing 边界有独立测试，
-  但这不代表 WeCom/Telegram webhook、媒体能力或完整业务观测
-  能力已满足 README 原验收要求。
+  但这不代表 Telegram webhook、多账号/HA Channel 调度、媒体能力、治理链或完整平台验收
+  已满足 README 原验收要求。
 
-> 当前开放 PR #90（Issue #75，运行时 Memory/Knowledge/Artifact 等能力）和 PR #92
-> （Issue #91，Outbox trace parent）尚未合并；它们不计入上方完成度。PR #90 当前 patch
-> coverage 约 80.4%，CI 的 Codecov patch 检查失败；PR #92 的当前检查已通过。
+> 当前基线仍不包含完整的 Redis/外部向量库/对象存储迁移工具、百分比分流、无状态 Worker
+> 水平扩展、IM webhook/rich update 和 Plugin/Guardrail 治理链；这些能力继续保留在上方未完成清单。
 
 ## 代码目录
 
-下面只是一个示范目录，用来说明平台需要覆盖的职责分层。实现时不必严格按这个结构组织代码，只要模块边界清晰、能对应到设计方案即可。
+下面是当前仓库的主要目录，按职责列出；测试文件和各后端的 codec/storage 辅助文件未逐一展开。
 
 ```txt
 |-- README.md              # 说明文档，包含设计、安装、使用
@@ -289,23 +307,37 @@
 |   |-- start.sh           # 启动服务
 |   `-- stop.sh            # 停止服务
 |-- data                   # 服务运行时数据
+|-- migrations             # PostgreSQL/MySQL schema 与迁移校验
 |-- examples               # 可运行的外部集成示例
-|   `-- telegram-e2e        # Telegram live long-polling E2E
+|   |-- telegram-e2e        # Telegram live long-polling/outbox E2E
+|   `-- wecom-e2e           # 企业微信回调示例测试
 |-- docs                   # 各模块说明与架构设计文档
 |-- cmd
 |   `-- trpc-service       # 命令行入口，可直接启动服务
+|-- deploy
+|   `-- observability       # OTel Collector、Prometheus、Tempo、Grafana 配置
 `-- trpcservice            # 源码
-    |-- agent              # 基于 tRPC-Agent-Go 的 Agent 定义
-    |-- channels           # 对接 IM 的 Channel Adapter
-    |-- config             # 租户与节点配置
-    |-- log                # 日志级别与脱敏
-    |-- metrics            # 监控指标
-    |-- skill              # 可运行的 Skill
-    |-- tenant             # 多租户模型与隔离
-    |-- tool               # 平台 Tool
-    |-- version.go         # 版本信息
-    |-- web                # 管理 / 对话页面
-    `-- workspace          # 工作目录，包含本地、容器等沙箱环境
+    |-- admin              # Admin API 与认证
+    |-- agent              # Agent App/Revision 模型与 Repository
+    |-- audit              # 审计事件与持久化
+    |-- backend             # Backend Profile、Capability Registry/Factory
+    |-- bootstrap           # 数据库、Provider、Runtime 和 HTTP 装配
+    |-- channels            # Telegram/企业微信 Channel Adapter
+    |-- config              # 服务配置模型
+    |-- controlplane        # PostgreSQL 控制面测试 facade
+    |-- gateway             # 鉴权、路由、Runner Registry、HTTP/SSE
+    |-- log                 # 结构化日志与脱敏
+    |-- metrics              # 运行时指标与 Audit telemetry wrapper
+    |-- model               # Model Profile、Secret Resolver/Registry
+    |-- observability       # Trace、metrics、OTLP provider 与访问控制
+    |-- runtime              # Execution、Session、Outbox、Runtime Storage
+    |-- storage              # PostgreSQL/MySQL 通用存储与错误映射
+    |-- skill                # Skill 接口
+    |-- tenant               # 多租户模型、Repository 与运行时边界
+    |-- tool                 # 平台 Tool
+    |-- version.go           # 版本信息
+    |-- web                  # 管理 / 对话页面入口
+    `-- workspace             # 工作目录入口
 ```
 
 ## CI
@@ -323,15 +355,38 @@ Codecov 对 project 和 patch 状态均使用 **85%**、零容差的报告目标
 
 ## 快速开始
 
+服务启动会调用 `bootstrap.NewFromEnvironment`，缺少数据库、身份、Admin 或模型配置时会在绑定 HTTP
+端口前失败。下面以 PostgreSQL 为例；数据库本身需先运行并允许服务账号执行项目 migration。
+
 ```bash
 git clone https://github.com/XnLemon/trpc-agent-service.git
 cd trpc-agent-service
 
 ./scripts/build.sh
+
+export TRPC_POSTGRES_DSN='postgres://postgres:postgres@127.0.0.1:5432/trpc_control_plane?sslmode=disable'
+export TRPC_INIT_TENANT_KEY='local'
+export TRPC_INIT_TENANT_NAME='Local Tenant'
+export TRPC_INIT_APP_KEY='assistant'
+export TRPC_INIT_APP_NAME='Local Assistant'
+./bin/trpc-service init --confirm
+```
+
+将初始化命令输出的 `TRPC_TENANT_ID` 和 `TRPC_APP_ID` 作为服务配置，并补齐运行时必需项：
+
+```bash
+export TRPC_API_TOKEN='replace-with-api-token'
+export TRPC_TENANT_ID='t_...'
+export TRPC_APP_ID='app_...'
+export TRPC_ADMIN_TOKEN='replace-with-admin-token'
+export TRPC_ADMIN_TENANTS='*'
+export TRPC_MODEL_API_KEY='replace-with-model-key'
+export TRPC_SESSION_BACKEND='postgres'
+
 ./scripts/start.sh
 ```
 
-控制面默认使用 PostgreSQL；切换 MySQL 时必须同时提供应用账号
+控制面默认使用 PostgreSQL，runtime storage 可选 `postgres` 或 `inmemory`；切换 MySQL 时必须同时提供应用账号
 `TRPC_MYSQL_DSN` 和迁移账号 `TRPC_MYSQL_MIGRATION_DSN`，Bootstrap 会在绑定 HTTP
 端口前完成迁移、schema 和权限校验。迁移账号需要目标数据库的 DDL 权限；应用账号只
 授予控制面 14 张表各自完整的表级 `SELECT/INSERT/UPDATE/DELETE`（缺失任何一项也会拒绝），
@@ -339,7 +394,9 @@ cd trpc-agent-service
 `CREATE/ALTER/DROP/TRIGGER` 等 DDL 权限。两个 DSN 必须实际登录为不同 MySQL 账号并指向
 同一个数据库；Bootstrap 会拒绝超出白名单的直接/角色权限、启用角色权限或 grant option。
 
-首次使用 PostgreSQL 时，先按 [Issue #67 首次运行初始化](https://xnlemon.github.io/trpc-agent-service/issue-67-first-run-init/) 生成 `TRPC_TENANT_ID` 和 `TRPC_APP_ID`，再启动服务。正常启动不会自动创建 Tenant 或 Agent App。
+首次运行初始化命令只支持 PostgreSQL；MySQL 控制面会在服务启动时自动执行迁移，但当前 MySQL
+runtime storage 只能使用 `TRPC_SESSION_BACKEND=inmemory`。正常启动不会自动创建 Tenant 或 Agent App，
+具体初始化边界见 [Issue #67 首次运行初始化](https://xnlemon.github.io/trpc-agent-service/issue-67-first-run-init/)。
 
 停止服务：
 
