@@ -55,7 +55,11 @@ func NewWebhook(adapter *Adapter, config WebhookConfig) (*Webhook, error) {
 	if config.MaxBodyBytes < 1 || len([]rune(config.SecretToken)) > maximumTokenRunes || hasControl(config.SecretToken) {
 		return nil, fmt.Errorf("%w: webhook configuration is invalid", ErrInvalid)
 	}
-	return &Webhook{adapter: adapter, path: strings.TrimRight(config.Path, "/"), secret: []byte(config.SecretToken), maxBody: config.MaxBodyBytes}, nil
+	path := strings.TrimRight(config.Path, "/")
+	if path == "" {
+		return nil, fmt.Errorf("%w: webhook path is invalid", ErrInvalid)
+	}
+	return &Webhook{adapter: adapter, path: path, secret: []byte(config.SecretToken), maxBody: config.MaxBodyBytes}, nil
 }
 
 // Channel identifies the wrapped Telegram adapter.
@@ -135,3 +139,5 @@ func (w *Webhook) Close() error {
 	w.wg.Wait()
 	return w.adapter.Close()
 }
+
+var _ channels.WebhookAdapter = (*Webhook)(nil)

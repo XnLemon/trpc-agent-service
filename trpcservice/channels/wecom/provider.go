@@ -52,7 +52,7 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 		}
 	}
 	p.mu.Unlock()
-	if (value.ReplyTarget.ConversationKind != "direct" && value.ReplyTarget.ConversationKind != "group") || value.ReplyTarget.ReceiverID == "" || (value.ReplyTarget.ConversationKind == "group" && value.ReplyTarget.BindingID == "") {
+	if (value.ReplyTarget.ConversationKind != "direct" && value.ReplyTarget.ConversationKind != "group") || value.ReplyTarget.ReceiverID == "" {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
 	}
 	if len([]byte(value.Payload)) == 0 || len([]byte(value.Payload)) > maximumTextBytes {
