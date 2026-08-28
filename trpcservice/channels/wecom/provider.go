@@ -43,6 +43,12 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 	if p == nil || strings.TrimSpace(p.CorpID) == "" || strings.TrimSpace(p.AgentID) == "" || strings.TrimSpace(p.AppSecret) == "" || ctx == nil {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
 	}
+	if (value.ReplyTarget.ConversationKind != "direct" && value.ReplyTarget.ConversationKind != "group") || value.ReplyTarget.ReceiverID == "" {
+		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
+	}
+	if len([]byte(value.Payload)) == 0 || len([]byte(value.Payload)) > maximumTextBytes {
+		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
+	}
 	key := deliveryKey(value)
 	p.mu.Lock()
 	if value.ReplyID != "" && p.receipts != nil {
@@ -52,12 +58,6 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 		}
 	}
 	p.mu.Unlock()
-	if (value.ReplyTarget.ConversationKind != "direct" && value.ReplyTarget.ConversationKind != "group") || value.ReplyTarget.ReceiverID == "" {
-		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
-	}
-	if len([]byte(value.Payload)) == 0 || len([]byte(value.Payload)) > maximumTextBytes {
-		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
-	}
 	token, err := p.accessToken(ctx)
 	if err != nil {
 		return "", err

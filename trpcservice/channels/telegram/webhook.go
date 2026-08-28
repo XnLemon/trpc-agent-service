@@ -112,7 +112,11 @@ func (w *Webhook) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		response.WriteHeader(http.StatusOK)
 	case errors.Is(err, ErrClosed), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		http.Error(response, "unavailable", http.StatusServiceUnavailable)
-	case errors.Is(err, ErrInvalidUpdate), errors.Is(err, ErrUnsupportedUpdate):
+	case errors.Is(err, ErrUnsupportedUpdate):
+		// The update was authenticated and safely classified but is outside the
+		// adapter contract. Acknowledge it so Telegram does not replay forever.
+		response.WriteHeader(http.StatusOK)
+	case errors.Is(err, ErrInvalidUpdate):
 		http.Error(response, "bad request", http.StatusBadRequest)
 	default:
 		http.Error(response, "unavailable", http.StatusServiceUnavailable)
