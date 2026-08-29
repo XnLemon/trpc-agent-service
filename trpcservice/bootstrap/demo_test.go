@@ -1215,7 +1215,15 @@ func TestEnsureDemoPublishedRevisionBranches(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
 
+func TestEnsureDemoPublishedRevisionLifecycle(t *testing.T) {
+	root := &tenant.Tenant{TenantID: testInitTenantID, Status: tenant.StatusActive}
+	current := int64(1)
+	newApp := func(status agent.Status) *agent.App {
+		return &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: status, CurrentRevision: &current, Version: 2}
+	}
+	valid := &agent.Revision{TenantID: root.TenantID, AppID: testInitAppID, Revision: 1, State: agent.RevisionStatePublished, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: agent.DefaultRuntimePolicy()}
 	t.Run("suspended app resumes", func(t *testing.T) {
 		db, mock, err := sqlmock.New()
 		if err != nil {
@@ -1233,7 +1241,6 @@ func TestEnsureDemoPublishedRevisionBranches(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-
 	t.Run("resume failure", func(t *testing.T) {
 		db, mock, err := sqlmock.New()
 		if err != nil {
@@ -1338,7 +1345,15 @@ func TestEnsureDemoDraftRevisionBranches(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
 
+func TestEnsureDemoDraftRevisionLifecycleFailures(t *testing.T) {
+	root := &tenant.Tenant{TenantID: testInitTenantID, Status: tenant.StatusActive}
+	metadata := demoAgentMetadata()
+	newApp := func() *agent.App {
+		return &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: agent.StatusDraft, Version: 1}
+	}
+	valid := &agent.Revision{TenantID: root.TenantID, AppID: testInitAppID, Revision: 1, DraftVersion: 1, State: agent.RevisionStateDraft, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: agent.DefaultRuntimePolicy()}
 	t.Run("app reload failure", func(t *testing.T) {
 		db, mock, err := sqlmock.New()
 		if err != nil {
@@ -1354,7 +1369,6 @@ func TestEnsureDemoDraftRevisionBranches(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-
 	t.Run("publish failure", func(t *testing.T) {
 		db, mock, err := sqlmock.New()
 		if err != nil {
