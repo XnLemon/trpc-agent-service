@@ -303,32 +303,40 @@ func ensureDemoRevision(ctx context.Context, db *sql.DB, apps agent.Repository, 
 	}
 	metadata := agent.ChangeMetadata{ActorType: demoActorType, ActorID: demoActorID, Reason: demoReason, CorrelationID: demoCorrelationID}
 	if app.CurrentRevision != nil {
-		revisions, err := findRevisionNumbers(ctx, db, root.TenantID, app.AppID)
-		if err != nil {
-			return nil, nil, false, err
-		}
-		if len(revisions) != 1 || revisions[0] != *app.CurrentRevision {
-			return nil, nil, false, fmt.Errorf("%w: app has unexpected revision history", ErrDemoState)
-		}
-		revision, err := apps.GetRevision(ctx, root.TenantID, app.AppID, *app.CurrentRevision)
-		if err != nil {
-			return nil, nil, false, demoDependencyError(err)
-		}
-		if revision.State != agent.RevisionStatePublished || !demoRevisionMatches(revision, modelID) || app.Status == agent.StatusDisabled {
-			return nil, nil, false, fmt.Errorf("%w: published app graph does not match offline demo", ErrDemoState)
-		}
-		if app.Status == agent.StatusSuspended {
-			active, _, err := apps.TransitionStatus(ctx, agent.TransitionStatusInput{TenantID: root.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: agent.StatusActive, Metadata: metadata})
-			if err != nil {
-				return nil, nil, false, demoDependencyError(err)
-			}
-			app = active
-		}
-		return app, revision, false, nil
+		return ensureDemoPublishedRevision(ctx, db, apps, root, app, modelID, metadata)
 	}
 	if app.Status != agent.StatusDraft {
 		return nil, nil, false, fmt.Errorf("%w: app has no published revision", ErrDemoState)
 	}
+	return ensureDemoDraftRevision(ctx, db, apps, root, app, modelID, metadata)
+}
+
+func ensureDemoPublishedRevision(ctx context.Context, db *sql.DB, apps agent.Repository, root *tenant.Tenant, app *agent.App, modelID string, metadata agent.ChangeMetadata) (*agent.App, *agent.Revision, bool, error) {
+	revisions, err := findRevisionNumbers(ctx, db, root.TenantID, app.AppID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if len(revisions) != 1 || revisions[0] != *app.CurrentRevision {
+		return nil, nil, false, fmt.Errorf("%w: app has unexpected revision history", ErrDemoState)
+	}
+	revision, err := apps.GetRevision(ctx, root.TenantID, app.AppID, *app.CurrentRevision)
+	if err != nil {
+		return nil, nil, false, demoDependencyError(err)
+	}
+	if revision.State != agent.RevisionStatePublished || !demoRevisionMatches(revision, modelID) || app.Status == agent.StatusDisabled {
+		return nil, nil, false, fmt.Errorf("%w: published app graph does not match offline demo", ErrDemoState)
+	}
+	if app.Status == agent.StatusSuspended {
+		active, _, err := apps.TransitionStatus(ctx, agent.TransitionStatusInput{TenantID: root.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: agent.StatusActive, Metadata: metadata})
+		if err != nil {
+			return nil, nil, false, demoDependencyError(err)
+		}
+		app = active
+	}
+	return app, revision, false, nil
+}
+
+func ensureDemoDraftRevision(ctx context.Context, db *sql.DB, apps agent.Repository, root *tenant.Tenant, app *agent.App, modelID string, metadata agent.ChangeMetadata) (*agent.App, *agent.Revision, bool, error) {
 	revisions, err := findRevisionNumbers(ctx, db, root.TenantID, app.AppID)
 	if err != nil {
 		return nil, nil, false, err

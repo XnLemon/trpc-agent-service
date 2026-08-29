@@ -161,8 +161,7 @@ func TestEnsureDemoDefaultsFailsClosed(t *testing.T) {
 	if err != nil || changed || stable.DefaultAgentAppID == nil || *stable.DefaultAgentAppID != "app_demo" {
 		t.Fatalf("matching defaults = %+v, changed=%v, err=%v", stable, changed, err)
 	}
-	wrong := *stable.DefaultAgentAppID
-	wrong = "app_other"
+	wrong := "app_other"
 	stable.DefaultAgentAppID = &wrong
 	if _, _, err := ensureDemoDefaults(context.Background(), repo, stable, "app_demo", "backend_demo"); !errors.Is(err, ErrDemoState) {
 		t.Fatalf("incompatible defaults error = %v", err)
