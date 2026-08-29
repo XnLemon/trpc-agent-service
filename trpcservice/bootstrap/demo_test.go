@@ -7,7 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
+	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 
@@ -31,8 +35,8 @@ func TestDefaultDemoConfigAndValidation(t *testing.T) {
 			t.Fatalf("invalid demo config error = %v", err)
 		}
 	}
-	trimmed := normalizeDemoConfig(DemoConfig{TenantKey: "  tenant-demo  ", AppKey: "  assistant-demo  "})
-	if trimmed.TenantKey != "tenant-demo" || trimmed.AppKey != "assistant-demo" || trimmed.AppDisplayName == "" {
+	trimmed := normalizeDemoConfig(DemoConfig{TenantKey: "  Tenant-Demo  ", AppKey: "  Assistant-Demo  ", ModelProfileKey: " DemoModel ", BackendProfileKey: " LocalStore "})
+	if trimmed.TenantKey != "tenant-demo" || trimmed.AppKey != "assistant-demo" || trimmed.ModelProfileKey != "demomodel" || trimmed.BackendProfileKey != "localstore" || trimmed.AppDisplayName == "" {
 		t.Fatalf("normalized demo config = %+v", trimmed)
 	}
 }
@@ -140,5 +144,62 @@ func TestDemoEnvironmentIsExplicitAndCredentialFree(t *testing.T) {
 	t.Setenv(envWeComCallbackToken, "callback")
 	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("demo environment with WeCom credentials = %v", err)
+	}
+}
+
+func TestEnsureDemoDefaultsFailsClosed(t *testing.T) {
+	repo := tenantmemory.NewRepository()
+	root, err := repo.Create(context.Background(), tenant.CreateInput{TenantKey: "demo", DisplayName: "Demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, changed, err := ensureDemoDefaults(context.Background(), repo, root, "app_demo", "backend_demo")
+	if err != nil || !changed || updated.DefaultAgentAppID == nil || updated.DefaultBackendProfileID == nil {
+		t.Fatalf("initial defaults update = %+v, changed=%v, err=%v", updated, changed, err)
+	}
+	stable, changed, err := ensureDemoDefaults(context.Background(), repo, updated, "app_demo", "backend_demo")
+	if err != nil || changed || stable.DefaultAgentAppID == nil || *stable.DefaultAgentAppID != "app_demo" {
+		t.Fatalf("matching defaults = %+v, changed=%v, err=%v", stable, changed, err)
+	}
+	wrong := *stable.DefaultAgentAppID
+	wrong = "app_other"
+	stable.DefaultAgentAppID = &wrong
+	if _, _, err := ensureDemoDefaults(context.Background(), repo, stable, "app_demo", "backend_demo"); !errors.Is(err, ErrDemoState) {
+		t.Fatalf("incompatible defaults error = %v", err)
+	}
+	suspended := *root
+	suspended.Status = tenant.StatusSuspended
+	if _, _, err := ensureDemoDefaults(context.Background(), repo, &suspended, "app_demo", "backend_demo"); !errors.Is(err, ErrDemoState) {
+		t.Fatalf("suspended tenant error = %v", err)
+	}
+	if _, _, err := ensureDemoDefaults(context.Background(), repo, nil, "app_demo", "backend_demo"); !errors.Is(err, ErrDemoState) {
+		t.Fatalf("nil tenant error = %v", err)
+	}
+}
+
+func TestEnsureDemoRevisionRejectsUnrunnableState(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	root := &tenant.Tenant{TenantID: testInitTenantID, Status: tenant.StatusActive}
+	app := &agent.App{TenantID: root.TenantID, AppID: testInitAppID, Status: agent.StatusActive}
+	canary := int64(2)
+	app.CanaryRevision = &canary
+	if _, _, _, err := ensureDemoRevision(context.Background(), db, nil, root, app, "model"); !errors.Is(err, ErrDemoState) {
+		t.Fatalf("canary state error = %v", err)
+	}
+	app.CanaryRevision = nil
+	suspended := *root
+	suspended.Status = tenant.StatusSuspended
+	if _, _, _, err := ensureDemoRevision(context.Background(), db, nil, &suspended, app, "model"); !errors.Is(err, ErrDemoState) {
+		t.Fatalf("suspended tenant error = %v", err)
+	}
+	if _, _, _, err := ensureDemoRevision(context.Background(), db, nil, root, nil, "model"); !errors.Is(err, ErrDemoState) {
+		t.Fatalf("nil app error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }

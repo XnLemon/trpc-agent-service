@@ -122,6 +122,13 @@ func InitializeDemo(ctx context.Context, db *sql.DB, input DemoConfig) (DemoResu
 	if tenantRoot.TenantKey != config.TenantKey || app.AppKey != config.AppKey {
 		return DemoResult{}, fmt.Errorf("%w: initial tenant or app key does not match demo configuration", ErrDemoState)
 	}
+	// The demo flow must return a graph that can immediately accept a chat.
+	// Resuming or enabling an operator-managed tenant is outside this
+	// development-only bootstrap boundary, so fail closed instead of reporting
+	// a graph that the runtime will reject.
+	if tenantRoot.Status != tenant.StatusActive {
+		return DemoResult{}, fmt.Errorf("%w: tenant is not active", ErrDemoState)
+	}
 	created := initial.Created
 	modelID, modelCreated, err := ensureDemoModel(ctx, db, modelRepo, initial.TenantID, config.ModelProfileKey)
 	if err != nil {
@@ -169,13 +176,13 @@ func normalizeDemoConfig(config DemoConfig) DemoConfig {
 	if strings.TrimSpace(config.BackendProfileKey) == "" {
 		config.BackendProfileKey = defaults.BackendProfileKey
 	}
-	config.TenantKey = strings.TrimSpace(config.TenantKey)
+	config.TenantKey = strings.ToLower(strings.TrimSpace(config.TenantKey))
 	config.TenantDisplayName = strings.TrimSpace(config.TenantDisplayName)
-	config.AppKey = strings.TrimSpace(config.AppKey)
+	config.AppKey = strings.ToLower(strings.TrimSpace(config.AppKey))
 	config.AppDisplayName = strings.TrimSpace(config.AppDisplayName)
 	config.AppDescription = strings.TrimSpace(config.AppDescription)
-	config.ModelProfileKey = strings.TrimSpace(config.ModelProfileKey)
-	config.BackendProfileKey = strings.TrimSpace(config.BackendProfileKey)
+	config.ModelProfileKey = strings.ToLower(strings.TrimSpace(config.ModelProfileKey))
+	config.BackendProfileKey = strings.ToLower(strings.TrimSpace(config.BackendProfileKey))
 	return config
 }
 
@@ -259,8 +266,17 @@ func ensureDemoBackend(ctx context.Context, db *sql.DB, repo backend.Repository,
 }
 
 func ensureDemoDefaults(ctx context.Context, repo tenant.Repository, root *tenant.Tenant, appID, backendID string) (*tenant.Tenant, bool, error) {
-	if root.DefaultAgentAppID != nil && *root.DefaultAgentAppID == appID && root.DefaultBackendProfileID != nil && *root.DefaultBackendProfileID == backendID {
+	if root == nil {
+		return nil, false, fmt.Errorf("%w: tenant is missing", ErrDemoState)
+	}
+	if root.DefaultAgentAppID != nil || root.DefaultBackendProfileID != nil {
+		if root.DefaultAgentAppID == nil || root.DefaultBackendProfileID == nil || *root.DefaultAgentAppID != appID || *root.DefaultBackendProfileID != backendID {
+			return nil, false, fmt.Errorf("%w: tenant defaults do not match offline demo", ErrDemoState)
+		}
 		return root, false, nil
+	}
+	if root.Status != tenant.StatusActive {
+		return nil, false, fmt.Errorf("%w: tenant is not active", ErrDemoState)
 	}
 	updated, err := repo.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{
 		TenantID: root.TenantID, ExpectedVersion: root.Version, DisplayName: root.DisplayName,
@@ -276,8 +292,24 @@ func ensureDemoDefaults(ctx context.Context, repo tenant.Repository, root *tenan
 }
 
 func ensureDemoRevision(ctx context.Context, db *sql.DB, apps agent.Repository, root *tenant.Tenant, app *agent.App, modelID string) (*agent.App, *agent.Revision, bool, error) {
+	if root == nil || root.Status != tenant.StatusActive {
+		return nil, nil, false, fmt.Errorf("%w: tenant is not active", ErrDemoState)
+	}
+	if app == nil {
+		return nil, nil, false, fmt.Errorf("%w: app is missing", ErrDemoState)
+	}
+	if app.CanaryRevision != nil {
+		return nil, nil, false, fmt.Errorf("%w: canary revision is not supported by offline demo", ErrDemoState)
+	}
 	metadata := agent.ChangeMetadata{ActorType: demoActorType, ActorID: demoActorID, Reason: demoReason, CorrelationID: demoCorrelationID}
 	if app.CurrentRevision != nil {
+		revisions, err := findRevisionNumbers(ctx, db, root.TenantID, app.AppID)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if len(revisions) != 1 || revisions[0] != *app.CurrentRevision {
+			return nil, nil, false, fmt.Errorf("%w: app has unexpected revision history", ErrDemoState)
+		}
 		revision, err := apps.GetRevision(ctx, root.TenantID, app.AppID, *app.CurrentRevision)
 		if err != nil {
 			return nil, nil, false, demoDependencyError(err)
