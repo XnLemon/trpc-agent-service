@@ -6,7 +6,9 @@ CONFIG="$ROOT/gitleaks.toml"
 TRIVYIGNORE="$ROOT/.trivyignore"
 today="$(date -u +%F)"
 found=0
-gitleaks_entries=0
+allowlist_block=""
+block_has_metadata=0
+block_has_entry=0
 shopt -s extglob
 
 validate_metadata() {
@@ -52,24 +54,44 @@ validate_metadata() {
   fi
 }
 
+finish_gitleaks_block() {
+  if [[ -n "$allowlist_block" && "$block_has_entry" -eq 1 && "$block_has_metadata" -eq 0 ]]; then
+    echo "::error::active Gitleaks allowlist entries lack owner, rationale, issue, and expiry metadata" >&2
+    exit 1
+  fi
+}
+
 while IFS= read -r line; do
   line="${line%$'\r'}"
-  if [[ "$line" =~ ^[[:space:]]*\[\[rules\.allowlists\]\] ]]; then
-    gitleaks_entries=1
+  if [[ "$line" =~ ^[[:space:]]*\[allowlist\][[:space:]]*$ ]]; then
+    finish_gitleaks_block
+    allowlist_block="global"
+    block_has_metadata=0
+    block_has_entry=0
+    continue
   fi
-  if [[ "$line" =~ ^[[:space:]]*(commits|paths|regexes|files|stopwords)[[:space:]]*=[[:space:]]*\[ && "$line" != *"[]"* ]]; then
-    gitleaks_entries=1
+  if [[ "$line" =~ ^[[:space:]]*\[\[rules\.allowlists\]\][[:space:]]*$ ]]; then
+    finish_gitleaks_block
+    allowlist_block="rule"
+    block_has_metadata=0
+    block_has_entry=1
+    continue
+  fi
+  if [[ "$line" =~ ^[[:space:]]*\[[^\[].*\][[:space:]]*$ ]]; then
+    finish_gitleaks_block
+    allowlist_block=""
+    continue
   fi
   if [[ "$line" == \#*allowlist-expiry:* ]]; then
     found=1
     validate_metadata "$line" "$CONFIG"
+    [[ -n "$allowlist_block" ]] && block_has_metadata=1
+  fi
+  if [[ -n "$allowlist_block" && "$line" =~ ^[[:space:]]*(commits|paths|regexes|files|stopwords)[[:space:]]*=[[:space:]]*\[ && "$line" != *"[]"* ]]; then
+    block_has_entry=1
   fi
 done < "$CONFIG"
-
-if [[ "$gitleaks_entries" -eq 1 && "$found" -eq 0 ]]; then
-  echo "::error::active Gitleaks allowlist entries lack owner, rationale, issue, and expiry metadata" >&2
-  exit 1
-fi
+finish_gitleaks_block
 
 if [[ -f "$TRIVYIGNORE" ]]; then
   trivy_found=0

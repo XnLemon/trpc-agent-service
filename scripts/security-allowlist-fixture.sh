@@ -26,6 +26,10 @@ fi
 cp "$ROOT/gitleaks.toml" "$fixture_root/gitleaks.toml"
 
 cat > "$fixture_root/gitleaks.toml" <<'EOF'
+[allowlist]
+# Owner: @security-team | Issue: #100 | Reason: test-only | allowlist-expiry: 2099-12-31
+commits = ["deadbeef"]
+
 [[rules.allowlists]]
 regexes = ["deadbeef"]
 EOF
