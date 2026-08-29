@@ -271,6 +271,7 @@ func TestRedactedMaterializationErrorDropsUnknownDetails(t *testing.T) {
 		runtimestorage.ErrConflict,
 		runtimestorage.ErrDuplicate,
 		runtimestorage.ErrInvalid,
+		runtimestorage.ErrNotFound,
 		runtimestorage.ErrStorage,
 	} {
 		err := redactedMaterializationError(stable)
@@ -281,6 +282,22 @@ func TestRedactedMaterializationErrorDropsUnknownDetails(t *testing.T) {
 	err := redactedMaterializationError(errors.New("driver password=top-secret"))
 	if !errors.Is(err, ErrMaterialization) || strings.Contains(err.Error(), "top-secret") {
 		t.Fatalf("unknown materialization error was not redacted: %v", err)
+	}
+}
+
+func TestMaterializerPreservesNotFoundErrorClass(t *testing.T) {
+	m, err := NewMaterializer(MaterializerConfig{Store: inmemory.New(), SegmentSize: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = m.Materialize(context.Background(), MaterializeInput{
+		TenantID: "tenant-a",
+		EventID:  "missing-event",
+		ReplyID:  "reply-missing-event",
+		Payload:  "reply",
+	})
+	if !errors.Is(err, ErrMaterialization) || !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing event materialization error = %v", err)
 	}
 }
 

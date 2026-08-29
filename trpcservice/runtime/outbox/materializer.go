@@ -127,7 +127,7 @@ func redactedMaterializationError(err error) error {
 	if err == nil {
 		return nil
 	}
-	for _, stable := range []error{context.Canceled, context.DeadlineExceeded, runtimestorage.ErrConflict, runtimestorage.ErrDuplicate, runtimestorage.ErrInvalid, runtimestorage.ErrStorage} {
+	for _, stable := range []error{context.Canceled, context.DeadlineExceeded, runtimestorage.ErrConflict, runtimestorage.ErrDuplicate, runtimestorage.ErrInvalid, runtimestorage.ErrNotFound, runtimestorage.ErrStorage} {
 		if errors.Is(err, stable) {
 			return errors.Join(ErrMaterialization, stable)
 		}
