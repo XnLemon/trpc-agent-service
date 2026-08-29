@@ -262,6 +262,22 @@ func TestMaterializerValidationBranches(t *testing.T) {
 }
 
 func TestRedactedMaterializationErrorDropsUnknownDetails(t *testing.T) {
+	if redactedMaterializationError(nil) != nil {
+		t.Fatal("nil materialization error was not preserved")
+	}
+	for _, stable := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		runtimestorage.ErrConflict,
+		runtimestorage.ErrDuplicate,
+		runtimestorage.ErrInvalid,
+		runtimestorage.ErrStorage,
+	} {
+		err := redactedMaterializationError(stable)
+		if !errors.Is(err, ErrMaterialization) || !errors.Is(err, stable) {
+			t.Fatalf("stable materialization error = %v, want %v", err, stable)
+		}
+	}
 	err := redactedMaterializationError(errors.New("driver password=top-secret"))
 	if !errors.Is(err, ErrMaterialization) || strings.Contains(err.Error(), "top-secret") {
 		t.Fatalf("unknown materialization error was not redacted: %v", err)
