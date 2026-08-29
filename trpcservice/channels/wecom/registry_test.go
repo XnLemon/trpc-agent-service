@@ -75,10 +75,43 @@ func TestRegistryRemoveAndCloseLifecycle(t *testing.T) {
 
 func TestRegistryNilReceiverLifecycle(t *testing.T) {
 	var registry *Registry
+	valid := Account{TenantID: "tenant", AccountID: "account", Provider: &Provider{}}
+	if err := registry.Register(valid); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil register = %v, want ErrInvalid", err)
+	}
 	if err := registry.Remove("tenant", "account"); !errors.Is(err, ErrAccountMissing) {
 		t.Fatalf("nil remove = %v, want ErrAccountMissing", err)
 	}
+	if _, err := registry.Resolve("tenant", "account"); !errors.Is(err, ErrAccountMissing) {
+		t.Fatalf("nil resolve = %v, want ErrAccountMissing", err)
+	}
 	if err := registry.Close(); err != nil {
 		t.Fatalf("nil close = %v", err)
+	}
+}
+
+func TestRegistryRegisterValidationDuplicateAndLazyMap(t *testing.T) {
+	valid := Account{TenantID: "tenant", AccountID: "account", Provider: &Provider{}}
+	cases := []struct {
+		name    string
+		account Account
+	}{
+		{name: "blank tenant", account: Account{AccountID: "account", Provider: valid.Provider}},
+		{name: "blank account", account: Account{TenantID: "tenant", Provider: valid.Provider}},
+		{name: "nil provider", account: Account{TenantID: "tenant", AccountID: "account"}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if err := NewRegistry().Register(test.account); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("register error = %v, want ErrInvalid", err)
+			}
+		})
+	}
+	lazy := &Registry{}
+	if err := lazy.Register(valid); err != nil {
+		t.Fatalf("register with nil account map: %v", err)
+	}
+	if err := lazy.Register(valid); !errors.Is(err, ErrAccountExists) {
+		t.Fatalf("duplicate register = %v, want ErrAccountExists", err)
 	}
 }
