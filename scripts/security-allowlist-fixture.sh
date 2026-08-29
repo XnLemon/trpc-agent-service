@@ -15,7 +15,9 @@ SECURITY_ALLOWLIST_ROOT="$fixture_root" "$ROOT/scripts/validate-security-allowli
 cat > "$fixture_root/gitleaks.toml" <<'EOF'
 [allowlist]
 # allowlist-expiry: 2099-12-31
-commits = ["deadbeef"]
+regexes = ["deadbeef"]
+files = ["secret.txt"]
+stopwords = ["fixture"]
 EOF
 if SECURITY_ALLOWLIST_ROOT="$fixture_root" "$ROOT/scripts/validate-security-allowlist.sh" >/dev/null 2>&1; then
   echo "::error::allowlist fixture accepted a Gitleaks entry without metadata" >&2
