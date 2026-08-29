@@ -8,7 +8,7 @@
 | `CI / Container Image Scan` | CI 构建出的镜像归档（Trivy v0.74.0） | HIGH、CRITICAL（包含尚未修复的条目） |
 | `CI / Commit Secret Scan` | Pull Request 引入的提交；`main` push 扫描完整 Git 历史（Gitleaks v8.24.3） | 任意高置信度密钥 |
 
-每个 job 只读取仓库内容；上传 SARIF 额外使用 `security-events: write`，原始报告会作为短期 artifact 保存，便于定位修复。上传到 GitHub Code Scanning 的报告不改变扫描门禁结果，因 fork Pull Request 可能没有写入 `security-events` 的权限。
+每个 job 只读取仓库内容；上传 SARIF 额外使用 `security-events: write`，原始报告会作为短期 artifact 保存，便于定位修复。来自 fork 的 Pull Request 会跳过需要写权限的 Code Scanning 上传；同仓库 PR 和 `main` push 的上传或报告校验失败会使 job 失败（fail closed）。
 
 ## 本地运行
 
