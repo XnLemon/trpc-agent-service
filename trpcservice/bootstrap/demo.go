@@ -118,6 +118,12 @@ func InitializeDemo(ctx context.Context, db *sql.DB, input DemoConfig) (DemoResu
 	if err := preflightDemoApp(ctx, db, appRepo, tenantRoot, app, config.ModelProfileKey); err != nil {
 		return DemoResult{}, demoStepError("agent revision preflight", err)
 	}
+	if err := preflightDemoModel(ctx, db, modelRepo, tenantRoot.TenantID, config.ModelProfileKey); err != nil {
+		return DemoResult{}, demoStepError("model profile preflight", err)
+	}
+	if err := preflightDemoBackend(ctx, db, backendRepo, tenantRoot.TenantID, config.BackendProfileKey); err != nil {
+		return DemoResult{}, demoStepError("backend profile preflight", err)
+	}
 	created := initial.Created
 	modelID, modelCreated, err := ensureDemoModel(ctx, db, modelRepo, initial.TenantID, config.ModelProfileKey)
 	if err != nil {
@@ -158,6 +164,36 @@ func loadDemoRootApp(ctx context.Context, tenants tenant.Repository, apps agent.
 		return nil, nil, fmt.Errorf("%w: tenant is not active", ErrDemoState)
 	}
 	return tenantRoot, app, nil
+}
+
+func preflightDemoModel(ctx context.Context, db *sql.DB, repo modelprofile.Repository, tenantID, profileKey string) error {
+	profileID, found, err := findProfileID(ctx, db, "model_profile", tenantID, profileKey)
+	if err != nil || !found {
+		return err
+	}
+	profile, err := repo.Get(ctx, tenantID, profileID)
+	if err != nil {
+		return demoDependencyError(err)
+	}
+	if profile.ProfileKey != profileKey || profile.Configuration.Provider != demoModelProvider || profile.Configuration.Model != demoModelName || profile.Configuration.SecretRef != "" || profile.Configuration.Endpoint != "" || len(profile.Configuration.Options) != 0 || !emptyModelGeneration(profile.Configuration.Generation) || profile.Status == modelprofile.StatusDisabled {
+		return fmt.Errorf("%w: model profile does not match offline demo", ErrDemoState)
+	}
+	return nil
+}
+
+func preflightDemoBackend(ctx context.Context, db *sql.DB, repo backend.Repository, tenantID, profileKey string) error {
+	profileID, found, err := findProfileID(ctx, db, "backend_profile", tenantID, profileKey)
+	if err != nil || !found {
+		return err
+	}
+	profile, err := repo.Get(ctx, tenantID, profileID)
+	if err != nil {
+		return demoDependencyError(err)
+	}
+	if profile.ProfileKey != profileKey || len(profile.Bindings) != 1 || profile.Bindings[0].Capability != backend.CapabilitySession || profile.Bindings[0].Provider != "inmemory" || profile.Bindings[0].Endpoint != "" || profile.Bindings[0].SecretRef != "" || len(profile.Bindings[0].Options) != 0 || profile.Status == backend.StatusDisabled {
+		return fmt.Errorf("%w: backend profile does not match offline demo", ErrDemoState)
+	}
+	return nil
 }
 
 // preflightDemoApp checks all existing app/revision state before the demo flow
