@@ -77,6 +77,11 @@ while IFS= read -r line; do
     block_has_entry=1
     continue
   fi
+  if [[ "$line" =~ ^[[:space:]]*\[\[.*\]\][[:space:]]*$ ]]; then
+    finish_gitleaks_block
+    allowlist_block=""
+    continue
+  fi
   if [[ "$line" =~ ^[[:space:]]*\[[^\[].*\][[:space:]]*$ ]]; then
     finish_gitleaks_block
     allowlist_block=""
