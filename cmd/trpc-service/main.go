@@ -29,6 +29,7 @@ const (
 	defaultWriteTimeout      = 30 * time.Second
 	defaultIdleTimeout       = 60 * time.Second
 	initUsage                = "usage: trpc-service init --confirm [-tenant-key key] [-tenant-name name] [-app-key key] [-app-name name] [-app-description text]"
+	demoUsage                = "usage: trpc-service demo --confirm [-tenant-key key] [-tenant-name name] [-app-key key] [-app-name name] [-model-key key] [-backend-key key]"
 	bootstrapPostgresDSN     = "TRPC_POSTGRES_DSN"
 
 	envInitTenantKey      = "TRPC_INIT_TENANT_KEY"
@@ -47,6 +48,12 @@ type initOptions struct {
 	confirm bool
 	help    bool
 	config  bootstrap.InitConfig
+}
+
+type demoOptions struct {
+	confirm bool
+	help    bool
+	config  bootstrap.DemoConfig
 }
 
 var (
@@ -71,12 +78,15 @@ func runMain(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 	if len(args) > 0 && args[0] == "init" {
 		return runInit(ctx, args[1:], stdout, stderr, signals)
 	}
+	if len(args) > 0 && args[0] == "demo" {
+		return runDemo(ctx, args[1:], stdout, stderr, signals)
+	}
 	options, help, err := parseServiceOptions(args, stderr)
 	if err != nil {
 		return err
 	}
 	if help {
-		_, _ = fmt.Fprintf(stdout, "trpc-agent-service %s\nusage: trpc-service [-addr address] [-shutdown-timeout duration]\n       trpc-service init --confirm [options]\n", trpcservice.Version)
+		_, _ = fmt.Fprintf(stdout, "trpc-agent-service %s\nusage: trpc-service [-addr address] [-shutdown-timeout duration]\n       trpc-service init --confirm [options]\n       trpc-service demo --confirm [options]\n", trpcservice.Version)
 		return nil
 	}
 	bootstrapRuntime, err := newBootstrapRuntime(ctx)
@@ -148,6 +158,64 @@ func runInit(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 	return bootstrap.WriteInitResult(stdout, result)
 }
 
+func runDemo(ctx context.Context, args []string, stdout, stderr io.Writer, signals <-chan os.Signal) error {
+	options, help, err := parseDemoOptions(args, stderr)
+	if err != nil {
+		return err
+	}
+	if help {
+		_, err := fmt.Fprintln(stdout, demoUsage+"\n\nThe database DSN is read from TRPC_POSTGRES_DSN. Demo metadata may also be supplied with TRPC_DEMO_TENANT_KEY, TRPC_DEMO_TENANT_NAME, TRPC_DEMO_APP_KEY, TRPC_DEMO_APP_NAME, TRPC_DEMO_APP_DESCRIPTION, TRPC_DEMO_MODEL_KEY, and TRPC_DEMO_BACKEND_KEY.")
+		return err
+	}
+	if !options.confirm {
+		return fmt.Errorf("%w: use --confirm", bootstrap.ErrInitializationAuthorization)
+	}
+	dsn := strings.TrimSpace(os.Getenv(bootstrapPostgresDSN))
+	if dsn == "" {
+		return fmt.Errorf("%w: %s is required", bootstrap.ErrInvalidConfig, bootstrapPostgresDSN)
+	}
+	if ctx == nil {
+		return bootstrap.ErrInvalidConfig
+	}
+	demoContext := ctx
+	if signals != nil {
+		var cancel context.CancelFunc
+		demoContext, cancel = context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			select {
+			case <-signals:
+				cancel()
+			case <-demoContext.Done():
+			}
+		}()
+	}
+	db, err := openInitDatabase(demoContext, dsn, postgres.Options{MaxOpenConns: 4, MaxIdleConns: 4})
+	if err != nil {
+		return mapInitCommandError(demoContext, err, "PostgreSQL is unavailable")
+	}
+	if db == nil {
+		return bootstrap.ErrDemoInitialization
+	}
+	applyErr := applyInitMigrations(demoContext, db)
+	if applyErr == nil {
+		applyErr = verifyInitMigrations(demoContext, db)
+	}
+	if applyErr != nil {
+		_ = db.Close()
+		return mapInitCommandError(demoContext, applyErr, "database migrations are not ready")
+	}
+	result, demoErr := bootstrap.InitializeDemo(demoContext, db, options.config)
+	closeErr := db.Close()
+	if demoErr != nil {
+		return demoErr
+	}
+	if closeErr != nil {
+		return fmt.Errorf("%w: database close failed", bootstrap.ErrDemoInitialization)
+	}
+	return bootstrap.WriteDemoResult(stdout, result)
+}
+
 func parseInitOptions(args []string, stderr io.Writer) (initOptions, bool, error) {
 	options := initOptions{config: bootstrap.InitConfig{
 		TenantKey:         strings.TrimSpace(os.Getenv(envInitTenantKey)),
@@ -171,6 +239,37 @@ func parseInitOptions(args []string, stderr io.Writer) (initOptions, bool, error
 	}
 	if flags.NArg() != 0 {
 		return initOptions{}, false, errors.New("unexpected init arguments")
+	}
+	return options, options.help, nil
+}
+
+func parseDemoOptions(args []string, stderr io.Writer) (demoOptions, bool, error) {
+	defaults := bootstrap.DefaultDemoConfig()
+	defaults.TenantKey = strings.TrimSpace(os.Getenv("TRPC_DEMO_TENANT_KEY"))
+	defaults.TenantDisplayName = strings.TrimSpace(os.Getenv("TRPC_DEMO_TENANT_NAME"))
+	defaults.AppKey = strings.TrimSpace(os.Getenv("TRPC_DEMO_APP_KEY"))
+	defaults.AppDisplayName = strings.TrimSpace(os.Getenv("TRPC_DEMO_APP_NAME"))
+	defaults.AppDescription = strings.TrimSpace(os.Getenv("TRPC_DEMO_APP_DESCRIPTION"))
+	defaults.ModelProfileKey = strings.TrimSpace(os.Getenv("TRPC_DEMO_MODEL_KEY"))
+	defaults.BackendProfileKey = strings.TrimSpace(os.Getenv("TRPC_DEMO_BACKEND_KEY"))
+	flags := flag.NewFlagSet("trpc-service demo", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	options := demoOptions{config: defaults}
+	flags.BoolVar(&options.help, "help", false, "show help")
+	flags.BoolVar(&options.help, "h", false, "show help")
+	flags.BoolVar(&options.confirm, "confirm", false, "authorize demo initialization")
+	flags.StringVar(&options.config.TenantKey, "tenant-key", options.config.TenantKey, "demo tenant key")
+	flags.StringVar(&options.config.TenantDisplayName, "tenant-name", options.config.TenantDisplayName, "demo tenant display name")
+	flags.StringVar(&options.config.AppKey, "app-key", options.config.AppKey, "demo agent app key")
+	flags.StringVar(&options.config.AppDisplayName, "app-name", options.config.AppDisplayName, "demo agent app display name")
+	flags.StringVar(&options.config.AppDescription, "app-description", options.config.AppDescription, "demo agent app description")
+	flags.StringVar(&options.config.ModelProfileKey, "model-key", options.config.ModelProfileKey, "demo model profile key")
+	flags.StringVar(&options.config.BackendProfileKey, "backend-key", options.config.BackendProfileKey, "demo backend profile key")
+	if err := flags.Parse(args); err != nil {
+		return demoOptions{}, false, err
+	}
+	if flags.NArg() != 0 {
+		return demoOptions{}, false, errors.New("unexpected demo arguments")
 	}
 	return options, options.help, nil
 }

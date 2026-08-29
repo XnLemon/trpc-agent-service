@@ -36,11 +36,20 @@ docker compose --env-file deploy/service.env -f deploy/docker-compose.yml down
 `deploy/example.env` 是仓库内提交的默认参数模板；复制后得到的
 `deploy/service.env` 仅用于本机覆盖值，真实凭据不会随镜像构建上下文提交。
 
-该快速开始的端到端边界是迁移、bootstrap、HTTP 存活/readiness 和容器入口；它不会自动
-创建 Tenant、Agent App、Model 或 Backend，也不会调用真实模型。要发送第一条对话请求，
-请先按 [Issue #67 首次运行初始化](issue-67-first-run-init.md) 初始化控制面，再通过
-Admin API 创建并发布 Model、Backend 和 Agent App。默认的 Tenant/App ID 只是本地占位值，
-不会因为服务启动而自动写入数据库。
+该命令的默认端到端边界是迁移、bootstrap、HTTP 存活/readiness 和容器入口；它不会自动
+创建控制面资源。需要一条真正可运行的本地链路时，使用开发专用入口：
+
+```bash
+./scripts/quickstart.sh --demo
+```
+
+`--demo` 会先执行 `trpc-service demo --confirm`，在 PostgreSQL 中幂等创建或复用 Tenant、
+Agent App、deterministic fake Model、InMemory Backend 及已发布 Revision，再启动服务并实际
+调用 `/v1/chat`。脚本断言固定响应 `Hello from the tRPC Agent Service demo.`；它不访问公共
+模型、IM 或 Secret Manager endpoint，也不会把 DSN、token、模型 key 或 SecretRef 写入输出。
+demo 仅支持 PostgreSQL、本地开发使用，遇到部分或多租户歧义状态会 fail closed。普通生产启动
+仍不会自动建资源；生产请按 [Issue #67 首次运行初始化](issue-67-first-run-init.md) 初始化
+控制面，再通过 Admin API 创建并发布配置。
 
 ### Compose 验收契约
 
@@ -176,6 +185,7 @@ curl --fail http://127.0.0.1:8080/readyz
 | `TRPC_MODEL_ENDPOINT_HOSTS` | 否，`api.openai.com` | 逗号分隔 HTTPS endpoint host 白名单 |
 | `TRPC_MODEL_SECRET_REF` | 否，`env/trpc-model-api-key` | 运行时 Secret 引用，不是 Secret 值 |
 | `TRPC_SESSION_BACKEND` | 必需，显式 `postgres`/`inmemory` | Compose/Kubernetes 示例使用 `postgres`；MySQL 控制面当前应使用 `inmemory` |
+| `TRPC_DEMO_MODE` | 否，`false` | 仅由 `quickstart.sh --demo` 显式启用；要求 `TRPC_MODEL_PROVIDER=fake`，不读取模型凭据 |
 
 模型 API key 只在受信任的 Secret Resolver/Factory 路径中使用，不进入 Execution Plan、缓存、
 日志或数据库。
@@ -206,13 +216,14 @@ OTLP exporter 故障不会把 header 或 Secret 写入 span、metric、日志或
 
 该脚本检查填充 env 文件的 Docker 忽略规则、Compose 渲染结果、容器监听地址、Kustomize
 输出和固定镜像 tag。仓库 CI 的 Deployment job 还会构建 Docker 镜像，并用 PostgreSQL 服务
-运行 Compose smoke test，验证容器内 `/healthz` 与 `/readyz`；MkDocs workflow 以
+运行 Compose smoke test，验证容器内 `/healthz`、`/readyz` 及 `--demo` golden path 的第一条
+`/v1/chat`；MkDocs workflow 以
 `mkdocs build --strict` 构建本页。由于本地环境可能没有运行 Docker daemon，无法连接 daemon
 时仍可运行上述 Compose config、Kustomize、Go 单测和静态检查，实际镜像/Compose smoke 会由
 CI 完成。
 
 ## 当前边界
 
-这套 quick start 验证的是 PostgreSQL migration、bootstrap、HTTP 存活/readiness 和部署
-入口，不会伪造真实模型供应商、企业微信或 Telegram 凭据。生产上线仍需要 Secret rotation、
+默认 quick start 验证的是 PostgreSQL migration、bootstrap、HTTP 存活/readiness 和部署
+入口；`--demo` 额外验证离线模型和第一条对话。生产上线仍需要 Secret rotation、
 备份恢复、容量压测、Provider/IM E2E、灰度和回滚演练；这些操作不能由本地占位配置替代。

@@ -122,6 +122,7 @@
 - [x] 增加显式、幂等且并发安全的首次 Tenant/App 初始化命令（Issue #67）
 - [x] 增加 Dockerfile、Docker Compose 最小部署和 Kubernetes 生产部署清单（Issue #74）
 - [x] 增加配置示例、环境变量说明和可验证的部署快速开始（Issue #74）
+- [x] 增加开发专用、可重复的本地 golden path，从空库验证第一条 deterministic `/v1/chat`（Issue #101）
 
 ### 多租户控制面
 
@@ -355,7 +356,7 @@
 - **Format & Lint**：`gofmt` 校验、`go vet`、`golangci-lint`
 - **Build, Test & Coverage**：构建、单测覆盖率、上传 [Codecov](https://codecov.io)、清理
 - **Race Tests**：在临时 PostgreSQL 与 MySQL 8 依赖上执行 `go test -race ./...`；MySQL migration/repository live 测试使用独立 migration 账号和表级 DML 白名单应用账号
-- **Deployment**：校验 Docker Compose/Kustomize 清单，构建镜像并运行 PostgreSQL + 服务 smoke test，验证 `/healthz` 和 `/readyz`
+- **Deployment**：校验 Docker Compose/Kustomize 清单，构建镜像并运行 PostgreSQL + 服务 golden path，验证 `/healthz`、`/readyz` 和第一条 `/v1/chat`
 
 完整的环境变量参考、Kubernetes Secret 约束和 Compose/Kubernetes 操作步骤见
 [部署、配置与快速开始](docs/docs/deployment.md)。
@@ -387,10 +388,21 @@ cp deploy/example.env deploy/service.env
 服务继续运行在 `http://127.0.0.1:8080`。`deploy/service.env` 仅供本地使用，已被 Git 和
 Docker build context 忽略，不能提交真实凭据。
 
-这个快速开始验证的是数据库迁移、bootstrap 和 HTTP 部署入口，不会自动创建 Tenant、Agent
-App、Model 或 Backend，也不会调用真实模型。要发送第一条对话请求，请先按
-[Issue #67 首次运行初始化](https://xnlemon.github.io/trpc-agent-service/issue-67-first-run-init/)
-初始化控制面，再通过 Admin API 创建并发布运行配置。
+要在空数据库上直接验证第一条对话，使用开发专用 golden path：
+
+```bash
+./scripts/quickstart.sh --demo
+```
+
+它会先运行 `trpc-service demo --confirm`，幂等创建或复用 Tenant、Agent App、离线
+deterministic Model、InMemory Backend 和已发布 Revision，然后以 fake provider 启动服务，
+并实际 POST `/v1/chat` 断言固定响应 `Hello from the tRPC Agent Service demo.`。命令输出只含
+资源 ID 与非敏感运行时变量，不输出 DSN、token 或模型密钥；可重复执行，发现歧义状态时会
+fail closed。该路径只支持 PostgreSQL、仅用于本地开发，不会在普通服务启动时自动建资源。
+
+默认运行（不带 `--demo`）仍只验证数据库迁移、bootstrap 和 HTTP 部署入口，不会创建任何控制面
+资源。生产或真实模型场景请按 [Issue #67 首次运行初始化](https://xnlemon.github.io/trpc-agent-service/issue-67-first-run-init/)
+执行显式初始化，再通过 Admin API 创建并发布运行配置。
 
 ### 源码模式
 

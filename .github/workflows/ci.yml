@@ -51,20 +51,8 @@ jobs:
       - name: Build container image
         run: docker build --tag "$TRPC_SERVICE_IMAGE" .
 
-      - name: Run Compose smoke test
-        run: |
-          docker compose \
-            --env-file deploy/example.env \
-            -f deploy/docker-compose.yml \
-            up -d --wait
-          docker compose \
-            --env-file deploy/example.env \
-            -f deploy/docker-compose.yml \
-            exec -T service /app/trpc-healthcheck http://127.0.0.1:8080/healthz
-          docker compose \
-            --env-file deploy/example.env \
-            -f deploy/docker-compose.yml \
-            exec -T service /app/trpc-healthcheck http://127.0.0.1:8080/readyz
+      - name: Run Compose golden path
+        run: ./scripts/quickstart.sh --demo deploy/example.env
 
       - name: Stop Compose services
         if: always()
