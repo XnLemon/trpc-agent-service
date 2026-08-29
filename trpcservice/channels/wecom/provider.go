@@ -49,10 +49,6 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 	if len([]byte(value.Payload)) == 0 || len([]byte(value.Payload)) > maximumTextBytes {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
 	}
-	token, err := p.accessToken(ctx)
-	if err != nil {
-		return "", err
-	}
 	agentID, parseErr := strconv.Atoi(strings.TrimSpace(p.AgentID))
 	if parseErr != nil || agentID <= 0 || strconv.Itoa(agentID) != strings.TrimSpace(p.AgentID) {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
@@ -66,6 +62,10 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 		}
 	}
 	p.mu.Unlock()
+	token, err := p.accessToken(ctx)
+	if err != nil {
+		return "", err
+	}
 	target := struct {
 		ToUser  string `json:"touser,omitempty"`
 		ChatID  string `json:"chatid,omitempty"`
