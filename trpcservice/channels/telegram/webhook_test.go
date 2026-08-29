@@ -88,6 +88,155 @@ func TestWebhookCloseCancelsAcceptedDispatch(t *testing.T) {
 	<-done
 }
 
+func TestNewWebhookRejectsInvalidConfiguration(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "webhook-config", "12345")
+	adapter := newTestAdapter(t, target, &dispatchStub{}, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
+	defer adapter.Close()
+	valid := WebhookConfig{Path: "/telegram/hook", SecretToken: "secret"}
+	cases := []struct {
+		name   string
+		config WebhookConfig
+		adapt  *Adapter
+	}{
+		{name: "nil adapter", config: valid},
+		{name: "blank path", config: WebhookConfig{Path: " ", SecretToken: "secret"}, adapt: adapter},
+		{name: "relative path", config: WebhookConfig{Path: "telegram/hook", SecretToken: "secret"}, adapt: adapter},
+		{name: "query path", config: WebhookConfig{Path: "/telegram/hook?x=1", SecretToken: "secret"}, adapt: adapter},
+		{name: "blank secret", config: WebhookConfig{Path: "/telegram/hook"}, adapt: adapter},
+		{name: "whitespace secret", config: WebhookConfig{Path: "/telegram/hook", SecretToken: " secret"}, adapt: adapter},
+		{name: "negative body limit", config: WebhookConfig{Path: "/telegram/hook", SecretToken: "secret", MaxBodyBytes: -1}, adapt: adapter},
+		{name: "root path", config: WebhookConfig{Path: "/", SecretToken: "secret"}, adapt: adapter},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			adapt := test.adapt
+			if adapt == nil && test.name != "nil adapter" {
+				adapt = adapter
+			}
+			if _, err := NewWebhook(adapt, test.config); err == nil {
+				t.Fatal("invalid webhook configuration was accepted")
+			}
+		})
+	}
+	alias, err := NewWebhook(adapter, WebhookConfig{Path: "/telegram/alias/", Secret: "secret"})
+	if err != nil {
+		t.Fatalf("secret alias configuration rejected: %v", err)
+	}
+	if alias.path != "/telegram/alias" {
+		t.Fatalf("normalized path = %q", alias.path)
+	}
+	_ = alias.Close()
+}
+
+func TestWebhookServeHTTPMapsAuthenticationAndAdapterOutcomes(t *testing.T) {
+	body := webhookUpdateBody(200, "hello")
+	cases := []struct {
+		name       string
+		method     string
+		path       string
+		secret     string
+		body       []byte
+		maxBody    int64
+		setup      func(*Adapter, *Webhook)
+		wantStatus int
+	}{
+		{name: "wrong method", method: http.MethodGet, path: "/telegram/cases", secret: "secret", body: body, wantStatus: http.StatusMethodNotAllowed},
+		{name: "wrong secret", method: http.MethodPost, path: "/telegram/cases", secret: "wrong", body: body, wantStatus: http.StatusForbidden},
+		{name: "oversized body", method: http.MethodPost, path: "/telegram/cases", secret: "secret", body: body, maxBody: 1, wantStatus: http.StatusBadRequest},
+		{name: "malformed json", method: http.MethodPost, path: "/telegram/cases", secret: "secret", body: []byte("{"), wantStatus: http.StatusBadRequest},
+		{name: "trailing json", method: http.MethodPost, path: "/telegram/cases", secret: "secret", body: append(append([]byte(nil), body...), []byte("{}")...), wantStatus: http.StatusBadRequest},
+		{name: "unsupported update acknowledged", method: http.MethodPost, path: "/telegram/cases", secret: "secret", body: webhookUpdateBodyWithEdited(201), wantStatus: http.StatusOK},
+		{name: "invalid update", method: http.MethodPost, path: "/telegram/cases", secret: "secret", body: webhookUpdateBody(-1, "hello"), wantStatus: http.StatusBadRequest},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			adapter, webhook := newWebhookCase(t, nil, test.maxBody)
+			defer adapter.Close()
+			defer webhook.Close()
+			if test.setup != nil {
+				test.setup(adapter, webhook)
+			}
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(test.method, "http://example.test"+test.path, bytesReader(test.body))
+			request.Header.Set("X-Telegram-Bot-Api-Secret-Token", test.secret)
+			webhook.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d", response.Code, test.wantStatus)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name       string
+		dispatcher *dispatchStub
+		setup      func(*Adapter, *Webhook)
+		wantStatus int
+	}{
+		{name: "closing", wantStatus: http.StatusServiceUnavailable, setup: func(_ *Adapter, webhook *Webhook) { webhook.BeginShutdown() }},
+		{name: "closed adapter", wantStatus: http.StatusServiceUnavailable, setup: func(adapter *Adapter, _ *Webhook) { _ = adapter.Close() }},
+		{name: "dispatch failure", dispatcher: &dispatchStub{err: errors.New("provider detail")}, wantStatus: http.StatusServiceUnavailable},
+		{name: "canceled result", dispatcher: &dispatchStub{err: context.Canceled}, wantStatus: http.StatusServiceUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			adapter, webhook := newWebhookCase(t, test.dispatcher, 0)
+			defer adapter.Close()
+			defer webhook.Close()
+			if test.setup != nil {
+				test.setup(adapter, webhook)
+			}
+			request := httptest.NewRequest(http.MethodPost, "http://example.test/telegram/cases", bytesReader(body))
+			request.Header.Set("X-Telegram-Bot-Api-Secret-Token", "secret")
+			response := httptest.NewRecorder()
+			webhook.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d", response.Code, test.wantStatus)
+			}
+		})
+	}
+}
+
+func TestWebhookServeHTTPHandlesNilReceiversAndRequests(t *testing.T) {
+	response := httptest.NewRecorder()
+	var webhook *Webhook
+	webhook.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "http://example.test/telegram/cases", nil))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("nil webhook status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+	adapter, webhook := newWebhookCase(t, nil, 0)
+	defer adapter.Close()
+	defer webhook.Close()
+	response = httptest.NewRecorder()
+	webhook.ServeHTTP(response, nil)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("nil request status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func newWebhookCase(t *testing.T, dispatcher *dispatchStub, maxBody int64) (*Adapter, *Webhook) {
+	t.Helper()
+	if dispatcher == nil {
+		dispatcher = &dispatchStub{events: []gateway.DispatchEvent{{Type: gateway.DispatchEventMessage, Text: "ok"}, {Type: gateway.DispatchEventDone, Done: true}}}
+	}
+	target := newTrustedTarget(t, channels.ChannelTelegram, "webhook-case", "12345")
+	adapter := newTestAdapter(t, target, dispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
+	webhook, err := NewWebhook(adapter, WebhookConfig{Path: "/telegram/cases", SecretToken: "secret", MaxBodyBytes: maxBody})
+	if err != nil {
+		adapter.Close()
+		t.Fatal(err)
+	}
+	return adapter, webhook
+}
+
+func webhookUpdateBody(updateID int64, text string) []byte {
+	body, _ := json.Marshal(models.Update{ID: updateID, Message: &models.Message{ID: 1, Chat: models.Chat{ID: 100, Type: models.ChatTypePrivate}, From: &models.User{ID: 42}, Text: text}})
+	return body
+}
+
+func webhookUpdateBodyWithEdited(updateID int64) []byte {
+	body, _ := json.Marshal(models.Update{ID: updateID, EditedMessage: &models.Message{ID: 1}})
+	return body
+}
+
 func bytesReader(value []byte) *bytes.Reader { return bytes.NewReader(value) }
 
 func waitForDispatch(t *testing.T, dispatcher *dispatchStub) error {
