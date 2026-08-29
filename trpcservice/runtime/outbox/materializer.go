@@ -115,9 +115,24 @@ func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) 
 		_, err = batchStore.EnqueueReplies(operationCtx, replies)
 	}
 	if err != nil {
-		return 0, errors.Join(ErrMaterialization, err)
+		return 0, redactedMaterializationError(err)
 	}
 	return len(segments), nil
+}
+
+// redactedMaterializationError keeps only stable, caller-actionable classes.
+// Storage adapters and provider fakes may return driver details, SQL text, or
+// credentials; those values must never cross the materialization boundary.
+func redactedMaterializationError(err error) error {
+	if err == nil {
+		return nil
+	}
+	for _, stable := range []error{context.Canceled, context.DeadlineExceeded, runtimestorage.ErrConflict, runtimestorage.ErrDuplicate, runtimestorage.ErrInvalid, runtimestorage.ErrNotFound, runtimestorage.ErrStorage} {
+		if errors.Is(err, stable) {
+			return errors.Join(ErrMaterialization, stable)
+		}
+	}
+	return ErrMaterialization
 }
 
 func splitRunes(value string, size int) []string {
