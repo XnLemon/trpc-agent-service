@@ -39,3 +39,46 @@ func TestRegistryScopesAccountsAndWorkerGroupCloses(t *testing.T) {
 		t.Fatalf("dispatch after close = %v", err)
 	}
 }
+
+func TestRegistryRemoveAndCloseLifecycle(t *testing.T) {
+	r := NewRegistry()
+	provider := &Provider{}
+	account := Account{TenantID: "tenant-a", AccountID: "account-1", Provider: provider}
+	if err := r.Register(account); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Remove(account.TenantID, account.AccountID); err != nil {
+		t.Fatalf("remove registered account: %v", err)
+	}
+	if _, err := r.Resolve(account.TenantID, account.AccountID); !errors.Is(err, ErrAccountMissing) {
+		t.Fatalf("resolve after remove = %v, want ErrAccountMissing", err)
+	}
+	if err := r.Remove(account.TenantID, account.AccountID); !errors.Is(err, ErrAccountMissing) {
+		t.Fatalf("remove missing account = %v, want ErrAccountMissing", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close registry: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close registry twice: %v", err)
+	}
+	if _, err := r.Resolve(account.TenantID, account.AccountID); !errors.Is(err, ErrRegistryClosed) {
+		t.Fatalf("resolve after close = %v, want ErrRegistryClosed", err)
+	}
+	if err := r.Remove(account.TenantID, account.AccountID); !errors.Is(err, ErrRegistryClosed) {
+		t.Fatalf("remove after close = %v, want ErrRegistryClosed", err)
+	}
+	if err := r.Register(account); !errors.Is(err, ErrRegistryClosed) {
+		t.Fatalf("register after close = %v, want ErrRegistryClosed", err)
+	}
+}
+
+func TestRegistryNilReceiverLifecycle(t *testing.T) {
+	var registry *Registry
+	if err := registry.Remove("tenant", "account"); !errors.Is(err, ErrAccountMissing) {
+		t.Fatalf("nil remove = %v, want ErrAccountMissing", err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatalf("nil close = %v", err)
+	}
+}
