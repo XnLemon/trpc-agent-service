@@ -11,7 +11,3 @@ commits = [
   "42ce4de5d613150528e376149387561cf91fc8dc",
   "1c120da2ccc77bb3a2be49fec7aea48055f5019a",
 ]
-paths = [
-  '''(^|/)\\.git/''',
-  '''(^|/)docs/site/''',
-]
