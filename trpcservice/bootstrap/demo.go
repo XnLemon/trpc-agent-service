@@ -43,6 +43,8 @@ const (
 	demoCorrelationID     = "demo-bootstrap"
 )
 
+type demoCatalogLoader func(environmentConfig) (*modelprofile.ProviderCatalog, *backend.ProviderCatalog, error)
+
 // DemoConfig contains the stable metadata for the local, offline demo graph.
 // Empty fields use the documented defaults so `trpc-service demo --confirm`
 // remains a one-command path while callers can choose non-conflicting keys.
@@ -101,16 +103,28 @@ func InitializeDemo(ctx context.Context, db *sql.DB, input DemoConfig) (DemoResu
 	if err != nil {
 		return DemoResult{}, err
 	}
-	modelCatalog, backendCatalog, err := environmentCatalogs(environmentConfig{
+	return initializeDemoAfterInit(ctx, db, config, initial, environmentCatalogs)
+}
+
+func initializeDemoAfterInit(ctx context.Context, db *sql.DB, config DemoConfig, initial InitResult, loadCatalogs demoCatalogLoader) (DemoResult, error) {
+	tenantRepo, appRepo, modelRepo, backendRepo, err := newDemoRepositories(db, loadCatalogs)
+	if err != nil {
+		return DemoResult{}, err
+	}
+	return initializeDemoGraph(ctx, db, config, initial, tenantRepo, appRepo, modelRepo, backendRepo)
+}
+
+func newDemoRepositories(db *sql.DB, loadCatalogs demoCatalogLoader) (tenant.Repository, agent.Repository, modelprofile.Repository, backend.Repository, error) {
+	modelCatalog, backendCatalog, err := loadCatalogs(environmentConfig{
 		demoMode: true, modelProvider: demoModelProvider, modelNames: []string{demoModelName},
 	})
 	if err != nil {
-		return DemoResult{}, fmt.Errorf("%w: demo catalogs", ErrDemoInitialization)
+		return nil, nil, nil, nil, fmt.Errorf("%w: demo catalogs", ErrDemoInitialization)
 	}
-	tenantRepo := tenantpostgres.NewRepository(db)
-	appRepo := agentpostgres.NewRepository(db)
-	modelRepo := modelpostgres.NewRepository(db, modelCatalog)
-	backendRepo := backendpostgres.NewRepository(db, backendCatalog)
+	return tenantpostgres.NewRepository(db), agentpostgres.NewRepository(db), modelpostgres.NewRepository(db, modelCatalog), backendpostgres.NewRepository(db, backendCatalog), nil
+}
+
+func initializeDemoGraph(ctx context.Context, db *sql.DB, config DemoConfig, initial InitResult, tenantRepo tenant.Repository, appRepo agent.Repository, modelRepo modelprofile.Repository, backendRepo backend.Repository) (DemoResult, error) {
 	tenantRoot, app, err := loadDemoRootApp(ctx, tenantRepo, appRepo, initial, config)
 	if err != nil {
 		return DemoResult{}, err
@@ -277,10 +291,14 @@ func normalizeDemoConfig(config DemoConfig) DemoConfig {
 }
 
 func (config DemoConfig) validate() error {
+	return config.validateWithCatalogs(environmentCatalogs)
+}
+
+func (config DemoConfig) validateWithCatalogs(loadCatalogs demoCatalogLoader) error {
 	if err := (InitConfig{TenantKey: config.TenantKey, TenantDisplayName: config.TenantDisplayName, AppKey: config.AppKey, AppDisplayName: config.AppDisplayName, AppDescription: config.AppDescription}).Validate(); err != nil {
 		return err
 	}
-	modelCatalog, backendCatalog, err := environmentCatalogs(environmentConfig{demoMode: true, modelProvider: demoModelProvider, modelNames: []string{demoModelName}})
+	modelCatalog, backendCatalog, err := loadCatalogs(environmentConfig{demoMode: true, modelProvider: demoModelProvider, modelNames: []string{demoModelName}})
 	if err != nil {
 		return fmt.Errorf("%w: demo catalogs", ErrDemoInitialization)
 	}
