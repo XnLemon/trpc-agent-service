@@ -5,7 +5,7 @@
 | Status check | 扫描内容 | 阻断阈值 |
 | --- | --- | --- |
 | `CI / Dependency Vulnerability Scan` | Go module 直接与传递依赖（govulncheck v1.1.3） | 任意可达漏洞 |
-| `CI / Container Image Scan` | CI 构建出的镜像归档（Trivy v0.58.2） | HIGH、CRITICAL（包含尚未修复的条目） |
+| `CI / Container Image Scan` | CI 构建出的镜像归档（Trivy v0.74.0） | HIGH、CRITICAL（包含尚未修复的条目） |
 | `CI / Commit Secret Scan` | Pull Request 引入的提交；`main` push 扫描完整 Git 历史（Gitleaks v8.24.3） | 任意高置信度密钥 |
 
 每个 job 只读取仓库内容；上传 SARIF 额外使用 `security-events: write`，原始报告会作为短期 artifact 保存，便于定位修复。上传到 GitHub Code Scanning 的报告不改变扫描门禁结果，因 fork Pull Request 可能没有写入 `security-events` 的权限。

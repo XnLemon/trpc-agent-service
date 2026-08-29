@@ -131,8 +131,8 @@ jobs:
           {
             echo "### Container image under scan"
             echo
-            echo "- Reference: `$TRPC_SERVICE_IMAGE`"
-            echo "- Immutable image ID: `$digest`"
+            echo "- Reference: $TRPC_SERVICE_IMAGE"
+            echo "- Immutable image ID: $digest"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
@@ -144,7 +144,7 @@ jobs:
         with:
           scan-type: image
           input: ${{ runner.temp }}/trpc-service.tar
-          version: v0.58.2
+          version: v0.74.0
           scanners: vuln
           severity: HIGH,CRITICAL
           ignore-unfixed: false
@@ -159,7 +159,7 @@ jobs:
         with:
           scan-type: image
           input: ${{ runner.temp }}/trpc-service.tar
-          version: v0.58.2
+          version: v0.74.0
           scanners: vuln
           severity: HIGH,CRITICAL
           ignore-unfixed: false
