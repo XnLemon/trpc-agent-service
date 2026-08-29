@@ -464,7 +464,7 @@ func TestDemoErrorAndValueHelpers(t *testing.T) {
 	}
 }
 
-func TestEnsureDemoProfilesBranches(t *testing.T) {
+func TestEnsureDemoModelBranches(t *testing.T) {
 	t.Run("model create and dependency failures", func(t *testing.T) {
 		profile := &modelprofile.Profile{ProfileID: "mp_demo", ProfileKey: demoModelProfileKey, Configuration: modelprofile.Configuration{Provider: demoModelProvider, Model: demoModelName}, Status: modelprofile.StatusActive}
 		db, mock, err := sqlmock.New()
@@ -545,68 +545,70 @@ func TestEnsureDemoProfilesBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("backend create and existing lifecycle", func(t *testing.T) {
-		binding := backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "inmemory"}
-		profile := &backend.Profile{ProfileID: "bp_demo", ProfileKey: demoBackendProfileKey, Bindings: []backend.CapabilityBinding{binding}, Status: backend.StatusActive}
+}
+
+func TestEnsureDemoBackendBranches(t *testing.T) {
+	binding := backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "inmemory"}
+	profile := &backend.Profile{ProfileID: "bp_demo", ProfileKey: demoBackendProfileKey, Bindings: []backend.CapabilityBinding{binding}, Status: backend.StatusActive}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectQuery("SELECT profile_id").WillReturnRows(sqlmock.NewRows([]string{"profile_id"}))
+	id, created, err := ensureDemoBackend(context.Background(), db, &demoBackendRepoStub{profile: profile}, testInitTenantID, demoBackendProfileKey)
+	if err != nil || !created || id != profile.ProfileID {
+		t.Fatalf("create = id:%s created:%v err:%v", id, created, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, status := range []backend.Status{backend.StatusActive, backend.StatusSuspended, backend.StatusDisabled} {
 		db, mock, err := sqlmock.New()
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = db.Close() })
-		mock.ExpectQuery("SELECT profile_id").WillReturnRows(sqlmock.NewRows([]string{"profile_id"}))
-		id, created, err := ensureDemoBackend(context.Background(), db, &demoBackendRepoStub{profile: profile}, testInitTenantID, demoBackendProfileKey)
-		if err != nil || !created || id != profile.ProfileID {
-			t.Fatalf("create = id:%s created:%v err:%v", id, created, err)
+		defer db.Close()
+		mock.ExpectQuery("SELECT profile_id").WillReturnRows(sqlmock.NewRows([]string{"profile_id"}).AddRow("bp_demo"))
+		repo := &demoBackendRepoStub{profile: &backend.Profile{ProfileID: "bp_demo", ProfileKey: demoBackendProfileKey, Bindings: []backend.CapabilityBinding{binding}, Status: status}}
+		_, _, err = ensureDemoBackend(context.Background(), db, repo, testInitTenantID, demoBackendProfileKey)
+		if status == backend.StatusDisabled && !errors.Is(err, ErrDemoState) {
+			t.Fatalf("disabled error = %v", err)
+		}
+		if status != backend.StatusDisabled && err != nil {
+			t.Fatalf("status %s error = %v", status, err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatal(err)
 		}
+	}
 
-		for _, status := range []backend.Status{backend.StatusActive, backend.StatusSuspended, backend.StatusDisabled} {
+	for _, test := range []struct {
+		name string
+		repo *demoBackendRepoStub
+		want error
+	}{
+		{name: "mismatch", repo: &demoBackendRepoStub{profile: &backend.Profile{ProfileID: "bp_demo", ProfileKey: "other", Bindings: []backend.CapabilityBinding{binding}, Status: backend.StatusActive}}, want: ErrDemoState},
+		{name: "get error", repo: &demoBackendRepoStub{profile: profile, getErr: sql.ErrConnDone}, want: ErrDemoInitialization},
+		{name: "transition error", repo: &demoBackendRepoStub{profile: &backend.Profile{ProfileID: "bp_demo", ProfileKey: demoBackendProfileKey, Bindings: []backend.CapabilityBinding{binding}, Status: backend.StatusSuspended}, transitionErr: sql.ErrConnDone}, want: ErrDemoInitialization},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { _ = db.Close() })
+			defer db.Close()
 			mock.ExpectQuery("SELECT profile_id").WillReturnRows(sqlmock.NewRows([]string{"profile_id"}).AddRow("bp_demo"))
-			repo := &demoBackendRepoStub{profile: &backend.Profile{ProfileID: "bp_demo", ProfileKey: demoBackendProfileKey, Bindings: []backend.CapabilityBinding{binding}, Status: status}}
-			_, _, err = ensureDemoBackend(context.Background(), db, repo, testInitTenantID, demoBackendProfileKey)
-			if status == backend.StatusDisabled && !errors.Is(err, ErrDemoState) {
-				t.Fatalf("disabled error = %v", err)
-			}
-			if status != backend.StatusDisabled && err != nil {
-				t.Fatalf("status %s error = %v", status, err)
+			_, _, err = ensureDemoBackend(context.Background(), db, test.repo, testInitTenantID, demoBackendProfileKey)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("error = %v, want %v", err, test.want)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatal(err)
 			}
-		}
-		for _, test := range []struct {
-			name string
-			repo *demoBackendRepoStub
-			want error
-		}{
-			{name: "mismatch", repo: &demoBackendRepoStub{profile: &backend.Profile{ProfileID: "bp_demo", ProfileKey: "other", Bindings: []backend.CapabilityBinding{binding}, Status: backend.StatusActive}}, want: ErrDemoState},
-			{name: "get error", repo: &demoBackendRepoStub{profile: profile, getErr: sql.ErrConnDone}, want: ErrDemoInitialization},
-			{name: "transition error", repo: &demoBackendRepoStub{profile: &backend.Profile{ProfileID: "bp_demo", ProfileKey: demoBackendProfileKey, Bindings: []backend.CapabilityBinding{binding}, Status: backend.StatusSuspended}, transitionErr: sql.ErrConnDone}, want: ErrDemoInitialization},
-		} {
-			t.Run(test.name, func(t *testing.T) {
-				db, mock, err := sqlmock.New()
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer db.Close()
-				mock.ExpectQuery("SELECT profile_id").WillReturnRows(sqlmock.NewRows([]string{"profile_id"}).AddRow("bp_demo"))
-				_, _, err = ensureDemoBackend(context.Background(), db, test.repo, testInitTenantID, demoBackendProfileKey)
-				if !errors.Is(err, test.want) {
-					t.Fatalf("error = %v, want %v", err, test.want)
-				}
-				if err := mock.ExpectationsWereMet(); err != nil {
-					t.Fatal(err)
-				}
-			})
-		}
-	})
+		})
+	}
 }
 
 func TestInitializeDemoEarlyReturns(t *testing.T) {
@@ -710,6 +712,41 @@ func TestPreflightDemoAppBranches(t *testing.T) {
 	}
 	if err := mock2.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateExistingDemoRevisionBranches(t *testing.T) {
+	root := &tenant.Tenant{TenantID: testInitTenantID, Status: tenant.StatusActive}
+	app := &agent.App{TenantID: root.TenantID, AppID: testInitAppID}
+	valid := &agent.Revision{TenantID: root.TenantID, AppID: app.AppID, Revision: 1, State: agent.RevisionStatePublished, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Instruction: demoInstruction, ModelProfileID: "mp_demo", Runtime: agent.DefaultRuntimePolicy()}
+	for _, test := range []struct {
+		name        string
+		profileRows *sqlmock.Rows
+		revision    *agent.Revision
+		getErr      error
+		want        error
+	}{
+		{name: "unknown model", profileRows: sqlmock.NewRows([]string{"profile_id"}), want: ErrDemoState},
+		{name: "get revision error", profileRows: sqlmock.NewRows([]string{"profile_id"}).AddRow("mp_demo"), getErr: sql.ErrConnDone, want: ErrDemoInitialization},
+		{name: "mismatch", profileRows: sqlmock.NewRows([]string{"profile_id"}).AddRow("mp_demo"), revision: &agent.Revision{State: agent.RevisionStatePublished}, want: ErrDemoState},
+		{name: "valid", profileRows: sqlmock.NewRows([]string{"profile_id"}).AddRow("mp_demo"), revision: valid},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			mock.ExpectQuery("SELECT profile_id").WillReturnRows(test.profileRows)
+			stub := &demoAgentRepoStub{revision: test.revision, getRevisionErr: test.getErr}
+			err = validateExistingDemoRevision(context.Background(), db, stub, root, app, 1, agent.RevisionStatePublished, demoModelProfileKey)
+			if test.want == nil && err != nil || test.want != nil && !errors.Is(err, test.want) {
+				t.Fatalf("error = %v, want %v", err, test.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
