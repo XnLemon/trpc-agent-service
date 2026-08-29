@@ -60,6 +60,8 @@ var (
 	openInitDatabase     = postgres.Open
 	applyInitMigrations  = migrations.Apply
 	verifyInitMigrations = migrations.Verify
+	initializeDemo       = bootstrap.InitializeDemo
+	writeDemoResult      = bootstrap.WriteDemoResult
 )
 
 var newBootstrapRuntime = bootstrap.NewFromEnvironment
@@ -205,7 +207,7 @@ func runDemo(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 		_ = db.Close()
 		return mapInitCommandError(demoContext, applyErr, "database migrations are not ready")
 	}
-	result, demoErr := bootstrap.InitializeDemo(demoContext, db, options.config)
+	result, demoErr := initializeDemo(demoContext, db, options.config)
 	closeErr := db.Close()
 	if demoErr != nil {
 		return demoErr
@@ -213,7 +215,7 @@ func runDemo(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 	if closeErr != nil {
 		return fmt.Errorf("%w: database close failed", bootstrap.ErrDemoInitialization)
 	}
-	return bootstrap.WriteDemoResult(stdout, result)
+	return writeDemoResult(stdout, result)
 }
 
 func parseInitOptions(args []string, stderr io.Writer) (initOptions, bool, error) {

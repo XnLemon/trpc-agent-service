@@ -457,3 +457,124 @@ func TestEnvironmentCatalogsAndIdentityListBoundaries(t *testing.T) {
 		t.Fatalf("empty identity list = %v", err)
 	}
 }
+
+func TestDemoEnvironmentConfigurationBranches(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envDemoMode, "not-bool")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("invalid demo mode = %v", err)
+	}
+
+	t.Setenv(envDemoMode, "true")
+	t.Setenv(envModelProvider, demoModelProvider)
+	t.Setenv(envModelNames, ",")
+	config := environmentConfig{demoMode: true, modelProvider: demoModelProvider}
+	if err := config.loadModel(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("invalid demo model list = %v", err)
+	}
+
+	config = environmentConfig{demoMode: true, driver: ControlPlaneDriverPostgres, runtimeStorage: "postgres"}
+	if err := config.loadRuntime(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("demo postgres runtime storage = %v", err)
+	}
+	config.driver = ControlPlaneDriverMySQL
+	config.runtimeStorage = "inmemory"
+	if err := config.loadRuntime(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("demo MySQL control plane = %v", err)
+	}
+
+	if _, _, err := environmentCatalogs(environmentConfig{demoMode: true, modelProvider: defaultModelProvider, modelNames: []string{demoModelName}}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("demo production provider = %v", err)
+	}
+	if _, _, err := environmentCatalogs(environmentConfig{demoMode: true, modelProvider: demoModelProvider}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("empty demo model catalog = %v", err)
+	}
+
+	if value, err := environmentBool("TEST_DEMO_BOOL"); err != nil || value {
+		t.Fatalf("empty environment bool = %v, %v", value, err)
+	}
+	t.Setenv("TEST_DEMO_BOOL", "true")
+	if value, err := environmentBool("TEST_DEMO_BOOL"); err != nil || !value {
+		t.Fatalf("true environment bool = %v, %v", value, err)
+	}
+	t.Setenv("TEST_DEMO_BOOL", "false")
+	if value, err := environmentBool("TEST_DEMO_BOOL"); err != nil || value {
+		t.Fatalf("false environment bool = %v, %v", value, err)
+	}
+	t.Setenv("TEST_DEMO_BOOL", "invalid")
+	if _, err := environmentBool("TEST_DEMO_BOOL"); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("invalid environment bool = %v", err)
+	}
+}
+
+func TestEnvironmentDemoRegistriesAreCredentialFree(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	delegate := inmemory.NewSessionService()
+	store := runtimestorageinmemory.New()
+	t.Cleanup(func() {
+		_ = delegate.Close()
+		_ = store.Close()
+	})
+	config := environmentConfig{
+		demoMode: true, modelProvider: demoModelProvider, modelNames: []string{demoModelName}, runtimeStorage: "inmemory",
+		apiIdentities: map[string]gateway.APIIdentity{"demo-token": {TenantID: tenantID, AppID: "app_00000000000000000000000000", SubjectID: "demo"}},
+	}
+	secrets, models, backends, err := environmentRegistries(config, delegate, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := secrets.Resolve(context.Background(), modelprofile.SecretScope{TenantID: tenantID, SecretRef: "env/model"}); err == nil {
+		t.Fatal("demo registry unexpectedly stored a model secret")
+	}
+	model, err := models.New(context.Background(), modelprofile.ModelFactoryInput{TenantID: tenantID, Provider: demoModelProvider, Model: demoModelName}, modelprofile.SecretValue{})
+	if err != nil || model == nil || model.Info().Name != demoModelName {
+		t.Fatalf("demo model registry = %T, %v", model, err)
+	}
+	for _, capability := range []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit} {
+		provider, resolveErr := backends.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: tenantID}, backend.CapabilityBinding{Capability: capability, Provider: "inmemory"})
+		if resolveErr != nil || provider == nil {
+			t.Fatalf("demo backend provider %s = %v", capability, resolveErr)
+		}
+	}
+	if _, _, _, err := environmentRegistries(environmentConfig{demoMode: true, modelProvider: demoModelProvider, apiIdentities: map[string]gateway.APIIdentity{"bad": {TenantID: "invalid", AppID: "app", SubjectID: "subject"}}}, delegate, store); err == nil {
+		t.Fatal("invalid demo tenant registration was accepted")
+	}
+}
+
+func TestNewFromEnvironmentBuildsDemoGraphWithoutCredentials(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envDemoMode, "true")
+	t.Setenv(envModelProvider, demoModelProvider)
+	t.Setenv(envModelAPIKey, "")
+	t.Setenv(envModelAPIKeys, "")
+	t.Setenv(envSessionBackend, "inmemory")
+	registerBootstrapPingDriver.Do(func() {
+		sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{})
+	})
+	db, err := sql.Open("trpc-service-bootstrap-ping", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousVerify := verifyEnvironmentMigrations
+	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	t.Cleanup(func() {
+		openEnvironmentDatabase = previousOpen
+		applyEnvironmentMigrations = previousApply
+		verifyEnvironmentMigrations = previousVerify
+		_ = db.Close()
+	})
+	graph, err := NewFromEnvironment(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !graph.Ready() {
+		t.Fatal("demo environment graph is not ready")
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
