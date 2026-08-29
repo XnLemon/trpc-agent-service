@@ -81,11 +81,18 @@ if [[ "$demo" == true ]]; then
       api_token="$configured_token"
     fi
   fi
+  http_port="${TRPC_HTTP_PORT:-}"
+  if [[ -z "$http_port" ]]; then
+    # Keep the probe aligned with Compose interpolation when the env file is
+    # supplied as an argument rather than sourced into this shell.
+    http_port="$(awk -F= '$1 == "TRPC_HTTP_PORT" {sub(/^[^=]*=/, ""); sub(/\r$/, ""); print; exit}' "$env_file")"
+  fi
+  http_port="${http_port:-8080}"
   response="$(curl --silent --show-error --fail \
     -H "Authorization: Bearer ${api_token}" \
     -H 'Content-Type: application/json' \
     --data '{"content":"hello from the local golden path","external_user_id":"quickstart-user","conversation_kind":"direct","external_peer_id":"quickstart"}' \
-    "http://127.0.0.1:${TRPC_HTTP_PORT:-8080}/v1/chat")"
+    "http://127.0.0.1:${http_port}/v1/chat")"
   if [[ "$response" != *"Hello from the tRPC Agent Service demo."* ]]; then
     echo "golden path chat response was not deterministic" >&2
     exit 1
