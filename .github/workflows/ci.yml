@@ -35,6 +35,95 @@ jobs:
       - name: Lint
         run: ./scripts/lint.sh
 
+  secret-scan:
+    name: Commit Secret Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned Gitleaks
+        shell: bash
+        env:
+          GITLEAKS_VERSION: 8.24.3
+          GITLEAKS_SHA256: 9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            --output "$archive"
+          echo "$GITLEAKS_SHA256  $archive" | sha256sum --check --strict
+          tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP" gitleaks
+          chmod +x "$RUNNER_TEMP/gitleaks"
+          "$RUNNER_TEMP/gitleaks" version
+
+      - name: Validate security allowlist expiry
+        run: ./scripts/validate-security-allowlist.sh
+
+      - name: Verify allowlist validation fixtures
+        run: ./scripts/security-allowlist-fixture.sh
+
+      - name: Verify scanner pass/fail fixtures
+        env:
+          GITLEAKS_BIN: ${{ runner.temp }}/gitleaks
+        run: ./scripts/security-secret-fixture.sh
+
+      - name: Run commit secret scan
+        id: gitleaks
+        continue-on-error: true
+        shell: bash
+        env:
+          GITLEAKS_BIN: ${{ runner.temp }}/gitleaks
+          GITLEAKS_REPORT: ${{ runner.temp }}/gitleaks-results.sarif
+        run: |
+          set -o pipefail
+          set +e
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+            "$GITLEAKS_BIN" git --redact --no-banner --config gitleaks.toml \
+              --log-opts="$range" --report-format sarif --report-path "$GITLEAKS_REPORT" \
+              2>&1 | tee "$RUNNER_TEMP/gitleaks-results.txt"
+          else
+            "$GITLEAKS_BIN" git --redact --no-banner --config gitleaks.toml \
+              --log-opts="--all" --report-format sarif --report-path "$GITLEAKS_REPORT" \
+              2>&1 | tee "$RUNNER_TEMP/gitleaks-results.txt"
+          fi
+          status=${PIPESTATUS[0]}
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Upload secret scan reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: secret-scan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gitleaks-results.*
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload secret SARIF
+        if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@0fa1882f994fbd81a47ab0804f93354f5ea40147
+        with:
+          sarif_file: ${{ runner.temp }}/gitleaks-results.sarif
+          category: commit-secret
+
+      - name: Enforce secret scan gate
+        if: always()
+        shell: bash
+        run: |
+          if [[ "${{ steps.gitleaks.outcome }}" != "success" ]]; then
+            echo "::error::Gitleaks detected a secret or failed to complete (exit code ${{ steps.gitleaks.outputs.exit_code }})"
+            echo "Rotate any exposed credential before requesting an exception."
+            exit 1
+          fi
+
   deployment:
     name: Deployment Validation
     runs-on: ubuntu-latest
