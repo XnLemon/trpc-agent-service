@@ -6,6 +6,7 @@ CONFIG="$ROOT/gitleaks.toml"
 TRIVYIGNORE="$ROOT/.trivyignore"
 today="$(date -u +%F)"
 found=0
+gitleaks_entries=0
 shopt -s extglob
 
 validate_metadata() {
@@ -41,6 +42,10 @@ validate_metadata() {
     echo "::error::invalid allowlist expiry near $location" >&2
     exit 1
   fi
+  if ! normalized_expiry="$(date -u -d "$expiry" +%F 2>/dev/null)" || [[ "$normalized_expiry" != "$expiry" ]]; then
+    echo "::error::invalid calendar date near $location: $expiry" >&2
+    exit 1
+  fi
   if [[ "$expiry" < "$today" || "$expiry" == "$today" ]]; then
     echo "::error::expired security allowlist entry: $expiry" >&2
     exit 1
@@ -49,13 +54,19 @@ validate_metadata() {
 
 while IFS= read -r line; do
   line="${line%$'\r'}"
-  case "$line" in
-    \#*allowlist-expiry:*)
-      found=1
-      validate_metadata "$line" "$CONFIG"
-      ;;
-  esac
+  if [[ "$line" =~ ^[[:space:]]*(commits|paths)[[:space:]]*=[[:space:]]*\[ && "$line" != *"[]"* ]]; then
+    gitleaks_entries=1
+  fi
+  if [[ "$line" == \#*allowlist-expiry:* ]]; then
+    found=1
+    validate_metadata "$line" "$CONFIG"
+  fi
 done < "$CONFIG"
+
+if [[ "$gitleaks_entries" -eq 1 && "$found" -eq 0 ]]; then
+  echo "::error::active Gitleaks allowlist entries lack owner, rationale, issue, and expiry metadata" >&2
+  exit 1
+fi
 
 if [[ -f "$TRIVYIGNORE" ]]; then
   trivy_found=0
