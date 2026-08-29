@@ -113,11 +113,11 @@ func InitializeDemo(ctx context.Context, db *sql.DB, input DemoConfig) (DemoResu
 	backendRepo := backendpostgres.NewRepository(db, backendCatalog)
 	tenantRoot, err := tenantRepo.Get(ctx, initial.TenantID)
 	if err != nil {
-		return DemoResult{}, demoDependencyError(err)
+		return DemoResult{}, demoStepError("tenant lookup", err)
 	}
 	app, err := appRepo.Get(ctx, initial.TenantID, initial.AppID)
 	if err != nil {
-		return DemoResult{}, demoDependencyError(err)
+		return DemoResult{}, demoStepError("app lookup", err)
 	}
 	if tenantRoot.TenantKey != config.TenantKey || app.AppKey != config.AppKey {
 		return DemoResult{}, fmt.Errorf("%w: initial tenant or app key does not match demo configuration", ErrDemoState)
@@ -125,22 +125,22 @@ func InitializeDemo(ctx context.Context, db *sql.DB, input DemoConfig) (DemoResu
 	created := initial.Created
 	modelID, modelCreated, err := ensureDemoModel(ctx, db, modelRepo, initial.TenantID, config.ModelProfileKey)
 	if err != nil {
-		return DemoResult{}, err
+		return DemoResult{}, demoStepError("model profile", err)
 	}
 	created = created || modelCreated
 	backendID, backendCreated, err := ensureDemoBackend(ctx, db, backendRepo, initial.TenantID, config.BackendProfileKey)
 	if err != nil {
-		return DemoResult{}, err
+		return DemoResult{}, demoStepError("backend profile", err)
 	}
 	created = created || backendCreated
 	tenantRoot, tenantChanged, err := ensureDemoDefaults(ctx, tenantRepo, tenantRoot, app.AppID, backendID)
 	if err != nil {
-		return DemoResult{}, err
+		return DemoResult{}, demoStepError("tenant defaults", err)
 	}
 	created = created || tenantChanged
 	app, revision, revisionCreated, err := ensureDemoRevision(ctx, db, appRepo, tenantRoot, app, modelID)
 	if err != nil {
-		return DemoResult{}, err
+		return DemoResult{}, demoStepError("agent revision", err)
 	}
 	created = created || revisionCreated
 	return DemoResult{TenantID: tenantRoot.TenantID, AppID: app.AppID, ModelProfileID: modelID, BackendProfileID: backendID, Revision: revision.Revision, Created: created}, nil
@@ -396,6 +396,13 @@ func demoDependencyError(err error) error {
 		return err
 	}
 	return fmt.Errorf("%w: control-plane operation failed", ErrDemoInitialization)
+}
+
+func demoStepError(step string, err error) error {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrDemoState) {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, step)
 }
 
 func demoModelMetadata() modelprofile.ChangeMetadata {
