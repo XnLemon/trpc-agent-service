@@ -54,6 +54,9 @@ validate_metadata() {
 
 while IFS= read -r line; do
   line="${line%$'\r'}"
+  if [[ "$line" =~ ^[[:space:]]*\[\[rules\.allowlists\]\] ]]; then
+    gitleaks_entries=1
+  fi
   if [[ "$line" =~ ^[[:space:]]*(commits|paths|regexes|files|stopwords)[[:space:]]*=[[:space:]]*\[ && "$line" != *"[]"* ]]; then
     gitleaks_entries=1
   fi
