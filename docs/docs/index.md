@@ -2,6 +2,8 @@
 
 基于 [tRPC-Agent-Go](https://github.com/trpc-group/trpc-agent-go) 的多租户节点化 Agent 部署平台。
 
+项目最初的任务描述、交付物和验收标准已归档至[原始任务书](project-brief.md)；本页及各专项文档描述当前实现。
+
 ## 平台能力
 
 - **多租户隔离**：租户级配置、数据、工具权限、审计与密钥隔离

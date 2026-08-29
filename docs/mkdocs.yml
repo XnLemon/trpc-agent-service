@@ -27,6 +27,7 @@ theme:
 
 nav:
   - 首页: index.md
+  - 项目说明: project-brief.md
   - 项目架构:
       - 生产架构设计: architecture.md
       - 数据模型: data-model.md
