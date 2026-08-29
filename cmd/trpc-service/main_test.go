@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"net/http"
@@ -11,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
 
 func TestServiceOptionsAndServerDefaults(t *testing.T) {
@@ -168,5 +171,201 @@ func TestRunServiceContextAndServeErrors(t *testing.T) {
 	}
 	if err := runService(context.Background(), nil, nil, time.Second, nil, nil); err == nil {
 		t.Fatal("invalid supervisor configuration was accepted")
+	}
+}
+
+func preserveDemoHooks(t *testing.T) {
+	t.Helper()
+	previousOpen := openInitDatabase
+	previousApply := applyInitMigrations
+	previousVerify := verifyInitMigrations
+	previousInitialize := initializeDemo
+	previousWrite := writeDemoResult
+	t.Cleanup(func() {
+		openInitDatabase = previousOpen
+		applyInitMigrations = previousApply
+		verifyInitMigrations = previousVerify
+		initializeDemo = previousInitialize
+		writeDemoResult = previousWrite
+	})
+}
+
+func TestRunDemoRejectsInvalidInputs(t *testing.T) {
+	setValidDemoEnvironment(t)
+	preserveDemoHooks(t)
+
+	if err := runMain(context.Background(), []string{"demo", "--unknown"}, io.Discard, io.Discard, nil); err == nil {
+		t.Fatal("unknown demo flag was accepted")
+	}
+	if err := runDemo(context.Background(), []string{"--help"}, &strings.Builder{}, io.Discard, nil); err != nil {
+		t.Fatalf("demo help = %v", err)
+	}
+	if err := runDemo(context.Background(), []string{"--help"}, initErrorWriter{err: errors.New("help output failed")}, io.Discard, nil); err == nil || err.Error() != "help output failed" {
+		t.Fatalf("demo help output error = %v", err)
+	}
+	if err := runDemo(nil, []string{"--confirm"}, io.Discard, io.Discard, nil); !errors.Is(err, bootstrap.ErrInvalidConfig) {
+		t.Fatalf("nil demo context = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	openInitDatabase = func(ctx context.Context, _ string, _ postgres.Options) (*sql.DB, error) {
+		return nil, ctx.Err()
+	}
+	if err := runDemo(canceled, []string{"--confirm"}, io.Discard, io.Discard, make(chan os.Signal)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled demo context = %v", err)
+	}
+}
+
+func TestRunDemoCoversLifecycleAndFailureBranches(t *testing.T) {
+	setValidDemoEnvironment(t)
+	preserveDemoHooks(t)
+	tests := []struct {
+		name       string
+		open       func(context.Context, string, postgres.Options) (*sql.DB, error)
+		apply      func(context.Context, *sql.DB) error
+		verify     func(context.Context, *sql.DB) error
+		initialize func(context.Context, *sql.DB, bootstrap.DemoConfig) (bootstrap.DemoResult, error)
+		write      func(io.Writer, bootstrap.DemoResult) error
+		closeError error
+		want       error
+		wantText   string
+	}{
+		{
+			name: "open error",
+			open: func(context.Context, string, postgres.Options) (*sql.DB, error) {
+				return nil, errors.New("database credentials")
+			},
+			want: bootstrap.ErrInvalidConfig,
+		},
+		{
+			name: "nil database",
+			open: func(context.Context, string, postgres.Options) (*sql.DB, error) { return nil, nil },
+			want: bootstrap.ErrDemoInitialization,
+		},
+		{
+			name:  "apply migrations",
+			apply: func(context.Context, *sql.DB) error { return errors.New("migration credentials") },
+			want:  bootstrap.ErrInvalidConfig,
+		},
+		{
+			name:   "verify migrations",
+			apply:  func(context.Context, *sql.DB) error { return nil },
+			verify: func(context.Context, *sql.DB) error { return errors.New("verification credentials") },
+			want:   bootstrap.ErrInvalidConfig,
+		},
+		{
+			name: "initialize error",
+			initialize: func(context.Context, *sql.DB, bootstrap.DemoConfig) (bootstrap.DemoResult, error) {
+				return bootstrap.DemoResult{}, errors.New("demo failed")
+			},
+			wantText: "demo failed",
+		},
+		{
+			name: "close error",
+			initialize: func(context.Context, *sql.DB, bootstrap.DemoConfig) (bootstrap.DemoResult, error) {
+				return bootstrap.DemoResult{}, nil
+			},
+			closeError: errors.New("close credentials"),
+			want:       bootstrap.ErrDemoInitialization,
+		},
+		{
+			name: "result output",
+			initialize: func(context.Context, *sql.DB, bootstrap.DemoConfig) (bootstrap.DemoResult, error) {
+				return bootstrap.DemoResult{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", AppID: "app_01ARZ3NDEKTSV4RRFFQ69G5FAV", ModelProfileID: "model_01ARZ3NDEKTSV4RRFFQ69G5FAV", BackendProfileID: "backend_01ARZ3NDEKTSV4RRFFQ69G5FAV", Revision: 1}, nil
+			},
+			write:    func(io.Writer, bootstrap.DemoResult) error { return errors.New("result output failed") },
+			wantText: "result output failed",
+		},
+		{
+			name: "success",
+			initialize: func(context.Context, *sql.DB, bootstrap.DemoConfig) (bootstrap.DemoResult, error) {
+				return bootstrap.DemoResult{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV"}, nil
+			},
+			write: func(writer io.Writer, result bootstrap.DemoResult) error {
+				if result.TenantID == "" || writer == nil {
+					return errors.New("invalid demo result")
+				}
+				return nil
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setValidDemoEnvironment(t)
+			var db *sql.DB
+			var mock sqlmock.Sqlmock
+			if test.open == nil {
+				var err error
+				db, mock, err = sqlmock.New()
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = db.Close() })
+				test.open = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+			}
+			openInitDatabase = test.open
+			applyInitMigrations = test.apply
+			if applyInitMigrations == nil {
+				applyInitMigrations = func(context.Context, *sql.DB) error { return nil }
+			}
+			verifyInitMigrations = test.verify
+			if verifyInitMigrations == nil {
+				verifyInitMigrations = func(context.Context, *sql.DB) error { return nil }
+			}
+			initializeDemo = test.initialize
+			if initializeDemo == nil {
+				initializeDemo = func(context.Context, *sql.DB, bootstrap.DemoConfig) (bootstrap.DemoResult, error) {
+					return bootstrap.DemoResult{}, nil
+				}
+			}
+			writeDemoResult = test.write
+			if writeDemoResult == nil {
+				writeDemoResult = func(io.Writer, bootstrap.DemoResult) error { return nil }
+			}
+			if test.closeError != nil {
+				mock.ExpectClose().WillReturnError(test.closeError)
+			} else if mock != nil {
+				mock.ExpectClose()
+			}
+			err := runDemo(context.Background(), []string{"--confirm"}, io.Discard, io.Discard, nil)
+			if test.wantText != "" {
+				if err == nil || err.Error() != test.wantText {
+					t.Fatalf("demo output error = %v", err)
+				}
+			} else if !errors.Is(err, test.want) {
+				t.Fatalf("demo error = %v, want %v", err, test.want)
+			}
+			if err != nil && strings.Contains(err.Error(), "credentials") {
+				t.Fatalf("demo error disclosed credentials: %v", err)
+			}
+			if mock != nil {
+				if err := mock.ExpectationsWereMet(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestRunDemoCancelsOnSignal(t *testing.T) {
+	setValidDemoEnvironment(t)
+	previousOpen := openInitDatabase
+	t.Cleanup(func() { openInitDatabase = previousOpen })
+	signals := make(chan os.Signal, 1)
+	openInitDatabase = func(ctx context.Context, _ string, _ postgres.Options) (*sql.DB, error) {
+		signals <- syscall.SIGTERM
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if err := runDemo(context.Background(), []string{"--confirm"}, io.Discard, io.Discard, signals); !errors.Is(err, context.Canceled) {
+		t.Fatalf("signal cancellation error = %v", err)
+	}
+}
+
+func setValidDemoEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv(bootstrapPostgresDSN, "postgres://demo-user@example.test/db")
+	for _, name := range []string{"TRPC_DEMO_TENANT_KEY", "TRPC_DEMO_TENANT_NAME", "TRPC_DEMO_APP_KEY", "TRPC_DEMO_APP_NAME", "TRPC_DEMO_APP_DESCRIPTION", "TRPC_DEMO_MODEL_KEY", "TRPC_DEMO_BACKEND_KEY"} {
+		t.Setenv(name, "")
 	}
 }

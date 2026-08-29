@@ -8,7 +8,8 @@
 - Pull Request 扫描 base 到 head 引入的提交；推送到 `main` 扫描完整 Git 历史。
 - 日志和 SARIF 使用 redacted 输出，不打印密钥值或敏感环境变量。
 - 报告以 SARIF 上传到 Code Scanning，并作为 artifact 保留 14 天；fork Pull Request 会跳过需要写权限的上传步骤。
-- 扫描器失败、报告生成失败或同仓库报告上传失败都会使 job 失败，清理步骤仍会执行。
+- Gitleaks 返回 `0` 表示没有发现，返回 `1` 表示扫描完成但发现疑似密钥；后者会上传 SARIF 并在同仓库 PR 创建 inline annotation，不会使 CI 失败。
+- 下载、配置、fixture、报告生成或同仓库报告上传失败等扫描内部错误仍会使 job 失败，清理步骤仍会执行。
 
 ## 本地运行
 

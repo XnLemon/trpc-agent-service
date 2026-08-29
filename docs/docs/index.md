@@ -2,6 +2,8 @@
 
 基于 [tRPC-Agent-Go](https://github.com/trpc-group/trpc-agent-go) 的多租户节点化 Agent 部署平台。
 
+项目最初的任务描述、交付物和验收标准已归档至[原始任务书](project-brief.md)；本页及各专项文档描述当前实现。
+
 ## 平台能力
 
 - **多租户隔离**：租户级配置、数据、工具权限、审计与密钥隔离
@@ -40,6 +42,8 @@
   固定真实 Bootstrap、readiness、最小 Admin API、重启恢复和验收矩阵。
 - [Issue #67：首次运行初始化](issue-67-first-run-init.md)：显式 `trpc-service init`、数据库状态判定、
   并发幂等和 local/staging/production 首次运行流程。
+- [Issue #101：本地 golden path](deployment.md)：开发专用 `quickstart.sh --demo` 从空 PostgreSQL
+  到第一条 deterministic `/v1/chat`，与生产显式初始化路径分离。
 - [Issue #50：Reliable Reply Delivery](issue-50-reliable-delivery.md)：Outbox worker、Provider
   交付、重试/DLQ、lease recovery、telemetry 与验收 ledger。
 - [租户审计与用量成本](audit-usage.md)：Issue #54/PR #55 的实现契约，固定 mandatory audit
@@ -49,7 +53,7 @@
 
 ## 快速开始
 
-生产入口、Docker Compose 快速开始、Kubernetes 清单和完整环境变量参考见
+生产入口、Docker Compose 快速开始、开发 golden path、Kubernetes 清单和完整环境变量参考见
 [部署、配置与快速开始](deployment.md)。
 
 ```bash

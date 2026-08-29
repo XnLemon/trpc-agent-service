@@ -66,6 +66,7 @@ const (
 	// #nosec G101 -- environment variable name, not a secret.
 	envModelSecretRef = "TRPC_MODEL_SECRET_REF"
 	envSessionBackend = "TRPC_SESSION_BACKEND"
+	envDemoMode       = "TRPC_DEMO_MODE"
 	// #nosec G101 -- environment variable name, not a secret.
 	envWeComCallbackToken  = "WECOM_CALLBACK_TOKEN"
 	envWeComEncodingAESKey = "WECOM_ENCODING_AES_KEY"
@@ -81,6 +82,8 @@ const (
 	defaultModelProvider = "openai"
 	defaultModelNames    = "gpt-4o-mini"
 	defaultEndpointHost  = "api.openai.com"
+	demoModelProvider    = "fake"
+	demoModelName        = "deterministic"
 	// #nosec G101 -- symbolic secret reference, not secret material.
 	defaultModelSecretRef = "env/trpc-model-api-key"
 	defaultSubjectID      = "service"
@@ -119,6 +122,7 @@ type environmentConfig struct {
 	endpointHosts  []string
 	secretRef      string
 	runtimeStorage string
+	demoMode       bool
 	wecom          *environmentWeComConfig
 	telemetry      observability.Provider
 	otlp           observability.OTLPConfig
@@ -345,6 +349,18 @@ func environmentRegistries(config environmentConfig, delegateSessions session.Se
 	modelRegistry := modelprofile.NewModelProviderRegistry()
 	backendRegistry := backend.NewProviderRegistry()
 	for _, identity := range config.apiIdentities {
+		if config.demoMode {
+			if err := modelRegistry.Register(identity.TenantID, demoModelProvider, environmentModelFactory{}); err != nil {
+				return nil, nil, nil, err
+			}
+			for _, capability := range []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit} {
+				provider := environmentRuntimeCapabilityProvider{capability: capability, delegate: delegateSessions, store: runtimeStore, telemetry: config.telemetry, backend: config.runtimeStorage}
+				if err := backendRegistry.Register(identity.TenantID, capability, "inmemory", provider); err != nil {
+					return nil, nil, nil, err
+				}
+			}
+			continue
+		}
 		modelAPIKey := config.modelAPIKey
 		if len(config.modelAPIKeys) != 0 {
 			modelAPIKey = config.modelAPIKeys[identity.TenantID]
@@ -369,12 +385,17 @@ func environmentRegistries(config environmentConfig, delegateSessions session.Se
 }
 
 func loadEnvironment() (environmentConfig, error) {
+	demoMode, err := environmentBool(envDemoMode)
+	if err != nil {
+		return environmentConfig{}, err
+	}
 	config := environmentConfig{
 		driver:         ControlPlaneDriver(strings.ToLower(strings.TrimSpace(environmentOrDefault(envControlPlaneDriver, string(ControlPlaneDriverPostgres))))),
 		modelProvider:  environmentOrDefault(envModelProvider, defaultModelProvider),
 		secretRef:      environmentOrDefault(envModelSecretRef, defaultModelSecretRef),
 		subjectID:      environmentOrDefault(envSubjectID, defaultSubjectID),
 		runtimeStorage: strings.ToLower(strings.TrimSpace(os.Getenv(envSessionBackend))),
+		demoMode:       demoMode,
 		telemetry:      observability.NewNoopProvider(),
 	}
 	loaders := []func() error{config.loadDatabase, config.loadIdentities, config.loadAdmin, config.loadModel, config.loadRuntime, config.loadWeCom}
@@ -502,6 +523,20 @@ func (config *environmentConfig) loadAdmin() error {
 }
 
 func (config *environmentConfig) loadModel() error {
+	if config.demoMode {
+		if config.modelProvider != demoModelProvider {
+			return fmt.Errorf("%w: %s requires %s provider", ErrInvalidConfig, envDemoMode, demoModelProvider)
+		}
+		config.modelProvider = demoModelProvider
+		config.secretRef = ""
+		config.modelAPIKey = ""
+		config.modelAPIKeys = nil
+		var err error
+		if config.modelNames, err = environmentList(envModelNames, environmentOrDefault(envModelNames, demoModelName), true); err != nil {
+			return err
+		}
+		return nil
+	}
 	var err error
 	if mapped := strings.TrimSpace(os.Getenv(envModelAPIKeys)); mapped != "" {
 		config.modelAPIKeys, err = parseEnvironmentModelAPIKeys(mapped)
@@ -566,6 +601,9 @@ func (config *environmentConfig) loadRuntime() error {
 	if config.runtimeStorage != "postgres" && config.runtimeStorage != "inmemory" {
 		return fmt.Errorf("%w: %s must be explicitly set to postgres or inmemory", ErrInvalidConfig, envSessionBackend)
 	}
+	if config.demoMode && (config.driver != ControlPlaneDriverPostgres || config.runtimeStorage != "inmemory") {
+		return fmt.Errorf("%w: %s requires PostgreSQL control plane and inmemory session backend", ErrInvalidConfig, envDemoMode)
+	}
 	if config.driver == ControlPlaneDriverMySQL && config.runtimeStorage == "postgres" {
 		return fmt.Errorf("%w: %s=postgres is not available with MySQL control plane; use inmemory until a MySQL runtime adapter is selected", ErrInvalidConfig, envSessionBackend)
 	}
@@ -578,6 +616,9 @@ func (config *environmentConfig) loadWeCom() error {
 	for _, value := range values {
 		if value != "" {
 			configured++
+		}
+		if config.demoMode && configured != 0 {
+			return fmt.Errorf("%w: %s cannot be enabled in demo mode", ErrInvalidConfig, envDemoMode)
 		}
 	}
 	if configured != 0 && configured != len(values) {
@@ -607,6 +648,25 @@ func environmentRuntimeStore(kind string, db *sql.DB) (runtimestorage.RuntimeSto
 }
 
 func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalog, *backend.ProviderCatalog, error) {
+	if config.demoMode {
+		if config.modelProvider != demoModelProvider {
+			return nil, nil, fmt.Errorf("%w: model provider %q is unsupported in demo mode", ErrInvalidConfig, config.modelProvider)
+		}
+		modelCatalog, err := modelprofile.NewProviderCatalog(modelprofile.ProviderSpec{
+			Provider:        demoModelProvider,
+			Models:          config.modelNames,
+			EndpointPolicy:  modelprofile.FieldForbidden,
+			SecretRefPolicy: modelprofile.FieldForbidden,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: demo model catalog is invalid", ErrInvalidConfig)
+		}
+		backendCatalog, err := newEnvironmentBackendCatalog()
+		if err != nil {
+			return nil, nil, err
+		}
+		return modelCatalog, backendCatalog, nil
+	}
 	if config.modelProvider != defaultModelProvider {
 		return nil, nil, fmt.Errorf("%w: model provider %q is unsupported", ErrInvalidConfig, config.modelProvider)
 	}
@@ -621,6 +681,14 @@ func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalo
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: model catalog is invalid", ErrInvalidConfig)
 	}
+	backendCatalog, err := newEnvironmentBackendCatalog()
+	if err != nil {
+		return nil, nil, err
+	}
+	return modelCatalog, backendCatalog, nil
+}
+
+func newEnvironmentBackendCatalog() (*backend.ProviderCatalog, error) {
 	backendCatalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
 		Provider:        "inmemory",
 		Capabilities:    []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit},
@@ -629,9 +697,21 @@ func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalo
 		Options:         map[string]backend.OptionSpec{},
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: backend catalog is invalid", ErrInvalidConfig)
+		return nil, fmt.Errorf("%w: backend catalog is invalid", ErrInvalidConfig)
 	}
-	return modelCatalog, backendCatalog, nil
+	return backendCatalog, nil
+}
+
+func environmentBool(name string) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return false, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%w: %s must be true or false", ErrInvalidConfig, name)
+	}
+	return parsed, nil
 }
 
 func requiredEnvironment(name string) (string, error) {
@@ -840,11 +920,14 @@ func (environmentModelFactory) New(ctx context.Context, input modelprofile.Model
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	provider := strings.ToLower(strings.TrimSpace(input.Provider))
+	if provider == demoModelProvider {
+		return deterministicModel{model: input.Model}, nil
+	}
 	apiKey := secret.Value()
 	if apiKey == "" {
 		return nil, errors.New("model factory secret is required")
 	}
-	provider := strings.ToLower(strings.TrimSpace(input.Provider))
 	if provider != "" && provider != defaultModelProvider {
 		return nil, fmt.Errorf("model factory provider %q is unsupported", input.Provider)
 	}

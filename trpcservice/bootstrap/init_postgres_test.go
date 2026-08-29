@@ -55,6 +55,83 @@ func TestPostgreSQLInitializeConcurrent(t *testing.T) {
 	}
 }
 
+// TestPostgreSQLInitializeDemo exercises the complete local graph against the
+// same disposable PostgreSQL service used by the initialization tests. It is
+// intentionally skipped outside CI when POSTGRES_INIT_TEST_DSN is absent.
+func TestPostgreSQLInitializeDemo(t *testing.T) {
+	ctx, db := openPostgresDemoTestDB(t)
+	defer func() { _, _ = db.ExecContext(context.Background(), "TRUNCATE TABLE public.tenant CASCADE") }()
+	if _, err := db.ExecContext(ctx, "TRUNCATE TABLE public.tenant CASCADE"); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := InitializeDemo(ctx, db, DefaultDemoConfig())
+	if err != nil {
+		t.Fatalf("first demo bootstrap: %v", err)
+	}
+	if !first.Created || first.TenantID == "" || first.AppID == "" || first.ModelProfileID == "" || first.BackendProfileID == "" || first.Revision < 1 {
+		t.Fatalf("first demo result = %+v", first)
+	}
+	second, err := InitializeDemo(ctx, db, DefaultDemoConfig())
+	if err != nil {
+		t.Fatalf("repeat demo bootstrap: %v", err)
+	}
+	if second.Created || second.TenantID != first.TenantID || second.AppID != first.AppID || second.ModelProfileID != first.ModelProfileID || second.BackendProfileID != first.BackendProfileID || second.Revision != first.Revision {
+		t.Fatalf("repeat demo result = %+v, first = %+v", second, first)
+	}
+	assertDemoRowCount(t, ctx, db, "model_profile", first.TenantID, first.ModelProfileID)
+	assertDemoRowCount(t, ctx, db, "backend_profile", first.TenantID, first.BackendProfileID)
+	var revisions int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM public.agent_app_revision WHERE tenant_id = $1 AND app_id = $2", first.TenantID, first.AppID).Scan(&revisions); err != nil {
+		t.Fatal(err)
+	}
+	if revisions != 1 {
+		t.Fatalf("demo revision count = %d, want 1", revisions)
+	}
+}
+
+func openPostgresDemoTestDB(t *testing.T) (context.Context, *sql.DB) {
+	t.Helper()
+	dsn := os.Getenv("POSTGRES_INIT_TEST_DSN")
+	if dsn == "" {
+		t.Skip("POSTGRES_INIT_TEST_DSN is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	t.Cleanup(cancel)
+	db, err := storagepostgres.Open(ctx, dsn, storagepostgres.Options{MaxOpenConns: 16, MaxIdleConns: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := migrations.Apply(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.Verify(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	return ctx, db
+}
+
+func assertDemoRowCount(t *testing.T, ctx context.Context, db *sql.DB, table, tenantID, profileID string) {
+	t.Helper()
+	var count int
+	query := ""
+	switch table {
+	case "model_profile":
+		query = "SELECT COUNT(*) FROM public.model_profile WHERE tenant_id = $1 AND profile_id = $2"
+	case "backend_profile":
+		query = "SELECT COUNT(*) FROM public.backend_profile WHERE tenant_id = $1 AND profile_id = $2"
+	default:
+		t.Fatalf("unsupported demo table %q", table)
+	}
+	if err := db.QueryRowContext(ctx, query, tenantID, profileID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("%s count = %d, want 1", table, count)
+	}
+}
+
 func openPostgresInitTestDB(t *testing.T) (context.Context, *sql.DB) {
 	t.Helper()
 	dsn := os.Getenv("POSTGRES_INIT_TEST_DSN")

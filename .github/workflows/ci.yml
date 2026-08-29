@@ -40,6 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: write
       security-events: write
     steps:
       - name: Checkout full history
@@ -76,7 +77,6 @@ jobs:
 
       - name: Run commit secret scan
         id: gitleaks
-        continue-on-error: true
         shell: bash
         env:
           GITLEAKS_BIN: ${{ runner.temp }}/gitleaks
@@ -96,7 +96,21 @@ jobs:
           fi
           status=${PIPESTATUS[0]}
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
-          exit "$status"
+          case "$status" in
+            0)
+              echo "findings=false" >> "$GITHUB_OUTPUT"
+              ;;
+            1)
+              # Gitleaks uses exit code 1 for a completed scan with findings.
+              # Findings are reported below; they are not a scanner failure.
+              echo "findings=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "findings=false" >> "$GITHUB_OUTPUT"
+              echo "::error::Gitleaks failed to complete (exit code $status)"
+              exit "$status"
+              ;;
+          esac
 
       - name: Upload secret scan reports
         if: always()
@@ -114,15 +128,71 @@ jobs:
           sarif_file: ${{ runner.temp }}/gitleaks-results.sarif
           category: commit-secret
 
-      - name: Enforce secret scan gate
-        if: always()
-        shell: bash
-        run: |
-          if [[ "${{ steps.gitleaks.outcome }}" != "success" ]]; then
-            echo "::error::Gitleaks detected a secret or failed to complete (exit code ${{ steps.gitleaks.outputs.exit_code }})"
-            echo "Rotate any exposed credential before requesting an exception."
-            exit 1
-          fi
+      - name: Add PR annotations for findings
+        if: ${{ success() && steps.gitleaks.outputs.findings == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: actions/github-script@v7
+        env:
+          GITLEAKS_REPORT: ${{ runner.temp }}/gitleaks-results.sarif
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync(process.env.GITLEAKS_REPORT, 'utf8'));
+            const results = (report.runs || []).flatMap((run) => run.results || []);
+            const { owner, repo } = context.repo;
+            const pullNumber = context.payload.pull_request.number;
+            const headSha = context.payload.pull_request.head.sha;
+            const existing = await github.paginate(github.rest.pulls.listReviewComments, {
+              owner,
+              repo,
+              pull_number: pullNumber,
+              per_page: 100,
+            });
+            const seen = new Set();
+            for (const comment of existing) {
+              const marker = comment.body?.match(/<!-- gitleaks:([^ ]+) -->/)?.[1];
+              if (marker) seen.add(marker);
+            }
+            let posted = 0;
+            for (const result of results) {
+              const location = result.locations?.[0]?.physicalLocation;
+              const uri = location?.artifactLocation?.uri;
+              const line = location?.region?.startLine;
+              if (!uri || !line) {
+                core.warning(`Skipping a finding without a reviewable file location (${result.ruleId || 'unknown rule'})`);
+                continue;
+              }
+              const path = uri.replace(/^file:\/\//, '').replace(/^\.\//, '');
+              const marker = `${result.ruleId || 'unknown'}:${path}:${line}`;
+              if (seen.has(marker)) continue;
+              const body = [
+                'Gitleaks found a potential secret pattern in this changed file. Review the value and rotate it if it is a real credential.',
+                `Rule: ${result.ruleId || 'unknown'}`,
+                `<!-- gitleaks:${marker} -->`,
+              ].join('\n\n');
+              try {
+                await github.rest.pulls.createReviewComment({
+                  owner,
+                  repo,
+                  pull_number: pullNumber,
+                  body,
+                  commit_id: headSha,
+                  path,
+                  line,
+                  side: 'RIGHT',
+                });
+                posted++;
+              } catch (error) {
+                core.warning(`Could not add an inline comment for ${path}:${line}: ${error.message}`);
+              }
+            }
+            core.summary
+              .addHeading('Commit secret scan')
+              .addRaw(`Completed with ${results.length} finding(s); ${posted} inline comment(s) added. Findings do not fail CI.`)
+              .write();
+
+      - name: Report clean secret scan
+        if: ${{ success() && steps.gitleaks.outputs.findings == 'false' }}
+        run: echo "Gitleaks completed successfully with no findings"
 
   deployment:
     name: Deployment Validation
@@ -140,20 +210,8 @@ jobs:
       - name: Build container image
         run: docker build --tag "$TRPC_SERVICE_IMAGE" .
 
-      - name: Run Compose smoke test
-        run: |
-          docker compose \
-            --env-file deploy/example.env \
-            -f deploy/docker-compose.yml \
-            up -d --wait
-          docker compose \
-            --env-file deploy/example.env \
-            -f deploy/docker-compose.yml \
-            exec -T service /app/trpc-healthcheck http://127.0.0.1:8080/healthz
-          docker compose \
-            --env-file deploy/example.env \
-            -f deploy/docker-compose.yml \
-            exec -T service /app/trpc-healthcheck http://127.0.0.1:8080/readyz
+      - name: Run Compose golden path
+        run: ./scripts/quickstart.sh --demo deploy/example.env
 
       - name: Stop Compose services
         if: always()

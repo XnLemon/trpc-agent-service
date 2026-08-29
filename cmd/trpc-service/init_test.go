@@ -40,6 +40,45 @@ func TestParseInitOptionsUsesExplicitMetadata(t *testing.T) {
 	}
 }
 
+func TestParseDemoOptionsUsesEnvironmentAndFlags(t *testing.T) {
+	t.Setenv("TRPC_DEMO_TENANT_KEY", "from-environment")
+	t.Setenv("TRPC_DEMO_APP_KEY", "environment-app")
+	t.Setenv("TRPC_DEMO_MODEL_KEY", "environment-model")
+	options, help, err := parseDemoOptions([]string{"--confirm", "--tenant-name", "Command Tenant", "--backend-key", "command-backend"}, io.Discard)
+	if err != nil || help || !options.confirm {
+		t.Fatalf("demo options = %+v help=%v err=%v", options, help, err)
+	}
+	if options.config.TenantKey != "from-environment" || options.config.TenantDisplayName != "Command Tenant" || options.config.AppKey != "environment-app" || options.config.ModelProfileKey != "environment-model" || options.config.BackendProfileKey != "command-backend" {
+		t.Fatalf("demo metadata = %+v", options.config)
+	}
+	if _, help, err := parseDemoOptions([]string{"--help"}, io.Discard); err != nil || !help {
+		t.Fatalf("demo help = help:%v err:%v", help, err)
+	}
+	if _, _, err := parseDemoOptions([]string{"--unknown"}, io.Discard); err == nil {
+		t.Fatal("unknown demo flag was accepted")
+	}
+	if _, _, err := parseDemoOptions([]string{"unexpected"}, io.Discard); err == nil {
+		t.Fatal("unexpected demo argument was accepted")
+	}
+}
+
+func TestRunDemoRequiresConfirmationAndDatabaseConfiguration(t *testing.T) {
+	previousOpen := openInitDatabase
+	openInitDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) {
+		t.Fatal("database was opened before demo preconditions")
+		return nil, nil
+	}
+	defer func() { openInitDatabase = previousOpen }()
+	t.Setenv(bootstrapPostgresDSN, "postgres://demo-user@example.test/db")
+	if err := runMain(context.Background(), []string{"demo"}, io.Discard, io.Discard, nil); err == nil || !errors.Is(err, bootstrap.ErrInitializationAuthorization) || !strings.Contains(err.Error(), "--confirm") {
+		t.Fatalf("missing demo confirmation error = %v", err)
+	}
+	t.Setenv(bootstrapPostgresDSN, "")
+	if err := runMain(context.Background(), []string{"demo", "--confirm"}, io.Discard, io.Discard, nil); err == nil || !errors.Is(err, bootstrap.ErrInvalidConfig) || !strings.Contains(err.Error(), bootstrapPostgresDSN) {
+		t.Fatalf("missing demo DSN error = %v", err)
+	}
+}
+
 func TestRunInitRequiresConfirmationAndValidConfiguration(t *testing.T) {
 	previousOpen := openInitDatabase
 	openInitDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) {
