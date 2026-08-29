@@ -8,26 +8,51 @@ today="$(date -u +%F)"
 found=0
 shopt -s extglob
 
-if grep -q 'Owner:' "$CONFIG" && ! grep -q 'Issue: #[0-9]' "$CONFIG"; then
-  echo "::error::security allowlist entries must include a tracking issue" >&2
-  exit 1
-fi
+validate_metadata() {
+  local metadata="$1"
+  local location="$2"
+  local owner issue reason expiry
+  if [[ "$metadata" =~ Owner:[[:space:]]*([^[:space:]|]+) ]]; then
+    owner="${BASH_REMATCH[1]}"
+  else
+    echo "::error::security exception near $location lacks an owner" >&2
+    exit 1
+  fi
+  if [[ "$metadata" =~ Issue:[[:space:]]*(#[0-9]+) ]]; then
+    issue="${BASH_REMATCH[1]}"
+  else
+    echo "::error::security exception near $location lacks a tracking issue" >&2
+    exit 1
+  fi
+  if [[ "$metadata" =~ Reason:[[:space:]]*([^|]+) ]]; then
+    reason="${BASH_REMATCH[1]}"
+    reason="${reason##+([[:space:]])}"
+    reason="${reason%%+([[:space:]])}"
+  else
+    reason=""
+  fi
+  if [[ -z "$reason" ]]; then
+    echo "::error::security exception near $location lacks a rationale" >&2
+    exit 1
+  fi
+  if [[ "$metadata" =~ allowlist-expiry:[[:space:]]*([0-9]{4}-[0-9]{2}-[0-9]{2}) ]]; then
+    expiry="${BASH_REMATCH[1]}"
+  else
+    echo "::error::invalid allowlist expiry near $location" >&2
+    exit 1
+  fi
+  if [[ "$expiry" < "$today" || "$expiry" == "$today" ]]; then
+    echo "::error::expired security allowlist entry: $expiry" >&2
+    exit 1
+  fi
+}
 
 while IFS= read -r line; do
   line="${line%$'\r'}"
   case "$line" in
     \#*allowlist-expiry:*)
       found=1
-      expiry="${line##*allowlist-expiry: }"
-      expiry="${expiry%% *}"
-      if [[ ! "$expiry" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-        echo "::error::invalid allowlist expiry: $expiry" >&2
-        exit 1
-      fi
-      if [[ "$expiry" < "$today" || "$expiry" == "$today" ]]; then
-        echo "::error::expired security allowlist entry: $expiry" >&2
-        exit 1
-      fi
+      validate_metadata "$line" "$CONFIG"
       ;;
   esac
 done < "$CONFIG"
@@ -45,20 +70,7 @@ if [[ -f "$TRIVYIGNORE" ]]; then
     if [[ "$trimmed" == \#* ]]; then
       if [[ "$trimmed" == *"Owner:"* || "$trimmed" == *"Issue:"* || "$trimmed" == *"allowlist-expiry:"* ]]; then
         metadata="$trimmed"
-        owner="${metadata#*Owner: }"
-        owner="${owner%% *}"
-        issue="${metadata#*Issue: }"
-        issue="${issue%% *}"
-        expiry="${metadata#*allowlist-expiry: }"
-        expiry="${expiry%% *}"
-        if [[ -z "$owner" || ! "$issue" =~ ^#[0-9]+$ || ! "$expiry" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-          echo "::error::invalid Trivy exception metadata near $TRIVYIGNORE:$line_no" >&2
-          exit 1
-        fi
-        if [[ "$expiry" < "$today" || "$expiry" == "$today" ]]; then
-          echo "::error::expired Trivy exception: $expiry" >&2
-          exit 1
-        fi
+        validate_metadata "$metadata" "$TRIVYIGNORE:$line_no"
       fi
       continue
     fi

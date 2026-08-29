@@ -7,10 +7,21 @@ trap 'rm -rf "$fixture_root"' EXIT
 
 cp "$ROOT/gitleaks.toml" "$fixture_root/gitleaks.toml"
 cat > "$fixture_root/.trivyignore" <<'EOF'
-# Owner: @security-team | Issue: #100 | allowlist-expiry: 2099-12-31
+# Owner: @security-team | Issue: #100 | Reason: test-only | allowlist-expiry: 2099-12-31
 CVE-2099-0001
 EOF
 SECURITY_ALLOWLIST_ROOT="$fixture_root" "$ROOT/scripts/validate-security-allowlist.sh" >/dev/null
+
+cat > "$fixture_root/gitleaks.toml" <<'EOF'
+[allowlist]
+# allowlist-expiry: 2099-12-31
+commits = []
+EOF
+if SECURITY_ALLOWLIST_ROOT="$fixture_root" "$ROOT/scripts/validate-security-allowlist.sh" >/dev/null 2>&1; then
+  echo "::error::allowlist fixture accepted a Gitleaks entry without metadata" >&2
+  exit 1
+fi
+cp "$ROOT/gitleaks.toml" "$fixture_root/gitleaks.toml"
 
 printf '%s\n' 'CVE-2099-0001' > "$fixture_root/.trivyignore"
 if SECURITY_ALLOWLIST_ROOT="$fixture_root" "$ROOT/scripts/validate-security-allowlist.sh" >/dev/null 2>&1; then
@@ -19,7 +30,7 @@ if SECURITY_ALLOWLIST_ROOT="$fixture_root" "$ROOT/scripts/validate-security-allo
 fi
 
 cat > "$fixture_root/.trivyignore" <<'EOF'
-# Owner: @security-team | Issue: #100 | allowlist-expiry: 2000-01-01
+# Owner: @security-team | Issue: #100 | Reason: test-only | allowlist-expiry: 2000-01-01
 CVE-2099-0001
 EOF
 if SECURITY_ALLOWLIST_ROOT="$fixture_root" "$ROOT/scripts/validate-security-allowlist.sh" >/dev/null 2>&1; then
