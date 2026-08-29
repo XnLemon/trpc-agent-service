@@ -261,6 +261,46 @@ func TestMaterializerValidationBranches(t *testing.T) {
 	}
 }
 
+func TestRedactedMaterializationErrorDropsUnknownDetails(t *testing.T) {
+	if redactedMaterializationError(nil) != nil {
+		t.Fatal("nil materialization error was not preserved")
+	}
+	for _, stable := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		runtimestorage.ErrConflict,
+		runtimestorage.ErrDuplicate,
+		runtimestorage.ErrInvalid,
+		runtimestorage.ErrNotFound,
+		runtimestorage.ErrStorage,
+	} {
+		err := redactedMaterializationError(stable)
+		if !errors.Is(err, ErrMaterialization) || !errors.Is(err, stable) {
+			t.Fatalf("stable materialization error = %v, want %v", err, stable)
+		}
+	}
+	err := redactedMaterializationError(errors.New("driver password=top-secret"))
+	if !errors.Is(err, ErrMaterialization) || strings.Contains(err.Error(), "top-secret") {
+		t.Fatalf("unknown materialization error was not redacted: %v", err)
+	}
+}
+
+func TestMaterializerPreservesNotFoundErrorClass(t *testing.T) {
+	m, err := NewMaterializer(MaterializerConfig{Store: inmemory.New(), SegmentSize: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = m.Materialize(context.Background(), MaterializeInput{
+		TenantID: "tenant-a",
+		EventID:  "missing-event",
+		ReplyID:  "reply-missing-event",
+		Payload:  "reply",
+	})
+	if !errors.Is(err, ErrMaterialization) || !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing event materialization error = %v", err)
+	}
+}
+
 func TestMaterializerDefaultSegmentSizeAndUnicodeSplit(t *testing.T) {
 	store := inmemory.New()
 	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-default", nil); err != nil {
