@@ -45,6 +45,7 @@ nav:
       - 企业微信自建应用 Text Webhook: wecom.md
       - Tenant 运行时持久化: runtime-storage.md
       - Runtime Capabilities (#75): runtime-capabilities.md
+      - "Issue #76 Stateless Worker and Migration": issue-76-stateless-worker.md
       - PostgreSQL 控制面与启动装配: postgresql-control-plane.md
       - "Issue #81 MySQL 控制面 Repository": issue-81-mysql-control-plane.md
       - 可重启控制面与 Admin API: issue-41-runtime-bootstrap-admin-api.md

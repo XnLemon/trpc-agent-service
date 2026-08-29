@@ -15,7 +15,7 @@ func TestOrderedFilesAreContiguousAndDigestable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 12 || files[0].version != 1 || files[1].version != 2 || files[2].version != 3 || files[3].version != 4 || files[4].version != 5 || files[5].version != 6 || files[6].version != 7 || files[7].version != 8 || files[8].version != 9 || files[9].version != 10 || files[10].version != 11 || files[11].version != 12 {
+	if len(files) != 13 || files[0].version != 1 || files[1].version != 2 || files[2].version != 3 || files[3].version != 4 || files[4].version != 5 || files[5].version != 6 || files[6].version != 7 || files[7].version != 8 || files[8].version != 9 || files[9].version != 10 || files[10].version != 11 || files[11].version != 12 || files[12].version != 13 {
 		t.Fatalf("migration order = %+v", files)
 	}
 	for _, migration := range files {
@@ -132,8 +132,8 @@ func TestApplyAcceptsReleasedTraceAndRuntimeHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if files[10].name != "0011_reply_trace_parent.up.sql" || files[11].name != "0012_runtime_capabilities.up.sql" {
-		t.Fatalf("released migration order = %q, %q", files[10].name, files[11].name)
+	if files[10].name != "0011_reply_trace_parent.up.sql" || files[11].name != "0012_runtime_capabilities.up.sql" || files[12].name != "0013_execution_queue.up.sql" {
+		t.Fatalf("released migration order = %q, %q, %q", files[10].name, files[11].name, files[12].name)
 	}
 	const (
 		releasedTraceDigest   = "6022eecd427ab1f6528f77284874ea97f85370f9dba646cd1c9de3ee93975557"
