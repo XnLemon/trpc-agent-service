@@ -129,6 +129,9 @@ func InitializeDemo(ctx context.Context, db *sql.DB, input DemoConfig) (DemoResu
 	if tenantRoot.Status != tenant.StatusActive {
 		return DemoResult{}, fmt.Errorf("%w: tenant is not active", ErrDemoState)
 	}
+	if err := preflightDemoApp(ctx, db, appRepo, tenantRoot, app, config.ModelProfileKey); err != nil {
+		return DemoResult{}, demoStepError("agent revision preflight", err)
+	}
 	created := initial.Created
 	modelID, modelCreated, err := ensureDemoModel(ctx, db, modelRepo, initial.TenantID, config.ModelProfileKey)
 	if err != nil {
@@ -151,6 +154,53 @@ func InitializeDemo(ctx context.Context, db *sql.DB, input DemoConfig) (DemoResu
 	}
 	created = created || tenantChanged
 	return DemoResult{TenantID: tenantRoot.TenantID, AppID: app.AppID, ModelProfileID: modelID, BackendProfileID: backendID, Revision: revision.Revision, Created: created}, nil
+}
+
+// preflightDemoApp checks all existing app/revision state before the demo flow
+// creates model or backend profiles. This keeps an incompatible database
+// unchanged when the operator has to resolve an existing revision manually.
+func preflightDemoApp(ctx context.Context, db *sql.DB, apps agent.Repository, root *tenant.Tenant, app *agent.App, modelKey string) error {
+	if app.CanaryRevision != nil {
+		return fmt.Errorf("%w: canary revision is not supported by offline demo", ErrDemoState)
+	}
+	revisions, err := findRevisionNumbers(ctx, db, root.TenantID, app.AppID)
+	if err != nil {
+		return err
+	}
+	if app.CurrentRevision != nil {
+		if len(revisions) != 1 || revisions[0] != *app.CurrentRevision {
+			return fmt.Errorf("%w: app has unexpected revision history", ErrDemoState)
+		}
+		return validateExistingDemoRevision(ctx, db, apps, root, app, *app.CurrentRevision, agent.RevisionStatePublished, modelKey)
+	}
+	if app.Status != agent.StatusDraft {
+		return fmt.Errorf("%w: app has no published revision", ErrDemoState)
+	}
+	if len(revisions) == 0 {
+		return nil
+	}
+	if len(revisions) != 1 {
+		return fmt.Errorf("%w: app has multiple unpublished revisions", ErrDemoState)
+	}
+	return validateExistingDemoRevision(ctx, db, apps, root, app, revisions[0], agent.RevisionStateDraft, modelKey)
+}
+
+func validateExistingDemoRevision(ctx context.Context, db *sql.DB, apps agent.Repository, root *tenant.Tenant, app *agent.App, revisionNumber int64, state agent.RevisionState, modelKey string) error {
+	modelID, found, err := findProfileID(ctx, db, "model_profile", root.TenantID, modelKey)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: existing revision references an unknown demo model", ErrDemoState)
+	}
+	revision, err := apps.GetRevision(ctx, root.TenantID, app.AppID, revisionNumber)
+	if err != nil {
+		return demoDependencyError(err)
+	}
+	if revision.State != state || !demoRevisionMatches(revision, modelID) {
+		return fmt.Errorf("%w: existing revision does not match offline demo", ErrDemoState)
+	}
+	return nil
 }
 
 func normalizeDemoConfig(config DemoConfig) DemoConfig {
