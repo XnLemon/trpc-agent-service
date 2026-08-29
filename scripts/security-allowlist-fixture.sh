@@ -60,6 +60,14 @@ if SECURITY_ALLOWLIST_ROOT="$fixture_root" "$ROOT/scripts/validate-security-allo
 fi
 cp "$ROOT/gitleaks.toml" "$fixture_root/gitleaks.toml"
 
+printf '%s' '[allowlist]
+commits = ["deadbeef"]' > "$fixture_root/gitleaks.toml"
+if SECURITY_ALLOWLIST_ROOT="$fixture_root" "$ROOT/scripts/validate-security-allowlist.sh" >/dev/null 2>&1; then
+  echo "::error::allowlist fixture accepted a Gitleaks config without a final newline or metadata" >&2
+  exit 1
+fi
+cp "$ROOT/gitleaks.toml" "$fixture_root/gitleaks.toml"
+
 sed 's/2026-12-31/2099-99-99/' "$ROOT/gitleaks.toml" > "$fixture_root/gitleaks.toml"
 if SECURITY_ALLOWLIST_ROOT="$fixture_root" "$ROOT/scripts/validate-security-allowlist.sh" >/dev/null 2>&1; then
   echo "::error::allowlist fixture accepted an invalid calendar date" >&2

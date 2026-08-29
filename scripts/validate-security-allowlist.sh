@@ -60,7 +60,7 @@ finish_gitleaks_block() {
   fi
 }
 
-while IFS= read -r line; do
+while IFS= read -r line || [[ -n "$line" ]]; do
   line="${line%$'\r'}"
   if [[ "$line" =~ ^[[:space:]]*\[allowlist\][[:space:]]*$ ]]; then
     finish_gitleaks_block
