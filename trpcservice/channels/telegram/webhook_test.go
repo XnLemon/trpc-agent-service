@@ -221,7 +221,7 @@ func newWebhookCase(t *testing.T, dispatcher *dispatchStub, maxBody int64) (*Ada
 	adapter := newTestAdapter(t, target, dispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
 	webhook, err := NewWebhook(adapter, WebhookConfig{Path: "/telegram/cases", SecretToken: "secret", MaxBodyBytes: maxBody})
 	if err != nil {
-		adapter.Close()
+		_ = adapter.Close()
 		t.Fatal(err)
 	}
 	return adapter, webhook
