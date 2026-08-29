@@ -464,7 +464,7 @@ func TestDemoErrorAndValueHelpers(t *testing.T) {
 	}
 }
 
-func TestEnsureDemoModelBranches(t *testing.T) {
+func TestEnsureDemoModelCreateBranches(t *testing.T) {
 	t.Run("model create and dependency failures", func(t *testing.T) {
 		profile := &modelprofile.Profile{ProfileID: "mp_demo", ProfileKey: demoModelProfileKey, Configuration: modelprofile.Configuration{Provider: demoModelProvider, Model: demoModelName}, Status: modelprofile.StatusActive}
 		db, mock, err := sqlmock.New()
@@ -501,6 +501,9 @@ func TestEnsureDemoModelBranches(t *testing.T) {
 		}
 	})
 
+}
+
+func TestEnsureDemoModelExistingBranches(t *testing.T) {
 	t.Run("model existing lifecycle and mismatch", func(t *testing.T) {
 		cases := []struct {
 			name                  string
@@ -544,7 +547,6 @@ func TestEnsureDemoModelBranches(t *testing.T) {
 			})
 		}
 	})
-
 }
 
 func TestEnsureDemoBackendBranches(t *testing.T) {
