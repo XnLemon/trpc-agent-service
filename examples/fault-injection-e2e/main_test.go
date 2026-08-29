@@ -112,19 +112,41 @@ func TestFaultInjectionOutboxRetryAndConcurrencyE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	results := make(chan error, 2)
-	go func() { _, runErr := worker.RunOnce(context.Background()); results <- runErr }()
+	type runOnceResult struct {
+		processed int
+		err       error
+	}
+	results := make(chan runOnceResult, 2)
+	go func() {
+		processed, runErr := worker.RunOnce(context.Background())
+		results <- runOnceResult{processed: processed, err: runErr}
+	}()
 	select {
 	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("worker did not enter provider")
 	}
-	go func() { _, runErr := workerB.RunOnce(context.Background()); results <- runErr }()
-	close(release)
-	for index := 0; index < 2; index++ {
-		if err := <-results; err != nil {
-			t.Fatal(err)
+	go func() {
+		processed, runErr := workerB.RunOnce(context.Background())
+		results <- runOnceResult{processed: processed, err: runErr}
+	}()
+	// Wait for B before releasing A so this test cannot pass by scheduling B
+	// only after A has delivered and released its lease.
+	select {
+	case result := <-results:
+		if result.err != nil || result.processed != 0 {
+			t.Fatalf("competing worker result = %+v", result)
 		}
+		if calls := provider.CallsFor("reply-concurrent"); calls != 1 {
+			t.Fatalf("competing worker delivered while lease was active: provider_calls=%d", calls)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("competing worker did not observe the active lease")
+	}
+	close(release)
+	result := <-results
+	if result.err != nil || result.processed != 1 {
+		t.Fatalf("primary worker result = %+v", result)
 	}
 	concurrent, err := store.GetReply(context.Background(), "tenant-fault", "reply-concurrent", 0)
 	if err != nil || concurrent.Status != runtimestorage.ReplySent || provider.CallsFor("reply-concurrent") != 1 {
