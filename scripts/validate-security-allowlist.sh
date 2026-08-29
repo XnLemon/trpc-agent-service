@@ -92,7 +92,7 @@ while IFS= read -r line; do
     validate_metadata "$line" "$CONFIG"
     [[ -n "$allowlist_block" ]] && block_has_metadata=1
   fi
-  if [[ -n "$allowlist_block" && "$line" =~ ^[[:space:]]*(commits|paths|regexes|files|stopwords)[[:space:]]*=[[:space:]]*\[ && "$line" != *"[]"* ]]; then
+  if [[ -n "$allowlist_block" && "$line" =~ ^[[:space:]]*(commits|paths|regexes|files|stopwords)[[:space:]]*= && "$line" != *"[]"* ]]; then
     block_has_entry=1
   fi
 done < "$CONFIG"
