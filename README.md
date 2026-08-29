@@ -213,7 +213,7 @@
 - [ ] 完成容量模型，并对并发 Session、Redis/SQL QPS 和 IM 峰值进行压测
 - [ ] 完成备份恢复、故障演练和租户级发布回滚流程
 - [x] 增加 Storage Adapter 契约测试和端到端消息链路测试（Issue #49/#50/#52）
-- [ ] 增加多租户越权、密钥泄漏、并发一致性和故障注入测试
+- [x] 增加多租户越权、密钥泄漏、并发一致性和故障注入测试（Issue #99；确定性示例覆盖 Gateway 边界、Outbox 与 Runner Registry）
 - [x] 在 CI 中运行 `go test -race ./...`（Issue #39）；Codecov project/patch 的 85% 目标仍待分支保护或 ruleset 设为合并门禁
 - [ ] 增加依赖漏洞、镜像和提交密钥扫描
 
@@ -281,6 +281,8 @@
   关联不会进入 Prometheus label。
 - Issue #91 将经过 W3C 校验的 `traceparent` 写入 ReplyCorrelation，并由 Outbox Worker 在
   `channel.send` 前恢复；旧记录或非法 parent 会从新的 root span 投递，不阻塞回复。
+- Issue #99 的 `examples/fault-injection-e2e` 使用受控 fake 验证伪造租户路由、机密错误脱敏、
+  Reply Outbox 重试/租约竞争/原子 materialization，以及租户隔离的并发 Runner 构建；不依赖网络或生产凭据。
 - Issue #26 的 fake candidate resolver/verifier 与 proof-bearing routing 边界有独立测试，
   但这不代表 Telegram webhook、多账号/HA Channel 调度、媒体能力、治理链或完整平台验收
   已满足 README 原验收要求。
@@ -317,6 +319,7 @@
 |-- data                   # 服务运行时数据
 |-- migrations             # PostgreSQL/MySQL schema 与迁移校验
 |-- examples               # 可运行的外部集成示例
+|   |-- fault-injection-e2e # 确定性 Gateway/Outbox/Registry 故障注入 E2E
 |   |-- telegram-e2e        # Telegram live long-polling/outbox E2E
 |   `-- wecom-e2e           # 企业微信回调示例测试
 |-- docs                   # 各模块说明与架构设计文档
@@ -354,6 +357,17 @@
 - **Build, Test & Coverage**：构建、单测覆盖率、上传 [Codecov](https://codecov.io)、清理
 - **Race Tests**：在临时 PostgreSQL 与 MySQL 8 依赖上执行 `go test -race ./...`；MySQL migration/repository live 测试使用独立 migration 账号和表级 DML 白名单应用账号
 - **Deployment**：校验 Docker Compose/Kustomize 清单，构建镜像并运行 PostgreSQL + 服务 smoke test，验证 `/healthz` 和 `/readyz`
+
+独立的 `.github/workflows/fault-injection-e2e.yml` 会在 `main` 的 push、面向 `main` 的 PR 和手动触发时运行：
+
+```bash
+go test ./examples/fault-injection-e2e -count=1 -v
+go test -race ./examples/fault-injection-e2e -count=1 -v
+```
+
+该套件不使用生产凭据或外部网络服务；覆盖矩阵和受控 failure hooks 见
+[`examples/fault-injection-e2e/README.md`](examples/fault-injection-e2e/README.md) 与
+[`docs/docs/issue-99-fault-injection.md`](docs/docs/issue-99-fault-injection.md)。
 
 完整的环境变量参考、Kubernetes Secret 约束和 Compose/Kubernetes 操作步骤见
 [部署、配置与快速开始](docs/docs/deployment.md)。
