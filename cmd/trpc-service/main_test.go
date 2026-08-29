@@ -174,8 +174,8 @@ func TestRunServiceContextAndServeErrors(t *testing.T) {
 	}
 }
 
-func TestRunDemoCoversLifecycleAndFailureBranches(t *testing.T) {
-	setValidDemoEnvironment(t)
+func preserveDemoHooks(t *testing.T) {
+	t.Helper()
 	previousOpen := openInitDatabase
 	previousApply := applyInitMigrations
 	previousVerify := verifyInitMigrations
@@ -188,6 +188,11 @@ func TestRunDemoCoversLifecycleAndFailureBranches(t *testing.T) {
 		initializeDemo = previousInitialize
 		writeDemoResult = previousWrite
 	})
+}
+
+func TestRunDemoRejectsInvalidInputs(t *testing.T) {
+	setValidDemoEnvironment(t)
+	preserveDemoHooks(t)
 
 	if err := runMain(context.Background(), []string{"demo", "--unknown"}, io.Discard, io.Discard, nil); err == nil {
 		t.Fatal("unknown demo flag was accepted")
@@ -209,7 +214,11 @@ func TestRunDemoCoversLifecycleAndFailureBranches(t *testing.T) {
 	if err := runDemo(canceled, []string{"--confirm"}, io.Discard, io.Discard, make(chan os.Signal)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled demo context = %v", err)
 	}
+}
 
+func TestRunDemoCoversLifecycleAndFailureBranches(t *testing.T) {
+	setValidDemoEnvironment(t)
+	preserveDemoHooks(t)
 	tests := []struct {
 		name       string
 		open       func(context.Context, string, postgres.Options) (*sql.DB, error)
