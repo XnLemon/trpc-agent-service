@@ -16,4 +16,7 @@ func TestRenderAggregatesTextAndFallsBackDeterministically(t *testing.T) {
 	if got := Render(nil); got != (Reply{Kind: KindFallback, Text: StableFallback}) {
 		t.Fatalf("empty fallback = %#v", got)
 	}
+	if got := Render([]gateway.DispatchEvent{{Type: gateway.DispatchEventType("card"), Text: "partial"}}); got != (Reply{Kind: KindFallback, Text: StableFallback}) {
+		t.Fatalf("unknown event fallback = %#v", got)
+	}
 }

@@ -31,11 +31,14 @@ type Reply struct {
 func Render(events []gateway.DispatchEvent) Reply {
 	var b strings.Builder
 	for _, event := range events {
-		if event.Type == gateway.DispatchEventError {
+		switch event.Type {
+		case gateway.DispatchEventError:
 			return Reply{Kind: KindFallback, Text: StableFallback}
-		}
-		if event.Type == gateway.DispatchEventMessage {
+		case gateway.DispatchEventMessage:
 			b.WriteString(event.Text)
+		case gateway.DispatchEventStatus, gateway.DispatchEventDone:
+		default:
+			return Reply{Kind: KindFallback, Text: StableFallback}
 		}
 	}
 	if text := strings.TrimSpace(b.String()); text != "" {

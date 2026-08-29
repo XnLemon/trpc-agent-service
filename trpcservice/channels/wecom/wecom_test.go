@@ -240,6 +240,13 @@ func TestProviderValidatesBeforeReceiptReplay(t *testing.T) {
 	assertDeliveryErrorClass(t, err, "invalid", false)
 }
 
+func TestProviderValidatesAgentIDBeforeReceiptReplay(t *testing.T) {
+	p := &Provider{CorpID: "corp", AgentID: "not-canonical", AppSecret: "secret", receipts: map[string]string{"tenant\x00reply\x000": "m-1"}}
+	value := storage.ReplyOutbox{TenantID: "tenant", ReplyID: "reply", SegmentIndex: 0, Payload: "hello", ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user"}}
+	_, err := p.Deliver(context.Background(), value)
+	assertDeliveryErrorClass(t, err, "invalid", false)
+}
+
 func TestProviderRejectsOversizedText(t *testing.T) {
 	p := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "app-secret"}
 	_, err := p.Deliver(context.Background(), storage.ReplyOutbox{Payload: strings.Repeat("界", 683), ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user-1"}})
