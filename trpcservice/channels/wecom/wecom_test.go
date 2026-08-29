@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -206,6 +207,46 @@ func TestProviderCachesTokenAndDeliversText(t *testing.T) {
 	}
 }
 
+func TestProviderDeliversGroupChat(t *testing.T) {
+	var payload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/cgi-bin/gettoken" {
+			_, _ = io.WriteString(w, `{"errcode":0,"access_token":"token","expires_in":3600}`)
+			return
+		}
+		if r.URL.Path == "/cgi-bin/message/send" {
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			_, _ = io.WriteString(w, `{"errcode":0,"msgid":"group-1"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	p := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret", BaseURL: server.URL, HTTPClient: server.Client()}
+	value := storage.ReplyOutbox{Payload: "hello", ReplyTarget: storage.ReplyTarget{ConversationKind: "group", ReceiverID: "chat-1"}}
+	if id, err := p.Deliver(context.Background(), value); err != nil || id != "group-1" {
+		t.Fatalf("group deliver = %q, %v", id, err)
+	}
+	if payload["chatid"] != "chat-1" || payload["touser"] != nil {
+		t.Fatalf("group payload = %#v", payload)
+	}
+}
+
+func TestProviderValidatesBeforeReceiptReplay(t *testing.T) {
+	p := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret", receipts: map[string]string{"tenant\x00reply\x000": "m-1"}}
+	value := storage.ReplyOutbox{TenantID: "tenant", ReplyID: "reply", SegmentIndex: 0, Payload: "", ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user"}}
+	_, err := p.Deliver(context.Background(), value)
+	assertDeliveryErrorClass(t, err, "invalid", false)
+}
+
+func TestProviderValidatesAgentIDBeforeReceiptReplay(t *testing.T) {
+	p := &Provider{CorpID: "corp", AgentID: "not-canonical", AppSecret: "secret", receipts: map[string]string{"tenant\x00reply\x000": "m-1"}}
+	value := storage.ReplyOutbox{TenantID: "tenant", ReplyID: "reply", SegmentIndex: 0, Payload: "hello", ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user"}}
+	_, err := p.Deliver(context.Background(), value)
+	assertDeliveryErrorClass(t, err, "invalid", false)
+}
+
 func TestProviderRejectsOversizedText(t *testing.T) {
 	p := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "app-secret"}
 	_, err := p.Deliver(context.Background(), storage.ReplyOutbox{Payload: strings.Repeat("界", 683), ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user-1"}})
@@ -303,7 +344,6 @@ func TestProviderRejectsInvalidDeliveryInputs(t *testing.T) {
 		{name: "nil provider", context: context.Background(), value: valid},
 		{name: "missing credentials", provider: &Provider{}, context: context.Background(), value: valid},
 		{name: "nil context", provider: provider, value: valid},
-		{name: "group target", provider: provider, context: context.Background(), value: storage.ReplyOutbox{Payload: "hello", ReplyTarget: storage.ReplyTarget{ConversationKind: "group", ReceiverID: "group"}}},
 		{name: "missing recipient", provider: provider, context: context.Background(), value: storage.ReplyOutbox{Payload: "hello", ReplyTarget: storage.ReplyTarget{ConversationKind: "direct"}}},
 		{name: "empty payload", provider: provider, context: context.Background(), value: storage.ReplyOutbox{ReplyTarget: valid.ReplyTarget}},
 		{name: "oversized payload", provider: provider, context: context.Background(), value: storage.ReplyOutbox{Payload: strings.Repeat("x", maximumTextBytes+1), ReplyTarget: valid.ReplyTarget}},

@@ -15,6 +15,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/replies"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
@@ -527,21 +528,8 @@ func (adapter *Adapter) dispatch(ctx context.Context, message gateway.InboundMes
 }
 
 func (adapter *Adapter) sendEvents(ctx context.Context, message *models.Message, events []gateway.DispatchEvent) error {
-	for _, event := range events {
-		if event.Type == gateway.DispatchEventError {
-			return adapter.sendText(ctx, message, failureReply)
-		}
-	}
-	var builder strings.Builder
-	for _, event := range events {
-		if event.Type == gateway.DispatchEventMessage {
-			builder.WriteString(event.Text)
-		}
-	}
-	if builder.Len() == 0 {
-		return nil
-	}
-	return adapter.sendText(ctx, message, builder.String())
+	reply := replies.Render(events)
+	return adapter.sendText(ctx, message, reply.Text)
 }
 
 func (adapter *Adapter) sendText(ctx context.Context, message *models.Message, text string) (err error) {
@@ -583,7 +571,11 @@ func normalizeUpdate(target channels.RoutingTarget, update *models.Update) (gate
 		return gateway.InboundMessage{}, ErrUnsupportedUpdate
 	}
 	message := update.Message
-	if hasUnsupportedMessage(message) || strings.TrimSpace(message.Text) == "" {
+	if hasUnsupportedMessage(message) {
+		return gateway.InboundMessage{}, ErrUnsupportedUpdate
+	}
+	content, contentType, ok := messageContent(message)
+	if !ok {
 		return gateway.InboundMessage{}, ErrUnsupportedUpdate
 	}
 	if message.From == nil || message.From.ID <= 0 || message.Chat.ID == 0 {
@@ -593,7 +585,7 @@ func normalizeUpdate(target channels.RoutingTarget, update *models.Update) (gate
 		return gateway.InboundMessage{}, ErrInvalidUpdate
 	}
 	inbound := gateway.InboundMessage{
-		Content: message.Text, ContentType: gateway.ContentTypeText,
+		Content: content, ContentType: contentType,
 		ExternalMessageID: externalMessageID(target, update.ID),
 		ExternalUserID:    strconv.FormatInt(message.From.ID, 10),
 	}
@@ -617,6 +609,47 @@ func normalizeUpdate(target channels.RoutingTarget, update *models.Update) (gate
 	return normalized, nil
 }
 
+func messageContent(message *models.Message) (string, string, bool) {
+	if message == nil {
+		return "", "", false
+	}
+	if strings.TrimSpace(message.Text) != "" {
+		return message.Text, gateway.ContentTypeText, true
+	}
+	if strings.TrimSpace(message.Caption) != "" && hasMedia(message) {
+		return message.Caption, gateway.ContentTypeMedia, true
+	}
+	if hasMedia(message) {
+		return "[telegram media]", gateway.ContentTypeMedia, true
+	}
+	if message.RichMessage != nil {
+		return "[telegram rich message]", gateway.ContentTypeRich, true
+	}
+	return "", "", false
+}
+
+func hasMedia(message *models.Message) bool {
+	if message == nil {
+		return false
+	}
+	if len(message.Photo) > 0 {
+		for _, photo := range message.Photo {
+			if strings.TrimSpace(photo.FileID) != "" {
+				return true
+			}
+		}
+	}
+	return hasPrimaryMedia(message) || hasSecondaryMedia(message)
+}
+
+func hasPrimaryMedia(message *models.Message) bool {
+	return message.Animation != nil || message.Audio != nil || message.Document != nil || message.PaidMedia != nil || message.Sticker != nil || message.Story != nil || message.Video != nil || message.VideoNote != nil || message.Voice != nil || message.Checklist != nil || message.Contact != nil
+}
+
+func hasSecondaryMedia(message *models.Message) bool {
+	return message.Dice != nil || message.Game != nil || message.Poll != nil || message.Venue != nil || message.Location != nil || message.Invoice != nil || message.SuccessfulPayment != nil || message.RefundedPayment != nil || message.UsersShared != nil || message.ChatShared != nil || message.Gift != nil || message.UniqueGift != nil || message.GiftUpgradeSent != nil || message.LivePhoto != nil
+}
+
 func hasUnsupportedMessage(message *models.Message) bool {
 	if message == nil {
 		return true
@@ -626,7 +659,7 @@ func hasUnsupportedMessage(message *models.Message) bool {
 			return true
 		}
 	}
-	return hasUnsupportedMessageMetadata(message) || hasUnsupportedMessageMedia(message) || hasUnsupportedMessageChatEvents(message)
+	return hasUnsupportedMessageMetadata(message) || hasUnsupportedMessageChatEvents(message)
 }
 
 func hasUnsupportedMessageMetadata(message *models.Message) bool {
@@ -634,7 +667,7 @@ func hasUnsupportedMessageMetadata(message *models.Message) bool {
 }
 
 func hasUnsupportedMessageRoutingMetadata(message *models.Message) bool {
-	return message.DirectMessagesTopic != nil || message.SenderChat != nil || message.SenderBusinessBot != nil || message.ReceiverUser != nil || message.BusinessConnectionID != "" || message.RichMessage != nil || message.Caption != "" || len(message.CaptionEntities) > 0
+	return message.DirectMessagesTopic != nil || message.SenderChat != nil || message.SenderBusinessBot != nil || message.ReceiverUser != nil || message.BusinessConnectionID != ""
 }
 
 func hasUnsupportedMessageReplyMetadata(message *models.Message) bool {

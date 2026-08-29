@@ -1,7 +1,6 @@
 # Telegram 长轮询 Channel Adapter
 
-> Issue #31 的实现契约与状态记录。Telegram long polling 普通文本路径已实现并由单元、race
-> 与全仓验证覆盖；Webhook、媒体/rich update、持久化和跨节点能力仍明确不在本 Issue 范围内。
+> Issue #31 的基础实现；Issue #77 在此之上补充 webhook、媒体/rich update 与统一回复渲染。
 
 ## 1. 交付边界
 
@@ -19,9 +18,9 @@ Telegram getUpdates
   -> Telegram sendMessage
 ```
 
-本 Issue 只实现 long polling 和普通文本消息。Webhook、媒体、命令、回调、持久化 outbox、跨
-节点 polling ownership 与分布式幂等保留给后续 Issue；`WebhookPath` 仍是绑定配置中的预留字段，
-不能被本适配器读取为运行模式。
+long polling 与 webhook 共用同一个 Adapter、幂等和 Gateway 边界；命令、回调仍 fail closed。
+Webhook 由调用方拥有 HTTP listener，`telegram.Webhook` 只负责精确 path、secret header、请求
+解码和优雅关闭。媒体 caption 与 rich update 会被规范化为受限的 Gateway content type。
 
 ## 2. 适配器边界与构造
 

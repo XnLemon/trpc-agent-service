@@ -34,8 +34,14 @@ const (
 	// Binding RoutingTarget.
 	PrincipalChannel PrincipalKind = "channel"
 
-	// ContentTypeText is the only content type executed by the first Gateway.
+	// ContentTypeText identifies a plain text message.
 	ContentTypeText = "text"
+	// ContentTypeMedia identifies an inbound message carrying media and an
+	// optional caption. The gateway preserves the caption/marker as Content.
+	ContentTypeMedia = "media"
+	// ContentTypeRich identifies a structured/rich inbound message. Adapters
+	// must provide a deterministic textual representation in Content.
+	ContentTypeRich = "rich"
 
 	// ConversationDirect identifies a direct conversation.
 	ConversationDirect = channels.ConversationDirect
@@ -155,8 +161,10 @@ func (m InboundMessage) Normalize() (InboundMessage, error) {
 	if clone.ContentType == "" {
 		clone.ContentType = ContentTypeText
 	}
-	if clone.ContentType != ContentTypeText {
-		return InboundMessage{}, fmt.Errorf("%w: only text content is supported", ErrInvalid)
+	switch clone.ContentType {
+	case ContentTypeText, ContentTypeMedia, ContentTypeRich:
+	default:
+		return InboundMessage{}, fmt.Errorf("%w: unsupported content type", ErrInvalid)
 	}
 	if n := len([]rune(clone.Content)); n < 1 || n > maxMessageRunes {
 		return InboundMessage{}, fmt.Errorf("%w: content must contain 1-%d characters", ErrInvalid, maxMessageRunes)

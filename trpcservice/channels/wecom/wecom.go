@@ -280,7 +280,15 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer h.drains.Done()
 		defer cancel()
-		stream, dispatchErr := h.dispatcher.Dispatch(executionCtx, gateway.DispatchRequest{Accepted: accepted, Principal: state.principal, RequestID: requestID, TraceID: traceID, Message: gateway.InboundMessage{Content: message.Content, ContentType: gateway.ContentTypeText, ExternalMessageID: message.MsgID, ExternalUserID: message.FromUserName, ConversationKind: channels.ConversationDirect, ExternalPeerID: message.FromUserName}})
+		inbound := gateway.InboundMessage{Content: message.Content, ContentType: gateway.ContentTypeText, ExternalMessageID: message.MsgID, ExternalUserID: message.FromUserName}
+		if strings.TrimSpace(message.ChatID) != "" {
+			inbound.ConversationKind = channels.ConversationGroup
+			inbound.ExternalChatID = strings.TrimSpace(message.ChatID)
+		} else {
+			inbound.ConversationKind = channels.ConversationDirect
+			inbound.ExternalPeerID = message.FromUserName
+		}
+		stream, dispatchErr := h.dispatcher.Dispatch(executionCtx, gateway.DispatchRequest{Accepted: accepted, Principal: state.principal, RequestID: requestID, TraceID: traceID, Message: inbound})
 		if dispatchErr == nil && stream != nil {
 			for range stream {
 			}
@@ -552,6 +560,7 @@ type callbackEnvelope struct {
 type inboundXML struct {
 	MsgID        string `xml:"MsgId"`
 	FromUserName string `xml:"FromUserName"`
+	ChatID       string `xml:"ChatId"`
 	MsgType      string `xml:"MsgType"`
 	AgentID      string `xml:"AgentID"`
 	Content      string `xml:"Content"`

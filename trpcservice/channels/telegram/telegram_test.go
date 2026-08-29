@@ -533,6 +533,42 @@ func TestUnsupportedAndMalformedUpdatesNeverDispatch(t *testing.T) {
 	}
 }
 
+func TestMessageContentAndHasMediaBranches(t *testing.T) {
+	cases := []struct {
+		name        string
+		message     *models.Message
+		wantContent string
+		wantType    string
+		wantOK      bool
+	}{
+		{name: "nil", message: nil},
+		{name: "text", message: &models.Message{Text: " hello "}, wantContent: " hello ", wantType: gateway.ContentTypeText, wantOK: true},
+		{name: "caption media", message: &models.Message{Caption: "caption", Photo: []models.PhotoSize{{FileID: "photo"}}}, wantContent: "caption", wantType: gateway.ContentTypeMedia, wantOK: true},
+		{name: "media marker", message: &models.Message{Video: &models.Video{}}, wantContent: "[telegram media]", wantType: gateway.ContentTypeMedia, wantOK: true},
+		{name: "rich marker", message: &models.Message{RichMessage: &models.RichMessage{}}, wantContent: "[telegram rich message]", wantType: gateway.ContentTypeRich, wantOK: true},
+		{name: "caption without media", message: &models.Message{Caption: "caption"}},
+		{name: "empty", message: &models.Message{}},
+		{name: "empty photo", message: &models.Message{Photo: []models.PhotoSize{{FileID: " "}}}},
+		{name: "text wins", message: &models.Message{Text: "text", Video: &models.Video{}}, wantContent: "text", wantType: gateway.ContentTypeText, wantOK: true},
+		{name: "secondary media", message: &models.Message{Dice: &models.Dice{}}, wantContent: "[telegram media]", wantType: gateway.ContentTypeMedia, wantOK: true},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			content, contentType, ok := messageContent(test.message)
+			if content != test.wantContent || contentType != test.wantType || ok != test.wantOK {
+				t.Fatalf("messageContent = (%q, %q, %t), want (%q, %q, %t)", content, contentType, ok, test.wantContent, test.wantType, test.wantOK)
+			}
+		})
+	}
+
+	if !hasMedia(&models.Message{Photo: []models.PhotoSize{{}, {FileID: "photo"}}}) {
+		t.Fatal("photo with a later valid file ID was not detected")
+	}
+	if hasMedia(&models.Message{Photo: []models.PhotoSize{{}}}) {
+		t.Fatal("photo without a file ID was detected as media")
+	}
+}
+
 func TestDispatchAndSendFailuresAreRedacted(t *testing.T) {
 	target := newTrustedTarget(t, channels.ChannelTelegram, "failure", "12345")
 	recorder := &errorRecorder{}

@@ -1,8 +1,7 @@
 # 企业微信自建应用 Text Webhook
 
-> 本页是 Issue #60 的文档先行契约。它只覆盖企业微信**自建应用**的内部成员
-> 文本回调和应用消息回复。它不把微信群机器人、微信公众号或微信客服伪装成同一种
-> `wecom` 协议。
+> 本页是 Issue #60 的基础契约；Issue #77 扩展了多账号 registry、有界 worker、群聊
+> delivery/receipt，以及独立的 Public WeChat/微信客服 provider boundary。
 
 ## 目标与边界
 
@@ -17,16 +16,15 @@ Telegram long polling / WeCom HTTPS callback
     -> channel Provider
 ```
 
-本阶段支持：
+基础阶段支持：
 
 - 企业微信自建应用的 URL 验证、签名校验、AES 解密和文本消息；
-- 内部成员单聊；企业微信自建应用的本阶段 callback 不接受群聊入站；
+- 内部成员单聊；Issue #77 增加群聊入站/出站目标；
 - Binding-aware Session identity、持久化入站幂等和受控文本回复；
 - 既有 Outbox 的 retry、lease/fencing、dead-letter 与重启恢复语义。
 
-本阶段不支持媒体、卡片、被动 XML 回复、第三方应用、微信群机器人入站、微信公众号、
-微信客服、Telegram webhook、多企业微信账号调度或 webhook HA 所有权。群机器人仅有
-出站 Webhook，未来应作为 notification/delivery target，而不是 Channel Binding。
+媒体、卡片、被动 XML 回复和第三方应用仍不在自建应用 provider 范围。公众号和微信客服
+使用 `trpcservice/channels/wechat` 中互不兼容的显式 provider，不复用 WeCom credential。
 
 `channels.ChannelWeCom` 的持久化值继续为 `wecom` 以保持已有 Binding 和 Admin API
 兼容，但在本页和代码注释中它专指 `wecom_app`。未来公众号、微信客服必须使用新的
