@@ -140,7 +140,7 @@ jobs:
         id: trivy
         if: always()
         continue-on-error: true
-        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2
+        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37
         with:
           scan-type: image
           input: ${{ runner.temp }}/trpc-service.tar
@@ -155,7 +155,7 @@ jobs:
         id: trivy-sarif
         if: always()
         continue-on-error: true
-        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2
+        uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37
         with:
           scan-type: image
           input: ${{ runner.temp }}/trpc-service.tar
