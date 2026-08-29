@@ -80,9 +80,10 @@ cd trpc-agent-service
 
 ```bash
 body='{"content":"hello from the local golden path","external_user_id":"quickstart-user","conversation_kind":"direct","external_peer_id":"quickstart"}'
+api_token="${TRPC_API_TOKEN:-local-api-token}"
 
 curl -i \
-  -H 'Authorization: Bearer local-api-token' \
+  -H "Authorization: Bearer ${api_token}" \
   -H 'Content-Type: application/json' \
   --data "$body" \
   http://127.0.0.1:8080/v1/chat
