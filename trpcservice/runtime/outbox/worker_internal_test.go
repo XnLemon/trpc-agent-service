@@ -261,6 +261,13 @@ func TestMaterializerValidationBranches(t *testing.T) {
 	}
 }
 
+func TestRedactedMaterializationErrorDropsUnknownDetails(t *testing.T) {
+	err := redactedMaterializationError(errors.New("driver password=top-secret"))
+	if !errors.Is(err, ErrMaterialization) || strings.Contains(err.Error(), "top-secret") {
+		t.Fatalf("unknown materialization error was not redacted: %v", err)
+	}
+}
+
 func TestMaterializerDefaultSegmentSizeAndUnicodeSplit(t *testing.T) {
 	store := inmemory.New()
 	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-default", nil); err != nil {

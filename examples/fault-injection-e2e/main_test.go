@@ -147,8 +147,42 @@ func TestFaultInjectionMaterializationFailureE2E(t *testing.T) {
 	if !errors.Is(err, outbox.ErrMaterialization) || strings.Contains(err.Error(), injectedSecret) {
 		t.Fatalf("storage failure = %v", err)
 	}
+	if store.attempted != 2 {
+		t.Fatalf("batch failure did not receive complete segment set: attempted=%d", store.attempted)
+	}
 	if rows, listErr := base.ListReplyCandidates(context.Background(), "tenant-fault"); listErr != nil || len(rows) != 0 {
 		t.Fatalf("partial rows after storage failure = %+v err=%v", rows, listErr)
+	}
+}
+
+// TestFaultInjectionMaterializationAtomicityE2E uses the real in-memory batch
+// implementation with a conflicting later segment. The conflict is discovered
+// after the first segment would otherwise be visible, so a passing test proves
+// the storage boundary rolls the batch back atomically.
+func TestFaultInjectionMaterializationAtomicityE2E(t *testing.T) {
+	store := runtimestorageinmemory.New()
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	if _, err := store.CreateSession(ctx, "tenant-fault", "session-atomic", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-fault", EventID: "event-atomic", SessionID: "session-atomic", BindingID: "binding", ExternalMessageID: "external-atomic"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: "tenant-fault", EventID: "event-atomic", ReplyID: "reply-atomic", SegmentIndex: 1, SegmentCount: 2, Payload: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: store, SegmentSize: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = materializer.Materialize(ctx, outbox.MaterializeInput{TenantID: "tenant-fault", EventID: "event-atomic", ReplyID: "reply-atomic", Payload: "abcdef"})
+	if !errors.Is(err, outbox.ErrMaterialization) || !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("atomic conflict = %v", err)
+	}
+	rows, err := store.ListReplyCandidates(ctx, "tenant-fault")
+	if err != nil || len(rows) != 1 || rows[0].SegmentIndex != 1 || rows[0].Payload != "old" {
+		t.Fatalf("materialization exposed a partial batch: rows=%+v err=%v", rows, err)
 	}
 }
 
@@ -405,14 +439,17 @@ func (p *faultProvider) CallsFor(replyID string) int {
 
 type failingBatchStore struct {
 	runtimestorage.RuntimeStore
-	err error
+	err       error
+	attempted int
 }
 
-func (s *failingBatchStore) EnqueueReplies(context.Context, []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+func (s *failingBatchStore) EnqueueReplies(_ context.Context, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	s.attempted = len(values)
 	return nil, s.err
 }
 
-func (s *failingBatchStore) EnqueueRepliesWithCorrelation(context.Context, runtimestorage.ReplyCorrelation, []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+func (s *failingBatchStore) EnqueueRepliesWithCorrelation(_ context.Context, _ runtimestorage.ReplyCorrelation, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	s.attempted = len(values)
 	return nil, s.err
 }
 
