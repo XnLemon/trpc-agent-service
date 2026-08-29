@@ -111,23 +111,9 @@ func InitializeDemo(ctx context.Context, db *sql.DB, input DemoConfig) (DemoResu
 	appRepo := agentpostgres.NewRepository(db)
 	modelRepo := modelpostgres.NewRepository(db, modelCatalog)
 	backendRepo := backendpostgres.NewRepository(db, backendCatalog)
-	tenantRoot, err := tenantRepo.Get(ctx, initial.TenantID)
+	tenantRoot, app, err := loadDemoRootApp(ctx, tenantRepo, appRepo, initial, config)
 	if err != nil {
-		return DemoResult{}, demoStepError("tenant lookup", err)
-	}
-	app, err := appRepo.Get(ctx, initial.TenantID, initial.AppID)
-	if err != nil {
-		return DemoResult{}, demoStepError("app lookup", err)
-	}
-	if tenantRoot.TenantKey != config.TenantKey || app.AppKey != config.AppKey {
-		return DemoResult{}, fmt.Errorf("%w: initial tenant or app key does not match demo configuration", ErrDemoState)
-	}
-	// The demo flow must return a graph that can immediately accept a chat.
-	// Resuming or enabling an operator-managed tenant is outside this
-	// development-only bootstrap boundary, so fail closed instead of reporting
-	// a graph that the runtime will reject.
-	if tenantRoot.Status != tenant.StatusActive {
-		return DemoResult{}, fmt.Errorf("%w: tenant is not active", ErrDemoState)
+		return DemoResult{}, err
 	}
 	if err := preflightDemoApp(ctx, db, appRepo, tenantRoot, app, config.ModelProfileKey); err != nil {
 		return DemoResult{}, demoStepError("agent revision preflight", err)
@@ -154,6 +140,24 @@ func InitializeDemo(ctx context.Context, db *sql.DB, input DemoConfig) (DemoResu
 	}
 	created = created || tenantChanged
 	return DemoResult{TenantID: tenantRoot.TenantID, AppID: app.AppID, ModelProfileID: modelID, BackendProfileID: backendID, Revision: revision.Revision, Created: created}, nil
+}
+
+func loadDemoRootApp(ctx context.Context, tenants tenant.Repository, apps agent.Repository, initial InitResult, config DemoConfig) (*tenant.Tenant, *agent.App, error) {
+	tenantRoot, err := tenants.Get(ctx, initial.TenantID)
+	if err != nil {
+		return nil, nil, demoStepError("tenant lookup", err)
+	}
+	app, err := apps.Get(ctx, initial.TenantID, initial.AppID)
+	if err != nil {
+		return nil, nil, demoStepError("app lookup", err)
+	}
+	if tenantRoot.TenantKey != config.TenantKey || app.AppKey != config.AppKey {
+		return nil, nil, fmt.Errorf("%w: initial tenant or app key does not match demo configuration", ErrDemoState)
+	}
+	if tenantRoot.Status != tenant.StatusActive {
+		return nil, nil, fmt.Errorf("%w: tenant is not active", ErrDemoState)
+	}
+	return tenantRoot, app, nil
 }
 
 // preflightDemoApp checks all existing app/revision state before the demo flow
