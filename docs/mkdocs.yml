@@ -57,6 +57,8 @@ nav:
       - "Issue #79 生产可观测性": issue-79-observability.md
       - "Issue #88 Prometheus 可观测性": issue-88-prometheus.md
       - "Issue #91 Outbox Trace Context": issue-91-trace-context.md
+      - CI 密钥扫描: security-scanning.md
+      - "Issue #99 Fault Injection": issue-99-fault-injection.md
   - 运维与验证:
       - 运维方案: ops.md
       - 部署、配置与快速开始: deployment.md
