@@ -133,16 +133,16 @@ func InitializeDemo(ctx context.Context, db *sql.DB, input DemoConfig) (DemoResu
 		return DemoResult{}, demoStepError("backend profile", err)
 	}
 	created = created || backendCreated
-	tenantRoot, tenantChanged, err := ensureDemoDefaults(ctx, tenantRepo, tenantRoot, app.AppID, backendID)
-	if err != nil {
-		return DemoResult{}, demoStepError("tenant defaults", err)
-	}
-	created = created || tenantChanged
 	app, revision, revisionCreated, err := ensureDemoRevision(ctx, db, appRepo, tenantRoot, app, modelID)
 	if err != nil {
 		return DemoResult{}, demoStepError("agent revision", err)
 	}
 	created = created || revisionCreated
+	tenantRoot, tenantChanged, err := ensureDemoDefaults(ctx, tenantRepo, tenantRoot, app.AppID, backendID)
+	if err != nil {
+		return DemoResult{}, demoStepError("tenant defaults", err)
+	}
+	created = created || tenantChanged
 	return DemoResult{TenantID: tenantRoot.TenantID, AppID: app.AppID, ModelProfileID: modelID, BackendProfileID: backendID, Revision: revision.Revision, Created: created}, nil
 }
 
