@@ -1,46 +1,32 @@
-# CI 安全扫描
+# CI 密钥扫描
 
-主 CI workflow（`.github/workflows/ci.yml`）在每个 Pull Request 以及推送到 `main` 时运行三项必需的安全门禁。仓库管理员需要在 `main` 的 branch protection 或 ruleset 中要求下表中的完整 status check 名称：
+主 CI workflow（`.github/workflows/ci.yml`）在每个 Pull Request 以及推送到 `main` 时运行提交密钥扫描。仓库管理员应在 `main` 的 branch protection 或 ruleset 中要求完整 status check：`CI / Commit Secret Scan`。
 
-| Status check | 扫描内容 | 阻断阈值 |
-| --- | --- | --- |
-| `CI / Dependency Vulnerability Scan` | Go module 直接与传递依赖（govulncheck v1.1.3） | 任意可达漏洞 |
-| `CI / Container Image Scan` | CI 构建出的镜像归档（Trivy v0.74.0） | HIGH、CRITICAL（包含尚未修复的条目） |
-| `CI / Commit Secret Scan` | Pull Request 引入的提交；`main` push 扫描完整 Git 历史（Gitleaks v8.24.3） | 任意高置信度密钥 |
+## 扫描策略
 
-每个 job 只读取仓库内容；上传 SARIF 额外使用 `security-events: write`，原始报告会作为短期 artifact 保存，便于定位修复。来自 fork 的 Pull Request 会跳过需要写权限的 Code Scanning 上传；同仓库 PR 和 `main` push 的上传或报告校验失败会使 job 失败（fail closed）。
+- 使用固定版本 Gitleaks v8.24.3，并在下载后校验 SHA-256。
+- Pull Request 扫描 base 到 head 引入的提交；推送到 `main` 扫描完整 Git 历史。
+- 日志和 SARIF 使用 redacted 输出，不打印密钥值或敏感环境变量。
+- 报告以 SARIF 上传到 Code Scanning，并作为 artifact 保留 14 天；fork Pull Request 会跳过需要写权限的上传步骤。
+- 扫描器失败、报告生成失败或同仓库报告上传失败都会使 job 失败，清理步骤仍会执行。
 
 ## 本地运行
 
-以下命令应在仓库根目录执行：
-
 ```bash
-# Go 依赖漏洞
-go run golang.org/x/vuln/cmd/govulncheck@v1.1.3 ./...
-
-# 构建并扫描同一个镜像归档（需要 Docker 与 Trivy）
-docker build --tag trpc-agent-service:security .
-docker save trpc-agent-service:security --output trpc-service.tar
-trivy image --input trpc-service.tar --scanners vuln \
-  --severity HIGH,CRITICAL --ignore-unfixed=false --exit-code 1
-rm -f trpc-service.tar
-
-# 当前工作树/历史密钥扫描（需要 Gitleaks 8.24.3）
+# 当前工作树/完整历史（需要 Gitleaks 8.24.3）
 gitleaks git --redact --config gitleaks.toml --log-opts="--all"
-```
 
-Pull Request 只检查引入的提交时，可将 `--log-opts` 替换为 `"$(git merge-base origin/main HEAD)..HEAD"`。`scripts/security-secret-fixture.sh` 会在临时 Git 仓库中验证一次通过和一次阻断，且不会把模拟 token 写入本仓库：
-
-```bash
+# 验证通过与阻断 fixture
 GITLEAKS_BIN=/path/to/gitleaks ./scripts/security-secret-fixture.sh
+bash scripts/security-allowlist-fixture.sh
 ```
+
+Pull Request 只检查引入的提交时，可将 `--log-opts` 替换为 `"$(git merge-base origin/main HEAD)..HEAD"`。
 
 ## 发现问题后的处理
 
-依赖漏洞应升级到扫描器报告的修复版本并重新运行完整测试。镜像漏洞应升级基础镜像或受影响模块；不要只依赖可变 tag。密钥扫描命中后，先吊销/轮换凭据，再从 Git 历史中清理泄漏内容。
+发现真实凭据后，先立即吊销/轮换，再从 Git 历史中清理泄漏内容，并重新运行扫描。误报或临时例外必须在 `gitleaks.toml` 中以最小提交或路径范围登记；每个例外都要写明 owner、Reason、跟踪 issue 和未来到期日期，并通过 `scripts/validate-security-allowlist.sh` 校验。不得把密钥值写入日志、SARIF 或 issue。
 
-误报或暂时无法修复的镜像条目必须在 `.trivyignore` 中以最小漏洞 ID 范围登记；密钥条目必须在 `gitleaks.toml` 中以最小路径或提交范围登记。每个例外都要在变更说明中写明 owner、理由、跟踪 issue 和到期日期，并通过 `scripts/validate-security-allowlist.sh` 校验。到期后必须删除例外；不得用 allowlist 隐藏真实凭据，也不得把 secret 值写入日志、SARIF 或 issue。
+## 非目标
 
-## 失败与报告策略
-
-漏洞数据库不可用、报告格式错误或扫描器异常都会使 job 失败（fail closed），同时保留清理步骤。表格输出用于 CI 日志，SARIF 用于 Code Scanning，artifact 保留 14 天。任何报告上传失败都不会把已完成的扫描误报为成功。
+本 PR 不新增 Go 依赖漏洞扫描或容器镜像漏洞扫描；上游依赖版本由上游项目负责维护，本仓库保持与上游同步。
