@@ -386,7 +386,12 @@ func (handler *HTTPHandler) decodeMessage(writer http.ResponseWriter, request *h
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return InboundMessage{}, fmt.Errorf("%w: request JSON has trailing data", ErrInvalid)
 	}
-	message := InboundMessage(input)
+	message := InboundMessage{
+		Content: input.Content, ContentType: input.ContentType,
+		ExternalMessageID: input.ExternalMessageID, ExternalUserID: input.ExternalUserID,
+		ConversationKind: input.ConversationKind, ExternalPeerID: input.ExternalPeerID,
+		ExternalChatID: input.ExternalChatID, ExternalThreadID: input.ExternalThreadID,
+	}
 	return message.Normalize()
 }
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
@@ -96,6 +97,9 @@ type DispatchConfig struct {
 	AuditWriter audit.Writer
 	// HandoffStore durably reserves and finalizes execution audit facts.
 	HandoffStore audit.HandoffStore
+	// Attachments loads verified tenant-owned media only when an inbound message
+	// contains attachment references. Text-only dispatches remain independent of it.
+	Attachments attachment.Reader
 }
 
 // Dispatcher resolves a fixed plan, acquires a Runner lease, and translates
@@ -110,6 +114,7 @@ type Dispatcher struct {
 	materializer *outbox.Materializer
 	auditWriter  audit.Writer
 	handoffStore audit.HandoffStore
+	attachments  attachment.Reader
 }
 
 type durableExecution struct {
@@ -143,7 +148,7 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 		}
 		config.Materializer = materializer
 	}
-	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore, materializer: config.Materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore}, nil
+	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore, materializer: config.Materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore, attachments: config.Attachments}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.
@@ -192,6 +197,15 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	if err != nil {
 		finishWithError(err)
 		return nil, err
+	}
+	userMessage, err := buildUserMessage(ctx, dispatcher.attachments, request.Principal.TenantID(), message)
+	if err != nil {
+		dispatcher.failDurable(durable, err)
+		finishWithError(err)
+		if IsContextCancellation(err) {
+			return nil, err
+		}
+		return nil, ErrExecution
 	}
 	if planApp.CanaryRevision != nil && planSnapshot.Revision().Revision == *planApp.CanaryRevision {
 		selectedRevision := planSnapshot.Revision().Revision
@@ -244,7 +258,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	runnerStarted := time.Now()
 	runnerCtx, _, finishRunner := observability.StartOperation(ctx, dispatcher.telemetry, observability.OperationRunnerExecution, "runner")
 	_ = dispatcher.metrics.Request(runnerCtx, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution, "status": "started"})
-	runnerEvents, err := runnerValue.Run(runnerCtx, identity.UserID, identity.SessionID, trpcmodel.NewUserMessage(message.Content), trpcagent.WithRequestID(requestID))
+	runnerEvents, err := runnerValue.Run(runnerCtx, identity.UserID, identity.SessionID, userMessage, trpcagent.WithRequestID(requestID))
 	if err != nil {
 		finishRunner(err)
 		_ = dispatcher.metrics.Operation(runnerCtx, runnerStarted, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, err)

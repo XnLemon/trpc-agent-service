@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 )
 
@@ -51,6 +52,7 @@ const (
 	maxPrincipalIDRunes = 256
 	maxMessageRunes     = 64 * 1024
 	maxExternalIDRunes  = 1024
+	maxInboundAttachments = 10
 )
 
 // PrincipalKind distinguishes the two independent authentication paths.
@@ -152,22 +154,42 @@ type InboundMessage struct {
 	ExternalPeerID    string
 	ExternalChatID    string
 	ExternalThreadID  string
+	// Attachments contains verified, tenant-owned media references. It never
+	// contains provider URLs, credentials, or direct fetch instructions.
+	Attachments []attachment.Reference
 }
 
 // Normalize validates the message without consulting untrusted route hints.
 func (m InboundMessage) Normalize() (InboundMessage, error) {
 	clone := m
 	clone.Content = strings.TrimSpace(clone.Content)
+	clone.Attachments = append([]attachment.Reference(nil), clone.Attachments...)
 	if clone.ContentType == "" {
 		clone.ContentType = ContentTypeText
+		if len(clone.Attachments) > 0 {
+			clone.ContentType = ContentTypeMedia
+		}
 	}
 	switch clone.ContentType {
 	case ContentTypeText, ContentTypeMedia, ContentTypeRich:
 	default:
 		return InboundMessage{}, fmt.Errorf("%w: unsupported content type", ErrInvalid)
 	}
-	if n := len([]rune(clone.Content)); n < 1 || n > maxMessageRunes {
-		return InboundMessage{}, fmt.Errorf("%w: content must contain 1-%d characters", ErrInvalid, maxMessageRunes)
+	if n := len([]rune(clone.Content)); n > maxMessageRunes {
+		return InboundMessage{}, fmt.Errorf("%w: content must contain at most %d characters", ErrInvalid, maxMessageRunes)
+	}
+	if clone.Content == "" && len(clone.Attachments) == 0 {
+		return InboundMessage{}, fmt.Errorf("%w: content or attachment is required", ErrInvalid)
+	}
+	if len(clone.Attachments) > maxInboundAttachments {
+		return InboundMessage{}, fmt.Errorf("%w: too many attachments", ErrInvalid)
+	}
+	for index, value := range clone.Attachments {
+		normalized, err := value.Normalize()
+		if err != nil {
+			return InboundMessage{}, fmt.Errorf("%w: attachment %d: %v", ErrInvalid, index, err)
+		}
+		clone.Attachments[index] = normalized
 	}
 	if clone.ExternalMessageID != "" {
 		if err := validateExternalID(clone.ExternalMessageID, "external message ID"); err != nil {
