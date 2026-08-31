@@ -49,9 +49,9 @@ const (
 	// ConversationGroup identifies a group conversation.
 	ConversationGroup = channels.ConversationGroup
 
-	maxPrincipalIDRunes = 256
-	maxMessageRunes     = 64 * 1024
-	maxExternalIDRunes  = 1024
+	maxPrincipalIDRunes   = 256
+	maxMessageRunes       = 64 * 1024
+	maxExternalIDRunes    = 1024
 	maxInboundAttachments = 10
 )
 
