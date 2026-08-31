@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
@@ -804,6 +805,59 @@ func TestDispatcherDurableChannelClaimSuppressesDuplicateRunner(t *testing.T) {
 	close(release)
 	if err := <-firstDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDispatcherBindsStoredAttachmentBeforePassingVerifiedContentToRunner(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPlanResolver(PlanResolverConfig{
+		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
+		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("image")
+	store := inmemory.New()
+	t.Cleanup(func() { _ = store.Close() })
+	reference, err := store.PutAttachment(context.Background(), principal.TenantID(), attachment.Upload{ID: "attachment-1", Kind: attachment.KindImage, MIMEType: "image/png", Size: int64(len(data)), Provider: "telegram", ProviderID: "file-1"}, strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatalf("PutAttachment = %v", err)
+	}
+	if _, err := store.Load(context.Background(), principal.TenantID(), "unbound-event", reference); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("unbound Load = %v", err)
+	}
+	var captured trpcmodel.Message
+	runnerValue := &testRunner{runFn: func(_ context.Context, _ string, _ string, message trpcmodel.Message, _ ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		captured = message
+		events := make(chan *trpcevent.Event, 1)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
+		close(events)
+		return events, nil
+	}}
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: InboundMessage{Content: "describe", ExternalMessageID: "attachment-message", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1", Attachments: []attachment.Reference{reference}}})
+	if err != nil {
+		t.Fatalf("Dispatch = %v", err)
+	}
+	if events := collectDispatchEvents(stream); len(events) != 1 || !events[0].Done {
+		t.Fatalf("dispatch events = %+v", events)
+	}
+	if captured.Content != "describe" || len(captured.ContentParts) != 1 || captured.ContentParts[0].Type != trpcmodel.ContentTypeImage || captured.ContentParts[0].Image == nil || string(captured.ContentParts[0].Image.Data) != string(data) {
+		t.Fatalf("Runner message = %+v", captured)
 	}
 }
 

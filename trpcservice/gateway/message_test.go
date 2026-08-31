@@ -25,10 +25,10 @@ func TestInboundMessageNormalizesAttachmentOnlyInput(t *testing.T) {
 func TestBuildUserMessageUsesVerifiedContentParts(t *testing.T) {
 	data := []byte("image")
 	reference := testAttachmentReference(t, attachment.KindImage, "image/png", data)
-	reader := attachmentReaderFunc(func(context.Context, string, attachment.Reference) (attachment.Content, error) {
+	reader := attachmentReaderFunc(func(context.Context, string, string, attachment.Reference) (attachment.Content, error) {
 		return attachment.Content{Data: data}, nil
 	})
-	message, err := buildUserMessage(context.Background(), reader, "tenant", InboundMessage{Content: "describe", Attachments: []attachment.Reference{reference}})
+	message, err := buildUserMessage(context.Background(), reader, "tenant", "event", InboundMessage{Content: "describe", Attachments: []attachment.Reference{reference}})
 	if err != nil {
 		t.Fatalf("buildUserMessage = %v", err)
 	}
@@ -40,27 +40,27 @@ func TestBuildUserMessageUsesVerifiedContentParts(t *testing.T) {
 func TestBuildUserMessageRejectsUnavailableOrTamperedAttachment(t *testing.T) {
 	reference := testAttachmentReference(t, attachment.KindDocument, "application/pdf", []byte("document"))
 	message := InboundMessage{Attachments: []attachment.Reference{reference}}
-	if _, err := buildUserMessage(context.Background(), nil, "tenant", message); err == nil {
+	if _, err := buildUserMessage(context.Background(), nil, "tenant", "event", message); err == nil {
 		t.Fatal("buildUserMessage accepted nil reader")
 	}
-	reader := attachmentReaderFunc(func(context.Context, string, attachment.Reference) (attachment.Content, error) {
+	reader := attachmentReaderFunc(func(context.Context, string, string, attachment.Reference) (attachment.Content, error) {
 		return attachment.Content{Data: []byte("tampered")}, nil
 	})
-	if _, err := buildUserMessage(context.Background(), reader, "tenant", message); err == nil {
+	if _, err := buildUserMessage(context.Background(), reader, "tenant", "event", message); err == nil {
 		t.Fatal("buildUserMessage accepted tampered content")
 	}
-	reader = attachmentReaderFunc(func(context.Context, string, attachment.Reference) (attachment.Content, error) {
+	reader = attachmentReaderFunc(func(context.Context, string, string, attachment.Reference) (attachment.Content, error) {
 		return attachment.Content{}, errors.New("unavailable")
 	})
-	if _, err := buildUserMessage(context.Background(), reader, "tenant", message); err == nil {
+	if _, err := buildUserMessage(context.Background(), reader, "tenant", "event", message); err == nil {
 		t.Fatal("buildUserMessage accepted reader error")
 	}
 }
 
-type attachmentReaderFunc func(context.Context, string, attachment.Reference) (attachment.Content, error)
+type attachmentReaderFunc func(context.Context, string, string, attachment.Reference) (attachment.Content, error)
 
-func (function attachmentReaderFunc) Load(ctx context.Context, tenantID string, reference attachment.Reference) (attachment.Content, error) {
-	return function(ctx, tenantID, reference)
+func (function attachmentReaderFunc) Load(ctx context.Context, tenantID, eventID string, reference attachment.Reference) (attachment.Content, error) {
+	return function(ctx, tenantID, eventID, reference)
 }
 
 func testAttachmentReference(t *testing.T, kind attachment.Kind, contentType string, data []byte) attachment.Reference {

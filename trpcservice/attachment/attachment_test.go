@@ -1,15 +1,11 @@
 package attachment
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"strings"
 	"testing"
-
-	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
-	runtimeinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	"time"
 )
 
 func TestReferenceNormalizeAndContentValidate(t *testing.T) {
@@ -28,25 +24,16 @@ func TestReferenceNormalizeAndContentValidate(t *testing.T) {
 	}
 }
 
-func TestStoreReaderScopesAndVerifiesObject(t *testing.T) {
-	store := runtimeinmemory.New()
-	t.Cleanup(func() { _ = store.Close() })
-	data := []byte("document")
-	digest := sha256.Sum256(data)
-	if _, err := store.PutObject(context.Background(), "tenant-a", "attachment-1", strings.NewReader(string(data)), "application/pdf"); err != nil {
-		t.Fatalf("PutObject = %v", err)
+func TestUploadNormalizeAppliesBoundedRetentionAndMediaFamily(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	normalized, err := (Upload{ID: "attachment-1", Kind: KindVideo, MIMEType: "video/mp4", Size: 1}).Normalize(now)
+	if err != nil || !normalized.ExpiresAt.Equal(now.Add(DefaultRetention)) {
+		t.Fatalf("Normalize = %+v, %v", normalized, err)
 	}
-	reader := StoreReader{Store: store}
-	reference := Reference{ID: "attachment-1", Kind: KindDocument, MIMEType: "application/pdf", Size: int64(len(data)), SHA256: hex.EncodeToString(digest[:])}
-	content, err := reader.Load(context.Background(), "tenant-a", reference)
-	if err != nil || string(content.Data) != string(data) {
-		t.Fatalf("Load = %q, %v", content.Data, err)
+	if _, err := (Upload{ID: "attachment-1", Kind: KindImage, MIMEType: "application/pdf", Size: 1}).Normalize(now); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("mismatched media family error = %v", err)
 	}
-	if _, err := reader.Load(context.Background(), "tenant-b", reference); !errors.Is(err, runtimestorage.ErrNotFound) {
-		t.Fatalf("cross-tenant Load = %v", err)
-	}
-	reference.Size++
-	if _, err := reader.Load(context.Background(), "tenant-a", reference); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("size mismatch Load = %v", err)
+	if _, err := (Upload{ID: "attachment-1", Kind: KindDocument, MIMEType: "application/pdf", Size: 1, ExpiresAt: now.Add(DefaultRetention + time.Second)}).Normalize(now); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("excess retention error = %v", err)
 	}
 }

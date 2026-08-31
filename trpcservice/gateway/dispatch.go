@@ -140,6 +140,11 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
 	}
+	if config.Attachments == nil {
+		if reader, ok := config.RuntimeStore.(attachment.Reader); ok {
+			config.Attachments = reader
+		}
+	}
 	config.AuditWriter = metrics.WrapAuditWriter(config.AuditWriter, config.Observability)
 	if config.Materializer == nil && config.RuntimeStore != nil {
 		materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: config.RuntimeStore, Observability: config.Observability})
@@ -198,7 +203,24 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		finishWithError(err)
 		return nil, err
 	}
-	userMessage, err := buildUserMessage(ctx, dispatcher.attachments, request.Principal.TenantID(), message)
+	attachmentEventID := ""
+	if durable != nil {
+		attachmentEventID = durable.eventID
+	}
+	if len(message.Attachments) > 0 {
+		binder, ok := dispatcher.attachments.(attachment.Binder)
+		if !ok || attachmentEventID == "" {
+			dispatcher.failDurable(durable, ErrExecution)
+			finishWithError(ErrExecution)
+			return nil, ErrExecution
+		}
+		if err := binder.BindAttachments(ctx, request.Principal.TenantID(), attachmentEventID, message.Attachments); err != nil {
+			dispatcher.failDurable(durable, err)
+			finishWithError(err)
+			return nil, ErrExecution
+		}
+	}
+	userMessage, err := buildUserMessage(ctx, dispatcher.attachments, request.Principal.TenantID(), attachmentEventID, message)
 	if err != nil {
 		dispatcher.failDurable(durable, err)
 		finishWithError(err)

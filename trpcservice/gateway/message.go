@@ -9,7 +9,7 @@ import (
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-func buildUserMessage(ctx context.Context, reader attachment.Reader, tenantID string, inbound InboundMessage) (trpcmodel.Message, error) {
+func buildUserMessage(ctx context.Context, reader attachment.Reader, tenantID, eventID string, inbound InboundMessage) (trpcmodel.Message, error) {
 	message := trpcmodel.Message{Role: trpcmodel.RoleUser, Content: inbound.Content}
 	if len(inbound.Attachments) == 0 {
 		return message, nil
@@ -18,7 +18,7 @@ func buildUserMessage(ctx context.Context, reader attachment.Reader, tenantID st
 		return trpcmodel.Message{}, fmt.Errorf("attachment reader is required")
 	}
 	for index, reference := range inbound.Attachments {
-		content, err := reader.Load(ctx, tenantID, reference)
+		content, err := reader.Load(ctx, tenantID, eventID, reference)
 		if err != nil {
 			return trpcmodel.Message{}, fmt.Errorf("load attachment %d: %w", index, err)
 		}

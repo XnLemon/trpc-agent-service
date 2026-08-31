@@ -31,6 +31,7 @@ type Store struct {
 	vectors      map[string]runtimestorage.VectorRecord
 	objects      map[string]runtimestorage.ObjectInfo
 	objectData   map[string][]byte
+	attachments  map[string]storedAttachment
 	indexQueue   chan runtimestorage.MemoryRecord
 	indexDone    chan struct{}
 	indexMu      *sync.RWMutex
@@ -136,7 +137,7 @@ func newStore(lifecycle *backendLifecycle) *Store {
 		memories: map[string]runtimestorage.MemoryRecord{}, summaries: map[string]runtimestorage.SummaryRecord{},
 		knowledge: map[string]runtimestorage.KnowledgeDocument{}, artifacts: map[string]runtimestorage.ArtifactRecord{},
 		audits: map[string][]runtimestorage.AuditRecord{}, vectors: map[string]runtimestorage.VectorRecord{},
-		objects: map[string]runtimestorage.ObjectInfo{}, objectData: map[string][]byte{},
+		objects: map[string]runtimestorage.ObjectInfo{}, objectData: map[string][]byte{}, attachments: map[string]storedAttachment{},
 		indexQueue: make(chan runtimestorage.MemoryRecord, 128), indexDone: lifecycle.done, indexMu: lifecycle.indexMu, lifecycle: lifecycle, closeOnce: &sync.Once{},
 	}
 	go store.indexWorker()
@@ -251,6 +252,12 @@ func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) e
 		for replyKey, reply := range s.replies {
 			if reply.TenantID == tenantID && reply.EventID == event.EventID {
 				delete(s.replies, replyKey)
+			}
+		}
+		for attachmentKey, attachmentValue := range s.attachments {
+			if attachmentValue.eventID == event.EventID {
+				attachmentValue.eventID = ""
+				s.attachments[attachmentKey] = attachmentValue
 			}
 		}
 	}
