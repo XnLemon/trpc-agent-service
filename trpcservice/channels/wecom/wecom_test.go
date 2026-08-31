@@ -273,6 +273,7 @@ func TestProviderSendsMediaReplyFallbackText(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // Covers the complete native upload/send contract for both supported media kinds.
 func TestProviderSendsNativeMediaReply(t *testing.T) {
 	for _, test := range []struct {
 		name           string
@@ -657,6 +658,7 @@ func TestHandlerAcceptsEncryptedTextWithRequestAndTraceIDs(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // Keeps the encrypted callback-to-attachment contract visible in one scenario.
 func TestHandlerAcceptsEncryptedNativeMediaAsAttachment(t *testing.T) {
 	dispatcher := &callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)}
 	app := dynamicTestApp(t, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")

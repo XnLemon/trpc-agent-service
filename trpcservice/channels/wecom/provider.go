@@ -308,10 +308,7 @@ func (p *Provider) downloadMedia(ctx context.Context, download MediaDownloadRequ
 	}
 	token, err := p.accessToken(ctx)
 	if err != nil {
-		if contextErr := ctx.Err(); contextErr != nil {
-			return nil, contextErr
-		}
-		return nil, ErrAttachment
+		return nil, wecomAttachmentError(ctx)
 	}
 	endpoint := p.baseURL() + "/cgi-bin/media/get?access_token=" + url.QueryEscape(token) + "&media_id=" + url.QueryEscape(download.MediaID)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -320,11 +317,16 @@ func (p *Provider) downloadMedia(ctx context.Context, download MediaDownloadRequ
 	}
 	response, err := p.client().Do(request)
 	if err != nil {
-		if contextErr := ctx.Err(); contextErr != nil {
-			return nil, contextErr
-		}
-		return nil, ErrAttachment
+		return nil, wecomAttachmentError(ctx)
 	}
+	data, err := readWeComMediaResponse(ctx, response, download)
+	if err != nil {
+		return nil, err
+	}
+	return io.NopCloser(bytes.NewReader(data)), nil
+}
+
+func readWeComMediaResponse(ctx context.Context, response *http.Response, download MediaDownloadRequest) ([]byte, error) {
 	if response == nil || response.Body == nil {
 		return nil, ErrAttachment
 	}
@@ -335,15 +337,21 @@ func (p *Provider) downloadMedia(ctx context.Context, download MediaDownloadRequ
 	contentType := strings.ToLower(strings.TrimSpace(response.Header.Get("Content-Type")))
 	data, err := io.ReadAll(io.LimitReader(response.Body, download.MaximumBytes+1))
 	if err != nil {
-		if contextErr := ctx.Err(); contextErr != nil {
-			return nil, contextErr
-		}
-		return nil, ErrAttachment
+		return nil, wecomAttachmentError(ctx)
 	}
 	if int64(len(data)) == 0 || int64(len(data)) > download.MaximumBytes || providerJSONError(contentType, data) || !downloadContentTypeMatches(download.Kind, contentType) {
 		return nil, ErrAttachment
 	}
-	return io.NopCloser(bytes.NewReader(data)), nil
+	return data, nil
+}
+
+func wecomAttachmentError(ctx context.Context) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	return ErrAttachment
 }
 
 func providerJSONError(contentType string, _ []byte) bool {

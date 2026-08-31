@@ -445,41 +445,72 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
-	var normalizeErr error
-	value, normalizeErr = runtimestorage.NormalizeReplyOutbox(value)
-	if normalizeErr != nil {
+	value, err := prepareReply(value)
+	if err != nil {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
 	}
-	if err := runtimestorage.ValidateTenant(value.TenantID); err != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil {
-		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
-	}
-	if value.Status == "" {
-		value.Status = runtimestorage.ReplyPending
-	}
-	if value.Status != runtimestorage.ReplyPending {
-		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
-	}
-	now := time.Now().UTC()
-	value.CreatedAt = now
-	value.UpdatedAt = now
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	event, ok := s.events[key(value.TenantID, value.EventID)]
-	if !ok {
-		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrNotFound
-	}
-	if event.ReplyTarget != value.ReplyTarget {
-		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
+	if err := s.validateReplyEvent(value); err != nil {
+		return runtimestorage.ReplyOutbox{}, err
 	}
 	k := replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)
 	if existing, ok := s.replies[k]; ok {
-		if existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload || existing.Kind != value.Kind || existing.Attachment != value.Attachment || existing.Fallback != value.Fallback || existing.ReplyTarget != value.ReplyTarget {
+		if !sameReplyContract(existing, value) {
 			return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
 		}
 		return cloneReply(existing), nil
 	}
 	s.replies[k] = value
 	return cloneReply(value), nil
+}
+
+func prepareReply(value runtimestorage.ReplyOutbox) (runtimestorage.ReplyOutbox, error) {
+	normalized, err := runtimestorage.NormalizeReplyOutbox(value)
+	if err != nil {
+		return runtimestorage.ReplyOutbox{}, err
+	}
+	if err := validateReplySegment(normalized); err != nil {
+		return runtimestorage.ReplyOutbox{}, err
+	}
+	if normalized.Status == "" {
+		normalized.Status = runtimestorage.ReplyPending
+	}
+	if normalized.Status != runtimestorage.ReplyPending {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
+	}
+	now := time.Now().UTC()
+	normalized.CreatedAt = now
+	normalized.UpdatedAt = now
+	return normalized, nil
+}
+
+func validateReplySegment(value runtimestorage.ReplyOutbox) error {
+	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil {
+		return runtimestorage.ErrInvalid
+	}
+	return nil
+}
+
+func (s *Store) validateReplyEvent(value runtimestorage.ReplyOutbox) error {
+	event, ok := s.events[key(value.TenantID, value.EventID)]
+	if !ok {
+		return runtimestorage.ErrNotFound
+	}
+	if event.ReplyTarget != value.ReplyTarget {
+		return runtimestorage.ErrConflict
+	}
+	return nil
+}
+
+func sameReplyContract(existing, value runtimestorage.ReplyOutbox) bool {
+	return existing.EventID == value.EventID &&
+		existing.SegmentCount == value.SegmentCount &&
+		existing.Payload == value.Payload &&
+		existing.Kind == value.Kind &&
+		existing.Attachment == value.Attachment &&
+		existing.Fallback == value.Fallback &&
+		existing.ReplyTarget == value.ReplyTarget
 }
 
 // EnqueueReplies validates a complete reply before committing any new segment.

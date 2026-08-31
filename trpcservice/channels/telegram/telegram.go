@@ -128,18 +128,15 @@ func (downloader telegramMediaDownloader) Download(ctx context.Context, fileID s
 	if ctx == nil || downloader.client == nil || downloader.httpClient == nil || fileID == "" || downloader.maximum < 1 {
 		return nil, ErrAttachment
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	file, err := downloader.client.GetFile(ctx, &bot.GetFileParams{FileID: fileID})
 	if err != nil {
-		if contextErr := ctx.Err(); contextErr != nil {
-			return nil, contextErr
-		}
-		return nil, ErrAttachment
+		return nil, telegramAttachmentError(ctx)
 	}
-	if file == nil || file.FilePath == "" {
-		return nil, ErrAttachment
-	}
-	fileURL, err := url.Parse(downloader.client.FileDownloadLink(file))
-	if err != nil || fileURL.Scheme != "https" || fileURL.Host == "" || fileURL.User != nil || fileURL.RawQuery != "" || fileURL.Fragment != "" {
+	fileURL, err := downloader.fileDownloadURL(file)
+	if err != nil {
 		return nil, ErrAttachment
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL.String(), nil)
@@ -148,32 +145,51 @@ func (downloader telegramMediaDownloader) Download(ctx context.Context, fileID s
 	}
 	response, err := downloader.httpClient.Do(request)
 	if err != nil {
-		if contextErr := ctx.Err(); contextErr != nil {
-			return nil, contextErr
-		}
+		return nil, telegramAttachmentError(ctx)
+	}
+	data, err := readTelegramMediaResponse(ctx, response, downloader.maximum)
+	if err != nil {
+		return nil, err
+	}
+	return io.NopCloser(bytes.NewReader(data)), nil
+}
+
+func (downloader telegramMediaDownloader) fileDownloadURL(file *models.File) (*url.URL, error) {
+	if file == nil || file.FilePath == "" {
 		return nil, ErrAttachment
 	}
+	fileURL, err := url.Parse(downloader.client.FileDownloadLink(file))
+	if err != nil || fileURL.Scheme != "https" || fileURL.Host == "" || fileURL.User != nil || fileURL.RawQuery != "" || fileURL.Fragment != "" {
+		return nil, ErrAttachment
+	}
+	return fileURL, nil
+}
+
+func readTelegramMediaResponse(ctx context.Context, response *http.Response, maximum int64) ([]byte, error) {
 	if response == nil || response.Body == nil {
 		return nil, ErrAttachment
 	}
 	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices || response.ContentLength > maximum {
 		return nil, ErrAttachment
 	}
-	if response.ContentLength > downloader.maximum {
-		return nil, ErrAttachment
-	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, downloader.maximum+1))
+	data, err := io.ReadAll(io.LimitReader(response.Body, maximum+1))
 	if err != nil {
-		if contextErr := ctx.Err(); contextErr != nil {
-			return nil, contextErr
+		return nil, telegramAttachmentError(ctx)
+	}
+	if int64(len(data)) > maximum {
+		return nil, ErrAttachment
+	}
+	return data, nil
+}
+
+func telegramAttachmentError(ctx context.Context) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		return nil, ErrAttachment
 	}
-	if int64(len(data)) > downloader.maximum {
-		return nil, ErrAttachment
-	}
-	return io.NopCloser(bytes.NewReader(data)), nil
+	return ErrAttachment
 }
 
 // BotFactoryConfig contains non-secret options for constructing one BotClient.
