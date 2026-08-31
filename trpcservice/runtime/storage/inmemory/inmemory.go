@@ -255,7 +255,7 @@ func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) e
 			}
 		}
 		for attachmentKey, attachmentValue := range s.attachments {
-			if attachmentValue.eventID == event.EventID {
+			if attachmentValue.eventID == event.EventID && strings.HasPrefix(attachmentKey, key(tenantID)) {
 				attachmentValue.eventID = ""
 				s.attachments[attachmentKey] = attachmentValue
 			}
@@ -445,6 +445,11 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
+	var normalizeErr error
+	value, normalizeErr = runtimestorage.NormalizeReplyOutbox(value)
+	if normalizeErr != nil {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
+	}
 	if err := runtimestorage.ValidateTenant(value.TenantID); err != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
 	}
@@ -468,7 +473,7 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 	}
 	k := replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)
 	if existing, ok := s.replies[k]; ok {
-		if existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload || existing.ReplyTarget != value.ReplyTarget {
+		if existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload || existing.Kind != value.Kind || existing.Attachment != value.Attachment || existing.Fallback != value.Fallback || existing.ReplyTarget != value.ReplyTarget {
 			return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
 		}
 		return cloneReply(existing), nil
@@ -498,6 +503,11 @@ func (s *Store) EnqueueRepliesWithCorrelation(ctx context.Context, correlation r
 
 func (s *Store) enqueueReplies(ctx context.Context, correlation runtimestorage.ReplyCorrelation, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	values, err = normalizeReplyBatch(values)
+	if err != nil {
 		return nil, err
 	}
 	first, _, err := validateReplyBatch(values)
@@ -569,9 +579,21 @@ func validateReplyBatch(values []runtimestorage.ReplyOutbox) (runtimestorage.Rep
 	return first, seen, nil
 }
 
+func normalizeReplyBatch(values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	normalized := make([]runtimestorage.ReplyOutbox, 0, len(values))
+	for _, value := range values {
+		reply, err := runtimestorage.NormalizeReplyOutbox(value)
+		if err != nil {
+			return nil, runtimestorage.ErrInvalid
+		}
+		normalized = append(normalized, reply)
+	}
+	return normalized, nil
+}
+
 func validateExistingReplies(replies map[string]runtimestorage.ReplyOutbox, values []runtimestorage.ReplyOutbox) error {
 	for _, value := range values {
-		if existing, ok := replies[replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)]; ok && (existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload || existing.ReplyTarget != value.ReplyTarget) {
+		if existing, ok := replies[replyKey(value.TenantID, value.ReplyID, value.SegmentIndex)]; ok && (existing.EventID != value.EventID || existing.SegmentCount != value.SegmentCount || existing.Payload != value.Payload || existing.Kind != value.Kind || existing.Attachment != value.Attachment || existing.Fallback != value.Fallback || existing.ReplyTarget != value.ReplyTarget) {
 			return runtimestorage.ErrConflict
 		}
 	}

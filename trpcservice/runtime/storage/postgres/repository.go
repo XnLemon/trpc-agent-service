@@ -17,7 +17,8 @@ import (
 type Store struct{ db *sql.DB }
 
 const eventColumns = "tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,fencing_token,lease_owner,lease_expires_at,reply_id,segment_count,reply_conversation_kind,reply_receiver_id,reply_thread_id,created_at,updated_at"
-const replyColumns = "tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at"
+const replyColumns = "tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_kind,attachment_id,attachment_kind,attachment_mime_type,attachment_name,attachment_size,attachment_sha256,attachment_provider,attachment_provider_id,fallback,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at"
+const insertReplyStatement = "INSERT INTO public.reply_outbox (tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_kind,attachment_id,attachment_kind,attachment_mime_type,attachment_name,attachment_size,attachment_sha256,attachment_provider,attachment_provider_id,fallback,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'pending' WHERE EXISTS (SELECT 1 FROM public.message_event WHERE tenant_id=$1 AND event_id=$3 AND ((reply_conversation_kind='' AND reply_receiver_id='' AND reply_thread_id='' AND $17='' AND $18='' AND $19='' AND $20='') OR (binding_id=$17 AND reply_conversation_kind=$18 AND reply_receiver_id=$19 AND reply_thread_id=$20))) ON CONFLICT (tenant_id,reply_id,segment_index) DO UPDATE SET updated_at=public.reply_outbox.updated_at WHERE public.reply_outbox.event_id=EXCLUDED.event_id AND public.reply_outbox.segment_count=EXCLUDED.segment_count AND public.reply_outbox.payload=EXCLUDED.payload AND public.reply_outbox.reply_kind=EXCLUDED.reply_kind AND public.reply_outbox.attachment_id=EXCLUDED.attachment_id AND public.reply_outbox.attachment_kind=EXCLUDED.attachment_kind AND public.reply_outbox.attachment_mime_type=EXCLUDED.attachment_mime_type AND public.reply_outbox.attachment_name=EXCLUDED.attachment_name AND public.reply_outbox.attachment_size=EXCLUDED.attachment_size AND public.reply_outbox.attachment_sha256=EXCLUDED.attachment_sha256 AND public.reply_outbox.attachment_provider=EXCLUDED.attachment_provider AND public.reply_outbox.attachment_provider_id=EXCLUDED.attachment_provider_id AND public.reply_outbox.fallback=EXCLUDED.fallback AND public.reply_outbox.reply_binding_id=EXCLUDED.reply_binding_id AND public.reply_outbox.reply_conversation_kind=EXCLUDED.reply_conversation_kind AND public.reply_outbox.reply_receiver_id=EXCLUDED.reply_receiver_id AND public.reply_outbox.reply_thread_id=EXCLUDED.reply_thread_id"
 
 // New creates a PostgreSQL runtime store over db.
 func New(db *sql.DB) *Store { return &Store{db: db} }
@@ -326,6 +327,11 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 	if err := check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
+	var normalizeErr error
+	value, normalizeErr = runtimestorage.NormalizeReplyOutbox(value)
+	if normalizeErr != nil {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
+	}
 	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
 	}
@@ -345,7 +351,7 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 		}
 	}
 	var result runtimestorage.ReplyOutbox
-	err := s.db.QueryRowContext(ctx, "INSERT INTO public.reply_outbox (tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending' WHERE EXISTS (SELECT 1 FROM public.message_event WHERE tenant_id=$1 AND event_id=$3 AND ((reply_conversation_kind='' AND reply_receiver_id='' AND reply_thread_id='' AND $7='' AND $8='' AND $9='' AND $10='') OR (binding_id=$7 AND reply_conversation_kind=$8 AND reply_receiver_id=$9 AND reply_thread_id=$10))) ON CONFLICT (tenant_id,reply_id,segment_index) DO UPDATE SET updated_at=public.reply_outbox.updated_at WHERE public.reply_outbox.event_id=EXCLUDED.event_id AND public.reply_outbox.segment_count=EXCLUDED.segment_count AND public.reply_outbox.payload=EXCLUDED.payload AND public.reply_outbox.reply_binding_id=EXCLUDED.reply_binding_id AND public.reply_outbox.reply_conversation_kind=EXCLUDED.reply_conversation_kind AND public.reply_outbox.reply_receiver_id=EXCLUDED.reply_receiver_id AND public.reply_outbox.reply_thread_id=EXCLUDED.reply_thread_id RETURNING "+replyColumns, value.TenantID, value.ReplyID, value.EventID, value.SegmentIndex, value.SegmentCount, value.Payload, value.ReplyTarget.BindingID, value.ReplyTarget.ConversationKind, value.ReplyTarget.ReceiverID, value.ReplyTarget.ThreadID).Scan(replyArgs(&result)...)
+	err := s.db.QueryRowContext(ctx, insertReplyStatement+" RETURNING "+replyColumns, replyInsertArgs(value)...).Scan(replyArgs(&result)...)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			if _, lookupErr := s.GetMessage(ctx, value.TenantID, value.EventID); lookupErr != nil {
@@ -363,6 +369,11 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 //nolint:gocyclo // The transaction validates and atomically persists the complete reply batch.
 func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
+		return nil, err
+	}
+	var err error
+	values, err = normalizeReplyBatch(values)
+	if err != nil {
 		return nil, err
 	}
 	if err := validateReplyBatch(values); err != nil {
@@ -403,6 +414,11 @@ func (s *Store) EnqueueRepliesWithCorrelation(ctx context.Context, correlation r
 		return nil, runtimestorage.ErrInvalid
 	}
 	correlation.TraceParent = observability.NormalizeTraceParent(correlation.TraceParent)
+	var normalizeErr error
+	values, normalizeErr = normalizeReplyBatch(values)
+	if normalizeErr != nil {
+		return nil, normalizeErr
+	}
 	first, err := validateReplyBatchForCorrelation(correlation, values)
 	if err != nil {
 		return nil, err
@@ -474,11 +490,23 @@ func validateReplyBatch(values []runtimestorage.ReplyOutbox) error {
 	return nil
 }
 
+func normalizeReplyBatch(values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	normalized := make([]runtimestorage.ReplyOutbox, 0, len(values))
+	for _, value := range values {
+		reply, err := runtimestorage.NormalizeReplyOutbox(value)
+		if err != nil {
+			return nil, runtimestorage.ErrInvalid
+		}
+		normalized = append(normalized, reply)
+	}
+	return normalized, nil
+}
+
 func (s *Store) insertReplySegments(ctx context.Context, tx *sql.Tx, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
 	result := make([]runtimestorage.ReplyOutbox, 0, len(values))
 	for _, value := range values {
 		var row runtimestorage.ReplyOutbox
-		err := tx.QueryRowContext(ctx, "INSERT INTO public.reply_outbox (tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending' WHERE EXISTS (SELECT 1 FROM public.message_event WHERE tenant_id=$1 AND event_id=$3 AND ((reply_conversation_kind='' AND reply_receiver_id='' AND reply_thread_id='' AND $7='' AND $8='' AND $9='' AND $10='') OR (binding_id=$7 AND reply_conversation_kind=$8 AND reply_receiver_id=$9 AND reply_thread_id=$10))) ON CONFLICT (tenant_id,reply_id,segment_index) DO UPDATE SET updated_at=public.reply_outbox.updated_at WHERE public.reply_outbox.event_id=EXCLUDED.event_id AND public.reply_outbox.segment_count=EXCLUDED.segment_count AND public.reply_outbox.payload=EXCLUDED.payload AND public.reply_outbox.reply_binding_id=EXCLUDED.reply_binding_id AND public.reply_outbox.reply_conversation_kind=EXCLUDED.reply_conversation_kind AND public.reply_outbox.reply_receiver_id=EXCLUDED.reply_receiver_id AND public.reply_outbox.reply_thread_id=EXCLUDED.reply_thread_id RETURNING "+replyColumns, value.TenantID, value.ReplyID, value.EventID, value.SegmentIndex, value.SegmentCount, value.Payload, value.ReplyTarget.BindingID, value.ReplyTarget.ConversationKind, value.ReplyTarget.ReceiverID, value.ReplyTarget.ThreadID).Scan(replyArgs(&row)...)
+		err := tx.QueryRowContext(ctx, insertReplyStatement+" RETURNING "+replyColumns, replyInsertArgs(value)...).Scan(replyArgs(&row)...)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				if _, lookupErr := lookupMessage(ctx, tx, value.TenantID, value.EventID); lookupErr != nil {
@@ -605,8 +633,23 @@ func check(ctx context.Context) error {
 func eventArgs(value *runtimestorage.MessageEvent) []any {
 	return []any{&value.TenantID, &value.EventID, &value.SessionID, &value.BindingID, &value.ExternalMessageID, &value.IdempotencyKey, &value.EventSeq, &value.Status, &value.FencingToken, &value.LeaseOwner, &value.LeaseExpiresAt, &value.ReplyID, &value.SegmentCount, &value.ReplyTarget.ConversationKind, &value.ReplyTarget.ReceiverID, &value.ReplyTarget.ThreadID, &value.CreatedAt, &value.UpdatedAt}
 }
+func replyInsertArgs(value runtimestorage.ReplyOutbox) []any {
+	return []any{
+		value.TenantID, value.ReplyID, value.EventID, value.SegmentIndex, value.SegmentCount, value.Payload,
+		value.Kind, value.Attachment.ID, value.Attachment.Kind, value.Attachment.MIMEType, value.Attachment.Name,
+		value.Attachment.Size, value.Attachment.SHA256, value.Attachment.Provider, value.Attachment.ProviderID, value.Fallback,
+		value.ReplyTarget.BindingID, value.ReplyTarget.ConversationKind, value.ReplyTarget.ReceiverID, value.ReplyTarget.ThreadID,
+	}
+}
 func replyArgs(value *runtimestorage.ReplyOutbox) []any {
-	return []any{&value.TenantID, &value.ReplyID, &value.EventID, &value.SegmentIndex, &value.SegmentCount, &value.Payload, &value.ReplyTarget.BindingID, &value.ReplyTarget.ConversationKind, &value.ReplyTarget.ReceiverID, &value.ReplyTarget.ThreadID, &value.Status, &value.Attempts, &value.FencingToken, &value.LeaseOwner, &value.LeaseExpiresAt, &value.ProviderMessageID, &value.LastErrorClass, &value.CreatedAt, &value.UpdatedAt}
+	return []any{
+		&value.TenantID, &value.ReplyID, &value.EventID, &value.SegmentIndex, &value.SegmentCount, &value.Payload,
+		&value.Kind, &value.Attachment.ID, &value.Attachment.Kind, &value.Attachment.MIMEType, &value.Attachment.Name,
+		&value.Attachment.Size, &value.Attachment.SHA256, &value.Attachment.Provider, &value.Attachment.ProviderID, &value.Fallback,
+		&value.ReplyTarget.BindingID, &value.ReplyTarget.ConversationKind, &value.ReplyTarget.ReceiverID, &value.ReplyTarget.ThreadID,
+		&value.Status, &value.Attempts, &value.FencingToken, &value.LeaseOwner, &value.LeaseExpiresAt,
+		&value.ProviderMessageID, &value.LastErrorClass, &value.CreatedAt, &value.UpdatedAt,
+	}
 }
 func cloneSession(value runtimestorage.Session) runtimestorage.Session {
 	if value.State != nil {

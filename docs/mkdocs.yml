@@ -43,8 +43,9 @@ nav:
       - "Issue #82 Agent App Registry and Tenant Canary": issue-82-agent-app-registry.md
       - Gateway、Execution Plan 与 HTTP/SSE: gateway.md
       - Telegram 长轮询 Adapter: telegram.md
-      - 企业微信自建应用 Text Webhook: wecom.md
+      - 企业微信自建应用 Channel Adapter: wecom.md
       - "Issue #77 Channel Capabilities": issue-77-channel-capabilities.md
+      - "Issue #98 Native Media": issue-98-native-media.md
       - Tenant 运行时持久化: runtime-storage.md
       - Runtime Capabilities (#75): runtime-capabilities.md
       - "Issue #76 Stateless Worker and Migration": issue-76-stateless-worker.md

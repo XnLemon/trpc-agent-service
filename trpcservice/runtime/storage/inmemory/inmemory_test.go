@@ -2,11 +2,14 @@ package inmemory_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 )
@@ -126,6 +129,36 @@ func TestStoreReplyCorrelationNormalizesTraceParentAtPersistenceBoundary(t *test
 	}
 }
 
+func TestStorePersistsMediaReplyContractAndDetectsConflicts(t *testing.T) {
+	store := inmemory.New()
+	seedEvent(t, store, "tenant-a", "session-media-reply", "event-media-reply")
+	reference := mediaReplyReference(t, attachment.KindImage, "image/png", []byte("png"))
+	reply := runtimestorage.ReplyOutbox{
+		TenantID: "tenant-a", ReplyID: "reply-media", EventID: "event-media-reply", SegmentIndex: 0, SegmentCount: 1,
+		Kind: runtimestorage.ReplyKindImage, Payload: "caption", Attachment: reference, Fallback: "[image attachment: chart.png]",
+	}
+	first, err := store.EnqueueReply(context.Background(), reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Kind != runtimestorage.ReplyKindImage || first.Attachment != reference || first.Fallback != reply.Fallback {
+		t.Fatalf("stored media reply = %+v", first)
+	}
+	if second, err := store.EnqueueReply(context.Background(), reply); err != nil || second.Attachment != reference {
+		t.Fatalf("idempotent media reply = %+v err=%v", second, err)
+	}
+	conflict := reply
+	conflict.Fallback = "[image attachment: changed]"
+	if _, err := store.EnqueueReply(context.Background(), conflict); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("media conflict = %v", err)
+	}
+	invalid := reply
+	invalid.Fallback = ""
+	if _, err := store.EnqueueReply(context.Background(), invalid); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid media fallback = %v", err)
+	}
+}
+
 func TestStoreDuplicateMessageAndConcurrentSequence(t *testing.T) {
 	store := inmemory.New()
 	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-1", nil); err != nil {
@@ -163,6 +196,16 @@ func TestStoreDuplicateMessageAndConcurrentSequence(t *testing.T) {
 	if len(seq) != 2 || seq[0] == seq[1] {
 		t.Fatalf("concurrent sequences = %v", seq)
 	}
+}
+
+func mediaReplyReference(t *testing.T, kind attachment.Kind, contentType string, data []byte) attachment.Reference {
+	t.Helper()
+	digest := sha256.Sum256(data)
+	reference := attachment.Reference{ID: "attachment-media", Kind: kind, MIMEType: contentType, Name: "chart.png", Size: int64(len(data)), SHA256: hex.EncodeToString(digest[:])}
+	if _, err := reference.Normalize(); err != nil {
+		t.Fatalf("test attachment = %v", err)
+	}
+	return reference
 }
 
 func TestStorePersistsFirstReplyTargetForDuplicateMessage(t *testing.T) {

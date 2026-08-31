@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -37,8 +38,19 @@ type responsesInputItem struct {
 	Content []responsesContentPart `json:"content"`
 }
 type responsesContentPart struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type       string               `json:"type"`
+	Text       string               `json:"text,omitempty"`
+	ImageURL   string               `json:"image_url,omitempty"`
+	Detail     string               `json:"detail,omitempty"`
+	FileID     string               `json:"file_id,omitempty"`
+	FileURL    string               `json:"file_url,omitempty"`
+	FileData   string               `json:"file_data,omitempty"`
+	Filename   string               `json:"filename,omitempty"`
+	InputAudio *responsesInputAudio `json:"input_audio,omitempty"`
+}
+type responsesInputAudio struct {
+	Data   string `json:"data"`
+	Format string `json:"format"`
 }
 
 func (m *responsesModel) stream(ctx context.Context, request *trpcmodel.Request, out chan<- *trpcmodel.Response) {
@@ -87,17 +99,125 @@ func responsesInput(request *trpcmodel.Request) []responsesInputItem {
 		if role == "" {
 			role = string(trpcmodel.RoleUser)
 		}
-		text := message.Content
-		if text == "" {
-			for _, part := range message.ContentParts {
-				if part.Text != nil {
-					text += *part.Text
-				}
-			}
-		}
-		input = append(input, responsesInputItem{Role: role, Content: []responsesContentPart{{Type: "input_text", Text: text}}})
+		input = append(input, responsesInputItem{Role: role, Content: responsesContent(message)})
 	}
 	return input
+}
+
+func responsesContent(message trpcmodel.Message) []responsesContentPart {
+	parts := make([]responsesContentPart, 0, 1+len(message.ContentParts))
+	text := message.Content
+	if text == "" {
+		for _, part := range message.ContentParts {
+			if part.Text != nil {
+				text += *part.Text
+			}
+		}
+	}
+	if text != "" || len(message.ContentParts) == 0 {
+		parts = append(parts, responsesTextPart(text))
+	}
+	for _, part := range message.ContentParts {
+		if part.Type == trpcmodel.ContentTypeText || part.Text != nil {
+			continue
+		}
+		if converted, ok := responsesContentFromPart(part); ok {
+			parts = append(parts, converted)
+		}
+	}
+	if len(parts) == 0 {
+		parts = append(parts, responsesTextPart(""))
+	}
+	return parts
+}
+
+func responsesContentFromPart(part trpcmodel.ContentPart) (responsesContentPart, bool) {
+	switch part.Type {
+	case trpcmodel.ContentTypeImage:
+		if part.Image == nil {
+			return responsesTextPart("[image attachment omitted: image data is missing]"), true
+		}
+		if strings.TrimSpace(part.Image.URL) != "" {
+			return responsesContentPart{Type: "input_image", ImageURL: strings.TrimSpace(part.Image.URL), Detail: part.Image.Detail}, true
+		}
+		if len(part.Image.Data) == 0 {
+			return responsesTextPart("[image attachment omitted: image data is missing]"), true
+		}
+		return responsesContentPart{Type: "input_image", ImageURL: dataURL("image", part.Image.Format, part.Image.Data), Detail: part.Image.Detail}, true
+	case trpcmodel.ContentTypeFile:
+		return responsesFilePart(part.File)
+	case trpcmodel.ContentTypeAudio:
+		return responsesAudioPart(part.Audio)
+	case trpcmodel.ContentTypeVideo:
+		return responsesTextPart("[video attachment omitted: model video input is not enabled]"), true
+	default:
+		return responsesContentPart{}, false
+	}
+}
+
+func responsesFilePart(file *trpcmodel.File) (responsesContentPart, bool) {
+	if file == nil {
+		return responsesTextPart("[file attachment omitted: file data is missing]"), true
+	}
+	if id := strings.TrimSpace(file.FileID); id != "" {
+		return responsesContentPart{Type: "input_file", FileID: id}, true
+	}
+	if fileURL := strings.TrimSpace(file.URL); fileURL != "" {
+		return responsesContentPart{Type: "input_file", FileURL: fileURL}, true
+	}
+	if len(file.Data) == 0 {
+		return responsesTextPart("[file attachment omitted: file data is missing]"), true
+	}
+	return responsesContentPart{Type: "input_file", FileData: dataURL("application", file.MimeType, file.Data), Filename: responsesFilename(file.Name)}, true
+}
+
+func responsesAudioPart(audio *trpcmodel.Audio) (responsesContentPart, bool) {
+	if audio == nil || len(audio.Data) == 0 {
+		return responsesTextPart("[audio attachment omitted: audio data is missing]"), true
+	}
+	format := responsesAudioFormat(audio.Format)
+	if format == "" {
+		return responsesTextPart("[audio attachment omitted: unsupported audio format]"), true
+	}
+	return responsesContentPart{Type: "input_audio", InputAudio: &responsesInputAudio{Data: base64.StdEncoding.EncodeToString(audio.Data), Format: format}}, true
+}
+
+func responsesTextPart(text string) responsesContentPart {
+	return responsesContentPart{Type: "input_text", Text: text}
+}
+
+func dataURL(defaultFamily, format string, data []byte) string {
+	mediaType := strings.ToLower(strings.TrimSpace(format))
+	if mediaType == "" {
+		mediaType = defaultFamily + "/octet-stream"
+	} else if !strings.Contains(mediaType, "/") {
+		mediaType = defaultFamily + "/" + strings.TrimPrefix(mediaType, ".")
+	}
+	return "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(data)
+}
+
+func responsesFilename(name string) string {
+	if trimmed := strings.TrimSpace(name); trimmed != "" {
+		return trimmed
+	}
+	return "attachment"
+}
+
+func responsesAudioFormat(format string) string {
+	value := strings.ToLower(strings.TrimSpace(format))
+	if _, subtype, ok := strings.Cut(value, "/"); ok {
+		value = subtype
+	}
+	switch value {
+	case "mpeg", "mpga":
+		return "mp3"
+	case "x-wav", "wave":
+		return "wav"
+	case "mp3", "wav":
+		return value
+	default:
+		return ""
+	}
 }
 
 func (m *responsesModel) doRequest(ctx context.Context, body []byte) (*http.Response, error) {

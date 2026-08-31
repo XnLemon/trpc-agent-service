@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	pgstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
 
@@ -31,6 +32,23 @@ func ValidateEmbedding(values []float64) bool {
 }
 
 const maxReplyTargetIDRunes = 1024
+
+// ReplyKind identifies the durable representation a channel provider should
+// attempt before falling back to text.
+type ReplyKind string
+
+const (
+	// ReplyKindText identifies the legacy text reply path.
+	ReplyKindText ReplyKind = "text"
+	// ReplyKindImage identifies an image attachment reply.
+	ReplyKindImage ReplyKind = "image"
+	// ReplyKindVideo identifies a video attachment reply.
+	ReplyKindVideo ReplyKind = "video"
+	// ReplyKindAudio identifies an audio attachment reply.
+	ReplyKindAudio ReplyKind = "audio"
+	// ReplyKindDocument identifies a document attachment reply.
+	ReplyKindDocument ReplyKind = "document"
+)
 
 // ReplyTarget is the trusted, durable destination for a channel reply. A zero
 // target is retained only for rows created before per-message routing existed.
@@ -166,7 +184,10 @@ type ReplyOutbox struct {
 	EventID           string
 	SegmentIndex      int
 	SegmentCount      int
+	Kind              ReplyKind
 	Payload           string
+	Attachment        attachment.Reference
+	Fallback          string
 	ReplyTarget       ReplyTarget
 	Status            string
 	Attempts          int
@@ -289,6 +310,56 @@ func validReplyTargetID(value string) bool {
 		}
 	}
 	return true
+}
+
+// NormalizeReplyOutbox validates a reply's protocol-neutral media contract and
+// returns a canonical copy. A zero Kind preserves the historical text-only path.
+func NormalizeReplyOutbox(value ReplyOutbox) (ReplyOutbox, error) {
+	value.Kind = normalizedReplyKind(value.Kind)
+	switch value.Kind {
+	case ReplyKindText:
+		if value.Attachment != (attachment.Reference{}) || value.Fallback != "" {
+			return ReplyOutbox{}, ErrInvalid
+		}
+		return value, nil
+	case ReplyKindImage, ReplyKindVideo, ReplyKindAudio, ReplyKindDocument:
+		reference, err := value.Attachment.Normalize()
+		if err != nil {
+			return ReplyOutbox{}, err
+		}
+		if replyKindForAttachment(reference.Kind) != value.Kind {
+			return ReplyOutbox{}, ErrInvalid
+		}
+		if !ValidateText(value.Fallback, 4096, true) {
+			return ReplyOutbox{}, ErrInvalid
+		}
+		value.Attachment = reference
+		return value, nil
+	default:
+		return ReplyOutbox{}, ErrInvalid
+	}
+}
+
+func normalizedReplyKind(kind ReplyKind) ReplyKind {
+	if kind == "" {
+		return ReplyKindText
+	}
+	return ReplyKind(strings.ToLower(strings.TrimSpace(string(kind))))
+}
+
+func replyKindForAttachment(kind attachment.Kind) ReplyKind {
+	switch kind {
+	case attachment.KindImage:
+		return ReplyKindImage
+	case attachment.KindVideo:
+		return ReplyKindVideo
+	case attachment.KindAudio:
+		return ReplyKindAudio
+	case attachment.KindDocument:
+		return ReplyKindDocument
+	default:
+		return ""
+	}
 }
 
 // ValidateTransition reports whether a reply transition is legal.

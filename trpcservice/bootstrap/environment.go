@@ -333,14 +333,22 @@ func environmentWeComComponents(config environmentConfig, channelsRepo channels.
 		return nil, nil, nil
 	}
 	credentials := environmentWeComCredentialResolver{tenantID: config.tenantID, config: *config.wecom}
+	var attachments runtimestorage.AttachmentStore
+	if store, ok := runtimeStore.(runtimestorage.AttachmentStore); ok {
+		attachments = store
+	}
+	var mediaDownloader wecom.MediaDownloader
+	if attachments != nil {
+		mediaDownloader = &wecom.HTTPMediaDownloader{}
+	}
 	factory := func(dispatcher gateway.DispatchService) (http.Handler, error) {
-		return wecom.New(wecom.Config{Candidates: channelsRepo, Tenants: tenantsRepo, Apps: appsRepo, Credentials: credentials, Dispatcher: dispatcher, AuditWriter: auditWriter, Observability: config.telemetry})
+		return wecom.New(wecom.Config{Candidates: channelsRepo, Tenants: tenantsRepo, Apps: appsRepo, Credentials: credentials, Dispatcher: dispatcher, Attachments: attachments, MediaDownloader: mediaDownloader, AuditWriter: auditWriter, Observability: config.telemetry})
 	}
 	owner, err := environmentWeComOwnerFunc()
 	if err != nil {
 		return nil, nil, err
 	}
-	worker, err := newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelsRepo, Credentials: credentials}, Channel: "wecom", ProviderName: "wecom", TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second, AuditWriter: auditWriter, Observability: config.telemetry})
+	worker, err := newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelsRepo, Credentials: credentials, Attachments: attachments}, Channel: "wecom", ProviderName: "wecom", TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second, AuditWriter: auditWriter, Observability: config.telemetry})
 	return factory, worker, err
 }
 

@@ -1,11 +1,13 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -13,10 +15,12 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	attachmentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -567,6 +571,101 @@ func TestMessageContentAndHasMediaBranches(t *testing.T) {
 	if hasMedia(&models.Message{Photo: []models.PhotoSize{{}}}) {
 		t.Fatal("photo without a file ID was detected as media")
 	}
+}
+
+func TestNativeMediaIsPersistedAndDispatchedAsReference(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "native-media", "12345")
+	dispatcher := &dispatchStub{events: []gateway.DispatchEvent{{Type: gateway.DispatchEventDone, Done: true}}}
+	data := []byte("telegram-image")
+	adapter, err := New(context.Background(), Config{
+		BotToken: "12345:runtime-secret", Target: target, Dispatcher: dispatcher,
+		Factory:     &fakeFactory{client: &fakeBot{me: &models.User{ID: 12345, IsBot: true}}},
+		Attachments: attachmentmemory.New(), MediaDownloader: fakeMediaDownloader{data: data},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = adapter.Close() }()
+	update := &models.Update{ID: 201, Message: &models.Message{
+		ID: 201, From: &models.User{ID: 42}, Chat: models.Chat{ID: 100, Type: models.ChatTypePrivate},
+		Caption: "please inspect", Photo: []models.PhotoSize{{FileID: "photo-small", FileSize: 3}, {FileID: "photo-large", FileSize: len(data)}},
+	}}
+	if err := adapter.HandleUpdate(context.Background(), update); err != nil {
+		t.Fatalf("HandleUpdate = %v", err)
+	}
+	requests := dispatcher.requests()
+	if len(requests) != 1 || requests[0].Message.Content != "please inspect" || len(requests[0].Message.Attachments) != 1 {
+		t.Fatalf("dispatch request = %+v", requests)
+	}
+	reference := requests[0].Message.Attachments[0]
+	if reference.Kind != attachment.KindImage || reference.MIMEType != "image/jpeg" || reference.Provider != "telegram" || reference.ProviderID != "photo-large" || reference.Size != int64(len(data)) {
+		t.Fatalf("attachment reference = %+v", reference)
+	}
+	if !strings.HasPrefix(reference.ID, "att_") || len(reference.SHA256) != sha256.Size*2 {
+		t.Fatalf("attachment identity = %+v", reference)
+	}
+}
+
+func TestNativeMediaFailuresAreRedactedAndCancellationPreserved(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "native-media-errors", "12345")
+	base := Config{BotToken: "12345:runtime-secret", Target: target, Factory: &fakeFactory{client: &fakeBot{me: &models.User{ID: 12345, IsBot: true}}}, Attachments: attachmentmemory.New()}
+	tooLarge := base
+	tooLarge.Dispatcher = &dispatchStub{}
+	tooLarge.MediaDownloader = fakeMediaDownloader{data: []byte("123456"), err: nil}
+	tooLarge.MaxAttachmentBytes = 5
+	adapter, err := New(context.Background(), tooLarge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.HandleUpdate(context.Background(), mediaUpdate(202, "oversized")); !errors.Is(err, ErrAttachment) || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("oversized media err = %v", err)
+	}
+	if got := len(tooLarge.Dispatcher.(*dispatchStub).requests()); got != 0 {
+		t.Fatalf("oversized media reached dispatch: %d", got)
+	}
+	_ = adapter.Close()
+
+	canceled := base
+	canceled.Dispatcher = &dispatchStub{}
+	ctx, cancel := context.WithCancel(context.Background())
+	canceled.MediaDownloader = fakeMediaDownloader{wait: func(context.Context) { cancel() }}
+	adapter, err = New(context.Background(), canceled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = adapter.Close() }()
+	if err := adapter.HandleUpdate(ctx, mediaUpdate(203, "cancel")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled media err = %v", err)
+	}
+	if got := len(canceled.Dispatcher.(*dispatchStub).requests()); got != 0 {
+		t.Fatalf("canceled media reached dispatch: %d", got)
+	}
+}
+
+type fakeMediaDownloader struct {
+	data []byte
+	err  error
+	wait func(context.Context)
+}
+
+func (downloader fakeMediaDownloader) Download(ctx context.Context, _ string) (io.ReadCloser, error) {
+	if downloader.wait != nil {
+		downloader.wait(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if downloader.err != nil {
+		return nil, downloader.err
+	}
+	return io.NopCloser(bytes.NewReader(downloader.data)), nil
+}
+
+func mediaUpdate(updateID int64, fileID string) *models.Update {
+	return &models.Update{ID: updateID, Message: &models.Message{
+		ID: int(updateID), From: &models.User{ID: 42}, Chat: models.Chat{ID: 100, Type: models.ChatTypePrivate},
+		Video: &models.Video{FileID: fileID},
+	}}
 }
 
 func TestDispatchAndSendFailuresAreRedacted(t *testing.T) {

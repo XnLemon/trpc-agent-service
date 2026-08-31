@@ -7,6 +7,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha1" // #nosec G505 -- WeCom requires SHA-1 callback signatures.
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -22,11 +23,13 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	storage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	attachmentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -56,6 +59,7 @@ func TestDecodeAESKeyAndDecryptRoundTrip(t *testing.T) {
 
 func TestNewRejectsInvalidConfiguration(t *testing.T) {
 	stub := &callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)}
+	staticTarget := staticTestTarget(t)
 	for _, config := range []Config{
 		{},
 		{Dispatcher: stub, MaxBodyBytes: -1},
@@ -63,6 +67,7 @@ func TestNewRejectsInvalidConfiguration(t *testing.T) {
 		{Dispatcher: stub, Token: "token", ReceiveID: "receive", AgentID: "1"},
 		{Dispatcher: stub, Token: "token", ReceiveID: "receive", AgentID: "1", EncodingAESKey: "bad", Target: channels.RoutingTarget{}},
 		{Dispatcher: stub, Token: "token", ReceiveID: "receive", AgentID: "1", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), Target: channels.RoutingTarget{}, Candidates: &dynamicCandidateConsumer{}},
+		{Dispatcher: stub, Token: "token", ReceiveID: "receive", AgentID: "1", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), Target: staticTarget, Attachments: attachmentmemory.New(), MediaDownloader: &fakeWeComMediaDownloader{}},
 	} {
 		if handler, err := New(config); handler != nil || !errors.Is(err, ErrInvalid) {
 			t.Fatalf("invalid config = handler %v, err %v", handler, err)
@@ -230,6 +235,229 @@ func TestProviderDeliversGroupChat(t *testing.T) {
 	}
 	if payload["chatid"] != "chat-1" || payload["touser"] != nil {
 		t.Fatalf("group payload = %#v", payload)
+	}
+}
+
+func TestProviderSendsMediaReplyFallbackText(t *testing.T) {
+	var payload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/cgi-bin/gettoken" {
+			_, _ = io.WriteString(w, `{"errcode":0,"access_token":"token","expires_in":3600}`)
+			return
+		}
+		if r.URL.Path == "/cgi-bin/message/send" {
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			_, _ = io.WriteString(w, `{"errcode":0,"msgid":"media-fallback-1"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	p := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret", BaseURL: server.URL, HTTPClient: server.Client()}
+	value := storage.ReplyOutbox{
+		Payload: "caption", Kind: storage.ReplyKindImage,
+		Attachment: wecomReplyReference(t, attachment.KindImage, "image/png", "chart.png", []byte("png")),
+		Fallback:   "[image attachment: chart.png]",
+		ReplyTarget: storage.ReplyTarget{
+			ConversationKind: "direct",
+			ReceiverID:       "user-1",
+		},
+	}
+	if id, err := p.Deliver(context.Background(), value); err != nil || id != "media-fallback-1" {
+		t.Fatalf("media fallback deliver = %q, %v", id, err)
+	}
+	text, ok := payload["text"].(map[string]any)
+	if payload["msgtype"] != "text" || !ok || text["content"] != "[image attachment: chart.png]" {
+		t.Fatalf("media fallback payload = %#v", payload)
+	}
+}
+
+func TestProviderSendsNativeMediaReply(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		kind           storage.ReplyKind
+		attachmentKind attachment.Kind
+		mimeType       string
+		fileName       string
+		data           []byte
+		uploadType     string
+		messageType    string
+		fallback       string
+	}{
+		{name: "image", kind: storage.ReplyKindImage, attachmentKind: attachment.KindImage, mimeType: "image/png", fileName: "chart.png", data: []byte("png"), uploadType: "image", messageType: "image", fallback: "[image attachment: chart.png]"},
+		{name: "document", kind: storage.ReplyKindDocument, attachmentKind: attachment.KindDocument, mimeType: "application/pdf", fileName: "brief.pdf", data: []byte("pdf"), uploadType: "file", messageType: "file", fallback: "[document attachment: brief.pdf]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var payload map[string]any
+			var uploadCalls int
+			var sendCalls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/cgi-bin/gettoken":
+					_, _ = io.WriteString(w, `{"errcode":0,"access_token":"token","expires_in":3600}`)
+				case "/cgi-bin/media/upload":
+					uploadCalls++
+					if r.URL.Query().Get("access_token") != "token" || r.URL.Query().Get("type") != test.uploadType {
+						t.Errorf("upload query = %s", r.URL.RawQuery)
+					}
+					if err := r.ParseMultipartForm(1 << 20); err != nil {
+						t.Errorf("parse upload = %v", err)
+						return
+					}
+					files := r.MultipartForm.File["media"]
+					if len(files) != 1 || files[0].Filename != test.fileName {
+						t.Errorf("upload files = %#v", files)
+						return
+					}
+					file, err := files[0].Open()
+					if err != nil {
+						t.Errorf("open upload = %v", err)
+						return
+					}
+					defer func() { _ = file.Close() }()
+					data, err := io.ReadAll(file)
+					if err != nil || string(data) != string(test.data) {
+						t.Errorf("upload data = %q, %v", data, err)
+						return
+					}
+					_, _ = io.WriteString(w, `{"errcode":0,"media_id":"uploaded-`+test.messageType+`"}`)
+				case "/cgi-bin/message/send":
+					sendCalls++
+					if r.URL.Query().Get("access_token") != "token" {
+						t.Errorf("send query = %s", r.URL.RawQuery)
+					}
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Errorf("decode send payload = %v", err)
+					}
+					_, _ = io.WriteString(w, `{"errcode":0,"msgid":"native-`+test.messageType+`-1"}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			reference := wecomReplyReference(t, test.attachmentKind, test.mimeType, test.fileName, test.data)
+			reader := &providerAttachmentReader{content: attachment.Content{Data: test.data}}
+			provider := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret", BaseURL: server.URL, HTTPClient: server.Client(), Attachments: reader}
+			reply := storage.ReplyOutbox{
+				TenantID: "tenant-a", EventID: "event-1", ReplyID: "reply-native-" + test.messageType,
+				SegmentIndex: 0, SegmentCount: 1, Kind: test.kind, Payload: "caption",
+				Attachment: reference, Fallback: test.fallback,
+				ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user-1"},
+			}
+
+			receipt, err := provider.Deliver(context.Background(), reply)
+			if err != nil || receipt != "native-"+test.messageType+"-1" {
+				t.Fatalf("native deliver = %q, %v", receipt, err)
+			}
+			if uploadCalls != 1 || sendCalls != 1 || reader.calls != 1 {
+				t.Fatalf("calls upload=%d send=%d reader=%d", uploadCalls, sendCalls, reader.calls)
+			}
+			if reader.tenantID != reply.TenantID || reader.eventID != reply.EventID || reader.reference != reference {
+				t.Fatalf("reader args = %q %q %+v", reader.tenantID, reader.eventID, reader.reference)
+			}
+			media, ok := payload[test.messageType].(map[string]any)
+			if payload["msgtype"] != test.messageType || payload["touser"] != "user-1" || payload["agentid"] != float64(1) || !ok || media["media_id"] != "uploaded-"+test.messageType {
+				t.Fatalf("native payload = %#v", payload)
+			}
+		})
+	}
+}
+
+func TestProviderPreservesNativeAttachmentCancellation(t *testing.T) {
+	data := []byte("png")
+	reference := wecomReplyReference(t, attachment.KindImage, "image/png", "chart.png", data)
+	provider := &Provider{
+		CorpID: "corp", AgentID: "1", AppSecret: "secret",
+		Attachments: &providerAttachmentReader{err: context.Canceled},
+		token:       "cached", tokenExpiry: time.Now().Add(time.Hour),
+	}
+	_, err := provider.Deliver(context.Background(), storage.ReplyOutbox{
+		TenantID: "tenant-a", EventID: "event-image", ReplyID: "reply-image", SegmentIndex: 0, SegmentCount: 1,
+		Kind: storage.ReplyKindImage, Payload: "caption", Attachment: reference, Fallback: "[image attachment: chart.png]",
+		ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user-1"},
+	})
+	assertDeliveryErrorClass(t, err, "canceled", true)
+}
+
+func TestHTTPMediaDownloaderFetchesMediaWithVerifiedBindingContext(t *testing.T) {
+	var tokenCalls int
+	var mediaCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/cgi-bin/gettoken":
+			tokenCalls++
+			if r.URL.Query().Get("corpid") != "corp" || r.URL.Query().Get("corpsecret") != "secret" {
+				t.Errorf("token query = %s", r.URL.RawQuery)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"errcode":0,"access_token":"token","expires_in":3600}`)
+		case "/cgi-bin/media/get":
+			mediaCalls++
+			if r.URL.Query().Get("access_token") != "token" || r.URL.Query().Get("media_id") != "media-1" {
+				t.Errorf("media query = %s", r.URL.RawQuery)
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = io.WriteString(w, "media-bytes")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	downloader := &HTTPMediaDownloader{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return time.Unix(100, 0).UTC() }}
+	request := MediaDownloadRequest{TenantID: "tenant-a", BindingID: "binding-1", CorpID: "corp", AgentID: "1", AppSecret: "secret", MediaID: "media-1", Kind: attachment.KindImage, MIMEType: "image/jpeg", MaximumBytes: 1 << 20}
+	for i := 0; i < 2; i++ {
+		body, err := downloader.Download(context.Background(), request)
+		if err != nil {
+			t.Fatalf("download = %v", err)
+		}
+		data, err := io.ReadAll(body)
+		closeErr := body.Close()
+		if err != nil || closeErr != nil || string(data) != "media-bytes" {
+			t.Fatalf("download body = %q read=%v close=%v", data, err, closeErr)
+		}
+	}
+	if tokenCalls != 1 || mediaCalls != 2 {
+		t.Fatalf("calls token=%d media=%d", tokenCalls, mediaCalls)
+	}
+}
+
+func TestHTTPMediaDownloaderRejectsInvalidOrProviderErrorResponses(t *testing.T) {
+	if _, err := (*HTTPMediaDownloader)(nil).Download(context.Background(), MediaDownloadRequest{}); !errors.Is(err, ErrAttachment) {
+		t.Fatalf("nil downloader error = %v", err)
+	}
+
+	for _, test := range []struct {
+		name string
+		kind attachment.Kind
+		mime string
+		body string
+	}{
+		{name: "provider error JSON", kind: attachment.KindImage, mime: "image/jpeg", body: `{"errcode":40003}`},
+		{name: "successful JSON is not document media", kind: attachment.KindDocument, mime: "application/octet-stream", body: `{"errcode":0}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/cgi-bin/gettoken" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"errcode":0,"access_token":"token","expires_in":3600}`)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				_, _ = io.WriteString(w, test.body)
+			}))
+			defer server.Close()
+
+			downloader := &HTTPMediaDownloader{BaseURL: server.URL, HTTPClient: server.Client()}
+			request := MediaDownloadRequest{TenantID: "tenant-a", BindingID: "binding-1", CorpID: "corp", AgentID: "1", AppSecret: "secret", MediaID: "media-1", Kind: test.kind, MIMEType: test.mime, MaximumBytes: 1 << 20}
+			body, err := downloader.Download(context.Background(), request)
+			if body != nil || !errors.Is(err, ErrAttachment) {
+				t.Fatalf("provider JSON download = body %v err %v", body, err)
+			}
+		})
 	}
 }
 
@@ -426,6 +654,74 @@ func TestHandlerAcceptsEncryptedTextWithRequestAndTraceIDs(t *testing.T) {
 	}
 	if err := handler.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHandlerAcceptsEncryptedNativeMediaAsAttachment(t *testing.T) {
+	dispatcher := &callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)}
+	app := dynamicTestApp(t, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	binding := dynamicTestBinding(t, "media-route", "env/wecom", app.AppID)
+	data := []byte("wecom-image")
+	downloader := &fakeWeComMediaDownloader{data: data}
+	handler, err := New(Config{
+		Candidates:       &dynamicCandidateConsumer{binding: binding},
+		Tenants:          dynamicTenantRepository{value: dynamicTestTenant(t)},
+		Apps:             dynamicAppRepository{value: app},
+		Credentials:      dynamicCredentials{values: map[string]Credentials{binding.SecretRef: {CallbackToken: "token", EncodingAESKey: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), AppSecret: "app-secret"}}},
+		Dispatcher:       dispatcher,
+		Attachments:      attachmentmemory.New(),
+		MediaDownloader:  downloader,
+		MaxBodyBytes:     1 << 20,
+		ExecutionTimeout: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = handler.Close() })
+
+	request := callbackXMLRequestAtPath(t, "/wecom/callback/media-route", []byte("<xml><MsgId>message-media</MsgId><FromUserName>user-1</FromUserName><MsgType>image</MsgType><AgentID>1</AgentID><MediaId>media-image</MediaId><PicUrl>https://provider.example/token</PicUrl></xml>"))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "success" {
+		t.Fatalf("media callback response = %d %q", response.Code, response.Body.String())
+	}
+	select {
+	case request := <-dispatcher.requests:
+		if request.Principal.TenantID() != binding.TenantID {
+			t.Fatalf("dispatch principal tenant = %q, want %q", request.Principal.TenantID(), binding.TenantID)
+		}
+		if request.Message.ContentType != gateway.ContentTypeMedia || request.Message.Content != "[wecom image attachment: media-image.jpg]" || len(request.Message.Attachments) != 1 {
+			t.Fatalf("media dispatch message = %+v", request.Message)
+		}
+		reference := request.Message.Attachments[0]
+		digest := sha256.Sum256(data)
+		if reference.ID != attachmentID("message-media", 0, "media-image") || reference.Kind != attachment.KindImage || reference.MIMEType != "image/jpeg" || reference.Name != "media-image.jpg" || reference.Provider != "wecom" || reference.ProviderID != "media-image" || reference.Size != int64(len(data)) || reference.SHA256 != hex.EncodeToString(digest[:]) {
+			t.Fatalf("media attachment reference = %+v", reference)
+		}
+		if downloader.request.MediaID != "media-image" || downloader.request.TenantID != binding.TenantID || downloader.request.BindingID != binding.BindingID ||
+			downloader.request.CorpID != "corp" || downloader.request.AgentID != "1" || downloader.request.AppSecret != "app-secret" ||
+			downloader.request.Kind != attachment.KindImage || downloader.request.MIMEType != "image/jpeg" || downloader.request.MaximumBytes != defaultAttachmentBytes {
+			t.Fatalf("download request = %+v", downloader.request)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("media callback did not dispatch")
+	}
+}
+
+func TestHandlerRejectsMediaWithoutConfiguredAttachmentBoundary(t *testing.T) {
+	dispatcher := &callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)}
+	handler := newCallbackTestHandler(t, dispatcher)
+	t.Cleanup(func() { _ = handler.Close() })
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, callbackXMLRequestAtPath(t, "/", []byte("<xml><MsgId>message-media</MsgId><FromUserName>user-1</FromUserName><MsgType>image</MsgType><AgentID>1</AgentID><MediaId>media-image</MediaId></xml>")))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("media without attachment boundary response = %d", response.Code)
+	}
+	select {
+	case request := <-dispatcher.requests:
+		t.Fatalf("unsupported media reached dispatch: %+v", request)
+	default:
 	}
 }
 
@@ -717,6 +1013,31 @@ func TestHandlerRejectsMalformedMessages(t *testing.T) {
 	}
 }
 
+func TestHandlerRejectsUnknownOrIncompleteMediaCallbacks(t *testing.T) {
+	dispatcher := &callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)}
+	handler := newCallbackTestHandler(t, dispatcher)
+	handler.attachments = attachmentmemory.New()
+	handler.mediaDownloader = &fakeWeComMediaDownloader{data: []byte("media")}
+	handler.maxAttachmentBytes = defaultAttachmentBytes
+	t.Cleanup(func() { _ = handler.Close() })
+
+	for _, message := range [][]byte{
+		[]byte("<xml><MsgId>unknown-media</MsgId><FromUserName>user-1</FromUserName><MsgType>location</MsgType><AgentID>1</AgentID><MediaId>media-id</MediaId></xml>"),
+		[]byte("<xml><MsgId>missing-media-id</MsgId><FromUserName>user-1</FromUserName><MsgType>file</MsgType><AgentID>1</AgentID><FileName>report.pdf</FileName></xml>"),
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, callbackXMLRequestAtPath(t, "/", message))
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("malformed media response = %d", response.Code)
+		}
+	}
+	select {
+	case request := <-dispatcher.requests:
+		t.Fatalf("malformed media reached dispatch: %+v", request)
+	default:
+	}
+}
+
 func TestDynamicHandlerAnswersVerifiedChallenge(t *testing.T) {
 	app := dynamicTestApp(t, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")
 	binding := dynamicTestBinding(t, "challenge-key", "env/wecom", app.AppID)
@@ -759,7 +1080,8 @@ func TestBindingProviderUsesActiveWeComBindingAndCachesProvider(t *testing.T) {
 	}
 	lookup := &bindingLookupStub{binding: binding}
 	credentials := &credentialResolverStub{credentials: Credentials{AppSecret: "app-secret"}}
-	provider := &BindingProvider{Bindings: lookup, Credentials: credentials}
+	reader := &providerAttachmentReader{}
+	provider := &BindingProvider{Bindings: lookup, Credentials: credentials, Attachments: reader}
 	value := storage.ReplyOutbox{TenantID: binding.TenantID, ReplyTarget: storage.ReplyTarget{BindingID: binding.BindingID, ConversationKind: "direct", ReceiverID: "user-1"}}
 	first, err := provider.provider(context.Background(), value)
 	if err != nil {
@@ -771,6 +1093,9 @@ func TestBindingProviderUsesActiveWeComBindingAndCachesProvider(t *testing.T) {
 	}
 	if first != second || first.CorpID != "corp" || first.AgentID != "1" {
 		t.Fatalf("binding provider = %+v, cached=%t", first, first == second)
+	}
+	if first.Attachments != reader {
+		t.Fatalf("binding provider attachment reader = %#v", first.Attachments)
 	}
 	if lookup.calls != 2 || credentials.calls != 2 {
 		t.Fatalf("lookup=%d credentials=%d", lookup.calls, credentials.calls)
@@ -974,12 +1299,61 @@ func (roundTrip roundTripFunc) RoundTrip(request *http.Request) (*http.Response,
 	return roundTrip(request)
 }
 
+type fakeWeComMediaDownloader struct {
+	data    []byte
+	err     error
+	request MediaDownloadRequest
+	mediaID string
+}
+
+func (downloader *fakeWeComMediaDownloader) Download(ctx context.Context, request MediaDownloadRequest) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	downloader.request = request
+	downloader.mediaID = request.MediaID
+	if downloader.err != nil {
+		return nil, downloader.err
+	}
+	return io.NopCloser(bytes.NewReader(downloader.data)), nil
+}
+
+type providerAttachmentReader struct {
+	content   attachment.Content
+	err       error
+	tenantID  string
+	eventID   string
+	reference attachment.Reference
+	calls     int
+}
+
+func (reader *providerAttachmentReader) Load(_ context.Context, tenantID, eventID string, reference attachment.Reference) (attachment.Content, error) {
+	reader.calls++
+	reader.tenantID = tenantID
+	reader.eventID = eventID
+	reader.reference = reference
+	if reader.err != nil {
+		return attachment.Content{}, reader.err
+	}
+	return reader.content.Clone(), nil
+}
+
 func assertDeliveryErrorClass(t *testing.T, err error, class string, retryable bool) {
 	t.Helper()
 	var deliveryErr *outbox.DeliveryError
 	if !errors.As(err, &deliveryErr) || deliveryErr.Class != class || deliveryErr.Retryable != retryable {
 		t.Fatalf("delivery error = %v, want class %q retryable %t", err, class, retryable)
 	}
+}
+
+func wecomReplyReference(t *testing.T, kind attachment.Kind, contentType, name string, data []byte) attachment.Reference {
+	t.Helper()
+	digest := sha256.Sum256(data)
+	reference := attachment.Reference{ID: "attachment-" + string(kind), Kind: kind, MIMEType: contentType, Name: name, Size: int64(len(data)), SHA256: hex.EncodeToString(digest[:])}
+	if _, err := reference.Normalize(); err != nil {
+		t.Fatalf("attachment reference = %v", err)
+	}
+	return reference
 }
 
 func requestBodyWithTrailingXML(t *testing.T, request *http.Request) string {
@@ -1039,6 +1413,11 @@ func callbackVerificationRequest(token, path, ciphertext string) *http.Request {
 func callbackTestRequestAtPath(t *testing.T, path, messageID, userID, content string) *http.Request {
 	t.Helper()
 	plain := []byte("<xml><MsgId>" + messageID + "</MsgId><FromUserName>" + userID + "</FromUserName><MsgType>text</MsgType><AgentID>1</AgentID><Content>" + content + "</Content></xml>")
+	return callbackXMLRequestAtPath(t, path, plain)
+}
+
+func callbackXMLRequestAtPath(t *testing.T, path string, plain []byte) *http.Request {
+	t.Helper()
 	ciphertext := encryptCallbackTestPayload(t, bytes.Repeat([]byte{1}, 32), "receive", plain)
 	request := callbackVerificationRequest("token", path, ciphertext)
 	request.Method = http.MethodPost
@@ -1169,6 +1548,24 @@ func newDynamicVerifyFixture(t *testing.T) (*Handler, *verifyCandidateConsumer, 
 	}
 	ciphertext := encryptCallbackTestPayload(t, bytes.Repeat([]byte{1}, 32), "receive", []byte("dynamic callback"))
 	return handler, consumer, ciphertext, callbackVerificationRequest("token", "/wecom/callback/verify-route", ciphertext)
+}
+
+func staticTestTarget(t *testing.T) channels.RoutingTarget {
+	t.Helper()
+	app := dynamicTestApp(t, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	binding := dynamicTestBinding(t, "static-route", "env/wecom", app.AppID)
+	target, err := channels.ResolveCandidateRoutingTarget(
+		context.Background(),
+		&dynamicCandidateConsumer{binding: binding},
+		dynamicTenantRepository{value: dynamicTestTenant(t)},
+		dynamicAppRepository{value: app},
+		channels.CandidateBindingContext{Channel: channels.ChannelWeCom},
+		func(context.Context, channels.Binding) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return target
 }
 
 type dynamicCredentials struct{ values map[string]Credentials }

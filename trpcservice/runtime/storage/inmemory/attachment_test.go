@@ -59,3 +59,34 @@ func TestAttachmentStoreScopesBindsAndCleansUp(t *testing.T) {
 		t.Fatalf("orphaned cleanup = %d, %v", removed, err)
 	}
 }
+
+func TestDeleteSessionDoesNotUnbindAnotherTenantAttachment(t *testing.T) {
+	store := New()
+	t.Cleanup(func() { _ = store.Close() })
+	for _, tenantID := range []string{"tenant-a", "tenant-b"} {
+		if _, err := store.CreateSession(context.Background(), tenantID, "session-1", nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: tenantID, EventID: "event-shared", SessionID: "session-1", BindingID: "binding-1", ExternalMessageID: "external-1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data := []byte("tenant-b-data")
+	digest := sha256.Sum256(data)
+	reference, err := store.PutAttachment(context.Background(), "tenant-b", attachment.Upload{ID: "attachment-b", Kind: attachment.KindDocument, MIMEType: "application/pdf", Size: int64(len(data))}, strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reference.SHA256 != hex.EncodeToString(digest[:]) {
+		t.Fatalf("reference digest = %q", reference.SHA256)
+	}
+	if err := store.BindAttachments(context.Background(), "tenant-b", "event-shared", []attachment.Reference{reference}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteSession(context.Background(), "tenant-a", "session-1"); err != nil {
+		t.Fatal(err)
+	}
+	if content, err := store.Load(context.Background(), "tenant-b", "event-shared", reference); err != nil || string(content.Data) != string(data) {
+		t.Fatalf("tenant-b attachment after tenant-a delete = %q, %v", content.Data, err)
+	}
+}

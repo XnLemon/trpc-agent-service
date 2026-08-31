@@ -28,6 +28,38 @@ func TestResponsesModelInfoAndInputDefaults(t *testing.T) {
 	}
 }
 
+func TestResponsesModelMapsContentParts(t *testing.T) {
+	input := responsesInput(&trpcmodel.Request{Messages: []trpcmodel.Message{{
+		Role:    trpcmodel.RoleUser,
+		Content: "describe",
+		ContentParts: []trpcmodel.ContentPart{
+			{Type: trpcmodel.ContentTypeImage, Image: &trpcmodel.Image{Data: []byte{1, 2}, Detail: "auto", Format: "png"}},
+			{Type: trpcmodel.ContentTypeFile, File: &trpcmodel.File{Name: "brief.pdf", Data: []byte("pdf"), MimeType: "application/pdf"}},
+			{Type: trpcmodel.ContentTypeAudio, Audio: &trpcmodel.Audio{Data: []byte("mp3"), Format: "audio/mpeg"}},
+			{Type: trpcmodel.ContentTypeVideo, Video: &trpcmodel.Video{Data: []byte("mp4"), Format: "mp4"}},
+		},
+	}}})
+	if len(input) != 1 || len(input[0].Content) != 5 {
+		t.Fatalf("input = %#v", input)
+	}
+	parts := input[0].Content
+	if parts[0].Type != "input_text" || parts[0].Text != "describe" {
+		t.Fatalf("text part = %#v", parts[0])
+	}
+	if parts[1].Type != "input_image" || parts[1].ImageURL != "data:image/png;base64,AQI=" || parts[1].Detail != "auto" {
+		t.Fatalf("image part = %#v", parts[1])
+	}
+	if parts[2].Type != "input_file" || parts[2].Filename != "brief.pdf" || parts[2].FileData != "data:application/pdf;base64,cGRm" {
+		t.Fatalf("file part = %#v", parts[2])
+	}
+	if parts[3].Type != "input_audio" || parts[3].InputAudio == nil || parts[3].InputAudio.Data != "bXAz" || parts[3].InputAudio.Format != "mp3" {
+		t.Fatalf("audio part = %#v", parts[3])
+	}
+	if parts[4].Type != "input_text" || parts[4].Text != "[video attachment omitted: model video input is not enabled]" {
+		t.Fatalf("video fallback part = %#v", parts[4])
+	}
+}
+
 func TestResponsesModelGenerateContentRejectsInvalidArguments(t *testing.T) {
 	model := &responsesModel{}
 	if responses, err := model.GenerateContent(nil, &trpcmodel.Request{}); responses != nil || err == nil {
