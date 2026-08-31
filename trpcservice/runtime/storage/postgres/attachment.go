@@ -32,22 +32,34 @@ func (s *Store) PutAttachment(ctx context.Context, tenantID string, upload attac
 	if runtimestorage.ValidateTenant(tenantID) != nil || content == nil {
 		return attachment.Reference{}, runtimestorage.ErrInvalid
 	}
-	normalized, err := upload.Normalize(time.Now().UTC())
+	reference, data, expiresAt, err := prepareAttachment(upload, content)
 	if err != nil {
 		return attachment.Reference{}, err
 	}
+	return s.persistAttachment(ctx, tenantID, reference, data, expiresAt)
+}
+
+func prepareAttachment(upload attachment.Upload, content io.Reader) (attachment.Reference, []byte, time.Time, error) {
+	normalized, err := upload.Normalize(time.Now().UTC())
+	if err != nil {
+		return attachment.Reference{}, nil, time.Time{}, err
+	}
 	data, err := io.ReadAll(io.LimitReader(content, normalized.Size+1))
 	if err != nil {
-		return attachment.Reference{}, runtimestorage.ErrStorage
+		return attachment.Reference{}, nil, time.Time{}, runtimestorage.ErrStorage
 	}
 	if int64(len(data)) != normalized.Size {
-		return attachment.Reference{}, attachment.ErrInvalid
+		return attachment.Reference{}, nil, time.Time{}, attachment.ErrInvalid
 	}
 	digest := sha256.Sum256(data)
 	reference := attachment.Reference{ID: normalized.ID, Kind: normalized.Kind, MIMEType: normalized.MIMEType, Name: normalized.Name, Size: normalized.Size, SHA256: hex.EncodeToString(digest[:]), Provider: normalized.Provider, ProviderID: normalized.ProviderID}
 	if _, err := reference.Normalize(); err != nil {
-		return attachment.Reference{}, err
+		return attachment.Reference{}, nil, time.Time{}, err
 	}
+	return reference, data, normalized.ExpiresAt, nil
+}
+
+func (s *Store) persistAttachment(ctx context.Context, tenantID string, reference attachment.Reference, data []byte, expiresAt time.Time) (attachment.Reference, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return attachment.Reference{}, runtimestorage.ErrStorage
@@ -61,39 +73,55 @@ func (s *Store) PutAttachment(ctx context.Context, tenantID string, upload attac
 		if stored.reference != reference {
 			return attachment.Reference{}, runtimestorage.ErrConflict
 		}
-		if err := tx.Commit(); err != nil {
-			return attachment.Reference{}, runtimestorage.ErrStorage
-		}
-		return stored.reference, nil
+		return commitAttachment(tx, stored.reference)
 	}
+	if err := ensureAttachmentObject(ctx, tx, tenantID, reference, data); err != nil {
+		return attachment.Reference{}, err
+	}
+	if err := insertAttachmentMetadata(ctx, tx, tenantID, reference, expiresAt); err != nil {
+		return attachment.Reference{}, err
+	}
+	return commitAttachment(tx, reference)
+}
+
+func ensureAttachmentObject(ctx context.Context, tx *sql.Tx, tenantID string, reference attachment.Reference, data []byte) error {
 	if _, err := tx.ExecContext(ctx, "INSERT INTO public.runtime_object (tenant_id,object_key,content_type,content,size,etag) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id,object_key) DO NOTHING", tenantID, reference.ID, reference.MIMEType, data, reference.Size, reference.SHA256); err != nil {
-		return attachment.Reference{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	var objectType, objectETag string
 	var objectSize int64
 	if err := tx.QueryRowContext(ctx, "SELECT content_type,size,etag FROM public.runtime_object WHERE tenant_id=$1 AND object_key=$2", tenantID, reference.ID).Scan(&objectType, &objectSize, &objectETag); err != nil {
-		return attachment.Reference{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if objectType != reference.MIMEType || objectSize != reference.Size || objectETag != reference.SHA256 {
-		return attachment.Reference{}, runtimestorage.ErrConflict
+		return runtimestorage.ErrConflict
 	}
-	result, err := tx.ExecContext(ctx, "INSERT INTO public.runtime_attachment (tenant_id,attachment_id,kind,mime_type,name,size,sha256,provider,provider_id,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (tenant_id,attachment_id) DO NOTHING", tenantID, reference.ID, reference.Kind, reference.MIMEType, reference.Name, reference.Size, reference.SHA256, reference.Provider, reference.ProviderID, normalized.ExpiresAt)
+	return nil
+}
+
+func insertAttachmentMetadata(ctx context.Context, tx *sql.Tx, tenantID string, reference attachment.Reference, expiresAt time.Time) error {
+	result, err := tx.ExecContext(ctx, "INSERT INTO public.runtime_attachment (tenant_id,attachment_id,kind,mime_type,name,size,sha256,provider,provider_id,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (tenant_id,attachment_id) DO NOTHING", tenantID, reference.ID, reference.Kind, reference.MIMEType, reference.Name, reference.Size, reference.SHA256, reference.Provider, reference.ProviderID, expiresAt)
 	if err != nil {
-		return attachment.Reference{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	created, err := result.RowsAffected()
 	if err != nil {
-		return attachment.Reference{}, runtimestorage.ErrStorage
+		return runtimestorage.ErrStorage
 	}
-	if created == 0 {
-		stored, found, err := loadAttachment(ctx, tx, tenantID, reference.ID, true)
-		if err != nil {
-			return attachment.Reference{}, err
-		}
-		if !found || stored.reference != reference {
-			return attachment.Reference{}, runtimestorage.ErrConflict
-		}
+	if created != 0 {
+		return nil
 	}
+	stored, found, err := loadAttachment(ctx, tx, tenantID, reference.ID, true)
+	if err != nil {
+		return err
+	}
+	if !found || stored.reference != reference {
+		return runtimestorage.ErrConflict
+	}
+	return nil
+}
+
+func commitAttachment(tx *sql.Tx, reference attachment.Reference) (attachment.Reference, error) {
 	if err := tx.Commit(); err != nil {
 		return attachment.Reference{}, runtimestorage.ErrStorage
 	}
