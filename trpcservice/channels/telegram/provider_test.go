@@ -168,6 +168,80 @@ func TestProviderFallsBackForUnsupportedOrUnavailableMedia(t *testing.T) {
 	}
 }
 
+func TestProviderImageWithoutReaderFallsBackToText(t *testing.T) {
+	imageData := []byte("png")
+	imageReference := providerAttachmentReference(t, attachment.KindImage, "image/png", "chart.png", imageData)
+	botClient := &providerBot{message: &models.Message{ID: 11}}
+	provider, err := NewProvider(botClient, 9, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := provider.Deliver(context.Background(), runtimestorage.ReplyOutbox{
+		TenantID: "tenant-a", EventID: "event-image", ReplyID: "reply-image", SegmentIndex: 0, SegmentCount: 1,
+		Kind: runtimestorage.ReplyKindImage, Payload: "caption", Attachment: imageReference, Fallback: "[image attachment: chart.png]",
+	})
+	if err != nil || receipt != "11" || botClient.photoCalls != 0 || botClient.calls != 1 || botClient.params.Text != "[image attachment: chart.png]" {
+		t.Fatalf("fallback receipt=%q text=%d photo=%d params=%+v err=%v", receipt, botClient.calls, botClient.photoCalls, botClient.params, err)
+	}
+}
+
+func TestProviderMissingAttachmentFallsBackToText(t *testing.T) {
+	imageData := []byte("png")
+	imageReference := providerAttachmentReference(t, attachment.KindImage, "image/png", "chart.png", imageData)
+	botClient := &providerBot{message: &models.Message{ID: 12}}
+	reader := &providerAttachmentReader{err: runtimestorage.ErrNotFound}
+	provider, err := NewProvider(botClient, 9, 0, WithAttachmentReader(reader))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := provider.Deliver(context.Background(), runtimestorage.ReplyOutbox{
+		TenantID: "tenant-a", EventID: "event-image", ReplyID: "reply-missing", SegmentIndex: 0, SegmentCount: 1,
+		Kind: runtimestorage.ReplyKindImage, Payload: "caption", Attachment: imageReference, Fallback: "[image attachment: chart.png]",
+	})
+	if err != nil || receipt != "12" || botClient.calls != 1 || botClient.photoCalls != 0 {
+		t.Fatalf("missing fallback receipt=%q text=%d photo=%d err=%v", receipt, botClient.calls, botClient.photoCalls, err)
+	}
+}
+
+func TestProviderTamperedAttachmentFallsBackToText(t *testing.T) {
+	imageData := []byte("png")
+	imageReference := providerAttachmentReference(t, attachment.KindImage, "image/png", "chart.png", imageData)
+	botClient := &providerBot{message: &models.Message{ID: 13}}
+	reader := &providerAttachmentReader{content: attachment.Content{Data: []byte("tampered")}}
+	provider, err := NewProvider(botClient, 9, 0, WithAttachmentReader(reader))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := provider.Deliver(context.Background(), runtimestorage.ReplyOutbox{
+		TenantID: "tenant-a", EventID: "event-image", ReplyID: "reply-tampered", SegmentIndex: 0, SegmentCount: 1,
+		Kind: runtimestorage.ReplyKindImage, Payload: "caption", Attachment: imageReference, Fallback: "[image attachment: chart.png]",
+	})
+	if err != nil || receipt != "13" || botClient.calls != 1 || botClient.photoCalls != 0 {
+		t.Fatalf("tampered fallback receipt=%q text=%d photo=%d err=%v", receipt, botClient.calls, botClient.photoCalls, err)
+	}
+}
+
+func TestProviderDocumentEmptyNameUsesReferenceID(t *testing.T) {
+	data := []byte("pdf")
+	reference := providerAttachmentReference(t, attachment.KindDocument, "application/pdf", "", data)
+	botClient := &providerBot{message: &models.Message{ID: 14}}
+	provider, err := NewProvider(botClient, 9, 0, WithAttachmentReader(&providerAttachmentReader{content: attachment.Content{Data: data}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.Deliver(context.Background(), runtimestorage.ReplyOutbox{
+		TenantID: "tenant-a", EventID: "event-doc", ReplyID: "reply-doc-empty-name", SegmentIndex: 0, SegmentCount: 1,
+		Kind: runtimestorage.ReplyKindDocument, Payload: "caption", Attachment: reference, Fallback: "[document attachment]",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upload, ok := botClient.documentParams.Document.(*models.InputFileUpload)
+	if !ok || upload.Filename != reference.ID {
+		t.Fatalf("document upload = %#v", botClient.documentParams.Document)
+	}
+}
+
 func TestProviderPreservesAttachmentCancellation(t *testing.T) {
 	data := []byte("png")
 	reference := providerAttachmentReference(t, attachment.KindImage, "image/png", "chart.png", data)
@@ -183,6 +257,47 @@ func TestProviderPreservesAttachmentCancellation(t *testing.T) {
 	var deliveryErr *outbox.DeliveryError
 	if !errors.As(err, &deliveryErr) || deliveryErr.Class != "canceled" || !deliveryErr.Retryable {
 		t.Fatalf("canceled attachment = %#v", err)
+	}
+}
+
+func TestProviderClassifiesMediaTimeoutAndInvalidContract(t *testing.T) {
+	data := []byte("png")
+	reference := providerAttachmentReference(t, attachment.KindImage, "image/png", "chart.png", data)
+	timeoutProvider, err := NewProvider(&providerBot{message: &models.Message{ID: 1}}, 9, 0, WithAttachmentReader(&providerAttachmentReader{err: context.DeadlineExceeded}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = timeoutProvider.Deliver(context.Background(), runtimestorage.ReplyOutbox{
+		TenantID: "tenant-a", EventID: "event-image", ReplyID: "reply-timeout", SegmentIndex: 0, SegmentCount: 1,
+		Kind: runtimestorage.ReplyKindImage, Payload: "caption", Attachment: reference, Fallback: "[image attachment: chart.png]",
+	})
+	var deliveryErr *outbox.DeliveryError
+	if !errors.As(err, &deliveryErr) || deliveryErr.Class != "timeout" || !deliveryErr.Retryable {
+		t.Fatalf("timeout attachment = %#v", err)
+	}
+
+	sendTimeout, err := NewProvider(&providerBot{message: &models.Message{ID: 1}, err: context.DeadlineExceeded}, 9, 0, WithAttachmentReader(&providerAttachmentReader{content: attachment.Content{Data: data}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sendTimeout.Deliver(context.Background(), runtimestorage.ReplyOutbox{
+		TenantID: "tenant-a", EventID: "event-image", ReplyID: "reply-send-timeout", SegmentIndex: 0, SegmentCount: 1,
+		Kind: runtimestorage.ReplyKindImage, Payload: "caption", Attachment: reference, Fallback: "[image attachment: chart.png]",
+	})
+	if !errors.As(err, &deliveryErr) || deliveryErr.Class != "timeout" || !deliveryErr.Retryable {
+		t.Fatalf("send timeout = %#v", err)
+	}
+
+	invalidProvider, err := NewProvider(&providerBot{message: &models.Message{ID: 1}}, 9, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = invalidProvider.Deliver(context.Background(), runtimestorage.ReplyOutbox{
+		TenantID: "tenant-a", EventID: "event-image", ReplyID: "reply-invalid", SegmentIndex: 0, SegmentCount: 1,
+		Kind: runtimestorage.ReplyKindImage, Payload: "caption", Fallback: "[image attachment]",
+	})
+	if !errors.As(err, &deliveryErr) || deliveryErr.Class != "invalid" || deliveryErr.Retryable {
+		t.Fatalf("invalid media contract = %#v", err)
 	}
 }
 

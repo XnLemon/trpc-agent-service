@@ -22,6 +22,22 @@ func TestInboundMessageNormalizesAttachmentOnlyInput(t *testing.T) {
 	}
 }
 
+func TestInboundMessageRejectsAttachmentBoundaries(t *testing.T) {
+	reference := testAttachmentReference(t, attachment.KindImage, "image/png", []byte("image"))
+	attachments := make([]attachment.Reference, maxInboundAttachments+1)
+	for index := range attachments {
+		attachments[index] = reference
+	}
+	if _, err := (InboundMessage{Attachments: attachments, ExternalMessageID: "message", ExternalUserID: "user", ConversationKind: ConversationDirect, ExternalPeerID: "peer"}).Normalize(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("too many attachments error = %v", err)
+	}
+	invalid := reference
+	invalid.ID = ""
+	if _, err := (InboundMessage{Attachments: []attachment.Reference{invalid}, ExternalMessageID: "message", ExternalUserID: "user", ConversationKind: ConversationDirect, ExternalPeerID: "peer"}).Normalize(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid attachment error = %v", err)
+	}
+}
+
 func TestBuildUserMessageUsesVerifiedContentParts(t *testing.T) {
 	data := []byte("image")
 	reference := testAttachmentReference(t, attachment.KindImage, "image/png", data)
@@ -34,6 +50,28 @@ func TestBuildUserMessageUsesVerifiedContentParts(t *testing.T) {
 	}
 	if message.Content != "describe" || len(message.ContentParts) != 1 || message.ContentParts[0].Type != trpcmodel.ContentTypeImage || string(message.ContentParts[0].Image.Data) != string(data) {
 		t.Fatalf("message = %+v", message)
+	}
+}
+
+func TestContentPartCoversAttachmentFamilies(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		ref  attachment.Reference
+		want trpcmodel.ContentType
+	}{
+		{name: "audio", ref: testAttachmentReference(t, attachment.KindAudio, "audio/mpeg", []byte("mp3")), want: trpcmodel.ContentTypeAudio},
+		{name: "video", ref: testAttachmentReference(t, attachment.KindVideo, "video/mp4", []byte("mp4")), want: trpcmodel.ContentTypeVideo},
+		{name: "document", ref: testAttachmentReference(t, attachment.KindDocument, "application/pdf", []byte("pdf")), want: trpcmodel.ContentTypeFile},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			part := contentPart(test.ref, attachment.Content{Data: []byte("content")})
+			if part.Type != test.want {
+				t.Fatalf("part type = %q, want %q", part.Type, test.want)
+			}
+		})
+	}
+	if got := mediaSubtype("application"); got != "application" {
+		t.Fatalf("mediaSubtype without slash = %q", got)
 	}
 }
 

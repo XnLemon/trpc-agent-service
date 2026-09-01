@@ -60,6 +60,71 @@ func TestResponsesModelMapsContentParts(t *testing.T) {
 	}
 }
 
+func TestResponsesModelMapsContentPartFallbacksAndReferences(t *testing.T) {
+	parts := responsesContent(trpcmodel.Message{ContentParts: []trpcmodel.ContentPart{
+		{Type: trpcmodel.ContentTypeImage, Image: &trpcmodel.Image{URL: " https://files.example/image.png ", Detail: "low"}},
+		{Type: trpcmodel.ContentTypeImage},
+		{Type: trpcmodel.ContentTypeFile, File: &trpcmodel.File{FileID: " file-123 "}},
+		{Type: trpcmodel.ContentTypeFile, File: &trpcmodel.File{URL: " https://files.example/brief.pdf "}},
+		{Type: trpcmodel.ContentTypeFile, File: &trpcmodel.File{Data: []byte("raw")}},
+		{Type: trpcmodel.ContentTypeFile},
+		{Type: trpcmodel.ContentTypeAudio, Audio: &trpcmodel.Audio{Data: []byte("wav"), Format: "audio/x-wav"}},
+		{Type: trpcmodel.ContentTypeAudio, Audio: &trpcmodel.Audio{Data: []byte("ogg"), Format: "audio/ogg"}},
+		{Type: "unsupported"},
+	}})
+	if len(parts) != 8 {
+		t.Fatalf("parts = %#v", parts)
+	}
+	assertResponsesPart(t, parts[0], responsesPartWant{typ: "input_image", imageURL: "https://files.example/image.png", detail: "low"})
+	assertResponsesPart(t, parts[1], responsesPartWant{typ: "input_text", text: "[image attachment omitted: image data is missing]"})
+	assertResponsesPart(t, parts[2], responsesPartWant{typ: "input_file", fileID: "file-123"})
+	assertResponsesPart(t, parts[3], responsesPartWant{typ: "input_file", fileURL: "https://files.example/brief.pdf"})
+	assertResponsesPart(t, parts[4], responsesPartWant{typ: "input_file", fileData: "data:application/octet-stream;base64,cmF3", filename: "attachment"})
+	assertResponsesPart(t, parts[5], responsesPartWant{typ: "input_text", text: "[file attachment omitted: file data is missing]"})
+	assertResponsesPart(t, parts[6], responsesPartWant{typ: "input_audio", audioFormat: "wav"})
+	assertResponsesPart(t, parts[7], responsesPartWant{typ: "input_text", text: "[audio attachment omitted: unsupported audio format]"})
+
+	empty := responsesContent(trpcmodel.Message{ContentParts: []trpcmodel.ContentPart{{Type: "unsupported"}}})
+	if len(empty) != 1 || empty[0].Type != "input_text" || empty[0].Text != "" {
+		t.Fatalf("empty content fallback = %#v", empty)
+	}
+}
+
+type responsesPartWant struct {
+	typ, text, imageURL, detail, fileID, fileURL, fileData, filename, audioFormat string
+}
+
+func assertResponsesPart(t *testing.T, got responsesContentPart, want responsesPartWant) {
+	t.Helper()
+	if got.Type != want.typ || got.Text != want.text || got.ImageURL != want.imageURL || got.Detail != want.detail || got.FileID != want.fileID || got.FileURL != want.fileURL || got.FileData != want.fileData || got.Filename != want.filename {
+		t.Fatalf("content part = %#v, want %#v", got, want)
+	}
+	if want.audioFormat == "" && got.InputAudio != nil {
+		t.Fatalf("unexpected audio payload = %#v", got.InputAudio)
+	}
+	if want.audioFormat != "" && (got.InputAudio == nil || got.InputAudio.Format != want.audioFormat) {
+		t.Fatalf("audio part = %#v, want format %q", got, want.audioFormat)
+	}
+}
+
+func TestResponsesAudioFormatVariants(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  string
+	}{
+		{input: "mpeg", want: "mp3"},
+		{input: "audio/mpga", want: "mp3"},
+		{input: "wave", want: "wav"},
+		{input: "wav", want: "wav"},
+		{input: "flac", want: ""},
+		{input: "", want: ""},
+	} {
+		if got := responsesAudioFormat(test.input); got != test.want {
+			t.Fatalf("responsesAudioFormat(%q) = %q, want %q", test.input, got, test.want)
+		}
+	}
+}
+
 func TestResponsesModelGenerateContentRejectsInvalidArguments(t *testing.T) {
 	model := &responsesModel{}
 	if responses, err := model.GenerateContent(nil, &trpcmodel.Request{}); responses != nil || err == nil {

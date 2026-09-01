@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -198,9 +199,13 @@ func TestNewRejectsNonTelegramTargetAndInvalidRuntimeOptions(t *testing.T) {
 
 	target := newTrustedTarget(t, channels.ChannelTelegram, "options", "12345")
 	for name, config := range map[string]Config{
-		"negative worker": {BotToken: "token", Target: target, Dispatcher: &dispatchStub{}, Workers: -1},
-		"short poll":      {BotToken: "token", Target: target, Dispatcher: &dispatchStub{}, PollTimeout: time.Second},
-		"http api":        {BotToken: "token", Target: target, Dispatcher: &dispatchStub{}, APIBaseURL: "http://insecure.example"},
+		"negative worker":           {BotToken: "token", Target: target, Dispatcher: &dispatchStub{}, Workers: -1},
+		"short poll":                {BotToken: "token", Target: target, Dispatcher: &dispatchStub{}, PollTimeout: time.Second},
+		"http api":                  {BotToken: "token", Target: target, Dispatcher: &dispatchStub{}, APIBaseURL: "http://insecure.example"},
+		"negative attachment bytes": {BotToken: "token", Target: target, Dispatcher: &dispatchStub{}, MaxAttachmentBytes: -1},
+		"oversized attachment bytes": {
+			BotToken: "token", Target: target, Dispatcher: &dispatchStub{}, MaxAttachmentBytes: maximumAttachmentBytes + 1,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalid) {
@@ -642,6 +647,139 @@ func TestNativeMediaFailuresAreRedactedAndCancellationPreserved(t *testing.T) {
 	}
 }
 
+func TestTelegramMediaDownloaderFetchesBoundedHTTPSFile(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/file/photos/chart.jpg" {
+			t.Fatalf("download path = %s", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, "telegram-bytes")
+	}))
+	defer server.Close()
+	client := &fakeTelegramFileClient{file: &models.File{FileID: "file-1", FilePath: "photos/chart.jpg"}, link: server.URL + "/file/photos/chart.jpg"}
+	downloader := telegramMediaDownloader{client: client, httpClient: server.Client(), maximum: 64}
+	body, err := downloader.Download(context.Background(), "file-1")
+	if err != nil {
+		t.Fatalf("Download = %v", err)
+	}
+	data, err := io.ReadAll(body)
+	closeErr := body.Close()
+	if err != nil || closeErr != nil || string(data) != "telegram-bytes" {
+		t.Fatalf("download body = %q read=%v close=%v", data, err, closeErr)
+	}
+	if client.fileID != "file-1" {
+		t.Fatalf("GetFile id = %q", client.fileID)
+	}
+}
+
+func TestTelegramMediaDownloaderRejectsUnsafeOrUnavailableFiles(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/status":
+			http.Error(w, "nope", http.StatusBadGateway)
+		case "/declared":
+			w.Header().Set("Content-Length", "99")
+			_, _ = io.WriteString(w, "x")
+		case "/large":
+			_, _ = io.WriteString(w, "123456")
+		default:
+			_, _ = io.WriteString(w, "ok")
+		}
+	}))
+	defer server.Close()
+
+	for _, test := range []struct {
+		name       string
+		ctx        context.Context
+		downloader telegramMediaDownloader
+		fileID     string
+		want       error
+	}{
+		{name: "nil context", downloader: telegramMediaDownloader{client: &fakeTelegramFileClient{}, httpClient: server.Client(), maximum: 8}, fileID: "file", want: ErrAttachment},
+		{name: "missing client", ctx: context.Background(), downloader: telegramMediaDownloader{httpClient: server.Client(), maximum: 8}, fileID: "file", want: ErrAttachment},
+		{name: "empty file id", ctx: context.Background(), downloader: telegramMediaDownloader{client: &fakeTelegramFileClient{}, httpClient: server.Client(), maximum: 8}, want: ErrAttachment},
+		{name: "zero maximum", ctx: context.Background(), downloader: telegramMediaDownloader{client: &fakeTelegramFileClient{}, httpClient: server.Client()}, fileID: "file", want: ErrAttachment},
+		{name: "get file error", ctx: context.Background(), downloader: telegramMediaDownloader{client: &fakeTelegramFileClient{err: errors.New("secret token")}, httpClient: server.Client(), maximum: 8}, fileID: "file", want: ErrAttachment},
+		{name: "missing file path", ctx: context.Background(), downloader: telegramMediaDownloader{client: &fakeTelegramFileClient{file: &models.File{FileID: "file"}}, httpClient: server.Client(), maximum: 8}, fileID: "file", want: ErrAttachment},
+		{name: "plain http URL", ctx: context.Background(), downloader: telegramMediaDownloader{client: &fakeTelegramFileClient{file: &models.File{FilePath: "file"}, link: "http://example.com/file"}, httpClient: server.Client(), maximum: 8}, fileID: "file", want: ErrAttachment},
+		{name: "URL with query", ctx: context.Background(), downloader: telegramMediaDownloader{client: &fakeTelegramFileClient{file: &models.File{FilePath: "file"}, link: server.URL + "/file?token=secret"}, httpClient: server.Client(), maximum: 8}, fileID: "file", want: ErrAttachment},
+		{name: "transport error", ctx: context.Background(), downloader: telegramMediaDownloader{client: &fakeTelegramFileClient{file: &models.File{FilePath: "file"}, link: server.URL + "/file"}, httpClient: &http.Client{Transport: telegramRoundTripFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("transport secret") })}, maximum: 8}, fileID: "file", want: ErrAttachment},
+		{name: "provider status", ctx: context.Background(), downloader: telegramMediaDownloader{client: &fakeTelegramFileClient{file: &models.File{FilePath: "file"}, link: server.URL + "/status"}, httpClient: server.Client(), maximum: 8}, fileID: "file", want: ErrAttachment},
+		{name: "declared size", ctx: context.Background(), downloader: telegramMediaDownloader{client: &fakeTelegramFileClient{file: &models.File{FilePath: "file"}, link: server.URL + "/declared"}, httpClient: server.Client(), maximum: 8}, fileID: "file", want: ErrAttachment},
+		{name: "body too large", ctx: context.Background(), downloader: telegramMediaDownloader{client: &fakeTelegramFileClient{file: &models.File{FilePath: "file"}, link: server.URL + "/large"}, httpClient: server.Client(), maximum: 5}, fileID: "file", want: ErrAttachment},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body, err := test.downloader.Download(test.ctx, test.fileID)
+			if body != nil {
+				_ = body.Close()
+			}
+			if !errors.Is(err, test.want) || strings.Contains(fmt.Sprint(err), "secret") {
+				t.Fatalf("Download error = %v, want %v", err, test.want)
+			}
+		})
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	downloader := telegramMediaDownloader{client: &fakeTelegramFileClient{file: &models.File{FilePath: "file"}, link: server.URL + "/file"}, httpClient: server.Client(), maximum: 8}
+	if _, err := downloader.Download(canceled, "file"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Download = %v", err)
+	}
+	if _, err := readTelegramMediaResponse(context.Background(), nil, 1); !errors.Is(err, ErrAttachment) {
+		t.Fatalf("nil response = %v", err)
+	}
+	if _, err := readTelegramMediaResponse(context.Background(), &http.Response{}, 1); !errors.Is(err, ErrAttachment) {
+		t.Fatalf("nil body response = %v", err)
+	}
+}
+
+func TestNativeAttachmentsClassifyTelegramMediaFamilies(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		message *models.Message
+		want    telegramAttachment
+	}{
+		{name: "nil message"},
+		{name: "largest photo", message: &models.Message{Photo: []models.PhotoSize{{FileID: ""}, {FileID: "small", FileSize: 1, Width: 10, Height: 10}, {FileID: "large", FileSize: 2, Width: 2, Height: 2}}}, want: telegramAttachment{fileID: "large", kind: attachment.KindImage, mimeType: "image/jpeg", name: "large.jpg"}},
+		{name: "video default mime and safe name", message: &models.Message{Video: &models.Video{FileID: "video-1", FileName: "bad/name", MimeType: "application/octet-stream"}}, want: telegramAttachment{fileID: "video-1", kind: attachment.KindVideo, mimeType: "video/mp4", name: "video-1.mp4"}},
+		{name: "animation keeps mime", message: &models.Message{Animation: &models.Animation{FileID: "anim-1", FileName: "clip.mp4", MimeType: "video/mp4"}}, want: telegramAttachment{fileID: "anim-1", kind: attachment.KindVideo, mimeType: "video/mp4", name: "clip.mp4"}},
+		{name: "audio default suffix", message: &models.Message{Audio: &models.Audio{FileID: "audio-1", MimeType: "audio/mpeg"}}, want: telegramAttachment{fileID: "audio-1", kind: attachment.KindAudio, mimeType: "audio/mpeg", name: "audio-1.mp3"}},
+		{name: "voice default", message: &models.Message{Voice: &models.Voice{FileID: "voice-1", MimeType: "audio/ogg"}}, want: telegramAttachment{fileID: "voice-1", kind: attachment.KindAudio, mimeType: "audio/ogg", name: "voice-1.ogg"}},
+		{name: "document image", message: &models.Message{Document: &models.Document{FileID: "doc-image", FileName: "scan.png", MimeType: "image/png"}}, want: telegramAttachment{fileID: "doc-image", kind: attachment.KindImage, mimeType: "image/png", name: "scan.png"}},
+		{name: "document video", message: &models.Message{Document: &models.Document{FileID: "doc-video", FileName: "clip.mov", MimeType: "video/quicktime"}}, want: telegramAttachment{fileID: "doc-video", kind: attachment.KindVideo, mimeType: "video/quicktime", name: "clip.mov"}},
+		{name: "document audio", message: &models.Message{Document: &models.Document{FileID: "doc-audio", FileName: "voice.mp3", MimeType: "audio/mpeg"}}, want: telegramAttachment{fileID: "doc-audio", kind: attachment.KindAudio, mimeType: "audio/mpeg", name: "voice.mp3"}},
+		{name: "document invalid MIME fallback", message: &models.Message{Document: &models.Document{FileID: "doc-1", FileName: "bad/name", MimeType: "image/png; charset=utf-8"}}, want: telegramAttachment{fileID: "doc-1", kind: attachment.KindDocument, mimeType: "application/octet-stream", name: "doc-1"}},
+		{name: "video note", message: &models.Message{VideoNote: &models.VideoNote{FileID: "round-1"}}, want: telegramAttachment{fileID: "round-1", kind: attachment.KindVideo, mimeType: "video/mp4", name: "round-1.mp4"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := nativeAttachments(test.message)
+			if test.want == (telegramAttachment{}) {
+				if got != nil {
+					t.Fatalf("nativeAttachments = %+v, want nil", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0] != test.want {
+				t.Fatalf("nativeAttachments = %+v, want %+v", got, test.want)
+			}
+		})
+	}
+	if got := nativeAttachments(&models.Message{Document: &models.Document{FileID: ""}}); got != nil {
+		t.Fatalf("empty document file ID = %+v", got)
+	}
+	if kindSupportsMIME(attachment.Kind("unknown"), "application/octet-stream") {
+		t.Fatal("unknown attachment kind matched MIME")
+	}
+	if kindSupportsMIME(attachment.KindDocument, "image/png") {
+		t.Fatal("document attachment accepted image MIME")
+	}
+	if got := mediaMIME(attachment.KindAudio, "application/octet-stream"); got != "audio/mpeg" {
+		t.Fatalf("audio fallback MIME = %q", got)
+	}
+	if got := mediaMIME(attachment.KindImage, "application/octet-stream"); got != "application/octet-stream" {
+		t.Fatalf("image fallback MIME = %q", got)
+	}
+}
+
 type fakeMediaDownloader struct {
 	data []byte
 	err  error
@@ -666,6 +804,34 @@ func mediaUpdate(updateID int64, fileID string) *models.Update {
 		ID: int(updateID), From: &models.User{ID: 42}, Chat: models.Chat{ID: 100, Type: models.ChatTypePrivate},
 		Video: &models.Video{FileID: fileID},
 	}}
+}
+
+type fakeTelegramFileClient struct {
+	file   *models.File
+	err    error
+	link   string
+	fileID string
+}
+
+func (client *fakeTelegramFileClient) GetFile(ctx context.Context, params *bot.GetFileParams) (*models.File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	client.fileID = params.FileID
+	if client.err != nil {
+		return nil, client.err
+	}
+	return client.file, nil
+}
+
+func (client *fakeTelegramFileClient) FileDownloadLink(*models.File) string {
+	return client.link
+}
+
+type telegramRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (roundTrip telegramRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
 }
 
 func TestDispatchAndSendFailuresAreRedacted(t *testing.T) {

@@ -462,6 +462,291 @@ func TestHTTPMediaDownloaderRejectsInvalidOrProviderErrorResponses(t *testing.T)
 	}
 }
 
+func TestWeComMediaHelpersCoverFamiliesAndFallbacks(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		message inboundXML
+		want    wecomAttachment
+	}{
+		{name: "file", message: inboundXML{MsgType: " file ", MediaID: " media-file ", FileName: "bad/name"}, want: wecomAttachment{mediaID: "media-file", kind: attachment.KindDocument, mimeType: wecomDefaultFileMIME, name: "media-file"}},
+		{name: "voice", message: inboundXML{MsgType: "voice", MediaID: "media-voice", Format: "speex"}, want: wecomAttachment{mediaID: "media-voice", kind: attachment.KindAudio, mimeType: "audio/speex", name: "media-voice.speex"}},
+		{name: "video", message: inboundXML{MsgType: "video", MediaID: "media-video"}, want: wecomAttachment{mediaID: "media-video", kind: attachment.KindVideo, mimeType: wecomDefaultVideoMIME, name: "media-video.mp4"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := wecomAttachmentDescriptor(test.message)
+			if err != nil || got != test.want {
+				t.Fatalf("descriptor = %+v, %v; want %+v", got, err, test.want)
+			}
+		})
+	}
+	if _, err := wecomAttachmentDescriptor(inboundXML{MsgType: "location", MediaID: "media"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unsupported descriptor = %v", err)
+	}
+	for _, test := range []struct {
+		format, mime, suffix string
+	}{
+		{format: "mp3", mime: "audio/mpeg", suffix: ".mp3"},
+		{format: "wav", mime: "audio/wav", suffix: ".wav"},
+		{format: "m4a", mime: "audio/mp4", suffix: ".m4a"},
+		{format: "ogg", mime: "audio/ogg", suffix: ".ogg"},
+		{format: "unknown", mime: wecomDefaultVoiceMIME, suffix: wecomDefaultVoiceSuffix},
+	} {
+		if mime, suffix := voiceMIME(test.format); mime != test.mime || suffix != test.suffix {
+			t.Fatalf("voiceMIME(%q) = %q/%q, want %q/%q", test.format, mime, suffix, test.mime, test.suffix)
+		}
+	}
+	if got := mediaName(" report.pdf ", "media-file", ".bin"); got != "report.pdf" {
+		t.Fatalf("mediaName kept name = %q", got)
+	}
+	long := strings.Repeat("x", wecomMediaContentRunes)
+	if got := wecomMediaContent(attachment.Reference{Kind: attachment.KindDocument, Name: long}); got != "[wecom document attachment]" {
+		t.Fatalf("long media content = %q", got)
+	}
+	if got, err := normalizeAttachmentBytes(1); err != nil || got != 1 {
+		t.Fatalf("normalizeAttachmentBytes = %d, %v", got, err)
+	}
+	if _, err := normalizeAttachmentBytes(maximumAttachmentBytes + 1); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("oversized attachment limit = %v", err)
+	}
+}
+
+func TestHTTPMediaDownloaderValidatesRequestAndResponseBoundaries(t *testing.T) {
+	normalized, err := normalizeMediaDownloadRequest(MediaDownloadRequest{
+		TenantID: " tenant-a ", BindingID: " binding-1 ", CorpID: " corp ", AgentID: " 1 ", AppSecret: " secret ",
+		MediaID: " media-1 ", Kind: attachment.KindDocument, MIMEType: " APPLICATION/PDF ",
+	})
+	if err != nil || normalized.TenantID != "tenant-a" || normalized.MIMEType != "application/pdf" || normalized.MaximumBytes != defaultAttachmentBytes {
+		t.Fatalf("normalized request = %+v, %v", normalized, err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*MediaDownloadRequest)
+	}{
+		{name: "missing tenant", mutate: func(request *MediaDownloadRequest) { request.TenantID = "" }},
+		{name: "invalid kind", mutate: func(request *MediaDownloadRequest) { request.Kind = "sticker" }},
+		{name: "control value", mutate: func(request *MediaDownloadRequest) { request.MediaID = "bad\nmedia" }},
+		{name: "oversized maximum", mutate: func(request *MediaDownloadRequest) { request.MaximumBytes = maximumAttachmentBytes + 1 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := normalized
+			test.mutate(&request)
+			if _, err := normalizeMediaDownloadRequest(request); !errors.Is(err, ErrAttachment) {
+				t.Fatalf("normalizeMediaDownloadRequest accepted %+v: %v", request, err)
+			}
+		})
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (&HTTPMediaDownloader{}).Download(canceled, normalized); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled download = %v", err)
+	}
+	if _, err := readWeComMediaResponse(context.Background(), nil, normalized); !errors.Is(err, ErrAttachment) {
+		t.Fatalf("nil response = %v", err)
+	}
+	if _, err := readWeComMediaResponse(context.Background(), &http.Response{}, normalized); !errors.Is(err, ErrAttachment) {
+		t.Fatalf("nil body = %v", err)
+	}
+	for _, test := range []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+		kind        attachment.Kind
+		maximum     int64
+	}{
+		{name: "bad status", status: http.StatusBadGateway, contentType: "application/octet-stream", body: "x", kind: attachment.KindDocument, maximum: 8},
+		{name: "empty body", status: http.StatusOK, contentType: "application/octet-stream", kind: attachment.KindDocument, maximum: 8},
+		{name: "too large", status: http.StatusOK, contentType: "application/octet-stream", body: "123456", kind: attachment.KindDocument, maximum: 5},
+		{name: "json suffix", status: http.StatusOK, contentType: "application/problem+json", body: "{}", kind: attachment.KindDocument, maximum: 8},
+		{name: "media mismatch", status: http.StatusOK, contentType: "image/png", body: "png", kind: attachment.KindDocument, maximum: 8},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := &http.Response{StatusCode: test.status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(test.body))}
+			response.Header.Set("Content-Type", test.contentType)
+			request := normalized
+			request.Kind = test.kind
+			request.MaximumBytes = test.maximum
+			if data, err := readWeComMediaResponse(context.Background(), response, request); data != nil || !errors.Is(err, ErrAttachment) {
+				t.Fatalf("readWeComMediaResponse = %q, %v", data, err)
+			}
+		})
+	}
+	if providerJSONError("not a media type", nil) {
+		t.Fatal("non-JSON invalid content type was rejected as provider JSON")
+	}
+	for _, test := range []struct {
+		kind        attachment.Kind
+		contentType string
+		want        bool
+	}{
+		{kind: attachment.KindImage, contentType: "image/png", want: true},
+		{kind: attachment.KindVideo, contentType: "video/mp4", want: true},
+		{kind: attachment.KindAudio, contentType: "audio/mpeg", want: true},
+		{kind: attachment.KindDocument, contentType: "application/pdf", want: true},
+		{kind: attachment.KindDocument, contentType: "audio/mpeg"},
+		{kind: attachment.Kind("unknown"), contentType: "application/octet-stream", want: true},
+		{kind: attachment.Kind("unknown"), contentType: "text/plain"},
+	} {
+		if got := downloadContentTypeMatches(test.kind, test.contentType); got != test.want {
+			t.Fatalf("downloadContentTypeMatches(%q, %q) = %t, want %t", test.kind, test.contentType, got, test.want)
+		}
+	}
+}
+
+func TestHandlerBuildsGroupMediaAndIngestFailures(t *testing.T) {
+	target := staticTestTarget(t)
+	principal, err := gateway.NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := callbackState{principal: principal, agentID: "1", appSecret: "app-secret"}
+	data := []byte("document")
+	downloader := &fakeWeComMediaDownloader{data: data}
+	handler := &Handler{attachments: attachmentmemory.New(), mediaDownloader: downloader, maxAttachmentBytes: defaultAttachmentBytes}
+
+	inbound, err := handler.buildInboundMessage(context.Background(), state, inboundXML{
+		MsgID: "message-file", FromUserName: "user-1", ChatID: "chat-1", MsgType: "file", AgentID: "1", MediaID: "media-file", FileName: "brief.pdf",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inbound.ConversationKind != channels.ConversationGroup || inbound.ExternalChatID != "chat-1" || inbound.Content != "[wecom document attachment: brief.pdf]" || len(inbound.Attachments) != 1 {
+		t.Fatalf("group media inbound = %+v", inbound)
+	}
+	if downloader.request.BindingID != target.BindingID || downloader.request.CorpID != target.ProviderAccountID || downloader.request.AppSecret != "app-secret" {
+		t.Fatalf("download request = %+v", downloader.request)
+	}
+
+	if _, err := handler.buildInboundMessage(context.Background(), state, inboundXML{MsgID: "message-bad", FromUserName: "user-1", MsgType: "location", MediaID: "media"}); !errors.Is(err, ErrAttachment) {
+		t.Fatalf("invalid media build = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := handler.ingestAttachment(canceled, state, inboundXML{MsgID: "message-cancel", FromUserName: "user-1", MsgType: "image", MediaID: "media-image"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled ingest = %v", err)
+	}
+	for _, test := range []struct {
+		name       string
+		downloader MediaDownloader
+		want       error
+	}{
+		{name: "download canceled", downloader: wecomMediaDownloaderFunc(func(context.Context, MediaDownloadRequest) (io.ReadCloser, error) { return nil, context.Canceled }), want: context.Canceled},
+		{name: "download redacted", downloader: wecomMediaDownloaderFunc(func(context.Context, MediaDownloadRequest) (io.ReadCloser, error) {
+			return nil, errors.New("provider secret")
+		}), want: ErrAttachment},
+		{name: "nil reader", downloader: wecomMediaDownloaderFunc(func(context.Context, MediaDownloadRequest) (io.ReadCloser, error) { return nil, nil }), want: ErrAttachment},
+		{name: "read error", downloader: wecomMediaDownloaderFunc(func(context.Context, MediaDownloadRequest) (io.ReadCloser, error) { return failingReadCloser{}, nil }), want: ErrAttachment},
+		{name: "empty body", downloader: &fakeWeComMediaDownloader{}, want: ErrAttachment},
+		{name: "too large", downloader: &fakeWeComMediaDownloader{data: []byte("123456")}, want: ErrAttachment},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := &Handler{attachments: attachmentmemory.New(), mediaDownloader: test.downloader, maxAttachmentBytes: 5}
+			_, err := h.ingestAttachment(context.Background(), state, inboundXML{MsgID: "message-" + test.name, FromUserName: "user-1", MsgType: "image", MediaID: "media-image"})
+			if !errors.Is(err, test.want) || strings.Contains(err.Error(), "secret") {
+				t.Fatalf("ingest error = %v, want %v", err, test.want)
+			}
+		})
+	}
+	storeCanceled, cancelStore := context.WithCancel(context.Background())
+	downloader = &fakeWeComMediaDownloader{data: data}
+	cancelingStore := wecomAttachmentStoreFunc(func(context.Context, string, attachment.Upload, io.Reader) (attachment.Reference, error) {
+		cancelStore()
+		return attachment.Reference{}, context.Canceled
+	})
+	h := &Handler{attachments: cancelingStore, mediaDownloader: downloader, maxAttachmentBytes: defaultAttachmentBytes}
+	if _, err := h.ingestAttachment(storeCanceled, state, inboundXML{MsgID: "message-store-cancel", FromUserName: "user-1", MsgType: "image", MediaID: "media-image"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("store cancellation = %v", err)
+	}
+	h = &Handler{attachments: wecomAttachmentStoreFunc(func(context.Context, string, attachment.Upload, io.Reader) (attachment.Reference, error) {
+		return attachment.Reference{}, errors.New("write failed")
+	}), mediaDownloader: downloader, maxAttachmentBytes: defaultAttachmentBytes}
+	if _, err := h.ingestAttachment(context.Background(), state, inboundXML{MsgID: "message-store", FromUserName: "user-1", MsgType: "image", MediaID: "media-image"}); !errors.Is(err, ErrAttachment) {
+		t.Fatalf("store failure = %v", err)
+	}
+}
+
+func TestProviderNativeMediaErrorBranches(t *testing.T) {
+	data := []byte("png")
+	reference := wecomReplyReference(t, attachment.KindImage, "image/png", "chart.png", data)
+	base := storage.ReplyOutbox{
+		TenantID: "tenant-a", EventID: "event-image", ReplyID: "reply-image", SegmentIndex: 0, SegmentCount: 1,
+		Kind: storage.ReplyKindImage, Payload: "caption", Attachment: reference, Fallback: "[image attachment: chart.png]",
+		ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user-1"},
+	}
+	for _, test := range []struct {
+		name      string
+		reader    *providerAttachmentReader
+		class     string
+		retryable bool
+	}{
+		{name: "missing attachment", reader: &providerAttachmentReader{err: storage.ErrNotFound}, class: "invalid"},
+		{name: "storage unavailable", reader: &providerAttachmentReader{err: errors.New("storage down")}, class: "unavailable", retryable: true},
+		{name: "tampered attachment", reader: &providerAttachmentReader{content: attachment.Content{Data: []byte("tampered")}}, class: "invalid"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret", Attachments: test.reader, token: "cached", tokenExpiry: time.Now().Add(time.Hour)}
+			_, err := provider.Deliver(context.Background(), base)
+			assertDeliveryErrorClass(t, err, test.class, test.retryable)
+		})
+	}
+	for _, test := range []struct {
+		name      string
+		status    int
+		body      string
+		class     string
+		retryable bool
+	}{
+		{name: "upload unavailable", status: http.StatusBadGateway, class: "unavailable", retryable: true},
+		{name: "upload malformed", status: http.StatusOK, body: "not-json", class: "provider_error", retryable: true},
+		{name: "upload rejected", status: http.StatusOK, body: `{"errcode":40003}`, class: "provider_error"},
+		{name: "missing media id", status: http.StatusOK, body: `{"errcode":0}`, class: "provider_error", retryable: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/cgi-bin/media/upload" {
+					t.Fatalf("path = %s", r.URL.Path)
+				}
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, test.body)
+			}))
+			defer server.Close()
+			provider := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret", BaseURL: server.URL, HTTPClient: server.Client(), Attachments: &providerAttachmentReader{content: attachment.Content{Data: data}}, token: "cached", tokenExpiry: time.Now().Add(time.Hour)}
+			_, err := provider.Deliver(context.Background(), base)
+			assertDeliveryErrorClass(t, err, test.class, test.retryable)
+		})
+	}
+	transport := &Provider{
+		CorpID: "corp", AgentID: "1", AppSecret: "secret",
+		HTTPClient:  &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, context.DeadlineExceeded })},
+		Attachments: &providerAttachmentReader{content: attachment.Content{Data: data}},
+		token:       "cached", tokenExpiry: time.Now().Add(time.Hour),
+	}
+	_, err := transport.Deliver(context.Background(), base)
+	assertDeliveryErrorClass(t, err, "timeout", true)
+
+	fallback := base
+	fallback.Kind = storage.ReplyKindAudio
+	fallback.Attachment = wecomReplyReference(t, attachment.KindAudio, "audio/mpeg", "voice.mp3", []byte("mp3"))
+	var payload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/cgi-bin/message/send" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		_, _ = io.WriteString(w, `{"errcode":0,"msgid":"audio-fallback"}`)
+	}))
+	defer server.Close()
+	receipt, err := (&Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret", BaseURL: server.URL, HTTPClient: server.Client(), token: "cached", tokenExpiry: time.Now().Add(time.Hour)}).Deliver(context.Background(), fallback)
+	if err != nil || receipt != "audio-fallback" {
+		t.Fatalf("audio fallback = %q, %v", receipt, err)
+	}
+	text, ok := payload["text"].(map[string]any)
+	if payload["msgtype"] != "text" || !ok || text["content"] != fallback.Fallback {
+		t.Fatalf("audio fallback payload = %#v", payload)
+	}
+}
+
 func TestProviderValidatesBeforeReceiptReplay(t *testing.T) {
 	p := &Provider{CorpID: "corp", AgentID: "1", AppSecret: "secret", receipts: map[string]string{"tenant\x00reply\x000": "m-1"}}
 	value := storage.ReplyOutbox{TenantID: "tenant", ReplyID: "reply", SegmentIndex: 0, Payload: "", ReplyTarget: storage.ReplyTarget{ConversationKind: "direct", ReceiverID: "user"}}
@@ -1319,6 +1604,40 @@ func (downloader *fakeWeComMediaDownloader) Download(ctx context.Context, reques
 	}
 	return io.NopCloser(bytes.NewReader(downloader.data)), nil
 }
+
+type wecomMediaDownloaderFunc func(context.Context, MediaDownloadRequest) (io.ReadCloser, error)
+
+func (function wecomMediaDownloaderFunc) Download(ctx context.Context, request MediaDownloadRequest) (io.ReadCloser, error) {
+	return function(ctx, request)
+}
+
+type failingReadCloser struct{}
+
+func (failingReadCloser) Read([]byte) (int, error) {
+	return 0, errors.New("read failed")
+}
+
+func (failingReadCloser) Close() error { return nil }
+
+type wecomAttachmentStoreFunc func(context.Context, string, attachment.Upload, io.Reader) (attachment.Reference, error)
+
+func (function wecomAttachmentStoreFunc) PutAttachment(ctx context.Context, tenantID string, upload attachment.Upload, content io.Reader) (attachment.Reference, error) {
+	return function(ctx, tenantID, upload, content)
+}
+
+func (wecomAttachmentStoreFunc) Load(context.Context, string, string, attachment.Reference) (attachment.Content, error) {
+	return attachment.Content{}, storage.ErrNotFound
+}
+
+func (wecomAttachmentStoreFunc) BindAttachments(context.Context, string, string, []attachment.Reference) error {
+	return storage.ErrNotFound
+}
+
+func (wecomAttachmentStoreFunc) CleanupAttachments(context.Context, string, time.Time) (int, error) {
+	return 0, nil
+}
+
+func (wecomAttachmentStoreFunc) Close() error { return nil }
 
 type providerAttachmentReader struct {
 	content   attachment.Content
