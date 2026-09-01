@@ -666,6 +666,40 @@ func TestHandlerBuildsGroupMediaAndIngestFailures(t *testing.T) {
 	}
 }
 
+func TestHandlerAttachmentIDIncludesBindingScope(t *testing.T) {
+	firstTarget := staticTestTarget(t)
+	secondTarget := staticTestTarget(t)
+	if firstTarget.BindingID == secondTarget.BindingID {
+		t.Fatal("test requires distinct binding IDs")
+	}
+	firstPrincipal, err := gateway.NewChannelPrincipal(firstTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPrincipal, err := gateway.NewChannelPrincipal(secondTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("wecom-image")
+	handler := &Handler{attachments: attachmentmemory.New(), mediaDownloader: &fakeWeComMediaDownloader{data: data}, maxAttachmentBytes: defaultAttachmentBytes}
+	message := inboundXML{MsgID: "message-same", FromUserName: "user-1", MsgType: "image", AgentID: "1", MediaID: "media-same"}
+
+	first, err := handler.ingestAttachment(context.Background(), callbackState{principal: firstPrincipal, agentID: "1", appSecret: "app-secret"}, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := handler.ingestAttachment(context.Background(), callbackState{principal: secondPrincipal, agentID: "1", appSecret: "app-secret"}, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("attachment IDs collided across bindings: %q", first.ID)
+	}
+	if first.ID != attachmentID(firstTarget.BindingID, "message-same", 0, "media-same") || second.ID != attachmentID(secondTarget.BindingID, "message-same", 0, "media-same") {
+		t.Fatalf("binding-scoped IDs = %q and %q", first.ID, second.ID)
+	}
+}
+
 func TestProviderNativeMediaErrorBranches(t *testing.T) {
 	data := []byte("png")
 	reference := wecomReplyReference(t, attachment.KindImage, "image/png", "chart.png", data)
@@ -982,7 +1016,7 @@ func TestHandlerAcceptsEncryptedNativeMediaAsAttachment(t *testing.T) {
 		}
 		reference := request.Message.Attachments[0]
 		digest := sha256.Sum256(data)
-		if reference.ID != attachmentID("message-media", 0, "media-image") || reference.Kind != attachment.KindImage || reference.MIMEType != "image/jpeg" || reference.Name != "media-image.jpg" || reference.Provider != "wecom" || reference.ProviderID != "media-image" || reference.Size != int64(len(data)) || reference.SHA256 != hex.EncodeToString(digest[:]) {
+		if reference.ID != attachmentID(binding.BindingID, "message-media", 0, "media-image") || reference.Kind != attachment.KindImage || reference.MIMEType != "image/jpeg" || reference.Name != "media-image.jpg" || reference.Provider != "wecom" || reference.ProviderID != "media-image" || reference.Size != int64(len(data)) || reference.SHA256 != hex.EncodeToString(digest[:]) {
 			t.Fatalf("media attachment reference = %+v", reference)
 		}
 		if downloader.request.MediaID != "media-image" || downloader.request.TenantID != binding.TenantID || downloader.request.BindingID != binding.BindingID ||

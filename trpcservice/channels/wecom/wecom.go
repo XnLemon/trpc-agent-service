@@ -486,8 +486,9 @@ func (h *Handler) ingestAttachment(ctx context.Context, state callbackState, mes
 	if int64(len(data)) == 0 || int64(len(data)) > h.maxAttachmentBytes {
 		return attachment.Reference{}, ErrAttachment
 	}
+	bindingID := download.BindingID
 	upload := attachment.Upload{
-		ID:         attachmentID(strings.TrimSpace(message.MsgID), 0, descriptor.mediaID),
+		ID:         attachmentID(bindingID, strings.TrimSpace(message.MsgID), 0, descriptor.mediaID),
 		Kind:       descriptor.kind,
 		MIMEType:   descriptor.mimeType,
 		Name:       descriptor.name,
@@ -570,8 +571,8 @@ func wecomMediaContent(reference attachment.Reference) string {
 	return base + "]"
 }
 
-func attachmentID(externalMessageID string, ordinal int, providerID string) string {
-	digest := sha256.Sum256([]byte(encodeParts(externalMessageID, strconv.Itoa(ordinal), providerID)))
+func attachmentID(bindingID, externalMessageID string, ordinal int, providerID string) string {
+	digest := sha256.Sum256([]byte(encodeParts(bindingID, externalMessageID, strconv.Itoa(ordinal), providerID)))
 	return "att_" + hex.EncodeToString(digest[:])
 }
 
