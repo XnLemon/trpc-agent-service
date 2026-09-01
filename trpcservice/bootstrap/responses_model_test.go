@@ -141,13 +141,23 @@ func TestResponsesModelStreamsOutputTextAndUsage(t *testing.T) {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
 		}
 		var body struct {
-			Model   string               `json:"model"`
-			Input   []responsesInputItem `json:"input"`
-			Store   bool                 `json:"store"`
-			Stream  bool                 `json:"stream"`
-			Include []string             `json:"include"`
+			Model  string               `json:"model"`
+			Input  []responsesInputItem `json:"input"`
+			Store  bool                 `json:"store"`
+			Stream bool                 `json:"stream"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Model != "gpt-5.6-sol" || len(body.Input) != 1 || body.Input[0].Content[0].Text != "hello" || body.Store || !body.Stream || len(body.Include) != 1 {
+		var raw map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if _, ok := raw["include"]; ok {
+			t.Fatalf("request body unexpectedly included encrypted reasoning: %#v", raw)
+		}
+		encoded, err := json.Marshal(raw)
+		if err != nil {
+			t.Fatalf("remarshal request body: %v", err)
+		}
+		if err := json.Unmarshal(encoded, &body); err != nil || body.Model != "gpt-5.6-sol" || len(body.Input) != 1 || body.Input[0].Content[0].Text != "hello" || body.Store || !body.Stream {
 			t.Fatalf("request body = %#v err=%v", body, err)
 		}
 		w.Header().Set("Content-Type", "text/event-stream")

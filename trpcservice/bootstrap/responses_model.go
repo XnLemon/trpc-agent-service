@@ -84,11 +84,10 @@ func (m *responsesModel) stream(ctx context.Context, request *trpcmodel.Request,
 
 func (m *responsesModel) requestBody(request *trpcmodel.Request) ([]byte, error) {
 	return json.Marshal(map[string]any{
-		"model":   m.model,
-		"input":   responsesInput(request),
-		"store":   false,
-		"stream":  true,
-		"include": []string{"reasoning.encrypted_content"},
+		"model":  m.model,
+		"input":  responsesInput(request),
+		"store":  false,
+		"stream": true,
 	})
 }
 
