@@ -138,7 +138,11 @@ func (collector *ReplyCollector) stableAuditRecorder(recorder audit.Recorder) au
 	}
 	collector.mu.Lock()
 	if collector.auditAt.IsZero() {
-		collector.auditAt = time.Now().UTC()
+		now := recorder.Now
+		if now == nil {
+			now = time.Now
+		}
+		collector.auditAt = now().UTC()
 	}
 	auditAt := collector.auditAt
 	collector.mu.Unlock()

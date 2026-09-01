@@ -161,7 +161,7 @@ func TestMediaReplyToolRetriesWithDurableAudit(t *testing.T) {
 		t.Fatalf("parallel intents = %#v", collector.Intents())
 	}
 	events, err := auditStore.List(context.Background(), audit.Query{})
-	if err != nil || len(events) != 2 || !sameAuditOccurrence(events) || !hasToolAuditEvents(events) {
+	if err != nil || ticks.Load() != 1 || len(events) != 2 || !sameAuditOccurrence(events) || !hasToolAuditEvents(events) {
 		t.Fatalf("parallel audit events = %#v, err=%v", events, err)
 	}
 }
