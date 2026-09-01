@@ -38,6 +38,7 @@ var (
 const (
 	defaultDispatchDrainTimeout      = 250 * time.Millisecond
 	durableInboundLeaseGrace         = 30 * time.Second
+	durableFailureFallbackReply      = "An error occurred during execution. Please contact the service provider."
 	maxDurableExternalMessageIDRunes = 512
 )
 
@@ -516,9 +517,12 @@ func (dispatcher *Dispatcher) finishDurable(ctx context.Context, requestID, trac
 	if len(replies) > 0 {
 		reply = replies[0]
 	}
+	if terminalErr != nil && !IsContextCancellation(terminalErr) {
+		reply = durableFailureFallbackReply
+	}
 	segments := 0
 	replyID := ""
-	if terminalErr == nil && dispatcher.materializer != nil && strings.TrimSpace(reply) != "" {
+	if dispatcher.materializer != nil && strings.TrimSpace(reply) != "" {
 		var err error
 		segments, err = dispatcher.materializer.Materialize(durableCtx, outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: requestID, TraceID: traceID, TraceParent: observability.TraceParentFromContext(durableCtx), Payload: reply, ReplyTarget: durable.replyTarget})
 		if err != nil {
@@ -528,7 +532,7 @@ func (dispatcher *Dispatcher) finishDurable(ctx context.Context, requestID, trac
 		}
 	}
 	to := runtimestorage.EventCompleted
-	if terminalErr != nil {
+	if terminalErr != nil && replyID == "" {
 		to = runtimestorage.EventFailed
 	}
 	_ = dispatcher.observeStorage(durableCtx, func(operationCtx context.Context) error {

@@ -989,6 +989,62 @@ func TestDispatcherDurableInboundLeaseCoversAgentRuntimeTimeout(t *testing.T) {
 	}
 }
 
+func TestDispatcherDurableChannelModelErrorMaterializesFallbackReply(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPlanResolver(PlanResolverConfig{
+		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
+		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerValue := &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		events := make(chan *trpcevent.Event, 1)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Error: &trpcmodel.ResponseError{Message: "provider secret"}}}
+		close(events)
+		return events, nil
+	}}
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	store := inmemory.New()
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, DrainTimeout: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{
+		Principal: principal, RequestID: "durable-error-fallback",
+		Message: InboundMessage{Content: "inbound", ExternalMessageID: "durable-error-fallback", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collectDispatchEvents(stream)
+	if len(events) != 2 || events[0].Error != ErrExecution.Error() || events[1].Status != "error" {
+		t.Fatalf("dispatch events = %+v", events)
+	}
+	rows, err := store.ListReplyCandidates(context.Background(), principal.TenantID())
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("outbox rows = %+v / %v", rows, err)
+	}
+	row := rows[0]
+	if row.Payload != durableFailureFallbackReply || row.ReplyTarget != (runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: "direct", ReceiverID: "peer-1"}) {
+		t.Fatalf("fallback row = %+v", row)
+	}
+	message, err := store.GetMessage(context.Background(), principal.TenantID(), row.EventID)
+	if err != nil || message.Status != runtimestorage.EventCompleted || message.ReplyID != row.ReplyID || message.SegmentCount != 1 {
+		t.Fatalf("fallback message = %+v / %v", message, err)
+	}
+	assertDurableReplyWorkerCompletesCount(t, store, principal.TenantID(), row.EventID, 1)
+}
+
 func dispatchAndAssertDurableReply(t *testing.T, dispatcher *Dispatcher, principal Principal, store runtimestorage.RuntimeStore) runtimestorage.MessageEvent {
 	t.Helper()
 	target, ok := principal.RoutingTarget()
@@ -1027,13 +1083,18 @@ func dispatchAndAssertDurableReply(t *testing.T, dispatcher *Dispatcher, princip
 
 func assertDurableReplyWorkerCompletes(t *testing.T, store runtimestorage.RuntimeStore, tenantID, eventID string) {
 	t.Helper()
+	assertDurableReplyWorkerCompletesCount(t, store, tenantID, eventID, 2)
+}
+
+func assertDurableReplyWorkerCompletesCount(t *testing.T, store runtimestorage.RuntimeStore, tenantID, eventID string, want int) {
+	t.Helper()
 	provider := &durableOutboxProvider{}
 	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: tenantID, Owner: "worker", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	processed, err := worker.RunOnce(context.Background())
-	if err != nil || processed != 2 || len(provider.deliveries) != 2 {
+	if err != nil || processed != want || len(provider.deliveries) != want {
 		t.Fatalf("worker = processed %d deliveries %d err %v", processed, len(provider.deliveries), err)
 	}
 	message, err := store.GetMessage(context.Background(), tenantID, eventID)
