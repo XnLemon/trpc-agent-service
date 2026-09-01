@@ -111,6 +111,7 @@ var (
 	verifyMySQLEnvironmentMigrations = migrations.VerifyMySQL
 	newEnvironmentRuntimeStore       = environmentRuntimeStore
 	newEnvironmentRedisRuntimeStore  = environmentRedisRuntimeStore
+	newEnvironmentInMemoryFallback   = func() runtimestorage.RuntimeStore { return runtimestorageinmemory.New() }
 	environmentWeComOwnerFunc        = environmentWeComOwner
 	newEnvironmentWeComWorker        = outbox.New
 )
@@ -852,7 +853,7 @@ func newEnvironmentRuntimeStoresForConfig(ctx context.Context, config environmen
 	if config.runtimeStorage != "redis" {
 		return stores, nil
 	}
-	fallback := runtimestorageinmemory.New()
+	fallback := newEnvironmentInMemoryFallback()
 	stores.providers["inmemory"] = fallback
 	stores.owned = append(stores.owned, fallback)
 	return stores, nil

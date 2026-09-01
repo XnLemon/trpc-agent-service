@@ -669,20 +669,26 @@ func TestEnvironmentRedisProfilesUseSeparateInMemoryProvider(t *testing.T) {
 
 func TestEnvironmentRedisRuntimeStoresOwnPrimaryAndFallback(t *testing.T) {
 	primary := &environmentRuntimeStoreSpy{}
-	previous := newEnvironmentRedisRuntimeStore
+	fallback := &environmentRuntimeStoreSpy{}
+	previousRedis := newEnvironmentRedisRuntimeStore
+	previousFallback := newEnvironmentInMemoryFallback
 	newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (runtimestorage.RuntimeStore, error) {
 		return primary, nil
 	}
-	t.Cleanup(func() { newEnvironmentRedisRuntimeStore = previous })
+	newEnvironmentInMemoryFallback = func() runtimestorage.RuntimeStore { return fallback }
+	t.Cleanup(func() {
+		newEnvironmentRedisRuntimeStore = previousRedis
+		newEnvironmentInMemoryFallback = previousFallback
+	})
 	stores, err := newEnvironmentRuntimeStoresForConfig(context.Background(), environmentConfig{runtimeStorage: "redis"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stores.primary != primary || stores.providers["redis"] != primary || stores.providers["inmemory"] == nil || len(stores.owned) != 2 {
+	if stores.primary != primary || stores.providers["redis"] != primary || stores.providers["inmemory"] != fallback || len(stores.owned) != 2 {
 		t.Fatalf("redis runtime stores = %#v", stores)
 	}
-	if err := stores.Close(); err != nil || primary.closed != 1 {
-		t.Fatalf("runtime store close = %v, primary closes=%d", err, primary.closed)
+	if err := stores.Close(); err != nil || primary.closed != 1 || fallback.closed != 1 {
+		t.Fatalf("runtime store close = %v, primary closes=%d fallback closes=%d", err, primary.closed, fallback.closed)
 	}
 	if _, err := environmentRuntimeProviders(environmentConfig{runtimeStorage: "redis"}, environmentRuntimeStores{providers: map[string]runtimestorage.RuntimeStore{"redis": primary}}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("missing in-memory fallback = %v", err)
@@ -787,6 +793,112 @@ func TestNewFromEnvironmentRedisConnectionFailureIsRedacted(t *testing.T) {
 		t.Fatalf("redis connection details leaked: %v", err)
 	}
 }
+
+func TestNewFromEnvironmentRuntimeStoreFailureBoundaries(t *testing.T) {
+	tests := []struct {
+		name           string
+		runtimeStorage string
+		configureStore func(context.CancelFunc)
+		wantError      error
+	}{
+		{
+			name:           "redis cancellation wins",
+			runtimeStorage: "redis",
+			configureStore: func(cancel context.CancelFunc) {
+				newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (runtimestorage.RuntimeStore, error) {
+					cancel()
+					return nil, errors.New("redis dial failure")
+				}
+			},
+			wantError: context.Canceled,
+		},
+		{
+			name:           "non redis preserves source error",
+			runtimeStorage: "inmemory",
+			configureStore: func(context.CancelFunc) {
+				newEnvironmentRuntimeStore = func(string, *sql.DB) (runtimestorage.RuntimeStore, error) {
+					return nil, errEnvironmentRuntimeStore
+				}
+			},
+			wantError: errEnvironmentRuntimeStore,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv(envSessionBackend, tt.runtimeStorage)
+			if tt.runtimeStorage == "redis" {
+				t.Setenv(envRedisAddr, "redis.internal:6379")
+			}
+			registerBootstrapPingDriver.Do(func() { sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{}) })
+			db, err := sql.Open("trpc-service-bootstrap-ping", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			previousOpen := openEnvironmentDatabase
+			previousRedis := newEnvironmentRedisRuntimeStore
+			previousStore := newEnvironmentRuntimeStore
+			t.Cleanup(func() {
+				openEnvironmentDatabase = previousOpen
+				newEnvironmentRedisRuntimeStore = previousRedis
+				newEnvironmentRuntimeStore = previousStore
+				_ = db.Close()
+			})
+			openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			tt.configureStore(cancel)
+
+			_, err = NewFromEnvironment(ctx)
+			if !errors.Is(err, tt.wantError) {
+				t.Fatalf("runtime store failure = %v, want %v", err, tt.wantError)
+			}
+			if pingErr := db.Ping(); pingErr == nil {
+				t.Fatal("database remained open after runtime store failure")
+			}
+		})
+	}
+}
+
+func TestNewFromEnvironmentRedisClosesPrimaryAndFallbackAfterBootstrapFailure(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envSessionBackend, "redis")
+	t.Setenv(envRedisAddr, "redis.internal:6379")
+	registerBootstrapPingDriver.Do(func() { sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{}) })
+	db, err := sql.Open("trpc-service-bootstrap-ping", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	primary := &environmentRuntimeStoreSpy{}
+	fallback := &environmentRuntimeStoreSpy{}
+	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousRedis := newEnvironmentRedisRuntimeStore
+	previousFallback := newEnvironmentInMemoryFallback
+	t.Cleanup(func() {
+		openEnvironmentDatabase = previousOpen
+		applyEnvironmentMigrations = previousApply
+		newEnvironmentRedisRuntimeStore = previousRedis
+		newEnvironmentInMemoryFallback = previousFallback
+		_ = db.Close()
+	})
+	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return errors.New("migration failed") }
+	newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (runtimestorage.RuntimeStore, error) { return primary, nil }
+	newEnvironmentInMemoryFallback = func() runtimestorage.RuntimeStore { return fallback }
+
+	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("bootstrap failure = %v", err)
+	}
+	if primary.closed != 1 || fallback.closed != 1 {
+		t.Fatalf("runtime store closes: primary=%d fallback=%d", primary.closed, fallback.closed)
+	}
+	if pingErr := db.Ping(); pingErr == nil {
+		t.Fatal("database remained open after bootstrap failure")
+	}
+}
+
+var errEnvironmentRuntimeStore = errors.New("runtime store initialization failed")
 
 func TestDemoEnvironmentConfigurationBranches(t *testing.T) {
 	setRequiredEnvironment(t)
