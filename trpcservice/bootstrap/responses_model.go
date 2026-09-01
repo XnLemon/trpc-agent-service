@@ -239,21 +239,37 @@ type responsesEvent struct {
 	Delta    string                     `json:"delta"`
 	Text     string                     `json:"text"`
 	Response responsesCompletedResponse `json:"response"`
+	Item     responsesOutputItem        `json:"item"`
+	Part     responsesOutputContent     `json:"part"`
 }
 type responsesCompletedResponse struct {
-	Usage *struct {
+	Status string          `json:"status"`
+	Error  *responsesError `json:"error"`
+	Usage  *struct {
 		InputTokens  int64 `json:"input_tokens"`
 		OutputTokens int64 `json:"output_tokens"`
 		TotalTokens  int64 `json:"total_tokens"`
 	} `json:"usage"`
-	Output     []responsesOutputItem `json:"output"`
-	OutputText string                `json:"output_text"`
+	IncompleteDetails *responsesIncompleteDetails `json:"incomplete_details"`
+	Output            []responsesOutputItem       `json:"output"`
+	OutputText        string                      `json:"output_text"`
 }
 type responsesOutputItem struct {
+	Type    string                   `json:"type"`
+	Status  string                   `json:"status"`
 	Content []responsesOutputContent `json:"content"`
 }
 type responsesOutputContent struct {
-	Text string `json:"text"`
+	Text    string `json:"text"`
+	Refusal string `json:"refusal"`
+}
+type responsesError struct {
+	Type    string `json:"type"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+type responsesIncompleteDetails struct {
+	Reason string `json:"reason"`
 }
 
 func consumeResponsesStream(ctx context.Context, scanner *bufio.Scanner, out chan<- *trpcmodel.Response) (*trpcmodel.Usage, bool, error) {
@@ -276,6 +292,28 @@ func consumeResponsesStream(ctx context.Context, scanner *bufio.Scanner, out cha
 			if !sendResponse(ctx, out, responsesTextDelta("response.output_text.done", event.Text)) {
 				return usage, emittedText, nil
 			}
+		}
+		if !emittedText && event.Type == "response.content_part.done" {
+			if text := event.Part.outputText(); text != "" {
+				emittedText = true
+				if !sendResponse(ctx, out, responsesTextDelta("response.content_part.done", text)) {
+					return usage, emittedText, nil
+				}
+			}
+		}
+		if !emittedText && event.Type == "response.output_item.done" {
+			if text := event.Item.outputText(); text != "" {
+				emittedText = true
+				if !sendResponse(ctx, out, responsesTextDelta("response.output_item.done", text)) {
+					return usage, emittedText, nil
+				}
+			}
+		}
+		if event.Type == "response.failed" {
+			return usage, emittedText, fmt.Errorf("responses API failed: %s", event.Response.errorText())
+		}
+		if event.Type == "response.incomplete" {
+			return usage, emittedText, fmt.Errorf("responses API incomplete: %s", event.Response.incompleteReason())
 		}
 		if event.Type == "response.completed" && event.Response.Usage != nil {
 			u := event.Response.Usage
@@ -302,11 +340,46 @@ func (response responsesCompletedResponse) outputText() string {
 	}
 	var builder strings.Builder
 	for _, item := range response.Output {
-		for _, content := range item.Content {
-			builder.WriteString(content.Text)
-		}
+		builder.WriteString(item.outputText())
 	}
 	return builder.String()
+}
+func (item responsesOutputItem) outputText() string {
+	var builder strings.Builder
+	for _, content := range item.Content {
+		builder.WriteString(content.outputText())
+	}
+	return builder.String()
+}
+func (content responsesOutputContent) outputText() string {
+	if content.Text != "" {
+		return content.Text
+	}
+	return content.Refusal
+}
+func (response responsesCompletedResponse) errorText() string {
+	if response.Error == nil {
+		return "unknown error"
+	}
+	if response.Error.Message != "" {
+		return response.Error.Message
+	}
+	if response.Error.Code != "" {
+		return response.Error.Code
+	}
+	if response.Error.Type != "" {
+		return response.Error.Type
+	}
+	return "unknown error"
+}
+func (response responsesCompletedResponse) incompleteReason() string {
+	if response.IncompleteDetails != nil && response.IncompleteDetails.Reason != "" {
+		return response.IncompleteDetails.Reason
+	}
+	if response.Status != "" {
+		return response.Status
+	}
+	return "unknown reason"
 }
 
 func responsesTextDelta(object, text string) *trpcmodel.Response {

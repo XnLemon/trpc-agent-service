@@ -216,6 +216,98 @@ func TestResponsesModelStreamsCompletedOutputFallbackAndUsage(t *testing.T) {
 	}
 }
 
+func TestResponsesModelStreamsOutputItemFallback(t *testing.T) {
+	tests := []struct {
+		name  string
+		event string
+	}{
+		{
+			name:  "content part done",
+			event: "data: {\"type\":\"response.content_part.done\",\"part\":{\"type\":\"output_text\",\"text\":\"成功\"}}\n\n",
+		},
+		{
+			name:  "output item done",
+			event: "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"成功\"}]}}\n\n",
+		},
+		{
+			name:  "refusal content",
+			event: "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"拒绝\"}]}}\n\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(tt.event))
+				_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":4,\"output_tokens\":2,\"total_tokens\":6}}}\n\n"))
+			}))
+			defer server.Close()
+
+			responses, err := (&responsesModel{endpoint: server.URL + "/v1", model: "test"}).GenerateContent(context.Background(), &trpcmodel.Request{Messages: []trpcmodel.Message{{Content: "hello"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got string
+			var terminal *trpcmodel.Response
+			for response := range responses {
+				terminal = response
+				if len(response.Choices) > 0 {
+					got += response.Choices[0].Delta.Content
+				}
+				if response.Error != nil {
+					t.Fatalf("unexpected error: %v", response.Error)
+				}
+			}
+			if got == "" || terminal == nil || terminal.Usage == nil || terminal.Usage.TotalTokens != 6 {
+				t.Fatalf("got text %q terminal %#v", got, terminal)
+			}
+		})
+	}
+}
+
+func TestResponsesModelReportsFailedAndIncompleteEvents(t *testing.T) {
+	tests := []struct {
+		name     string
+		event    string
+		wantText string
+	}{
+		{
+			name:     "failed",
+			event:    "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"server_error\",\"message\":\"upstream unavailable\"}}}\n\n",
+			wantText: "responses API failed: upstream unavailable",
+		},
+		{
+			name:     "incomplete",
+			event:    "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
+			wantText: "responses API incomplete: max_output_tokens",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(tt.event))
+			}))
+			defer server.Close()
+			responses, err := (&responsesModel{endpoint: server.URL + "/v1", model: "test"}).GenerateContent(context.Background(), &trpcmodel.Request{Messages: []trpcmodel.Message{{Content: "hello"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := <-responses
+			message := ""
+			if got != nil && got.Error != nil {
+				message = got.Error.Message
+			}
+			if got == nil || got.Error == nil || !strings.Contains(message, tt.wantText) || !got.Done {
+				t.Fatalf("error response = %#v message=%q", got, message)
+			}
+			if _, ok := <-responses; ok {
+				t.Fatal("response channel did not close")
+			}
+		})
+	}
+}
+
 func TestResponsesModelReturnsHTTPAndTransportErrors(t *testing.T) {
 	tests := []struct {
 		name     string
