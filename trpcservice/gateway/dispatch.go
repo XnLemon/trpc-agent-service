@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -34,9 +35,11 @@ var (
 	ErrAuditWriteFailed = errors.New("audit_write_failed")
 )
 
-const defaultDispatchDrainTimeout = 250 * time.Millisecond
-const durableInboundLease = 30 * time.Second
-const maxDurableExternalMessageIDRunes = 512
+const (
+	defaultDispatchDrainTimeout      = 250 * time.Millisecond
+	durableInboundLeaseGrace         = 30 * time.Second
+	maxDurableExternalMessageIDRunes = 512
+)
 
 // DispatchEventType identifies the protocol-neutral event surface consumed by
 // JSON and SSE adapters.
@@ -198,7 +201,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	}
 	planSnapshot := plan.AgentSnapshot()
 	planApp := planSnapshot.App()
-	durable, err := dispatcher.claimInbound(ctx, request.Principal, message, identity)
+	durable, err := dispatcher.claimInboundWithLease(ctx, request.Principal, message, identity, durableInboundLeaseForRuntime(planSnapshot.Revision().Runtime))
 	if err != nil {
 		finishWithError(err)
 		return nil, err
@@ -368,8 +371,15 @@ func detachedCorrelationContext(parent context.Context, requestID, traceID strin
 }
 
 func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity) (result *durableExecution, err error) {
+	return dispatcher.claimInboundWithLease(ctx, principal, message, identity, durableInboundLeaseForRuntime(agent.DefaultRuntimePolicy()))
+}
+
+func (dispatcher *Dispatcher) claimInboundWithLease(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, leaseDuration time.Duration) (result *durableExecution, err error) {
 	if dispatcher.runtimeStore == nil || principal.Kind() != PrincipalChannel {
 		return nil, nil
+	}
+	if leaseDuration <= 0 {
+		leaseDuration = durableInboundLeaseForRuntime(agent.DefaultRuntimePolicy())
 	}
 	started := time.Now()
 	operationCtx, _, finish := observability.StartOperation(ctx, dispatcher.telemetry, observability.OperationStorageOperation, "storage")
@@ -416,7 +426,7 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 	from := event.Status
 	running, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{
 		TenantID: principal.TenantID(), EventID: event.EventID, From: from,
-		To: runtimestorage.EventRunning, Owner: owner, LeaseDuration: durableInboundLease,
+		To: runtimestorage.EventRunning, Owner: owner, LeaseDuration: leaseDuration,
 	})
 	if err != nil {
 		if duplicate && errors.Is(err, runtimestorage.ErrConflict) {
@@ -425,6 +435,14 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 		return nil, err
 	}
 	return &durableExecution{store: store, tenantID: principal.TenantID(), eventID: event.EventID, owner: owner, fencingToken: running.FencingToken, replyTarget: event.ReplyTarget}, nil
+}
+
+func durableInboundLeaseForRuntime(policy agent.RuntimePolicy) time.Duration {
+	seconds := policy.ExecutionTimeoutSeconds
+	if seconds <= 0 {
+		seconds = agent.DefaultRuntimePolicy().ExecutionTimeoutSeconds
+	}
+	return time.Duration(seconds)*time.Second + durableInboundLeaseGrace
 }
 
 func replyTarget(target channels.RoutingTarget, message InboundMessage) (runtimestorage.ReplyTarget, error) {

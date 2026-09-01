@@ -85,6 +85,12 @@ type claimStoreStub struct {
 	getErr, createErr, recordErr, transitionErr error
 }
 
+type transitionCaptureStore struct {
+	runtimestorage.RuntimeStore
+	mu          sync.Mutex
+	transitions []runtimestorage.MessageTransition
+}
+
 type dispatchAttachmentStore struct {
 	bindFn func(context.Context, string, string, []attachment.Reference) error
 	loadFn func(context.Context, string, string, attachment.Reference) (attachment.Content, error)
@@ -127,6 +133,24 @@ func (s *claimStoreStub) TransitionMessage(context.Context, runtimestorage.Messa
 		return runtimestorage.MessageEvent{}, s.transitionErr
 	}
 	return runtimestorage.MessageEvent{}, nil
+}
+
+func (s *transitionCaptureStore) TransitionMessage(ctx context.Context, transition runtimestorage.MessageTransition) (runtimestorage.MessageEvent, error) {
+	s.mu.Lock()
+	s.transitions = append(s.transitions, transition)
+	s.mu.Unlock()
+	return s.RuntimeStore.TransitionMessage(ctx, transition)
+}
+
+func (s *transitionCaptureStore) runningLease() (time.Duration, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, transition := range s.transitions {
+		if transition.To == runtimestorage.EventRunning {
+			return transition.LeaseDuration, true
+		}
+	}
+	return 0, false
 }
 
 func newTestDispatcher(t *testing.T, runnerValue *testRunner) (*Dispatcher, Principal) {
@@ -918,6 +942,51 @@ func TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle(t 
 	}
 	message := dispatchAndAssertDurableReply(t, dispatcher, principal, store)
 	assertDurableReplyWorkerCompletes(t, store, principal.TenantID(), message.EventID)
+}
+
+func TestDispatcherDurableInboundLeaseCoversAgentRuntimeTimeout(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPlanResolver(PlanResolverConfig{
+		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
+		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerValue := &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		events := make(chan *trpcevent.Event, 1)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
+		close(events)
+		return events, nil
+	}}
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	store := &transitionCaptureStore{RuntimeStore: inmemory.New()}
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, DrainTimeout: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{
+		Principal: principal, RequestID: "durable-lease",
+		Message: InboundMessage{Content: "inbound", ExternalMessageID: "durable-lease", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collectDispatchEvents(stream)
+	got, ok := store.runningLease()
+	want := time.Duration(fixture.revision.Runtime.ExecutionTimeoutSeconds)*time.Second + durableInboundLeaseGrace
+	if !ok || got != want || got <= 30*time.Second {
+		t.Fatalf("durable inbound lease = %v ok=%v, want %v and longer than 30s", got, ok, want)
+	}
 }
 
 func dispatchAndAssertDurableReply(t *testing.T, dispatcher *Dispatcher, principal Principal, store runtimestorage.RuntimeStore) runtimestorage.MessageEvent {

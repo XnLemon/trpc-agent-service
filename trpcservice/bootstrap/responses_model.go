@@ -235,15 +235,25 @@ func (m *responsesModel) doRequest(ctx context.Context, body []byte) (*http.Resp
 }
 
 type responsesEvent struct {
-	Type     string `json:"type"`
-	Delta    string `json:"delta"`
-	Response struct {
-		Usage *struct {
-			InputTokens  int64 `json:"input_tokens"`
-			OutputTokens int64 `json:"output_tokens"`
-			TotalTokens  int64 `json:"total_tokens"`
-		} `json:"usage"`
-	} `json:"response"`
+	Type     string                     `json:"type"`
+	Delta    string                     `json:"delta"`
+	Text     string                     `json:"text"`
+	Response responsesCompletedResponse `json:"response"`
+}
+type responsesCompletedResponse struct {
+	Usage *struct {
+		InputTokens  int64 `json:"input_tokens"`
+		OutputTokens int64 `json:"output_tokens"`
+		TotalTokens  int64 `json:"total_tokens"`
+	} `json:"usage"`
+	Output     []responsesOutputItem `json:"output"`
+	OutputText string                `json:"output_text"`
+}
+type responsesOutputItem struct {
+	Content []responsesOutputContent `json:"content"`
+}
+type responsesOutputContent struct {
+	Text string `json:"text"`
 }
 
 func consumeResponsesStream(ctx context.Context, scanner *bufio.Scanner, out chan<- *trpcmodel.Response) (*trpcmodel.Usage, bool, error) {
@@ -261,15 +271,46 @@ func consumeResponsesStream(ctx context.Context, scanner *bufio.Scanner, out cha
 				return usage, emittedText, nil
 			}
 		}
+		if !emittedText && event.Type == "response.output_text.done" && event.Text != "" {
+			emittedText = true
+			if !sendResponse(ctx, out, responsesTextDelta("response.output_text.done", event.Text)) {
+				return usage, emittedText, nil
+			}
+		}
 		if event.Type == "response.completed" && event.Response.Usage != nil {
 			u := event.Response.Usage
 			usage = &trpcmodel.Usage{PromptTokens: int(u.InputTokens), CompletionTokens: int(u.OutputTokens), TotalTokens: int(u.TotalTokens)}
+		}
+		if !emittedText && event.Type == "response.completed" {
+			if text := event.Response.outputText(); text != "" {
+				emittedText = true
+				if !sendResponse(ctx, out, responsesTextDelta("response.completed", text)) {
+					return usage, emittedText, nil
+				}
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, emittedText, err
 	}
 	return usage, emittedText, nil
+}
+
+func (response responsesCompletedResponse) outputText() string {
+	if response.OutputText != "" {
+		return response.OutputText
+	}
+	var builder strings.Builder
+	for _, item := range response.Output {
+		for _, content := range item.Content {
+			builder.WriteString(content.Text)
+		}
+	}
+	return builder.String()
+}
+
+func responsesTextDelta(object, text string) *trpcmodel.Response {
+	return &trpcmodel.Response{Object: object, IsPartial: true, Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Role: trpcmodel.RoleAssistant, Content: text}}}}
 }
 
 func parseResponsesEvent(line string) (responsesEvent, bool) {

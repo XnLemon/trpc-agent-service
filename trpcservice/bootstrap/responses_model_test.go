@@ -182,6 +182,40 @@ func TestResponsesModelStreamsOutputTextAndUsage(t *testing.T) {
 	}
 }
 
+func TestResponsesModelStreamsCompletedOutputFallbackAndUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"成功\"}]}],\"usage\":{\"input_tokens\":4,\"output_tokens\":2,\"total_tokens\":6}}}\n\n"))
+	}))
+	defer server.Close()
+
+	responses, err := (&responsesModel{endpoint: server.URL + "/v1", model: "test"}).GenerateContent(context.Background(), &trpcmodel.Request{Messages: []trpcmodel.Message{{Content: "hello"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	var usage *trpcmodel.Usage
+	count := 0
+	for response := range responses {
+		count++
+		if len(response.Choices) > 0 {
+			got += response.Choices[0].Delta.Content
+		}
+		if response.Usage != nil {
+			usage = response.Usage
+		}
+		if response.Error != nil {
+			t.Fatalf("unexpected error: %v", response.Error)
+		}
+	}
+	if got != "成功" || count != 2 {
+		t.Fatalf("got text %q across %d responses", got, count)
+	}
+	if usage == nil || usage.TotalTokens != 6 {
+		t.Fatalf("unexpected usage: %#v", usage)
+	}
+}
+
 func TestResponsesModelReturnsHTTPAndTransportErrors(t *testing.T) {
 	tests := []struct {
 		name     string
