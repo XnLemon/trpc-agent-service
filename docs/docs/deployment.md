@@ -58,6 +58,9 @@ demo 仅支持 PostgreSQL、本地开发使用，遇到部分或多租户歧义�
 - 容器健康检查使用静态 `/app/trpc-healthcheck`，不会依赖 distroless 镜像中的 shell。
 - `/healthz` 用于存活和 startup probe；`/readyz` 用于流量接入前的 readiness。
 - `TRPC_SERVICE_IMAGE` 可在 CI 或本地覆盖服务镜像名；默认值是 `trpc-agent-service:local`。
+- Compose 同时启动 Redis 7（AOF、`redis:6379`）作为可选运行时后端；只有显式设置
+  `TRPC_SESSION_BACKEND=redis` 时服务才会读写它。生产环境应替换为受管 Redis，并通过 Secret
+  Manager 注入 `TRPC_REDIS_PASSWORD`。
 
 填充后的 `deploy/service.env` 已被 `.dockerignore` 排除，不会进入 Docker build context；该文件
 仍可能被 Compose 读取，因此不要提交到 Git，也不要把它作为生产 Secret 管理方案。
@@ -185,7 +188,14 @@ curl --fail http://127.0.0.1:8080/readyz
 | `TRPC_MODEL_NAMES` | 否，`gpt-4o-mini` | 逗号分隔模型白名单 |
 | `TRPC_MODEL_ENDPOINT_HOSTS` | 否，`api.openai.com` | 逗号分隔 HTTPS endpoint host 白名单 |
 | `TRPC_MODEL_SECRET_REF` | 否，`env/trpc-model-api-key` | 运行时 Secret 引用，不是 Secret 值 |
-| `TRPC_SESSION_BACKEND` | 必需，显式 `postgres`/`inmemory` | Compose/Kubernetes 示例使用 `postgres`；MySQL 控制面当前应使用 `inmemory` |
+| `TRPC_SESSION_BACKEND` | 必需，显式 `postgres`/`redis`/`inmemory` | Compose/Kubernetes 示例使用 `postgres`；Redis 模式只提供 Session/Memory，MySQL 控制面当前应使用 `inmemory` |
+| `TRPC_REDIS_ADDR` | Redis 模式必需 | Redis `host:port`；Compose 默认使用 `redis:6379` |
+| `TRPC_REDIS_PASSWORD` | 否 | Redis 认证密码，使用 Secret Manager 注入，不进入日志或快照 |
+| `TRPC_REDIS_SECRET_REF` | 否，`env/trpc-redis-password` | Redis Backend Profile 的可选 SecretRef |
+| `TRPC_REDIS_DB` | 否，`0` | Redis logical database |
+| `TRPC_REDIS_KEY_PREFIX` | 否，`trpc:runtime:v1` | tenant-scoped key 前缀 |
+| `TRPC_REDIS_DIAL_TIMEOUT` / `TRPC_REDIS_READ_TIMEOUT` / `TRPC_REDIS_WRITE_TIMEOUT` | 否 | Go duration，限制 Redis 客户端 I/O |
+| `TRPC_REDIS_POOL_SIZE` | 否 | 大于 `0` 时覆盖连接池大小 |
 | `TRPC_DEMO_MODE` | 否，`false` | 仅由 `quickstart.sh --demo` 显式启用；要求 `TRPC_MODEL_PROVIDER=fake`，不读取模型凭据 |
 
 模型 API key 只在受信任的 Secret Resolver/Factory 路径中使用，不进入 Execution Plan、缓存、

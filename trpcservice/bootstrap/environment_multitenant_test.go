@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
@@ -13,6 +14,7 @@ import (
 	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	runtimestorageredis "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
@@ -455,6 +457,149 @@ func TestEnvironmentCatalogsAndIdentityListBoundaries(t *testing.T) {
 	}
 	if _, err := parseEnvironmentAPIIdentities(""); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("empty identity list = %v", err)
+	}
+}
+
+func TestLoadEnvironmentRedisConfigurationIsExplicitAndBounded(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envSessionBackend, "redis")
+	t.Setenv(envRedisAddr, "127.0.0.1:6379")
+	t.Setenv(envRedisPassword, "redis-secret")
+	t.Setenv(envRedisDB, "3")
+	t.Setenv(envRedisKeyPrefix, "service:runtime")
+	t.Setenv(envRedisSecretRef, "env/redis-password")
+	t.Setenv(envRedisDialTimeout, "150ms")
+	t.Setenv(envRedisReadTimeout, "250ms")
+	t.Setenv(envRedisWriteTimeout, "350ms")
+	t.Setenv(envRedisPoolSize, "12")
+
+	config, err := loadEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.redis.Addr != "127.0.0.1:6379" || config.redis.Password != "redis-secret" || config.redis.DB != 3 || config.redis.KeyPrefix != "service:runtime" || config.redis.PoolSize != 12 {
+		t.Fatalf("redis config = %+v", config.redis)
+	}
+	if config.redisEndpoint != "redis://127.0.0.1:6379" || config.redisSecretRef != "env/redis-password" || config.redis.DialTimeout.String() != "150ms" || config.redis.ReadTimeout.String() != "250ms" || config.redis.WriteTimeout.String() != "350ms" {
+		t.Fatalf("redis endpoint/timeouts = %q/%q/%s/%s/%s", config.redisEndpoint, config.redisSecretRef, config.redis.DialTimeout, config.redis.ReadTimeout, config.redis.WriteTimeout)
+	}
+
+	for _, test := range []struct {
+		name  string
+		value string
+	}{
+		{name: "missing address", value: ""},
+		{name: "invalid db", value: "not-an-integer"},
+		{name: "invalid timeout", value: "not-a-duration"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv(envSessionBackend, "redis")
+			t.Setenv(envRedisAddr, "127.0.0.1:6379")
+			switch test.name {
+			case "missing address":
+				t.Setenv(envRedisAddr, test.value)
+			case "invalid db":
+				t.Setenv(envRedisDB, test.value)
+			case "invalid timeout":
+				t.Setenv(envRedisDialTimeout, test.value)
+			}
+			if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("redis configuration error = %v", err)
+			}
+		})
+	}
+}
+
+func TestEnvironmentRedisCatalogAndRegistryBoundaries(t *testing.T) {
+	const (
+		tenantA = "t_00000000000000000000000000"
+		tenantB = "t_00000000000000000000000001"
+	)
+	config := environmentConfig{runtimeStorage: "redis", redisEndpoint: "redis://127.0.0.1:6379", redisSecretRef: "env/redis-password", redis: runtimestorageredis.Config{Password: "redis-secret"}, modelProvider: defaultModelProvider, modelNames: []string{"gpt-4o-mini"}, endpointHosts: []string{"api.openai.com"}, secretRef: "env/model", apiIdentities: map[string]gateway.APIIdentity{
+		"token-a": {TenantID: tenantA, AppID: "app-a", SubjectID: "subject-a"},
+		"token-b": {TenantID: tenantB, AppID: "app-b", SubjectID: "subject-b"},
+	}, modelAPIKeys: map[string]string{tenantA: "model-a", tenantB: "model-b"}}
+	_, backendCatalog, err := environmentCatalogs(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.NewProfile(backend.CreateInput{TenantID: tenantA, ProfileKey: "redis", DisplayName: "Redis", Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: config.redisEndpoint, SecretRef: config.redisSecretRef}}}, backendCatalog); err != nil {
+		t.Fatalf("redis session binding = %v", err)
+	}
+	if _, err := backend.NewProfile(backend.CreateInput{TenantID: tenantA, ProfileKey: "redis-summary", DisplayName: "Redis Summary", Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySummary, Provider: "redis", Endpoint: config.redisEndpoint}}}, backendCatalog); !errors.Is(err, backend.ErrInvalid) {
+		t.Fatalf("unsupported redis capability = %v", err)
+	}
+	if _, err := backend.NewProfile(backend.CreateInput{TenantID: tenantA, ProfileKey: "redis-endpoint", DisplayName: "Redis Endpoint", Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: "redis://other:6379"}}}, backendCatalog); err != nil {
+		t.Fatalf("catalog should accept a valid redis endpoint before provider binding: %v", err)
+	}
+
+	delegate := inmemory.NewSessionService()
+	store := runtimestorageinmemory.New()
+	t.Cleanup(func() { _ = delegate.Close(); _ = store.Close() })
+	secrets, _, providers, err := environmentRegistries(config, delegate, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := secrets.Resolve(context.Background(), modelprofile.SecretScope{TenantID: tenantA, SecretRef: config.redisSecretRef})
+	if err != nil || secret.Value() != "redis-secret" {
+		t.Fatalf("tenant redis secret = %q, %v", secret.Value(), err)
+	}
+	if _, err := secrets.Resolve(context.Background(), modelprofile.SecretScope{TenantID: tenantA, SecretRef: "env/other"}); err == nil {
+		t.Fatal("foreign redis secret reference was accepted")
+	}
+	provider, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis"})
+	if err != nil || provider == nil {
+		t.Fatalf("tenant redis provider = %v", err)
+	}
+	if _, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySummary, Provider: "redis"}); !errors.Is(err, backend.ErrProviderUnavailable) {
+		t.Fatalf("unsupported redis provider capability = %v", err)
+	}
+	if _, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000002"}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis"}); !errors.Is(err, backend.ErrProviderUnavailable) {
+		t.Fatalf("unregistered tenant redis provider = %v", err)
+	}
+	value, err := provider.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: "redis://other:6379"}, secret)
+	if !errors.Is(err, backend.ErrStorageFactory) || value != nil {
+		t.Fatalf("mismatched redis endpoint = %T, %v", value, err)
+	}
+	if strings.Contains(err.Error(), "redis://other:6379") {
+		t.Fatal("redis endpoint leaked in provider error")
+	}
+}
+
+func TestNewFromEnvironmentRedisConnectionFailureIsRedacted(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envSessionBackend, "redis")
+	t.Setenv(envRedisAddr, "redis.internal:6379")
+	t.Setenv(envRedisPassword, "redis-password")
+	registerBootstrapPingDriver.Do(func() { sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{}) })
+	db, err := sql.Open("trpc-service-bootstrap-ping", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousVerify := verifyEnvironmentMigrations
+	previousRedis := newEnvironmentRedisRuntimeStore
+	t.Cleanup(func() {
+		openEnvironmentDatabase = previousOpen
+		applyEnvironmentMigrations = previousApply
+		verifyEnvironmentMigrations = previousVerify
+		newEnvironmentRedisRuntimeStore = previousRedis
+		_ = db.Close()
+	})
+	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (runtimestorage.RuntimeStore, error) {
+		return nil, errors.New("dial redis.internal:6379 with password redis-password failed")
+	}
+	_, err = NewFromEnvironment(context.Background())
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("redis connection error = %v", err)
+	}
+	if strings.Contains(err.Error(), "redis.internal:6379") || strings.Contains(err.Error(), "redis-password") {
+		t.Fatalf("redis connection details leaked: %v", err)
 	}
 }
 
