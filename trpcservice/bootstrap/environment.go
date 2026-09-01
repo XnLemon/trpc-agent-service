@@ -152,6 +152,25 @@ type environmentWeComConfig struct {
 	secretRef      string
 }
 
+// environmentRuntimeStores owns process-scoped runtime stores. The primary
+// store serves ingress and outbox processing; provider stores serve Backend
+// Profile capability materialization.
+type environmentRuntimeStores struct {
+	primary   runtimestorage.RuntimeStore
+	providers map[string]runtimestorage.RuntimeStore
+	owned     []runtimestorage.RuntimeStore
+}
+
+func (stores environmentRuntimeStores) Close() error {
+	var errs []error
+	for _, store := range stores.owned {
+		if store != nil {
+			errs = append(errs, store.Close())
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // NewFromEnvironment assembles the production bootstrap graph from explicit
 // process configuration. It fails before binding an HTTP server when the
 // durable control plane or required credentials are not configured.
@@ -193,7 +212,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, err
 	}
 	delegateSessions := inmemory.NewSessionService()
-	runtimeStore, err := newEnvironmentRuntimeStoreForConfig(ctx, config, db)
+	runtimeStores, err := newEnvironmentRuntimeStoresForConfig(ctx, config, db)
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = db.Close()
@@ -205,10 +224,11 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		}
 		return nil, err
 	}
+	runtimeStore := runtimeStores.primary
 	tenantRepo, appRepo, channelRepo, auditWriter, err := environmentRepositories(config, db)
 	if err != nil {
 		_ = delegateSessions.Close()
-		_ = runtimeStore.Close()
+		_ = runtimeStores.Close()
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: environment repositories: %v", ErrInvalidConfig, err)
 	}
@@ -216,21 +236,21 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	wecomFactory, wecomWorker, err := environmentWeComComponents(config, channelRepo, tenantRepo, appRepo, runtimeStore, auditWriter)
 	if err != nil {
 		_ = delegateSessions.Close()
-		_ = runtimeStore.Close()
+		_ = runtimeStores.Close()
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: wecom components: %v", ErrInvalidConfig, err)
 	}
-	secretRegistry, modelRegistry, backendRegistry, err := environmentRegistries(config, delegateSessions, runtimeStore)
+	secretRegistry, modelRegistry, backendRegistry, err := environmentRegistriesForStores(config, delegateSessions, runtimeStores)
 	if err != nil {
 		_ = delegateSessions.Close()
-		_ = runtimeStore.Close()
+		_ = runtimeStores.Close()
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: environment registries: %v", ErrInvalidConfig, err)
 	}
 	storageFactory, err := backend.NewRegistryStorageFactory(backendRegistry, secretRegistry)
 	if err != nil {
 		_ = delegateSessions.Close()
-		_ = runtimeStore.Close()
+		_ = runtimeStores.Close()
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: storage factory: %v", ErrInvalidConfig, err)
 	}
@@ -261,12 +281,12 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		Migrate:          applyMigrations,
 		VerifyMigrations: verifyMigrations,
 		CloseDependencies: func() error {
-			return errors.Join(delegateSessions.Close(), runtimeStore.Close())
+			return errors.Join(delegateSessions.Close(), runtimeStores.Close())
 		},
 	})
 	if err != nil {
 		_ = delegateSessions.Close()
-		_ = runtimeStore.Close()
+		_ = runtimeStores.Close()
 		_ = db.Close()
 		return nil, err
 	}
@@ -365,21 +385,34 @@ func environmentWeComComponents(config environmentConfig, channelsRepo channels.
 }
 
 func environmentRegistries(config environmentConfig, delegateSessions session.Service, runtimeStore runtimestorage.RuntimeStore) (*modelprofile.SecretRegistry, *modelprofile.ModelProviderRegistry, *backend.ProviderRegistry, error) {
+	providerName := environmentRuntimeProviderName(config.runtimeStorage)
+	return environmentRegistriesForStores(config, delegateSessions, environmentRuntimeStores{
+		primary:   runtimeStore,
+		providers: map[string]runtimestorage.RuntimeStore{providerName: runtimeStore},
+	})
+}
+
+type environmentRuntimeProviderSpec struct {
+	name         string
+	capabilities []backend.Capability
+	store        runtimestorage.RuntimeStore
+}
+
+func environmentRegistriesForStores(config environmentConfig, delegateSessions session.Service, runtimeStores environmentRuntimeStores) (*modelprofile.SecretRegistry, *modelprofile.ModelProviderRegistry, *backend.ProviderRegistry, error) {
 	secretRegistry := modelprofile.NewSecretRegistry()
 	modelRegistry := modelprofile.NewModelProviderRegistry()
 	backendRegistry := backend.NewProviderRegistry()
-	providerName := environmentRuntimeProviderName(config.runtimeStorage)
-	capabilities := environmentRuntimeCapabilities(config.runtimeStorage)
+	runtimeProviders, err := environmentRuntimeProviders(config, runtimeStores)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	for _, identity := range config.apiIdentities {
 		if config.demoMode {
 			if err := modelRegistry.Register(identity.TenantID, demoModelProvider, environmentModelFactory{}); err != nil {
 				return nil, nil, nil, err
 			}
-			for _, capability := range capabilities {
-				provider := environmentRuntimeCapabilityProvider{capability: capability, delegate: delegateSessions, store: runtimeStore, telemetry: config.telemetry, backend: config.runtimeStorage, redisEndpoint: config.redisEndpoint, redisSecretRef: config.redisSecretRef, redisPasswordRequired: config.redis.Password != ""}
-				if err := backendRegistry.Register(identity.TenantID, capability, providerName, provider); err != nil {
-					return nil, nil, nil, err
-				}
+			if err := registerEnvironmentRuntimeProviders(backendRegistry, identity.TenantID, delegateSessions, config, runtimeProviders); err != nil {
+				return nil, nil, nil, err
 			}
 			continue
 		}
@@ -401,14 +434,45 @@ func environmentRegistries(config environmentConfig, delegateSessions session.Se
 				return nil, nil, nil, err
 			}
 		}
-		for _, capability := range capabilities {
-			provider := environmentRuntimeCapabilityProvider{capability: capability, delegate: delegateSessions, store: runtimeStore, telemetry: config.telemetry, backend: config.runtimeStorage, redisEndpoint: config.redisEndpoint, redisSecretRef: config.redisSecretRef, redisPasswordRequired: config.redis.Password != ""}
-			if err := backendRegistry.Register(identity.TenantID, capability, providerName, provider); err != nil {
-				return nil, nil, nil, err
-			}
+		if err := registerEnvironmentRuntimeProviders(backendRegistry, identity.TenantID, delegateSessions, config, runtimeProviders); err != nil {
+			return nil, nil, nil, err
 		}
 	}
 	return secretRegistry, modelRegistry, backendRegistry, nil
+}
+
+func environmentRuntimeProviders(config environmentConfig, stores environmentRuntimeStores) ([]environmentRuntimeProviderSpec, error) {
+	providerName := environmentRuntimeProviderName(config.runtimeStorage)
+	primary := stores.providers[providerName]
+	if primary == nil {
+		return nil, fmt.Errorf("%w: primary runtime provider is unavailable", ErrInvalidConfig)
+	}
+	providers := []environmentRuntimeProviderSpec{{name: providerName, capabilities: environmentRuntimeCapabilities(config.runtimeStorage), store: primary}}
+	if config.runtimeStorage != "redis" {
+		return providers, nil
+	}
+	fallback := stores.providers["inmemory"]
+	if fallback == nil {
+		return nil, fmt.Errorf("%w: in-memory runtime provider is unavailable", ErrInvalidConfig)
+	}
+	return append(providers, environmentRuntimeProviderSpec{name: "inmemory", capabilities: environmentRuntimeCapabilities("inmemory"), store: fallback}), nil
+}
+
+func registerEnvironmentRuntimeProviders(registry *backend.ProviderRegistry, tenantID string, delegateSessions session.Service, config environmentConfig, runtimeProviders []environmentRuntimeProviderSpec) error {
+	for _, runtimeProvider := range runtimeProviders {
+		for _, capability := range runtimeProvider.capabilities {
+			provider := environmentRuntimeCapabilityProvider{capability: capability, delegate: delegateSessions, store: runtimeProvider.store, telemetry: config.telemetry, backend: runtimeProvider.name}
+			if runtimeProvider.name == "redis" {
+				provider.redisEndpoint = config.redisEndpoint
+				provider.redisSecretRef = config.redisSecretRef
+				provider.redisPasswordRequired = config.redis.Password != ""
+			}
+			if err := registry.Register(tenantID, capability, runtimeProvider.name, provider); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func environmentRuntimeProviderName(runtimeStorage string) string {
@@ -774,6 +838,26 @@ func newEnvironmentRuntimeStoreForConfig(ctx context.Context, config environment
 	return newEnvironmentRuntimeStore(config.runtimeStorage, db)
 }
 
+func newEnvironmentRuntimeStoresForConfig(ctx context.Context, config environmentConfig, db *sql.DB) (environmentRuntimeStores, error) {
+	primary, err := newEnvironmentRuntimeStoreForConfig(ctx, config, db)
+	if err != nil {
+		return environmentRuntimeStores{}, err
+	}
+	providerName := environmentRuntimeProviderName(config.runtimeStorage)
+	stores := environmentRuntimeStores{
+		primary:   primary,
+		providers: map[string]runtimestorage.RuntimeStore{providerName: primary},
+		owned:     []runtimestorage.RuntimeStore{primary},
+	}
+	if config.runtimeStorage != "redis" {
+		return stores, nil
+	}
+	fallback := runtimestorageinmemory.New()
+	stores.providers["inmemory"] = fallback
+	stores.owned = append(stores.owned, fallback)
+	return stores, nil
+}
+
 func environmentRedisRuntimeStore(ctx context.Context, config environmentConfig) (runtimestorage.RuntimeStore, error) {
 	store, err := runtimestorageredis.NewFromConfig(ctx, config.redis)
 	if err != nil {
@@ -848,6 +932,13 @@ func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalo
 }
 
 func newEnvironmentBackendCatalog(runtimeStorage string) (*backend.ProviderCatalog, error) {
+	inMemory := backend.ProviderSpec{
+		Provider:        "inmemory",
+		Capabilities:    []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit},
+		EndpointPolicy:  backend.FieldForbidden,
+		SecretRefPolicy: backend.FieldForbidden,
+		Options:         map[string]backend.OptionSpec{},
+	}
 	if runtimeStorage == "redis" {
 		backendCatalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
 			Provider:        "redis",
@@ -856,19 +947,13 @@ func newEnvironmentBackendCatalog(runtimeStorage string) (*backend.ProviderCatal
 			EndpointSchemes: []string{"redis"},
 			SecretRefPolicy: backend.FieldOptional,
 			Options:         map[string]backend.OptionSpec{},
-		})
+		}, inMemory)
 		if err != nil {
 			return nil, fmt.Errorf("%w: backend catalog is invalid", ErrInvalidConfig)
 		}
 		return backendCatalog, nil
 	}
-	backendCatalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
-		Provider:        "inmemory",
-		Capabilities:    []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit},
-		EndpointPolicy:  backend.FieldForbidden,
-		SecretRefPolicy: backend.FieldForbidden,
-		Options:         map[string]backend.OptionSpec{},
-	})
+	backendCatalog, err := backend.NewProviderCatalog(inMemory)
 	if err != nil {
 		return nil, fmt.Errorf("%w: backend catalog is invalid", ErrInvalidConfig)
 	}

@@ -16,6 +16,7 @@ import (
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestorageredis "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	"github.com/alicebob/miniredis/v2"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
@@ -535,9 +536,16 @@ func TestEnvironmentRedisCatalogAndRegistryBoundaries(t *testing.T) {
 	}
 
 	delegate := inmemory.NewSessionService()
-	store := runtimestorageinmemory.New()
-	t.Cleanup(func() { _ = delegate.Close(); _ = store.Close() })
-	secrets, _, providers, err := environmentRegistries(config, delegate, store)
+	redisStore := runtimestorageinmemory.New()
+	inMemoryStore := runtimestorageinmemory.New()
+	t.Cleanup(func() { _ = delegate.Close(); _ = redisStore.Close(); _ = inMemoryStore.Close() })
+	secrets, _, providers, err := environmentRegistriesForStores(config, delegate, environmentRuntimeStores{
+		primary: redisStore,
+		providers: map[string]runtimestorage.RuntimeStore{
+			"redis":    redisStore,
+			"inmemory": inMemoryStore,
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -564,6 +572,183 @@ func TestEnvironmentRedisCatalogAndRegistryBoundaries(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "redis://other:6379") {
 		t.Fatal("redis endpoint leaked in provider error")
+	}
+	value, err = provider.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: config.redisEndpoint, SecretRef: "env/other"}, secret)
+	if !errors.Is(err, backend.ErrStorageFactory) || value != nil {
+		t.Fatalf("mismatched redis secret reference = %T, %v", value, err)
+	}
+}
+
+func TestEnvironmentRedisProfilesUseSeparateInMemoryProvider(t *testing.T) {
+	const (
+		tenantA   = "t_00000000000000000000000000"
+		tenantB   = "t_00000000000000000000000001"
+		sessionID = "same-session"
+		memoryID  = "same-memory"
+	)
+	config := environmentConfig{runtimeStorage: "redis", redisEndpoint: "redis://127.0.0.1:6379", redisSecretRef: "env/redis-password", redis: runtimestorageredis.Config{Password: "redis-secret"}, modelProvider: defaultModelProvider, modelNames: []string{"gpt-4o-mini"}, endpointHosts: []string{"api.openai.com"}, secretRef: "env/model", apiIdentities: map[string]gateway.APIIdentity{
+		"token-a": {TenantID: tenantA, AppID: "app-a", SubjectID: "subject-a"},
+		"token-b": {TenantID: tenantB, AppID: "app-b", SubjectID: "subject-b"},
+	}, modelAPIKeys: map[string]string{tenantA: "model-a", tenantB: "model-b"}}
+	_, catalog, err := environmentCatalogs(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redisProfile, err := backend.NewProfile(backend.CreateInput{TenantID: tenantA, ProfileKey: "redis-runtime", DisplayName: "Redis Runtime", Bindings: []backend.CapabilityBinding{
+		{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: config.redisEndpoint, SecretRef: config.redisSecretRef},
+		{Capability: backend.CapabilityMemory, Provider: "redis", Endpoint: config.redisEndpoint, SecretRef: config.redisSecretRef},
+	}}, catalog)
+	if err != nil {
+		t.Fatalf("redis profile = %v", err)
+	}
+	inMemoryProfile, err := backend.NewProfile(backend.CreateInput{TenantID: tenantB, ProfileKey: "inmemory-runtime", DisplayName: "InMemory Runtime", Bindings: []backend.CapabilityBinding{
+		{Capability: backend.CapabilitySession, Provider: "inmemory"},
+		{Capability: backend.CapabilityMemory, Provider: "inmemory"},
+	}}, catalog)
+	if err != nil {
+		t.Fatalf("in-memory profile = %v", err)
+	}
+
+	delegate := inmemory.NewSessionService()
+	redisStore := runtimestorageinmemory.New()
+	inMemoryStore := runtimestorageinmemory.New()
+	t.Cleanup(func() { _ = delegate.Close(); _ = redisStore.Close(); _ = inMemoryStore.Close() })
+	secrets, _, providers, err := environmentRegistriesForStores(config, delegate, environmentRuntimeStores{
+		primary: redisStore,
+		providers: map[string]runtimestorage.RuntimeStore{
+			"redis":    redisStore,
+			"inmemory": inMemoryStore,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory, err := backend.NewRegistryStorageFactory(providers, secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redisCapabilities, err := factory.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantA, Bindings: redisProfile.Bindings})
+	if err != nil {
+		t.Fatalf("redis capabilities = %v", err)
+	}
+	t.Cleanup(func() { _ = redisCapabilities.Close() })
+	inMemoryCapabilities, err := factory.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantB, Bindings: inMemoryProfile.Bindings})
+	if err != nil {
+		t.Fatalf("in-memory capabilities = %v", err)
+	}
+	t.Cleanup(func() { _ = inMemoryCapabilities.Close() })
+	if _, err := redisCapabilities.Session(); err != nil {
+		t.Fatalf("redis session capability = %v", err)
+	}
+	if _, err := inMemoryCapabilities.Session(); err != nil {
+		t.Fatalf("in-memory session capability = %v", err)
+	}
+	redisMemory, err := redisCapabilities.Memory()
+	if err != nil {
+		t.Fatalf("redis memory capability = %v", err)
+	}
+	inMemoryMemory, err := inMemoryCapabilities.Memory()
+	if err != nil {
+		t.Fatalf("in-memory memory capability = %v", err)
+	}
+	ctx := context.Background()
+	if _, err := redisMemory.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: tenantA, MemoryID: memoryID, UserID: "user", Content: "redis"}); err != nil {
+		t.Fatalf("redis memory write = %v", err)
+	}
+	if _, err := inMemoryMemory.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: tenantB, MemoryID: memoryID, UserID: "user", Content: "in-memory"}); err != nil {
+		t.Fatalf("in-memory memory write = %v", err)
+	}
+	if _, err := redisStore.CreateSession(ctx, tenantA, sessionID, map[string]any{"provider": "redis"}); err != nil {
+		t.Fatalf("redis session write = %v", err)
+	}
+	if _, err := inMemoryStore.CreateSession(ctx, tenantB, sessionID, map[string]any{"provider": "in-memory"}); err != nil {
+		t.Fatalf("in-memory session write = %v", err)
+	}
+	assertEnvironmentRuntimeStoreIsolation(t, redisStore, inMemoryStore, tenantA, tenantB, sessionID, memoryID)
+}
+
+func TestEnvironmentRedisRuntimeStoresOwnPrimaryAndFallback(t *testing.T) {
+	primary := &environmentRuntimeStoreSpy{}
+	previous := newEnvironmentRedisRuntimeStore
+	newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (runtimestorage.RuntimeStore, error) {
+		return primary, nil
+	}
+	t.Cleanup(func() { newEnvironmentRedisRuntimeStore = previous })
+	stores, err := newEnvironmentRuntimeStoresForConfig(context.Background(), environmentConfig{runtimeStorage: "redis"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stores.primary != primary || stores.providers["redis"] != primary || stores.providers["inmemory"] == nil || len(stores.owned) != 2 {
+		t.Fatalf("redis runtime stores = %#v", stores)
+	}
+	if err := stores.Close(); err != nil || primary.closed != 1 {
+		t.Fatalf("runtime store close = %v, primary closes=%d", err, primary.closed)
+	}
+	if _, err := environmentRuntimeProviders(environmentConfig{runtimeStorage: "redis"}, environmentRuntimeStores{providers: map[string]runtimestorage.RuntimeStore{"redis": primary}}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("missing in-memory fallback = %v", err)
+	}
+	if _, err := environmentRuntimeProviders(environmentConfig{runtimeStorage: "redis"}, environmentRuntimeStores{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("missing redis primary = %v", err)
+	}
+}
+
+func TestEnvironmentRedisRuntimeStoreFailsClosed(t *testing.T) {
+	server := miniredis.RunT(t)
+	config := environmentConfig{redis: runtimestorageredis.Config{Addr: server.Addr()}}
+	store, err := environmentRedisRuntimeStore(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	addr := server.Addr()
+	server.Close()
+	if _, err := environmentRedisRuntimeStore(context.Background(), environmentConfig{redis: runtimestorageredis.Config{Addr: addr}}); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("unavailable Redis runtime store = %v", err)
+	}
+}
+
+type environmentRuntimeStoreSpy struct {
+	runtimestorage.RuntimeStore
+	closed int
+}
+
+func (store *environmentRuntimeStoreSpy) Close() error {
+	store.closed++
+	return nil
+}
+
+func assertEnvironmentRuntimeStoreIsolation(t *testing.T, redisStore, inMemoryStore runtimestorage.RuntimeStore, tenantA, tenantB, sessionID, memoryID string) {
+	t.Helper()
+	ctx := context.Background()
+	redisSession, err := redisStore.GetSession(ctx, tenantA, sessionID)
+	if err != nil || redisSession.State["provider"] != "redis" {
+		t.Fatalf("redis session = %#v, %v", redisSession, err)
+	}
+	inMemorySession, err := inMemoryStore.GetSession(ctx, tenantB, sessionID)
+	if err != nil || inMemorySession.State["provider"] != "in-memory" {
+		t.Fatalf("in-memory session = %#v, %v", inMemorySession, err)
+	}
+	redisMemory, err := redisStore.(runtimestorage.MemoryStore).GetMemory(ctx, tenantA, memoryID)
+	if err != nil || redisMemory.Content != "redis" {
+		t.Fatalf("redis memory = %#v, %v", redisMemory, err)
+	}
+	inMemoryMemory, err := inMemoryStore.(runtimestorage.MemoryStore).GetMemory(ctx, tenantB, memoryID)
+	if err != nil || inMemoryMemory.Content != "in-memory" {
+		t.Fatalf("in-memory memory = %#v, %v", inMemoryMemory, err)
+	}
+	if _, err := redisStore.GetSession(ctx, tenantB, sessionID); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("redis session leaked into in-memory tenant = %v", err)
+	}
+	if _, err := inMemoryStore.GetSession(ctx, tenantA, sessionID); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("in-memory session leaked into redis tenant = %v", err)
+	}
+	if _, err := redisStore.(runtimestorage.MemoryStore).GetMemory(ctx, tenantB, memoryID); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("redis memory leaked into in-memory tenant = %v", err)
+	}
+	if _, err := inMemoryStore.(runtimestorage.MemoryStore).GetMemory(ctx, tenantA, memoryID); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("in-memory memory leaked into redis tenant = %v", err)
 	}
 }
 

@@ -384,19 +384,24 @@ func TestRedisReplyCorrelationAndCandidateOrdering(t *testing.T) {
 	}
 }
 
-func TestRedisMemoryQueriesAndTombstone(t *testing.T) {
-	server := miniredis.RunT(t)
-	store := newStore(t, server)
-	ctx := context.Background()
+func seedRedisMemories(t *testing.T, store *redisstore.Store) {
+	t.Helper()
 	for _, value := range []runtimestorage.MemoryInput{
 		{TenantID: "tenant-a", MemoryID: "both", UserID: "user", Content: "coffee and tea", Topics: []string{"drink"}, Metadata: map[string]any{"source": "test"}, Embedding: []float64{1, 0}},
 		{TenantID: "tenant-a", MemoryID: "coffee", UserID: "user", Content: "coffee", Embedding: []float64{0, 1}},
 		{TenantID: "tenant-a", MemoryID: "other-user", UserID: "other", Content: "coffee and tea"},
 	} {
-		if _, err := store.PutMemory(ctx, value); err != nil {
+		if _, err := store.PutMemory(context.Background(), value); err != nil {
 			t.Fatal(err)
 		}
 	}
+}
+
+func TestRedisMemoryQueriesAndDefensiveCopies(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	ctx := context.Background()
+	seedRedisMemories(t, store)
 	values, err := store.ListMemories(ctx, "tenant-a", "user", 1)
 	if err != nil || len(values) != 1 || values[0].UserID != "user" {
 		t.Fatalf("limited memories = %+v, %v", values, err)
@@ -416,22 +421,35 @@ func TestRedisMemoryQueriesAndTombstone(t *testing.T) {
 	if err != nil || persisted.Topics[0] != "drink" || persisted.Metadata["source"] != "test" || persisted.Embedding[0] != 1 {
 		t.Fatalf("memory defensive copy = %+v, %v", persisted, err)
 	}
+}
+
+func TestRedisMemoryTombstoneRemovesIndexHandoff(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	ctx := context.Background()
+	seedRedisMemories(t, store)
+	persisted, err := store.GetMemory(ctx, "tenant-a", "both")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := store.EnqueueMemoryIndex(ctx, persisted); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.DeleteMemory(ctx, "tenant-a", "both"); err != nil {
 		t.Fatal(err)
 	}
-	for name, check := range map[string]func() error{
-		"read":  func() error { _, err := store.GetMemory(ctx, "tenant-a", "both"); return err },
-		"index": func() error { return store.EnqueueMemoryIndex(ctx, persisted) },
-		"wait":  func() error { return store.WaitForMemoryIndex(ctx, "tenant-a", "both", persisted.Version) },
-	} {
-		if err := check(); !errors.Is(err, runtimestorage.ErrNotFound) {
-			t.Fatalf("deleted memory %s = %v", name, err)
-		}
+	checks := []struct {
+		name string
+		call func() error
+	}{
+		{name: "read", call: func() error { _, err := store.GetMemory(ctx, "tenant-a", "both"); return err }},
+		{name: "index", call: func() error { return store.EnqueueMemoryIndex(ctx, persisted) }},
+		{name: "wait", call: func() error { return store.WaitForMemoryIndex(ctx, "tenant-a", "both", persisted.Version) }},
 	}
-	values, err = store.ListMemories(ctx, "tenant-a", "user", 10)
+	for _, check := range checks {
+		assertRedisError(t, check.name, check.call(), runtimestorage.ErrNotFound)
+	}
+	values, err := store.ListMemories(ctx, "tenant-a", "user", 10)
 	if err != nil || len(values) != 1 || values[0].MemoryID != "coffee" {
 		t.Fatalf("tombstoned memories = %+v, %v", values, err)
 	}
@@ -471,140 +489,448 @@ func TestRedisOwnedConstructorsAndPing(t *testing.T) {
 	}
 }
 
-func TestRedisValidationAndCancellationBoundaries(t *testing.T) {
+func assertRedisError(t *testing.T, name string, err, want error) {
+	t.Helper()
+	if !errors.Is(err, want) {
+		t.Fatalf("%s = %v, want %v", name, err, want)
+	}
+}
+
+func TestRedisConstructorAndContextValidation(t *testing.T) {
 	server := miniredis.RunT(t)
 	store := newStore(t, server)
 	ctx := context.Background()
 	var nilStore *redisstore.Store
-	if err := nilStore.Ping(ctx); !errors.Is(err, runtimestorage.ErrStorage) {
-		t.Fatalf("nil store ping = %v", err)
-	}
-	if err := store.Ping(nil); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("nil context ping = %v", err)
-	}
-	if _, err := store.GetSession(nil, "tenant-a", "session"); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("nil context read = %v", err)
-	}
+	assertRedisError(t, "nil store ping", nilStore.Ping(ctx), runtimestorage.ErrStorage)
+	assertRedisError(t, "nil context ping", store.Ping(nil), runtimestorage.ErrInvalid)
+	_, err := store.GetSession(nil, "tenant-a", "session")
+	assertRedisError(t, "nil context read", err, runtimestorage.ErrInvalid)
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := redisstore.NewFromURL(canceled, "redis://"+server.Addr()); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled URL constructor = %v", err)
-	}
-	if _, err := redisstore.NewFromConfig(canceled, redisstore.Config{Addr: server.Addr()}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled config constructor = %v", err)
-	}
-	for name, err := range map[string]error{
-		"empty config address": func() error { _, err := redisstore.NewFromConfig(ctx, redisstore.Config{}); return err }(),
-		"negative config DB": func() error {
+	_, err = redisstore.NewFromURL(canceled, "redis://"+server.Addr())
+	assertRedisError(t, "canceled URL constructor", err, context.Canceled)
+	_, err = redisstore.NewFromConfig(canceled, redisstore.Config{Addr: server.Addr()})
+	assertRedisError(t, "canceled config constructor", err, context.Canceled)
+	checks := []struct {
+		name string
+		call func() error
+	}{
+		{name: "empty config address", call: func() error { _, err := redisstore.NewFromConfig(ctx, redisstore.Config{}); return err }},
+		{name: "negative config DB", call: func() error {
 			_, err := redisstore.NewFromConfig(ctx, redisstore.Config{Addr: server.Addr(), DB: -1})
 			return err
-		}(),
-		"nil URL context": func() error { _, err := redisstore.NewFromURL(nil, "redis://"+server.Addr()); return err }(),
-		"empty URL":       func() error { _, err := redisstore.NewFromURL(ctx, ""); return err }(),
-	} {
-		if !errors.Is(err, runtimestorage.ErrInvalid) {
-			t.Fatalf("%s = %v", name, err)
-		}
+		}},
+		{name: "nil URL context", call: func() error { _, err := redisstore.NewFromURL(nil, "redis://"+server.Addr()); return err }},
+		{name: "empty URL", call: func() error { _, err := redisstore.NewFromURL(ctx, ""); return err }},
 	}
-	if _, err := store.GetReplyCorrelation(ctx, "", "event"); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("invalid correlation read = %v", err)
+	for _, check := range checks {
+		assertRedisError(t, check.name, check.call(), runtimestorage.ErrInvalid)
 	}
-	if _, err := store.GetReplyCorrelation(ctx, "tenant-a", ""); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("empty correlation event = %v", err)
+}
+
+func TestRedisSessionAndEventValidation(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	ctx := context.Background()
+	checks := []struct {
+		name string
+		call func() error
+	}{
+		{name: "invalid correlation read", call: func() error { _, err := store.GetReplyCorrelation(ctx, "", "event"); return err }},
+		{name: "empty correlation event", call: func() error { _, err := store.GetReplyCorrelation(ctx, "tenant-a", ""); return err }},
+		{name: "invalid session tenant", call: func() error { _, err := store.GetSession(ctx, "", "session"); return err }},
+		{name: "empty session ID", call: func() error { _, err := store.CreateSession(ctx, "tenant-a", "", nil); return err }},
+		{name: "unencodable session state", call: func() error {
+			_, err := store.CreateSession(ctx, "tenant-a", "bad-state", map[string]any{"channel": make(chan int)})
+			return err
+		}},
+		{name: "unencodable update state", call: func() error {
+			_, err := store.UpdateSessionState(ctx, "tenant-a", "missing", 1, map[string]any{"channel": make(chan int)})
+			return err
+		}},
+		{name: "invalid session delete", call: func() error { return store.DeleteSession(ctx, "", "session") }},
+		{name: "incomplete inbound event", call: func() error {
+			_, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session"})
+			return err
+		}},
+		{name: "mismatched reply target", call: func() error {
+			_, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session", BindingID: "binding", ExternalMessageID: "external", EventID: "event", ReplyTarget: runtimestorage.ReplyTarget{BindingID: "other", ConversationKind: "direct", ReceiverID: "receiver"}})
+			return err
+		}},
+		{name: "invalid message read", call: func() error { _, err := store.GetMessage(ctx, "", "event"); return err }},
+		{name: "invalid history payload", call: func() error {
+			_, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: []byte("not-json")})
+			return err
+		}},
+		{name: "invalid history tenant", call: func() error { _, err := store.ListEventPayloads(ctx, "", "session"); return err }},
 	}
-	if _, err := store.GetSession(ctx, "", "session"); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("invalid session tenant = %v", err)
+	for _, check := range checks {
+		assertRedisError(t, check.name, check.call(), runtimestorage.ErrInvalid)
 	}
-	if _, err := store.CreateSession(ctx, "tenant-a", "", nil); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("empty session ID = %v", err)
+	transitions := []struct {
+		name  string
+		value runtimestorage.MessageTransition
+		want  error
+	}{
+		{name: "missing owner", value: runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: "event", From: runtimestorage.EventReceived, To: runtimestorage.EventFailed}, want: runtimestorage.ErrInvalid},
+		{name: "illegal transition", value: runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: "event", From: runtimestorage.EventReceived, To: runtimestorage.EventCompleted, Owner: "worker"}, want: runtimestorage.ErrIllegalTransition},
+		{name: "running without lease", value: runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: "event", From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "worker"}, want: runtimestorage.ErrInvalid},
 	}
-	if _, err := store.CreateSession(ctx, "tenant-a", "bad-state", map[string]any{"channel": make(chan int)}); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("unencodable session state = %v", err)
+	for _, transition := range transitions {
+		_, err := store.TransitionMessage(ctx, transition.value)
+		assertRedisError(t, transition.name, err, transition.want)
 	}
-	if _, err := store.UpdateSessionState(ctx, "tenant-a", "missing", 1, map[string]any{"channel": make(chan int)}); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("unencodable update state = %v", err)
+}
+
+func TestRedisReplyValidation(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	ctx := context.Background()
+	checks := []struct {
+		name string
+		call func() error
+		want error
+	}{
+		{name: "non-pending reply", call: func() error {
+			_, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentCount: 1, Status: runtimestorage.ReplySent})
+			return err
+		}, want: runtimestorage.ErrInvalid},
+		{name: "out-of-range reply segment", call: func() error {
+			_, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 1, SegmentCount: 1})
+			return err
+		}, want: runtimestorage.ErrInvalid},
+		{name: "incomplete reply batch", call: func() error {
+			_, err := store.EnqueueReplies(ctx, []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentCount: 2}})
+			return err
+		}, want: runtimestorage.ErrInvalid},
+		{name: "empty correlation enqueue", call: func() error {
+			_, err := store.EnqueueRepliesWithCorrelation(ctx, runtimestorage.ReplyCorrelation{}, nil)
+			return err
+		}, want: runtimestorage.ErrInvalid},
+		{name: "empty reply ID", call: func() error { _, err := store.GetReply(ctx, "tenant-a", "", 0); return err }, want: runtimestorage.ErrInvalid},
+		{name: "invalid candidates tenant", call: func() error { _, err := store.ListReplyCandidates(ctx, ""); return err }, want: runtimestorage.ErrInvalid},
+		{name: "empty reply owner", call: func() error { _, err := store.ClaimReply(ctx, "tenant-a", "reply", 0, "", time.Second); return err }, want: runtimestorage.ErrInvalid},
+		{name: "illegal reply transition", call: func() error {
+			_, err := store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply", From: runtimestorage.ReplySent, To: runtimestorage.ReplySending, Owner: "worker"})
+			return err
+		}, want: runtimestorage.ErrIllegalTransition},
 	}
-	if err := store.DeleteSession(ctx, "", "session"); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("invalid session delete = %v", err)
+	for _, check := range checks {
+		assertRedisError(t, check.name, check.call(), check.want)
 	}
-	if _, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session"}); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("incomplete inbound event = %v", err)
+}
+
+func TestRedisMemoryValidation(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	ctx := context.Background()
+	checks := []struct {
+		name string
+		call func() error
+	}{
+		{name: "empty memory user", call: func() error {
+			_, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", Content: "content"})
+			return err
+		}},
+		{name: "non-finite memory embedding", call: func() error {
+			_, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", UserID: "user", Content: "content", Embedding: []float64{math.NaN()}})
+			return err
+		}},
+		{name: "unencodable memory metadata", call: func() error {
+			_, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", UserID: "user", Content: "content", Metadata: map[string]any{"channel": make(chan int)}})
+			return err
+		}},
+		{name: "invalid memory read", call: func() error { _, err := store.GetMemory(ctx, "", "memory"); return err }},
+		{name: "empty memory list user", call: func() error { _, err := store.ListMemories(ctx, "tenant-a", "", 0); return err }},
+		{name: "negative memory limit", call: func() error { _, err := store.ListMemories(ctx, "tenant-a", "user", -1); return err }},
+		{name: "empty memory query", call: func() error { _, err := store.SearchMemories(ctx, "tenant-a", "user", "", 0); return err }},
+		{name: "empty memory delete", call: func() error { return store.DeleteMemory(ctx, "tenant-a", "") }},
+		{name: "invalid memory index", call: func() error {
+			return store.EnqueueMemoryIndex(ctx, runtimestorage.MemoryRecord{TenantID: "tenant-a", MemoryID: "memory"})
+		}},
+		{name: "invalid memory handoff wait", call: func() error { return store.WaitForMemoryIndex(ctx, "tenant-a", "memory", 0) }},
 	}
-	if _, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session", BindingID: "binding", ExternalMessageID: "external", EventID: "event", ReplyTarget: runtimestorage.ReplyTarget{BindingID: "other", ConversationKind: "direct", ReceiverID: "receiver"}}); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("mismatched reply target = %v", err)
+	for _, check := range checks {
+		assertRedisError(t, check.name, check.call(), runtimestorage.ErrInvalid)
 	}
-	for name, transition := range map[string]runtimestorage.MessageTransition{
-		"missing owner":         {TenantID: "tenant-a", EventID: "event", From: runtimestorage.EventReceived, To: runtimestorage.EventFailed},
-		"illegal transition":    {TenantID: "tenant-a", EventID: "event", From: runtimestorage.EventReceived, To: runtimestorage.EventCompleted, Owner: "worker"},
-		"running without lease": {TenantID: "tenant-a", EventID: "event", From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "worker"},
-	} {
-		if _, err := store.TransitionMessage(ctx, transition); (name == "illegal transition" && !errors.Is(err, runtimestorage.ErrIllegalTransition)) || (name != "illegal transition" && !errors.Is(err, runtimestorage.ErrInvalid)) {
-			t.Fatalf("%s = %v", name, err)
-		}
+}
+
+func TestRedisOperationsHonorCanceledContext(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reply := runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentCount: 1}
+	calls := []struct {
+		name string
+		call func() error
+	}{
+		{name: "ping", call: func() error { return store.Ping(ctx) }},
+		{name: "correlation", call: func() error { _, err := store.GetReplyCorrelation(ctx, "tenant-a", "event"); return err }},
+		{name: "get session", call: func() error { _, err := store.GetSession(ctx, "tenant-a", "session"); return err }},
+		{name: "create session", call: func() error { _, err := store.CreateSession(ctx, "tenant-a", "session", nil); return err }},
+		{name: "update session", call: func() error { _, err := store.UpdateSessionState(ctx, "tenant-a", "session", 1, nil); return err }},
+		{name: "delete session", call: func() error { return store.DeleteSession(ctx, "tenant-a", "session") }},
+		{name: "record message", call: func() error {
+			_, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session", BindingID: "binding", ExternalMessageID: "external", EventID: "event"})
+			return err
+		}},
+		{name: "get message", call: func() error { _, err := store.GetMessage(ctx, "tenant-a", "event"); return err }},
+		{name: "transition message", call: func() error {
+			_, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: "event", From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "worker", LeaseDuration: time.Second})
+			return err
+		}},
+		{name: "append payload", call: func() error {
+			_, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: []byte(`{}`)})
+			return err
+		}},
+		{name: "list payloads", call: func() error { _, err := store.ListEventPayloads(ctx, "tenant-a", "session"); return err }},
+		{name: "enqueue reply", call: func() error { _, err := store.EnqueueReply(ctx, reply); return err }},
+		{name: "enqueue replies", call: func() error { _, err := store.EnqueueReplies(ctx, []runtimestorage.ReplyOutbox{reply}); return err }},
+		{name: "enqueue correlated replies", call: func() error {
+			_, err := store.EnqueueRepliesWithCorrelation(ctx, runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event", RequestID: "request"}, []runtimestorage.ReplyOutbox{reply})
+			return err
+		}},
+		{name: "get reply", call: func() error { _, err := store.GetReply(ctx, "tenant-a", "reply", 0); return err }},
+		{name: "list candidates", call: func() error { _, err := store.ListReplyCandidates(ctx, "tenant-a"); return err }},
+		{name: "claim reply", call: func() error {
+			_, err := store.ClaimReply(ctx, "tenant-a", "reply", 0, "worker", time.Second)
+			return err
+		}},
+		{name: "transition reply", call: func() error {
+			_, err := store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply", From: runtimestorage.ReplyPending, To: runtimestorage.ReplySending, Owner: "worker"})
+			return err
+		}},
+		{name: "put memory", call: func() error {
+			_, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", UserID: "user", Content: "content"})
+			return err
+		}},
+		{name: "get memory", call: func() error { _, err := store.GetMemory(ctx, "tenant-a", "memory"); return err }},
+		{name: "list memories", call: func() error { _, err := store.ListMemories(ctx, "tenant-a", "user", 0); return err }},
+		{name: "search memories", call: func() error { _, err := store.SearchMemories(ctx, "tenant-a", "user", "content", 0); return err }},
+		{name: "delete memory", call: func() error { return store.DeleteMemory(ctx, "tenant-a", "memory") }},
+		{name: "enqueue memory index", call: func() error {
+			return store.EnqueueMemoryIndex(ctx, runtimestorage.MemoryRecord{TenantID: "tenant-a", MemoryID: "memory", Version: 1})
+		}},
+		{name: "wait memory index", call: func() error { return store.WaitForMemoryIndex(ctx, "tenant-a", "memory", 1) }},
 	}
-	if _, err := store.GetMessage(ctx, "", "event"); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("invalid message read = %v", err)
+	for _, value := range calls {
+		assertRedisError(t, value.name, value.call(), context.Canceled)
 	}
-	if _, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: []byte("not-json")}); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("invalid history payload = %v", err)
+}
+
+func TestRedisMissingRecordsReturnNotFound(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	ctx := context.Background()
+	reply := runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentCount: 1}
+	calls := []struct {
+		name string
+		call func() error
+	}{
+		{name: "correlation", call: func() error { _, err := store.GetReplyCorrelation(ctx, "tenant-a", "event"); return err }},
+		{name: "session", call: func() error { _, err := store.GetSession(ctx, "tenant-a", "session"); return err }},
+		{name: "session update", call: func() error { _, err := store.UpdateSessionState(ctx, "tenant-a", "session", 1, nil); return err }},
+		{name: "session delete", call: func() error { return store.DeleteSession(ctx, "tenant-a", "session") }},
+		{name: "message record", call: func() error {
+			_, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session", BindingID: "binding", ExternalMessageID: "external", EventID: "event"})
+			return err
+		}},
+		{name: "message", call: func() error { _, err := store.GetMessage(ctx, "tenant-a", "event"); return err }},
+		{name: "message transition", call: func() error {
+			_, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: "event", From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "worker", LeaseDuration: time.Second})
+			return err
+		}},
+		{name: "payload append", call: func() error {
+			_, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: []byte(`{}`)})
+			return err
+		}},
+		{name: "payload list", call: func() error { _, err := store.ListEventPayloads(ctx, "tenant-a", "session"); return err }},
+		{name: "reply enqueue", call: func() error { _, err := store.EnqueueReply(ctx, reply); return err }},
+		{name: "reply batch", call: func() error { _, err := store.EnqueueReplies(ctx, []runtimestorage.ReplyOutbox{reply}); return err }},
+		{name: "reply", call: func() error { _, err := store.GetReply(ctx, "tenant-a", "reply", 0); return err }},
+		{name: "reply claim", call: func() error {
+			_, err := store.ClaimReply(ctx, "tenant-a", "reply", 0, "worker", time.Second)
+			return err
+		}},
+		{name: "reply transition", call: func() error {
+			_, err := store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply", From: runtimestorage.ReplyPending, To: runtimestorage.ReplySending, Owner: "worker"})
+			return err
+		}},
+		{name: "memory", call: func() error { _, err := store.GetMemory(ctx, "tenant-a", "memory"); return err }},
+		{name: "memory delete", call: func() error { return store.DeleteMemory(ctx, "tenant-a", "memory") }},
+		{name: "memory index", call: func() error {
+			return store.EnqueueMemoryIndex(ctx, runtimestorage.MemoryRecord{TenantID: "tenant-a", MemoryID: "memory", Version: 1})
+		}},
+		{name: "memory index wait", call: func() error { return store.WaitForMemoryIndex(ctx, "tenant-a", "memory", 1) }},
 	}
-	if _, err := store.ListEventPayloads(ctx, "", "session"); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("invalid history tenant = %v", err)
+	for _, value := range calls {
+		assertRedisError(t, value.name, value.call(), runtimestorage.ErrNotFound)
 	}
-	invalidReply := runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 1, Status: runtimestorage.ReplySent}
-	if _, err := store.EnqueueReply(ctx, invalidReply); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("non-pending reply = %v", err)
+	memories, err := store.ListMemories(ctx, "tenant-a", "user", 0)
+	if err != nil || len(memories) != 0 {
+		t.Fatalf("empty memories = %+v, %v", memories, err)
 	}
-	if _, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 1, SegmentCount: 1}); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("out-of-range reply segment = %v", err)
+	candidates, err := store.ListReplyCandidates(ctx, "tenant-a")
+	if err != nil || len(candidates) != 0 {
+		t.Fatalf("empty reply candidates = %+v, %v", candidates, err)
 	}
-	if _, err := store.EnqueueReplies(ctx, []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentIndex: 0, SegmentCount: 2}}); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("incomplete reply batch = %v", err)
+}
+
+func TestRedisMessageSuccessTransitions(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	ctx := context.Background()
+	event := seedEvent(t, store, "tenant-a", "session", "event")
+	running, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: event.EventID, From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "worker", LeaseDuration: time.Second})
+	if err != nil || running.Status != runtimestorage.EventRunning || running.FencingToken != 1 || running.LeaseOwner != "worker" {
+		t.Fatalf("running event = %+v, %v", running, err)
 	}
-	if _, err := store.EnqueueRepliesWithCorrelation(ctx, runtimestorage.ReplyCorrelation{}, nil); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("empty correlation enqueue = %v", err)
+	completed, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: event.EventID, From: runtimestorage.EventRunning, To: runtimestorage.EventCompleted, Owner: "worker", FencingToken: running.FencingToken})
+	if err != nil || completed.Status != runtimestorage.EventCompleted || completed.LeaseExpiresAt != nil {
+		t.Fatalf("completed event = %+v, %v", completed, err)
 	}
-	if _, err := store.GetReply(ctx, "tenant-a", "", 0); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("empty reply ID = %v", err)
+	pending, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: event.EventID, From: runtimestorage.EventCompleted, To: runtimestorage.EventReplyPending, Owner: "worker", ReplyID: "reply", SegmentCount: 1})
+	if err != nil || pending.Status != runtimestorage.EventReplyPending || pending.ReplyID != "reply" || pending.SegmentCount != 1 {
+		t.Fatalf("pending reply event = %+v, %v", pending, err)
 	}
-	if _, err := store.ListReplyCandidates(ctx, ""); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("invalid candidates tenant = %v", err)
+	replied, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: event.EventID, From: runtimestorage.EventReplyPending, To: runtimestorage.EventReplied, Owner: "worker"})
+	if err != nil || replied.Status != runtimestorage.EventReplied {
+		t.Fatalf("replied event = %+v, %v", replied, err)
 	}
-	if _, err := store.ClaimReply(ctx, "tenant-a", "reply", 0, "", time.Second); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("empty reply owner = %v", err)
+	if got, err := store.GetMessage(ctx, "tenant-a", event.EventID); err != nil || got.Status != runtimestorage.EventReplied {
+		t.Fatalf("persisted replied event = %+v, %v", got, err)
 	}
-	if _, err := store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply", SegmentIndex: 0, From: runtimestorage.ReplySent, To: runtimestorage.ReplySending, Owner: "worker"}); !errors.Is(err, runtimestorage.ErrIllegalTransition) {
-		t.Fatalf("illegal reply transition = %v", err)
+}
+
+func TestRedisReplyDeliverySuccessTransitions(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	ctx := context.Background()
+	event := seedEvent(t, store, "tenant-a", "session", "event")
+	reply, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: event.EventID, SegmentCount: 1, Payload: "response"})
+	if err != nil || reply.Status != runtimestorage.ReplyPending {
+		t.Fatalf("pending reply = %+v, %v", reply, err)
 	}
-	if _, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", UserID: "", Content: "content"}); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("empty memory user = %v", err)
+	claimed, err := store.ClaimReply(ctx, "tenant-a", "reply", 0, "worker", time.Second)
+	if err != nil || claimed.Status != runtimestorage.ReplySending || claimed.Attempts != 1 {
+		t.Fatalf("claimed reply = %+v, %v", claimed, err)
 	}
-	if _, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", UserID: "user", Content: "content", Embedding: []float64{math.NaN()}}); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("non-finite memory embedding = %v", err)
+	sent, err := store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply", From: runtimestorage.ReplySending, To: runtimestorage.ReplySent, Owner: "worker", FencingToken: claimed.FencingToken, ProviderID: "provider-message"})
+	if err != nil || sent.Status != runtimestorage.ReplySent || sent.ProviderMessageID != "provider-message" || sent.LeaseExpiresAt != nil {
+		t.Fatalf("sent reply = %+v, %v", sent, err)
 	}
-	if _, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", UserID: "user", Content: "content", Metadata: map[string]any{"channel": make(chan int)}}); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("unencodable memory metadata = %v", err)
+}
+
+func TestRedisMemoryDefaultValues(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	value, err := store.PutMemory(context.Background(), runtimestorage.MemoryInput{TenantID: "tenant-a", UserID: "user", Content: "content"})
+	if err != nil || !strings.HasPrefix(value.MemoryID, "mem_") || value.Version != 1 {
+		t.Fatalf("defaulted memory = %+v, %v", value, err)
 	}
-	if _, err := store.GetMemory(ctx, "", "memory"); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("invalid memory read = %v", err)
+	if _, err := store.SearchMemories(context.Background(), "tenant-a", "user", "absent", 0); err != nil {
+		t.Fatalf("empty search = %v", err)
 	}
-	if _, err := store.ListMemories(ctx, "tenant-a", "", 0); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("empty memory user = %v", err)
+}
+
+func TestRedisConstructorsNormalizeDefaultsAndOptions(t *testing.T) {
+	server := miniredis.RunT(t)
+	ctx := context.Background()
+	client := redisclient.NewClient(&redisclient.Options{Addr: server.Addr()})
+	borrowed, err := redisstore.New(client, "")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := store.ListMemories(ctx, "tenant-a", "user", -1); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("negative memory limit = %v", err)
+	t.Cleanup(func() { _ = borrowed.Close(); _ = client.Close() })
+	if _, err := borrowed.CreateSession(ctx, "tenant-a", "session", nil); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := store.SearchMemories(ctx, "tenant-a", "user", "", 0); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("empty memory query = %v", err)
+	if !server.Exists("trpc:runtime:v1:" + hex.EncodeToString([]byte("tenant-a"))) {
+		t.Fatal("default Redis key prefix was not used")
 	}
-	if err := store.DeleteMemory(ctx, "tenant-a", ""); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("empty memory delete = %v", err)
+	configured, err := redisstore.NewFromConfig(ctx, redisstore.Config{
+		Addr:         server.Addr(),
+		DialTimeout:  time.Second,
+		ReadTimeout:  time.Second,
+		WriteTimeout: time.Second,
+		PoolSize:     2,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := store.EnqueueMemoryIndex(ctx, runtimestorage.MemoryRecord{TenantID: "tenant-a", MemoryID: "memory"}); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("invalid memory index = %v", err)
+	if err := configured.Close(); err != nil {
+		t.Fatal(err)
 	}
-	if err := store.WaitForMemoryIndex(ctx, "tenant-a", "memory", 0); !errors.Is(err, runtimestorage.ErrInvalid) {
-		t.Fatalf("invalid memory handoff wait = %v", err)
+	addr := server.Addr()
+	server.Close()
+	if _, err := redisstore.NewFromURL(ctx, "redis://"+addr); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("unavailable URL constructor = %v", err)
+	}
+}
+
+func TestRedisReplyInsertionIsIdempotentAndFenced(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	ctx := context.Background()
+	target := runtimestorage.ReplyTarget{BindingID: "binding-target", ConversationKind: "direct", ReceiverID: "receiver"}
+	event := seedEvent(t, store, "tenant-a", "session", "event")
+	if _, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session", BindingID: "binding-target", ExternalMessageID: "external-target", EventID: "event-target", ReplyTarget: target}); err != nil {
+		t.Fatal(err)
+	}
+	input := runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: event.EventID, SegmentCount: 1, Payload: "payload"}
+	first, err := store.EnqueueReply(ctx, input)
+	if err != nil || first.Status != runtimestorage.ReplyPending {
+		t.Fatalf("first reply = %+v, %v", first, err)
+	}
+	second, err := store.EnqueueReply(ctx, input)
+	if err != nil || second.CreatedAt != first.CreatedAt {
+		t.Fatalf("idempotent reply = %+v, %v", second, err)
+	}
+	if _, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: event.EventID, SegmentCount: 1, Payload: "changed"}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("reply payload conflict = %v", err)
+	}
+	if _, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "target", EventID: "event-target", SegmentCount: 1}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("reply target conflict = %v", err)
+	}
+}
+
+func TestRedisReplyBatchRejectsInconsistentSegments(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	event := seedEvent(t, store, "tenant-a", "session", "event")
+	base := runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: event.EventID, SegmentCount: 2}
+	tests := []struct {
+		name  string
+		batch []runtimestorage.ReplyOutbox
+	}{
+		{name: "empty", batch: nil},
+		{name: "invalid first", batch: []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "reply", EventID: event.EventID, SegmentCount: 1, Status: runtimestorage.ReplySent}}},
+		{name: "different tenant", batch: []runtimestorage.ReplyOutbox{base, {TenantID: "tenant-b", ReplyID: "reply", EventID: event.EventID, SegmentIndex: 1, SegmentCount: 2}}},
+		{name: "different reply", batch: []runtimestorage.ReplyOutbox{base, {TenantID: "tenant-a", ReplyID: "other", EventID: event.EventID, SegmentIndex: 1, SegmentCount: 2}}},
+		{name: "different event", batch: []runtimestorage.ReplyOutbox{base, {TenantID: "tenant-a", ReplyID: "reply", EventID: "other", SegmentIndex: 1, SegmentCount: 2}}},
+		{name: "different count", batch: []runtimestorage.ReplyOutbox{base, {TenantID: "tenant-a", ReplyID: "reply", EventID: event.EventID, SegmentIndex: 1, SegmentCount: 3}}},
+		{name: "duplicate segment", batch: []runtimestorage.ReplyOutbox{base, base}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := store.EnqueueReplies(context.Background(), test.batch); !errors.Is(err, runtimestorage.ErrInvalid) {
+				t.Fatalf("batch error = %v", err)
+			}
+		})
+	}
+}
+
+func TestRedisReplyTransitionCanStartDelivery(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	event := seedEvent(t, store, "tenant-a", "session", "event")
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: event.EventID, SegmentCount: 1}); err != nil {
+		t.Fatal(err)
+	}
+	sending, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply", From: runtimestorage.ReplyPending, To: runtimestorage.ReplySending, Owner: "worker", LeaseDuration: time.Second})
+	if err != nil || sending.Status != runtimestorage.ReplySending || sending.Attempts != 1 || sending.LeaseExpiresAt == nil {
+		t.Fatalf("sending reply = %+v, %v", sending, err)
 	}
 }
 
