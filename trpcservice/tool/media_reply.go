@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
@@ -85,6 +86,7 @@ type ReplyCollector struct {
 	mu      sync.Mutex
 	intents []ReplyIntent
 	seen    map[string]struct{}
+	auditAt time.Time
 }
 
 // NewReplyCollector returns an empty collector for one execution.
@@ -128,6 +130,20 @@ func (collector *ReplyCollector) Intents() []ReplyIntent {
 	collector.mu.Lock()
 	defer collector.mu.Unlock()
 	return append([]ReplyIntent(nil), collector.intents...)
+}
+
+func (collector *ReplyCollector) stableAuditRecorder(recorder audit.Recorder) audit.Recorder {
+	if collector == nil {
+		return recorder
+	}
+	collector.mu.Lock()
+	if collector.auditAt.IsZero() {
+		collector.auditAt = time.Now().UTC()
+	}
+	auditAt := collector.auditAt
+	collector.mu.Unlock()
+	recorder.Now = func() time.Time { return auditAt }
+	return recorder
 }
 
 // Factory constructs one stateless, context-bound platform tool.
@@ -220,8 +236,9 @@ func sendTestImage(ctx context.Context) (sendTestImageResult, error) {
 	if err != nil {
 		return sendTestImageResult{}, err
 	}
+	recorder := execution.Replies.stableAuditRecorder(execution.Audit)
 	policy := Policy{
-		Recorder: execution.Audit,
+		Recorder: recorder,
 		Allowed:  map[string]Decision{SendTestImageID: Allow},
 	}
 	if _, err := policy.Decide(ctx, execution.RequestID, execution.TraceID, SendTestImageID); err != nil {
@@ -245,7 +262,7 @@ func sendTestImage(ctx context.Context) (sendTestImageResult, error) {
 	if err := execution.Replies.Add(ReplyIntent{Kind: runtimestorage.ReplyKindImage, Attachment: reference, Payload: testImagePayload, Fallback: testImageFallback}); err != nil {
 		return sendTestImageResult{}, redactedToolError(err)
 	}
-	if err := execution.Audit.ToolExecuted(ctx, execution.RequestID, execution.TraceID, SendTestImageID); err != nil {
+	if err := recorder.ToolExecuted(ctx, execution.RequestID, execution.TraceID, SendTestImageID); err != nil {
 		return sendTestImageResult{}, redactedToolError(err)
 	}
 	return sendTestImageResult{Status: "queued", Message: "The requested test image is queued for native delivery."}, nil

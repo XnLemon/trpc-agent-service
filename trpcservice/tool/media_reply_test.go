@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
@@ -132,6 +135,70 @@ func TestMediaReplyToolFailsClosedWithoutDurableContext(t *testing.T) {
 	if _, err := sendTestImage(context.Background()); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("missing execution context error = %v", err)
 	}
+}
+
+func TestMediaReplyToolRetriesWithDurableAudit(t *testing.T) {
+	store := runtimestorageinmemory.New()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-a", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", EventID: "event-a", SessionID: "session-a", BindingID: "binding-a", ExternalMessageID: "message-a"}); err != nil {
+		t.Fatal(err)
+	}
+	auditStore, err := audit.NewInMemory("tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ticks atomic.Int64
+	collector := NewReplyCollector()
+	ctx := WithExecutionContext(context.Background(), ExecutionContext{
+		TenantID: "tenant-a", EventID: "event-a", RequestID: "request-a", TraceID: "trace-a", Attachments: store, Replies: collector,
+		Audit: audit.Recorder{Writer: auditStore, TenantID: "tenant-a", Now: func() time.Time { return time.Unix(0, ticks.Add(1)).UTC() }},
+	})
+	callable := resolveTestImageTool(t)
+	assertParallelTestImageCallsSucceed(t, callable, ctx)
+	if len(collector.Intents()) != 1 {
+		t.Fatalf("parallel intents = %#v", collector.Intents())
+	}
+	events, err := auditStore.List(context.Background(), audit.Query{})
+	if err != nil || len(events) != 2 || !sameAuditOccurrence(events) || !hasToolAuditEvents(events) {
+		t.Fatalf("parallel audit events = %#v, err=%v", events, err)
+	}
+}
+
+func assertParallelTestImageCallsSucceed(t *testing.T, callable trpctool.CallableTool, ctx context.Context) {
+	t.Helper()
+	errs := make(chan error, 2)
+	var group sync.WaitGroup
+	for index := 0; index < 2; index++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			_, err := callable.Call(ctx, []byte("{}"))
+			errs <- err
+		}()
+	}
+	group.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("parallel tool call = %v", err)
+		}
+	}
+}
+
+func sameAuditOccurrence(events []audit.Event) bool {
+	return len(events) == 2 && events[0].OccurredAt.Equal(events[1].OccurredAt)
+}
+
+func hasToolAuditEvents(events []audit.Event) bool {
+	types := map[audit.EventType]struct{}{}
+	for _, event := range events {
+		types[event.EventType] = struct{}{}
+	}
+	_, allowed := types[audit.EventToolAllowed]
+	_, executed := types[audit.EventToolExecuted]
+	return allowed && executed
 }
 
 type toolAuditWriter struct {
