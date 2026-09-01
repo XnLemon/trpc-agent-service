@@ -1,8 +1,29 @@
 # 运维、可观测性与生产风险
 
 > 本页把 [生产架构设计](architecture.md) 转成可执行的发布、监控、恢复和风险检查表。
-> 当前仓库只有控制面领域模型、快照和最小 Runner spine；Gateway、队列、真实 IM/Storage
-> Adapter、Dashboard 和告警规则仍是后续平台实现，不应把本页当作已经部署的运行手册。
+> 本页同时记录已在仓库实现的运行时能力和仍待生产化的能力。代码、测试或示例可验证
+> 不代表相应的基础设施已经按本页要求部署并通过容量或灾备验收。
+
+## 当前实现状态
+
+下表区分“有领域契约或设计”与“默认运行链路已经可用”。发布和答辩应以此表为准，避免把
+规划中的架构能力表述为已完成的生产部署。
+
+| 能力 | 状态 | 当前边界与验证 | 生产化缺口或后续门禁 |
+| --- | --- | --- | --- |
+| Gateway、Execution Plan、HTTP Chat/SSE 与 Agent Worker | 已实现 | 可信租户路由、版本化执行快照、限流和幂等均在服务运行链路中 | 仍需按部署规模验证跨节点容量和 SLO |
+| 控制面与运行时存储 | 已实现 | PostgreSQL 控制面；InMemory 和 PostgreSQL Runtime Store 覆盖 Session/Event、Memory、Knowledge、Vector、Artifact 和 Reply Outbox | PostgreSQL 向量/知识检索尚未替代为专用索引服务；InMemory 仅适合单进程开发/测试 |
+| 可靠回复投递 | 已实现 | Reply Outbox 有租约、fencing、指数退避、dead-letter 与 reconcile 测试 | 尚未形成通用的供应商 `Retry-After` 解析和按 chat/provider 限频队列 |
+| Telegram 与企业微信通道 | 已实现，默认装配范围有限 | 两个通道已有入站处理、附件/媒体 MVP、图片和文档出站以及 fallback；企业微信环境 bootstrap 仍是单个静态身份配置 | 需要按目标供应商补齐更丰富交互、平台级多账号装配和限频/429 演练 |
+| Trace、metrics、Prometheus 与审计 | 已实现 | OpenTelemetry、Prometheus 导出、脱敏字段和审计事件均有代码、文档或示例验证 | 告警阈值、保留策略和真实 exporter 背压容量尚未完成生产验收 |
+| 灰度和回滚 | 部分实现 | Tenant/App 级 canary revision 与版本化回滚指针已可用 | 不含百分比 rollout、稳定分桶、指标自动止损或自动回滚 |
+| 故障注入 | 部分实现 | deterministic E2E 覆盖 Gateway、Worker、Outbox lease/retry/restart 和并发边界 | 未完成真实数据库故障转移、OTel 背压、IM 429/Retry-After 与模型超时的演练 |
+| Redis、对象存储与独立向量库 | 未实现 | Backend Profile 和 Runtime Capability 已定义可路由边界 | 需要真实 provider、租户装配、迁移、隔离契约和运行验证；当前优先跟踪 Redis Runtime Store |
+| Admin 身份与工具治理 | 部分实现 | Admin 使用静态 Bearer Token；工具支持 allow/deny/approval 策略，运行时记录调用上限和审计数据 | 需要 OIDC/JWT、RBAC、token rotation、参数级策略、主体授权和可扣减预算 |
+| 容量、备份与灾备 | 未实现 | 已有容量模型、部署示例和故障注入测试 | 需要可重复压测、备份恢复、容量基线和真实基础设施演练 |
+
+本页的 runbook 描述目标运行约束；当表中能力尚未实现时，它是后续实现的验收条件，而不是
+已经可由默认环境保证的行为。
 
 ## 运行边界与值班目标
 
@@ -207,10 +228,14 @@ backpressure。高峰保护使用租户级 token bucket、全局队列上限、�
 | 回复重试风暴 | IM 429/5xx、固定间隔重试、无 per-chat 限速 | 供应商封禁、用户刷屏、队列雪崩 | retry multiplier、429、DLQ、outbox age | 指数退避+jitter、解析 Retry-After、按通道/chat 分桶、最大预算和 DLQ |
 | goroutine/事件泄漏 | context 未传递、Runner Event channel 未排空、consumer 无关闭边界 | Worker 内存上涨、滚动发布卡住、重复消费 | goroutine、FD、channel backlog、shutdown duration 持续上升 | owner 明确；context deadline；有界 drain；supervisor/health check；超时交给幂等重投递 |
 
-## 当前实现状态与后续门禁
+## 后续实现门禁
 
-本仓库目前可以验证 Tenant、Agent App/Revision、Model Profile、Backend Profile、无密钥
-Execution Plan、Runner policy 和 Tenant-scoped Session 的模型/边界测试；不能验证真实 IM
-验签、跨节点 CAS、队列至少一次投递、SQL/Redis 迁移或生产告警。后续实现每落地一个 Adapter
-都必须补充：双租户隔离测试、重复/乱序/验签失败测试、provider 一致性契约测试、故障注入、
-审计字段检查和 `mkdocs build --strict`。
+当前仓库已经覆盖 Tenant、Agent App/Revision、Model Profile、Backend Profile、无密钥
+Execution Plan、Runner policy、Tenant-scoped PostgreSQL/内存 Runtime Store、Telegram/企业微信
+入站验证与可靠回复投递的模型、边界或 E2E 测试。它们不替代跨节点容量、真实基础设施故障
+恢复或外部后端迁移的生产验收。
+
+后续每落地一个外部 Adapter 或生产运行能力，都必须补充：双租户隔离测试、重复/乱序/验签
+失败测试、provider 一致性契约测试、目标基础设施故障注入、审计字段检查和
+`mkdocs build --strict`。涉及数据后端的变更还必须证明 migration、shadow read、回滚窗口和
+provider 不可用时的失败语义。
