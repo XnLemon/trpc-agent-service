@@ -47,6 +47,7 @@ const (
 	EventToolAllowed              EventType = "tool.allowed"
 	EventToolDenied               EventType = "tool.denied"
 	EventToolApprovalRequired     EventType = "tool.approval_required"
+	EventToolExecuted             EventType = "tool.executed"
 	EventIMAuthorizationAllowed   EventType = "im.authorization_allowed"
 	EventIMAuthorizationDenied    EventType = "im.authorization_denied"
 	EventIMIngressAccepted        EventType = "im.ingress_accepted"
@@ -562,7 +563,7 @@ func hasControl(value string) bool {
 }
 func validEventType(value EventType) bool {
 	switch value {
-	case EventControlPlaneChanged, EventExecutionStarted, EventExecutionCompleted, EventExecutionFailed, EventExecutionCanceled, EventExecutionTimedOut, EventExecutionFallback, EventCanarySelected, EventToolAllowed, EventToolDenied, EventToolApprovalRequired, EventIMAuthorizationAllowed, EventIMAuthorizationDenied, EventIMIngressAccepted, EventIMIngressDuplicate, EventIMDeliverySent, EventIMDeliveryRetryScheduled, EventIMDeliveryDeadLettered, EventIMDeliveryReconciled, EventBudgetRejected, EventContentRedacted, EventAuditIncomplete:
+	case EventControlPlaneChanged, EventExecutionStarted, EventExecutionCompleted, EventExecutionFailed, EventExecutionCanceled, EventExecutionTimedOut, EventExecutionFallback, EventCanarySelected, EventToolAllowed, EventToolDenied, EventToolApprovalRequired, EventToolExecuted, EventIMAuthorizationAllowed, EventIMAuthorizationDenied, EventIMIngressAccepted, EventIMIngressDuplicate, EventIMDeliverySent, EventIMDeliveryRetryScheduled, EventIMDeliveryDeadLettered, EventIMDeliveryReconciled, EventBudgetRejected, EventContentRedacted, EventAuditIncomplete:
 		return true
 	}
 	return false

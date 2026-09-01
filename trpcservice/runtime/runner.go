@@ -12,6 +12,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
@@ -36,8 +37,6 @@ func NewRunner(
 }
 
 // NewRunnerWithObservability is NewRunner with provider-neutral model and tool telemetry.
-//
-//nolint:gocyclo // Runner construction validates and wires several independent capability boundaries.
 func NewRunnerWithObservability(
 	ctx context.Context,
 	plan ExecutionPlan,
@@ -45,6 +44,24 @@ func NewRunnerWithObservability(
 	factory modelprofile.ModelFactory,
 	sessions session.Service,
 	telemetry observability.Provider,
+	storageFactories ...backend.StorageFactory,
+) (trpcrunner.Runner, error) {
+	return NewRunnerWithToolRegistry(ctx, plan, resolver, factory, sessions, telemetry, servicetool.DefaultRegistry(), storageFactories...)
+}
+
+// NewRunnerWithToolRegistry is NewRunnerWithObservability with an explicit
+// installed-tool registry. A nil registry uses the built-in platform tools.
+// The returned Runner borrows the registry and never mutates it.
+//
+//nolint:gocyclo // Runner construction validates and wires several independent capability boundaries.
+func NewRunnerWithToolRegistry(
+	ctx context.Context,
+	plan ExecutionPlan,
+	resolver modelprofile.SecretResolver,
+	factory modelprofile.ModelFactory,
+	sessions session.Service,
+	telemetry observability.Provider,
+	toolRegistry *servicetool.Registry,
 	storageFactories ...backend.StorageFactory,
 ) (trpcrunner.Runner, error) {
 	if ctx == nil {
@@ -119,7 +136,14 @@ func NewRunnerWithObservability(
 	if telemetry != nil {
 		model = wrapTelemetryModel(model)
 	}
-	llmOptions := llmAgentOptions(agentInput, model)
+	if toolRegistry == nil {
+		toolRegistry = servicetool.DefaultRegistry()
+	}
+	tools, err := toolRegistry.Resolve(agentInput.Tools)
+	if err != nil {
+		return nil, fmt.Errorf("build runner: tools: %w", err)
+	}
+	llmOptions := llmAgentOptions(agentInput, model, tools)
 	if telemetry != nil {
 		llmOptions = append(llmOptions, telemetryOptions(telemetry, modelInput.Provider, modelInput.Model)...)
 	}
@@ -140,8 +164,8 @@ func NewRunnerWithObservability(
 	return runner, nil
 }
 
-func llmAgentOptions(input agent.LLMAgentFactoryInput, model trpcmodel.Model) []llmagent.Option {
-	return []llmagent.Option{
+func llmAgentOptions(input agent.LLMAgentFactoryInput, model trpcmodel.Model, toolSets ...[]trpctool.Tool) []llmagent.Option {
+	options := []llmagent.Option{
 		llmagent.WithDescription(input.Description),
 		llmagent.WithInstruction(input.Instruction),
 		llmagent.WithGlobalInstruction(input.GlobalInstruction),
@@ -152,6 +176,10 @@ func llmAgentOptions(input agent.LLMAgentFactoryInput, model trpcmodel.Model) []
 		llmagent.WithEnableParallelTools(input.Runtime.EnableParallelTools),
 		llmagent.WithToolConcurrencyConfig(trpctool.ConcurrencyConfig{MaxConcurrency: input.Runtime.MaxParallelTools}),
 	}
+	if len(toolSets) > 0 && len(toolSets[0]) > 0 {
+		options = append(options, llmagent.WithTools(toolSets[0]))
+	}
+	return options
 }
 
 type callbackStateKey struct{}

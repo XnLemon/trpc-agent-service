@@ -10,7 +10,10 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
+	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
@@ -288,6 +291,74 @@ func TestNewRunnerCarriesPublishedRuntimePolicy(t *testing.T) {
 	runOptions := trpcagent.NewRunOptions(policyRunner.runOptions...)
 	if runOptions.MaxRunDuration != time.Duration(policy.ExecutionTimeoutSeconds)*time.Second {
 		t.Fatalf("MaxRunDuration = %v, want %v", runOptions.MaxRunDuration, time.Duration(policy.ExecutionTimeoutSeconds)*time.Second)
+	}
+}
+
+func TestRunnerExecutesRevisionAuthorizedMediaTool(t *testing.T) {
+	fixture := runtimeFixture(t)
+	app, revision := runtimeAgentFixtureWithTools(t, fixture.root.TenantID, fixture.modelProfile.ProfileID, "media-tool-app", agent.DefaultRuntimePolicy(), []agent.ToolAuthorization{{ToolID: servicetool.SendTestImageID, Required: true}})
+	plan, err := NewExecutionPlan(fixture.tenantSnapshot, app, revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := runtimestorageinmemory.New()
+	if _, err := store.CreateSession(context.Background(), fixture.root.TenantID, "tool-session", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: fixture.root.TenantID, EventID: "tool-event", SessionID: "tool-session", BindingID: "tool-binding", ExternalMessageID: "tool-message"}); err != nil {
+		t.Fatal(err)
+	}
+	model := &runtimeToolCallingModel{}
+	sessions := inmemory.NewSessionService()
+	runner, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{model: model}, sessions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = runner.Close()
+		_ = sessions.Close()
+	})
+	collector := servicetool.NewReplyCollector()
+	ctx := servicetool.WithExecutionContext(context.Background(), servicetool.ExecutionContext{TenantID: fixture.root.TenantID, EventID: "tool-event", RequestID: "tool-request", TraceID: "tool-trace", Attachments: store, Replies: collector})
+	events, err := runner.Run(ctx, "user", "tool-session", trpcmodel.NewUserMessage("send me a test image"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	if !model.calledTool(servicetool.SendTestImageID) {
+		t.Fatalf("model tool surface = %v", model.toolNames)
+	}
+	intents := collector.Intents()
+	if len(intents) != 1 || intents[0].Kind != runtimestorage.ReplyKindImage || intents[0].Attachment.Provider != "tool" || intents[0].Attachment.ProviderID != servicetool.SendTestImageID {
+		t.Fatalf("media intents = %+v", intents)
+	}
+	if _, err := store.Load(context.Background(), fixture.root.TenantID, "tool-event", intents[0].Attachment); err != nil {
+		t.Fatalf("tool attachment was not event-bound: %v", err)
+	}
+}
+
+func TestRunnerDoesNotExposeUnapprovedTools(t *testing.T) {
+	fixture := runtimeFixture(t)
+	plan := newExecutionPlanForRunner(t, fixture)
+	model := &runtimeToolCallingModel{respondText: true}
+	sessions := inmemory.NewSessionService()
+	runner, err := NewRunner(context.Background(), plan, nil, &runtimeModelFactory{model: model}, sessions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = runner.Close()
+		_ = sessions.Close()
+	})
+	events, err := runner.Run(context.Background(), "user", "session", trpcmodel.NewUserMessage("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	if len(model.toolNames) != 0 {
+		t.Fatalf("unapproved tool surface = %v", model.toolNames)
 	}
 }
 
@@ -688,6 +759,10 @@ func runtimeAgentFixture(t *testing.T, tenantID, modelProfileID, appKey string) 
 }
 
 func runtimeAgentFixtureWithPolicy(t *testing.T, tenantID, modelProfileID, appKey string, policy agent.RuntimePolicy) (*agent.App, *agent.Revision) {
+	return runtimeAgentFixtureWithTools(t, tenantID, modelProfileID, appKey, policy, nil)
+}
+
+func runtimeAgentFixtureWithTools(t *testing.T, tenantID, modelProfileID, appKey string, policy agent.RuntimePolicy, tools []agent.ToolAuthorization) (*agent.App, *agent.Revision) {
 	t.Helper()
 	app, err := agent.NewApp(agent.CreateInput{TenantID: tenantID, AppKey: appKey, DisplayName: "Support App", Description: "Support"})
 	if err != nil {
@@ -695,7 +770,7 @@ func runtimeAgentFixtureWithPolicy(t *testing.T, tenantID, modelProfileID, appKe
 	}
 	draft, err := agent.NewRevision(agent.CreateRevisionInput{
 		TenantID: tenantID, AppID: app.AppID, Revision: 1,
-		Configuration: agent.DraftConfiguration{Description: "Support revision", Instruction: "Answer accurately.", GlobalInstruction: "Follow policy.", ModelProfileID: modelProfileID, Runtime: policy},
+		Configuration: agent.DraftConfiguration{Description: "Support revision", Instruction: "Answer accurately.", GlobalInstruction: "Follow policy.", ModelProfileID: modelProfileID, Runtime: policy, Tools: tools},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -753,6 +828,7 @@ type runtimeModelFactory struct {
 	secret    modelprofile.SecretValue
 	err       error
 	returnNil bool
+	model     trpcmodel.Model
 }
 
 type runtimeCloseTrackingSession struct {
@@ -792,7 +868,49 @@ func (factory *runtimeModelFactory) New(_ context.Context, input modelprofile.Mo
 	if factory.returnNil {
 		return nil, nil
 	}
+	if factory.model != nil {
+		return factory.model, nil
+	}
 	return runtimeFakeModel{response: factory.response, block: factory.block}, nil
+}
+
+type runtimeToolCallingModel struct {
+	toolNames   []string
+	calls       int
+	respondText bool
+}
+
+func (model *runtimeToolCallingModel) Info() trpcmodel.Info {
+	return trpcmodel.Info{Name: "tool-calling"}
+}
+
+func (model *runtimeToolCallingModel) GenerateContent(ctx context.Context, request *trpcmodel.Request) (<-chan *trpcmodel.Response, error) {
+	for name := range request.Tools {
+		model.toolNames = append(model.toolNames, name)
+	}
+	model.calls++
+	responses := make(chan *trpcmodel.Response, 1)
+	response := &trpcmodel.Response{Done: true, Choices: []trpcmodel.Choice{{Message: trpcmodel.NewAssistantMessage("done")}}}
+	if !model.respondText && model.calls == 1 {
+		response.Choices[0].Message = trpcmodel.Message{Role: trpcmodel.RoleAssistant, ToolCalls: []trpcmodel.ToolCall{{Type: "function", ID: "tool-call", Function: trpcmodel.FunctionDefinitionParam{Name: servicetool.SendTestImageID, Arguments: []byte("{}")}}}}
+	}
+	go func() {
+		defer close(responses)
+		select {
+		case responses <- response:
+		case <-ctx.Done():
+		}
+	}()
+	return responses, nil
+}
+
+func (model *runtimeToolCallingModel) calledTool(name string) bool {
+	for _, value := range model.toolNames {
+		if value == name {
+			return true
+		}
+	}
+	return false
 }
 
 type runtimeFakeModel struct {

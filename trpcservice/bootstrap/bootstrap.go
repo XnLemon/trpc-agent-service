@@ -43,6 +43,7 @@ import (
 	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
 	tenantmysql "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/mysql"
 	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
+	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
@@ -93,6 +94,9 @@ type Config struct {
 	ModelFactory   modelprofile.ModelFactory
 	StorageFactory backend.StorageFactory
 	Sessions       session.Service
+	// ToolRegistry resolves published revision authorizations to installed,
+	// context-bound platform tools. A nil value uses the built-in registry.
+	ToolRegistry *servicetool.Registry
 	// RuntimeStore is the tenant-scoped Session/Event/Outbox capability. It is
 	// separate from upstream session.Service while the runtime adapter evolves.
 	RuntimeStore runtimestorage.RuntimeStore
@@ -335,7 +339,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	registry, err := gateway.NewRuntimeRunnerRegistry(gateway.RuntimeRunnerRegistryConfig{
 		Registry: config.Registry, SecretResolver: config.SecretResolver,
 		ModelFactory: config.ModelFactory, Sessions: config.Sessions, StorageFactory: config.StorageFactory,
-		Observability: config.Observability,
+		Observability: config.Observability, ToolRegistry: config.ToolRegistry,
 	})
 	if err != nil {
 		return nil, ErrInvalidConfig

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,9 +19,11 @@ import (
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
+	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 type capturedRun struct {
@@ -94,6 +97,14 @@ type transitionCaptureStore struct {
 type dispatchAttachmentStore struct {
 	bindFn func(context.Context, string, string, []attachment.Reference) error
 	loadFn func(context.Context, string, string, attachment.Reference) (attachment.Content, error)
+}
+
+type failingToolAttachmentStore struct {
+	runtimestorage.AttachmentStore
+}
+
+func (failingToolAttachmentStore) PutAttachment(context.Context, string, attachment.Upload, io.Reader) (attachment.Reference, error) {
+	return attachment.Reference{}, errors.New("attachment storage failed")
 }
 
 func (s dispatchAttachmentStore) BindAttachments(ctx context.Context, tenantID, eventID string, references []attachment.Reference) error {
@@ -944,6 +955,162 @@ func TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle(t 
 	assertDurableReplyWorkerCompletes(t, store, principal.TenantID(), message.EventID)
 }
 
+func TestDispatcherMaterializesToolMediaReplyAndReplaysIdempotently(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal := mustChannelPrincipal(t, target)
+	dispatcher, store, runs := newToolMediaDispatcher(t, fixture)
+	request := DispatchRequest{Principal: principal, RequestID: "media-request", TraceID: "media-trace", Message: InboundMessage{Content: "send a test image", ExternalMessageID: "media-message", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"}}
+	assertToolMediaDispatchCompletes(t, dispatcher, request)
+	reply := assertToolMediaOutbox(t, store, principal.TenantID(), target)
+	assertToolMediaCorrelation(t, store, principal.TenantID(), reply.EventID)
+	assertToolMediaDuplicateIsRejected(t, dispatcher, request, runs, store, principal.TenantID())
+}
+
+func mustChannelPrincipal(t *testing.T, target channels.RoutingTarget) Principal {
+	t.Helper()
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return principal
+}
+
+func newToolMediaDispatcher(t *testing.T, fixture gatewayFixture) (*Dispatcher, *inmemory.Store, *atomic.Int32) {
+	t.Helper()
+	resolver, err := NewPlanResolver(PlanResolverConfig{Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := &atomic.Int32{}
+	runnerValue := &testRunner{runFn: func(ctx context.Context, _ string, _ string, _ trpcmodel.Message, _ ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		runs.Add(1)
+		return testImageToolEvents(ctx)
+	}}
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	store := inmemory.New()
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, DrainTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dispatcher, store, runs
+}
+
+func testImageToolEvents(ctx context.Context) (<-chan *trpcevent.Event, error) {
+	tools, err := servicetool.DefaultRegistry().Resolve([]agent.ToolAuthorization{{ToolID: servicetool.SendTestImageID, Required: true}})
+	if err != nil {
+		return nil, err
+	}
+	callable, ok := tools[0].(trpctool.CallableTool)
+	if !ok {
+		return nil, errors.New("tool is not callable")
+	}
+	events := make(chan *trpcevent.Event, 1)
+	if _, err := callable.Call(ctx, []byte("{}")); err != nil {
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Error: &trpcmodel.ResponseError{Message: err.Error()}}}
+	} else {
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
+	}
+	close(events)
+	return events, nil
+}
+
+func assertToolMediaDispatchCompletes(t *testing.T, dispatcher *Dispatcher, request DispatchRequest) {
+	t.Helper()
+	stream, err := dispatcher.Dispatch(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if events := collectDispatchEvents(stream); len(events) != 1 || !events[0].Done {
+		t.Fatalf("tool dispatch events = %+v", events)
+	}
+}
+
+func assertToolMediaOutbox(t *testing.T, store *inmemory.Store, tenantID string, target channels.RoutingTarget) runtimestorage.ReplyOutbox {
+	t.Helper()
+	replies, err := store.ListReplyCandidates(context.Background(), tenantID)
+	if err != nil || len(replies) != 1 {
+		t.Fatalf("media replies = %+v, err=%v", replies, err)
+	}
+	reply := replies[0]
+	if reply.Kind != runtimestorage.ReplyKindImage || reply.Fallback == "" || reply.ReplyTarget.BindingID != target.BindingID || reply.ReplyTarget.ReceiverID != "peer-1" {
+		t.Fatalf("media outbox row = %+v", reply)
+	}
+	if _, err := store.Load(context.Background(), tenantID, reply.EventID, reply.Attachment); err != nil {
+		t.Fatalf("outbox attachment is not tenant/event scoped: %v", err)
+	}
+	return reply
+}
+
+func assertToolMediaCorrelation(t *testing.T, store *inmemory.Store, tenantID, eventID string) {
+	t.Helper()
+	correlation, err := store.GetReplyCorrelation(context.Background(), tenantID, eventID)
+	if err != nil || correlation.RequestID != "media-request" || correlation.TraceID != "media-trace" {
+		t.Fatalf("media reply correlation = %+v, err=%v", correlation, err)
+	}
+}
+
+func assertToolMediaDuplicateIsRejected(t *testing.T, dispatcher *Dispatcher, request DispatchRequest, runs *atomic.Int32, store *inmemory.Store, tenantID string) {
+	t.Helper()
+	if _, err := dispatcher.Dispatch(context.Background(), request); !errors.Is(err, ErrDuplicateMessage) {
+		t.Fatalf("duplicate media dispatch error = %v", err)
+	}
+	if runs.Load() != 1 {
+		t.Fatalf("tool runner calls = %d, want one durable execution", runs.Load())
+	}
+	replies, err := store.ListReplyCandidates(context.Background(), tenantID)
+	if err != nil || len(replies) != 1 {
+		t.Fatalf("replayed media replies = %+v, err=%v", replies, err)
+	}
+}
+
+func TestDispatcherToolFailureMaterializesFallback(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPlanResolver(PlanResolverConfig{Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerValue := &testRunner{runFn: func(ctx context.Context, _ string, _ string, _ trpcmodel.Message, _ ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		tools, resolveErr := servicetool.DefaultRegistry().Resolve([]agent.ToolAuthorization{{ToolID: servicetool.SendTestImageID}})
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		_, callErr := tools[0].(trpctool.CallableTool).Call(ctx, []byte("{}"))
+		events := make(chan *trpcevent.Event, 1)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Error: &trpcmodel.ResponseError{Message: callErr.Error()}}}
+		close(events)
+		return events, nil
+	}}
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	store := inmemory.New()
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, AttachmentStore: failingToolAttachmentStore{AttachmentStore: store}, DrainTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "tool-fallback", TraceID: "tool-fallback-trace", Message: InboundMessage{Content: "send a test image", ExternalMessageID: "tool-fallback-message", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = collectDispatchEvents(stream)
+	replies, err := store.ListReplyCandidates(context.Background(), principal.TenantID())
+	if err != nil || len(replies) != 1 || replies[0].Kind != runtimestorage.ReplyKindText || replies[0].Payload != durableFailureFallbackReply {
+		t.Fatalf("tool failure fallback = %+v, err=%v", replies, err)
+	}
+}
+
 func TestDispatcherDurableInboundLeaseCoversAgentRuntimeTimeout(t *testing.T) {
 	fixture := newGatewayFixture(t)
 	target := newTrustedRoutingTarget(t, fixture)
@@ -1209,7 +1376,7 @@ func assertDurableClaimReclaimsReconcilingAndValidatesIDs(t *testing.T, dispatch
 	if err != nil || recoveredReconciling == nil {
 		t.Fatalf("reconciling reclaim = %+v err=%v", recoveredReconciling, err)
 	}
-	dispatcher.finishDurable(context.Background(), "", "", recoveredReconciling, errors.New("execution failed"))
+	dispatcher.finishDurable(context.Background(), "", "", recoveredReconciling, errors.New("execution failed"), "", nil)
 	message.ExternalMessageID = ""
 	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing external ID error = %v", err)

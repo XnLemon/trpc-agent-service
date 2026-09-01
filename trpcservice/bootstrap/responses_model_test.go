@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 func TestResponsesModelInfoAndInputDefaults(t *testing.T) {
@@ -136,41 +137,59 @@ func TestResponsesModelGenerateContentRejectsInvalidArguments(t *testing.T) {
 }
 
 func TestResponsesModelStreamsOutputTextAndUsage(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/responses" || r.Header.Get("Authorization") != "Bearer test-key" || r.Header.Get("Content-Type") != "application/json" {
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
-		}
-		var body struct {
-			Model  string               `json:"model"`
-			Input  []responsesInputItem `json:"input"`
-			Store  bool                 `json:"store"`
-			Stream bool                 `json:"stream"`
-		}
-		var raw map[string]json.RawMessage
-		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-			t.Fatalf("decode request body: %v", err)
-		}
-		if _, ok := raw["include"]; ok {
-			t.Fatalf("request body unexpectedly included encrypted reasoning: %#v", raw)
-		}
-		encoded, err := json.Marshal(raw)
-		if err != nil {
-			t.Fatalf("remarshal request body: %v", err)
-		}
-		if err := json.Unmarshal(encoded, &body); err != nil || body.Model != "gpt-5.6-sol" || len(body.Input) != 1 || body.Input[0].Content[0].Text != "hello" || body.Store || !body.Stream {
-			t.Fatalf("request body = %#v err=%v", body, err)
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"北\"}\n\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"京\"}\n\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n"))
-	}))
+	server := httptest.NewServer(responsesTextAndUsageHandler(t))
 	defer server.Close()
 
 	responses, err := (&responsesModel{apiKey: "test-key", endpoint: server.URL + "/v1", model: "gpt-5.6-sol"}).GenerateContent(context.Background(), &trpcmodel.Request{Messages: []trpcmodel.Message{{Role: trpcmodel.RoleUser, Content: "hello"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertResponsesTextAndUsage(t, responses)
+}
+
+func responsesTextAndUsageHandler(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, request *http.Request) {
+		assertResponsesTextRequest(t, request)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"北\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"京\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n"))
+	}
+}
+
+func assertResponsesTextRequest(t *testing.T, request *http.Request) {
+	t.Helper()
+	if request.URL.Path != "/v1/responses" || request.Header.Get("Authorization") != "Bearer test-key" || request.Header.Get("Content-Type") != "application/json" {
+		t.Fatalf("unexpected request: %s %s", request.Method, request.URL.String())
+	}
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(request.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	if _, ok := raw["include"]; ok {
+		t.Fatalf("request body unexpectedly included encrypted reasoning: %#v", raw)
+	}
+	var body struct {
+		Model  string               `json:"model"`
+		Input  []responsesInputItem `json:"input"`
+		Store  bool                 `json:"store"`
+		Stream bool                 `json:"stream"`
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("remarshal request body: %v", err)
+	}
+	if err := json.Unmarshal(encoded, &body); err != nil {
+		t.Fatalf("decode normalized request body: %v", err)
+	}
+	if body.Model != "gpt-5.6-sol" || len(body.Input) != 1 || len(body.Input[0].Content) != 1 || body.Input[0].Content[0].Text != "hello" || body.Store || !body.Stream {
+		t.Fatalf("request body = %#v err=%v", body, err)
+	}
+}
+
+func assertResponsesTextAndUsage(t *testing.T, responses <-chan *trpcmodel.Response) {
+	t.Helper()
 	var got string
 	var usage *trpcmodel.Usage
 	count := 0
@@ -379,7 +398,7 @@ func TestResponsesModelSkipsMalformedEventsAndReportsScannerErrors(t *testing.T)
 	}
 
 	reader := &errorReader{}
-	_, _, err = consumeResponsesStream(context.Background(), bufio.NewScanner(reader), make(chan *trpcmodel.Response, 1))
+	_, err = consumeResponsesStream(context.Background(), bufio.NewScanner(reader), make(chan *trpcmodel.Response, 1))
 	if !errors.Is(err, errReaderFailure) {
 		t.Fatalf("scanner error = %v", err)
 	}
@@ -418,4 +437,71 @@ func TestResponsesModelRejectsEmptyCompletedResponse(t *testing.T) {
 	if terminal == nil || terminal.Error == nil {
 		t.Fatalf("expected empty response error, got %#v", terminal)
 	}
+}
+
+func TestResponsesModelSerializesFunctionTools(t *testing.T) {
+	request := &trpcmodel.Request{
+		Messages: []trpcmodel.Message{{Role: trpcmodel.RoleUser, Content: "send a test image"}},
+		Tools: map[string]trpctool.Tool{
+			"send_test_image": responsesTestTool{declaration: trpctool.Declaration{
+				Name: "send_test_image", Description: "Queue a controlled test image.",
+				InputSchema: &trpctool.Schema{Type: "object", AdditionalProperties: false},
+			}},
+		},
+	}
+	body, err := (&responsesModel{model: "test"}).requestBody(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Tools []responsesTool
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Tools) != 1 || decoded.Tools[0].Type != "function" || decoded.Tools[0].Name != "send_test_image" || decoded.Tools[0].Parameters == nil || decoded.Tools[0].Parameters.Type != "object" || decoded.Tools[0].Parameters.AdditionalProperties != false {
+		t.Fatalf("serialized tools = %#v", decoded.Tools)
+	}
+}
+
+func TestResponsesModelMapsFunctionCallHistory(t *testing.T) {
+	input := responsesInput(&trpcmodel.Request{Messages: []trpcmodel.Message{
+		{Role: trpcmodel.RoleAssistant, ToolCalls: []trpcmodel.ToolCall{{Type: "function", ID: "call-1", Function: trpcmodel.FunctionDefinitionParam{Name: "send_test_image", Arguments: []byte("{}")}}}},
+		{Role: trpcmodel.RoleTool, ToolID: "call-1", ToolName: "send_test_image", Content: "{\"status\":\"queued\"}"},
+	}})
+	if len(input) != 2 || input[0].Type != "function_call" || input[0].CallID != "call-1" || input[0].Name != "send_test_image" || input[0].Arguments != "{}" || input[1].Type != "function_call_output" || input[1].CallID != "call-1" || input[1].Output != "{\"status\":\"queued\"}" {
+		t.Fatalf("function history = %#v", input)
+	}
+}
+
+func TestResponsesModelStreamsFunctionCall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"send_test_image\",\"arguments\":\"{}\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"send_test_image\",\"arguments\":\"{}\"}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1,\"total_tokens\":5}}}\n\n"))
+	}))
+	defer server.Close()
+	responses, err := (&responsesModel{endpoint: server.URL, model: "test"}).GenerateContent(context.Background(), &trpcmodel.Request{Messages: []trpcmodel.Message{{Content: "send a test image"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var terminal *trpcmodel.Response
+	for response := range responses {
+		terminal = response
+	}
+	if terminal == nil || !terminal.Done || terminal.Error != nil || terminal.Usage == nil || terminal.Usage.TotalTokens != 5 || len(terminal.Choices) != 1 || len(terminal.Choices[0].Message.ToolCalls) != 1 {
+		t.Fatalf("function call terminal = %#v", terminal)
+	}
+	call := terminal.Choices[0].Message.ToolCalls[0]
+	if call.Type != "function" || call.ID != "call-1" || call.Function.Name != "send_test_image" || string(call.Function.Arguments) != "{}" {
+		t.Fatalf("function call = %#v", call)
+	}
+}
+
+type responsesTestTool struct {
+	declaration trpctool.Declaration
+}
+
+func (tool responsesTestTool) Declaration() *trpctool.Declaration {
+	return &tool.declaration
 }

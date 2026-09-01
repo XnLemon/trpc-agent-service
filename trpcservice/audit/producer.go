@@ -77,6 +77,12 @@ func (r Recorder) ToolDecision(ctx context.Context, eventType EventType, request
 	return r.Record(ctx, Event{EventType: eventType, RequestID: requestID, TraceID: traceID, ToolName: toolName, Decision: decision, ErrorType: errorType})
 }
 
+// ToolExecuted records a successful tool execution without persisting its
+// arguments, result, or any provider-specific media metadata.
+func (r Recorder) ToolExecuted(ctx context.Context, requestID, traceID, toolName string) error {
+	return r.Record(ctx, Event{EventType: EventToolExecuted, RequestID: requestID, TraceID: traceID, ToolName: toolName, Decision: DecisionAccepted})
+}
+
 // BudgetRejected records a budget rejection.
 func (r Recorder) BudgetRejected(ctx context.Context, requestID, traceID string) error {
 	return r.Record(ctx, Event{EventType: EventBudgetRejected, RequestID: requestID, TraceID: traceID, Decision: DecisionRejected, ErrorType: string(ErrorBudget)})

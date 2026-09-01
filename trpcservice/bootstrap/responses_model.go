@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 type responsesModel struct {
@@ -34,8 +36,13 @@ func (m *responsesModel) GenerateContent(ctx context.Context, request *trpcmodel
 }
 
 type responsesInputItem struct {
-	Role    string                 `json:"role"`
-	Content []responsesContentPart `json:"content"`
+	Type      string                 `json:"type,omitempty"`
+	Role      string                 `json:"role,omitempty"`
+	Content   []responsesContentPart `json:"content,omitempty"`
+	CallID    string                 `json:"call_id,omitempty"`
+	Name      string                 `json:"name,omitempty"`
+	Arguments string                 `json:"arguments,omitempty"`
+	Output    string                 `json:"output,omitempty"`
 }
 type responsesContentPart struct {
 	Type       string               `json:"type"`
@@ -51,6 +58,13 @@ type responsesContentPart struct {
 type responsesInputAudio struct {
 	Data   string `json:"data"`
 	Format string `json:"format"`
+}
+
+type responsesTool struct {
+	Type        string           `json:"type"`
+	Name        string           `json:"name"`
+	Description string           `json:"description,omitempty"`
+	Parameters  *trpctool.Schema `json:"parameters"`
 }
 
 func (m *responsesModel) stream(ctx context.Context, request *trpcmodel.Request, out chan<- *trpcmodel.Response) {
@@ -70,37 +84,95 @@ func (m *responsesModel) stream(ctx context.Context, request *trpcmodel.Request,
 		m.emitError(out, fmt.Errorf("responses API returned status %d", resp.StatusCode))
 		return
 	}
-	usage, emittedText, err := consumeResponsesStream(ctx, bufio.NewScanner(resp.Body), out)
+	state, err := consumeResponsesStream(ctx, bufio.NewScanner(resp.Body), out)
 	if err != nil {
 		m.emitError(out, err)
 		return
 	}
-	terminal := &trpcmodel.Response{Object: "response", Done: true, Usage: usage}
-	if !emittedText {
+	terminal := &trpcmodel.Response{Object: "response", Done: true, Usage: state.usage}
+	if len(state.toolCalls) > 0 {
+		terminal.Choices = []trpcmodel.Choice{{Message: trpcmodel.Message{Role: trpcmodel.RoleAssistant, ToolCalls: state.toolCalls}}}
+	}
+	if !state.emittedText && len(state.toolCalls) == 0 {
 		terminal.Error = &trpcmodel.ResponseError{Message: "responses API completed without output text", Type: trpcmodel.ErrorTypeAPIError}
 	}
 	sendResponse(ctx, out, terminal)
 }
 
 func (m *responsesModel) requestBody(request *trpcmodel.Request) ([]byte, error) {
-	return json.Marshal(map[string]any{
+	body := map[string]any{
 		"model":  m.model,
 		"input":  responsesInput(request),
 		"store":  false,
 		"stream": true,
-	})
+	}
+	if tools := responsesTools(request); len(tools) > 0 {
+		body["tools"] = tools
+	}
+	return json.Marshal(body)
 }
 
 func responsesInput(request *trpcmodel.Request) []responsesInputItem {
+	if request == nil {
+		return nil
+	}
 	input := make([]responsesInputItem, 0, len(request.Messages))
 	for _, message := range request.Messages {
-		role := string(message.Role)
-		if role == "" {
-			role = string(trpcmodel.RoleUser)
-		}
-		input = append(input, responsesInputItem{Role: role, Content: responsesContent(message)})
+		input = append(input, responsesMessageInput(message)...)
 	}
 	return input
+}
+
+func responsesMessageInput(message trpcmodel.Message) []responsesInputItem {
+	if message.Role == trpcmodel.RoleTool && strings.TrimSpace(message.ToolID) != "" {
+		return []responsesInputItem{{Type: "function_call_output", CallID: strings.TrimSpace(message.ToolID), Output: message.Content}}
+	}
+	if len(message.ToolCalls) > 0 {
+		input := make([]responsesInputItem, 0, len(message.ToolCalls)+1)
+		if message.Content != "" {
+			input = append(input, responsesTextMessage(message))
+		}
+		for _, call := range message.ToolCalls {
+			if strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Function.Name) == "" {
+				continue
+			}
+			input = append(input, responsesInputItem{Type: "function_call", CallID: strings.TrimSpace(call.ID), Name: strings.TrimSpace(call.Function.Name), Arguments: string(call.Function.Arguments)})
+		}
+		return input
+	}
+	return []responsesInputItem{responsesTextMessage(message)}
+}
+
+func responsesTextMessage(message trpcmodel.Message) responsesInputItem {
+	role := string(message.Role)
+	if role == "" {
+		role = string(trpcmodel.RoleUser)
+	}
+	return responsesInputItem{Role: role, Content: responsesContent(message)}
+}
+
+func responsesTools(request *trpcmodel.Request) []responsesTool {
+	if request == nil || len(request.Tools) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(request.Tools))
+	for name := range request.Tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	tools := make([]responsesTool, 0, len(names))
+	for _, name := range names {
+		tool := request.Tools[name]
+		if tool == nil || tool.Declaration() == nil {
+			continue
+		}
+		declaration := tool.Declaration()
+		if strings.TrimSpace(declaration.Name) == "" || declaration.InputSchema == nil {
+			continue
+		}
+		tools = append(tools, responsesTool{Type: "function", Name: declaration.Name, Description: declaration.Description, Parameters: declaration.InputSchema})
+	}
+	return tools
 }
 
 func responsesContent(message trpcmodel.Message) []responsesContentPart {
@@ -254,9 +326,12 @@ type responsesCompletedResponse struct {
 	OutputText        string                      `json:"output_text"`
 }
 type responsesOutputItem struct {
-	Type    string                   `json:"type"`
-	Status  string                   `json:"status"`
-	Content []responsesOutputContent `json:"content"`
+	Type      string                   `json:"type"`
+	Status    string                   `json:"status"`
+	CallID    string                   `json:"call_id"`
+	Name      string                   `json:"name"`
+	Arguments string                   `json:"arguments"`
+	Content   []responsesOutputContent `json:"content"`
 }
 type responsesOutputContent struct {
 	Text    string `json:"text"`
@@ -271,66 +346,105 @@ type responsesIncompleteDetails struct {
 	Reason string `json:"reason"`
 }
 
-func consumeResponsesStream(ctx context.Context, scanner *bufio.Scanner, out chan<- *trpcmodel.Response) (*trpcmodel.Usage, bool, error) {
+type responsesStreamState struct {
+	usage       *trpcmodel.Usage
+	emittedText bool
+	toolCalls   []trpcmodel.ToolCall
+	callIDs     map[string]struct{}
+}
+
+func consumeResponsesStream(ctx context.Context, scanner *bufio.Scanner, out chan<- *trpcmodel.Response) (responsesStreamState, error) {
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
-	var usage *trpcmodel.Usage
-	emittedText := false
+	state := responsesStreamState{callIDs: make(map[string]struct{})}
 	for scanner.Scan() {
 		event, ok := parseResponsesEvent(scanner.Text())
 		if !ok {
 			continue
 		}
-		if event.Type == "response.output_text.delta" && event.Delta != "" {
-			emittedText = true
-			if !sendResponse(ctx, out, &trpcmodel.Response{Object: "response.output_text.delta", IsPartial: true, Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Role: trpcmodel.RoleAssistant, Content: event.Delta}}}}) {
-				return usage, emittedText, nil
-			}
+		continueReading, err := consumeResponsesEvent(ctx, out, event, &state)
+		if err != nil {
+			return state, err
 		}
-		if !emittedText && event.Type == "response.output_text.done" && event.Text != "" {
-			emittedText = true
-			if !sendResponse(ctx, out, responsesTextDelta("response.output_text.done", event.Text)) {
-				return usage, emittedText, nil
-			}
-		}
-		if !emittedText && event.Type == "response.content_part.done" {
-			if text := event.Part.outputText(); text != "" {
-				emittedText = true
-				if !sendResponse(ctx, out, responsesTextDelta("response.content_part.done", text)) {
-					return usage, emittedText, nil
-				}
-			}
-		}
-		if !emittedText && event.Type == "response.output_item.done" {
-			if text := event.Item.outputText(); text != "" {
-				emittedText = true
-				if !sendResponse(ctx, out, responsesTextDelta("response.output_item.done", text)) {
-					return usage, emittedText, nil
-				}
-			}
-		}
-		if event.Type == "response.failed" {
-			return usage, emittedText, fmt.Errorf("responses API failed: %s", event.Response.errorText())
-		}
-		if event.Type == "response.incomplete" {
-			return usage, emittedText, fmt.Errorf("responses API incomplete: %s", event.Response.incompleteReason())
-		}
-		if event.Type == "response.completed" && event.Response.Usage != nil {
-			u := event.Response.Usage
-			usage = &trpcmodel.Usage{PromptTokens: int(u.InputTokens), CompletionTokens: int(u.OutputTokens), TotalTokens: int(u.TotalTokens)}
-		}
-		if !emittedText && event.Type == "response.completed" {
-			if text := event.Response.outputText(); text != "" {
-				emittedText = true
-				if !sendResponse(ctx, out, responsesTextDelta("response.completed", text)) {
-					return usage, emittedText, nil
-				}
-			}
+		if !continueReading {
+			return state, nil
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, emittedText, err
+		return state, err
 	}
-	return usage, emittedText, nil
+	return state, nil
+}
+
+func consumeResponsesEvent(ctx context.Context, out chan<- *trpcmodel.Response, event responsesEvent, state *responsesStreamState) (bool, error) {
+	if event.Type == "response.failed" {
+		return false, fmt.Errorf("responses API failed: %s", event.Response.errorText())
+	}
+	if event.Type == "response.incomplete" {
+		return false, fmt.Errorf("responses API incomplete: %s", event.Response.incompleteReason())
+	}
+	state.addToolCalls(event)
+	state.setUsage(event)
+	if event.Type == "response.output_text.delta" && event.Delta != "" {
+		state.emittedText = true
+		return sendResponse(ctx, out, responsesTextDelta(event.Type, event.Delta)), nil
+	}
+	if state.emittedText {
+		return true, nil
+	}
+	object, text := responsesEventText(event)
+	if text == "" {
+		return true, nil
+	}
+	state.emittedText = true
+	return sendResponse(ctx, out, responsesTextDelta(object, text)), nil
+}
+
+func (state *responsesStreamState) addToolCalls(event responsesEvent) {
+	if event.Type == "response.output_item.done" {
+		state.addToolCall(event.Item.toolCall())
+	}
+	if event.Type == "response.completed" {
+		for _, item := range event.Response.Output {
+			state.addToolCall(item.toolCall())
+		}
+	}
+}
+
+func (state *responsesStreamState) addToolCall(call trpcmodel.ToolCall, ok bool) {
+	if !ok {
+		return
+	}
+	key := call.ID
+	if _, found := state.callIDs[key]; found {
+		return
+	}
+	state.callIDs[key] = struct{}{}
+	state.toolCalls = append(state.toolCalls, call)
+}
+
+func (state *responsesStreamState) setUsage(event responsesEvent) {
+	if event.Type != "response.completed" || event.Response.Usage == nil {
+		return
+	}
+	usage := event.Response.Usage
+	state.usage = &trpcmodel.Usage{PromptTokens: int(usage.InputTokens), CompletionTokens: int(usage.OutputTokens), TotalTokens: int(usage.TotalTokens)}
+}
+
+func responsesEventText(event responsesEvent) (string, string) {
+	switch event.Type {
+	case "response.output_text.delta":
+		return event.Type, event.Delta
+	case "response.output_text.done":
+		return event.Type, event.Text
+	case "response.content_part.done":
+		return event.Type, event.Part.outputText()
+	case "response.output_item.done":
+		return event.Type, event.Item.outputText()
+	case "response.completed":
+		return event.Type, event.Response.outputText()
+	default:
+		return "", ""
+	}
 }
 
 func (response responsesCompletedResponse) outputText() string {
@@ -349,6 +463,13 @@ func (item responsesOutputItem) outputText() string {
 		builder.WriteString(content.outputText())
 	}
 	return builder.String()
+}
+
+func (item responsesOutputItem) toolCall() (trpcmodel.ToolCall, bool) {
+	if item.Type != "function_call" || strings.TrimSpace(item.CallID) == "" || strings.TrimSpace(item.Name) == "" {
+		return trpcmodel.ToolCall{}, false
+	}
+	return trpcmodel.ToolCall{Type: "function", ID: strings.TrimSpace(item.CallID), Function: trpcmodel.FunctionDefinitionParam{Name: strings.TrimSpace(item.Name), Arguments: []byte(item.Arguments)}}, true
 }
 func (content responsesOutputContent) outputText() string {
 	if content.Text != "" {
