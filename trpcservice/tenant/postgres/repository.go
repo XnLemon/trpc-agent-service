@@ -16,13 +16,8 @@ import (
 // List returns a stable page of only the requested tenant scopes. Scope
 // filtering is part of the database query and therefore precedes pagination.
 func (r *TenantRepository) List(ctx context.Context, scopes []string, query, status, cursor string, limit int) ([]*tenant.Tenant, string, error) {
-	visible := make(map[string]struct{}, len(scopes))
-	for _, scope := range scopes {
-		if scope != "" {
-			visible[scope] = struct{}{}
-		}
-	}
-	if len(visible) == 0 {
+	scopeClause, arguments := tenantScopeClause(scopes)
+	if scopeClause == "" {
 		return []*tenant.Tenant{}, "", nil
 	}
 	if r == nil || r.db == nil {
@@ -40,18 +35,7 @@ func (r *TenantRepository) List(ctx context.Context, scopes []string, query, sta
 			return nil, "", fmt.Errorf("invalid cursor")
 		}
 	}
-	scopeIDs := make([]string, 0, len(visible))
-	for scope := range visible {
-		scopeIDs = append(scopeIDs, scope)
-	}
-	sort.Strings(scopeIDs)
-	placeholders := make([]string, len(scopeIDs))
-	arguments := make([]any, len(scopeIDs))
-	for index, scope := range scopeIDs {
-		placeholders[index] = fmt.Sprintf("$%d", index+1)
-		arguments[index] = scope
-	}
-	rows, err := r.db.QueryContext(ctx, tenantSelect+` WHERE tenant_id IN (`+strings.Join(placeholders, ", ")+`) ORDER BY tenant_id`, arguments...)
+	rows, err := r.db.QueryContext(ctx, tenantSelect+scopeClause+` ORDER BY tenant_id`, arguments...)
 	if err != nil {
 		return nil, "", mapDBError(ctx, err, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid)
 	}
@@ -87,6 +71,33 @@ func (r *TenantRepository) List(ctx context.Context, scopes []string, query, sta
 		next = fmt.Sprintf("%d", end)
 	}
 	return items[offset:end], next, nil
+}
+
+// tenantScopeClause returns a deterministic SQL predicate and arguments for
+// the tenant IDs visible to one Admin principal. An empty predicate means no
+// tenant is visible, never an unrestricted query.
+func tenantScopeClause(scopes []string) (string, []any) {
+	visible := make(map[string]struct{}, len(scopes))
+	for _, scope := range scopes {
+		if scope != "" {
+			visible[scope] = struct{}{}
+		}
+	}
+	if len(visible) == 0 {
+		return "", nil
+	}
+	scopeIDs := make([]string, 0, len(visible))
+	for scope := range visible {
+		scopeIDs = append(scopeIDs, scope)
+	}
+	sort.Strings(scopeIDs)
+	placeholders := make([]string, len(scopeIDs))
+	arguments := make([]any, len(scopeIDs))
+	for index, scope := range scopeIDs {
+		placeholders[index] = fmt.Sprintf("$%d", index+1)
+		arguments[index] = scope
+	}
+	return ` WHERE tenant_id IN (` + strings.Join(placeholders, ", ") + `) `, arguments
 }
 
 // TenantRepository persists Tenant roots in PostgreSQL.
