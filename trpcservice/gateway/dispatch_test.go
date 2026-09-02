@@ -1387,6 +1387,37 @@ func TestDispatcherRunnerEventCancellationAfterReceiptDoesNotComplete(t *testing
 	}
 }
 
+func TestDispatcherRunnerEventCancellationDuringSendRecordsCanceledAudit(t *testing.T) {
+	dispatcher, _ := newTestDispatcher(t, &testRunner{})
+	ctx := &stagedContext{Context: context.Background(), done: make(chan struct{}), firstErr: make(chan struct{}), errAfter: 2}
+	runnerEvents := make(chan *trpcevent.Event)
+	event := &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "terminal"}}}, Done: true}}
+	output := make(chan DispatchEvent, 4)
+	var terminalErr error
+	var terminalEventType audit.EventType
+	var terminalErrorType string
+	var terminalCommitted bool
+	var terminalErrorEmitted bool
+	var reply strings.Builder
+	done := dispatcher.handleForwardRunnerEvent(ctx, "request-cancel-during-send", "", runnerEvents, output, event, &reply, &terminalErr, &terminalEventType, &terminalErrorType, &terminalCommitted, &terminalErrorEmitted,
+		func(audit.EventType, string) error { return nil },
+		func(audit.ExecutionResult, string) error { return nil })
+	if !done || !errors.Is(terminalErr, context.Canceled) || terminalEventType != audit.EventExecutionCanceled || terminalErrorType != string(audit.ErrorCanceled) {
+		t.Fatalf("cancellation state done=%v err=%v event=%q error=%q", done, terminalErr, terminalEventType, terminalErrorType)
+	}
+	var finalizedType audit.EventType
+	if err := dispatcher.finalizeForward(ctx, "request-cancel-during-send", "", nil, Principal{}, terminalErr, reply.String(), terminalEventType, terminalErrorType,
+		func(eventType audit.EventType, _ string) error {
+			finalizedType = eventType
+			return nil
+		}); err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("finalize error = %v", err)
+	}
+	if finalizedType != audit.EventExecutionCanceled {
+		t.Fatalf("finalized audit type = %q", finalizedType)
+	}
+}
+
 func TestDispatcherRejectsInvalidBoundaryInputs(t *testing.T) {
 	dispatcher, principal := newTestDispatcher(t, &testRunner{})
 	if _, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Message: InboundMessage{Content: "hello"}}); !errors.Is(err, ErrUnauthenticated) {

@@ -716,6 +716,9 @@ func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requ
 		}
 		if !sendDispatchEvent(ctx, output, item) {
 			*terminalErr = ctx.Err()
+			if IsContextCancellation(*terminalErr) {
+				*terminalEventType, *terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
+			}
 			drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
 			return true
 		}
