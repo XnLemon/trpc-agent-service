@@ -69,10 +69,10 @@ export function ReasonDialog({
       destroyOnClose
       width={520}
     >
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div className="admin-stack">
         {description}
         <div>
-          <div className="admin-page-subtitle" style={{ marginBottom: 6 }}>
+          <div className="admin-page-subtitle admin-description-spaced">
             操作原因（必填，将写入审计记录）
           </div>
           <Textarea

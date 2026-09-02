@@ -72,7 +72,7 @@ export function BindingsPage() {
       createTitle="创建渠道绑定"
       createDescription="将企业微信 / Telegram 入站流量路由到指定 Agent App。服务端只保存路由摘要与 Secret 引用，不保存路由原文与渠道凭据。"
       createForm={
-        <Form layout="vertical" colon>
+        <Form layout="vertical" labelAlign="top" colon>
           <Form.FormItem label="Binding Key" help="创建后不可修改，租户内唯一。">
             <Input value={bindingKey} onChange={(v) => setBindingKey(String(v))} placeholder="例如 wecom-support" />
           </Form.FormItem>

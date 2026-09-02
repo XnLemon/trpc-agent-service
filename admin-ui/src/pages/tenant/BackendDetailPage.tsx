@@ -131,7 +131,7 @@ export function BackendDetailPage() {
             <Descriptions
               size="small"
               colon
-              style={{ marginTop: 8 }}
+              className="admin-description-meta"
               items={[
                 { label: 'Profile Key', content: profile.ProfileKey },
                 { label: 'Profile ID', content: <span className="admin-mono">{profile.ProfileID}</span> },
@@ -161,7 +161,7 @@ export function BackendDetailPage() {
               </Button>
             }
           >
-            <Form layout="vertical" colon>
+            <Form layout="vertical" labelAlign="top" colon>
               <Form.FormItem label="展示名">
                 <Input value={form.displayName} onChange={(v) => setForm({ ...form, displayName: String(v) })} />
               </Form.FormItem>
@@ -176,7 +176,7 @@ export function BackendDetailPage() {
           </Card>
 
           <Card title="状态操作" bordered>
-            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+            <Space direction="vertical" size="small" className="admin-stack-full">
               <div className="admin-page-subtitle">active ↔ suspended；disabled 为终态。暂停后运行时将拒绝新执行。</div>
               <StatusActions status={profile.Status} busy={saving} onTransition={transition} />
             </Space>

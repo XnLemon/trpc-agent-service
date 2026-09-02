@@ -50,21 +50,21 @@ export function TenantLayout() {
   }, [load]);
 
   return (
-    <div className="admin-page" style={{ maxWidth: 'none' }}>
+    <div className="admin-page admin-tenant-page">
       <LoadState loading={loading} error={error} onRetry={load}>
         {tenant ? (
           <>
-            <Card bordered>
-              <Space align="center" size="large" breakLine style={{ width: '100%' }}>
+            <Card className="admin-context-card" bordered>
+              <Space align="center" size="large" breakLine className="admin-stack-full">
                 <div>
-                  <Space align="center">
+                  <div className="admin-context-title-row">
                     <h2 className="admin-page-title">{tenant.DisplayName}</h2>
                     <StatusTag status={tenant.Status} />
-                  </Space>
+                  </div>
                   <Descriptions
                     size="small"
                     colon
-                    style={{ marginTop: 8 }}
+                    className="admin-description-meta"
                     items={[
                       { label: '租户 Key', content: tenant.TenantKey },
                       { label: '租户 ID', content: <span className="admin-mono">{tenant.TenantID}</span> },

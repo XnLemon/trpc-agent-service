@@ -178,6 +178,57 @@ func TestAdminTenantCreateAndReadUseIndependentPrincipal(t *testing.T) {
 	}
 }
 
+func TestAdminMeAndCollectionListsUseScopedStablePagination(t *testing.T) {
+	handler, _ := testHandler(t)
+	create := func(key string) string {
+		req := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants", strings.NewReader(`{"tenant_key":"`+key+`","display_name":"`+key+`"}`))
+		req.Header.Set("Authorization", "Bearer admin-token")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create tenant status = %d", rec.Code)
+		}
+		var envelope struct {
+			Data struct{ TenantID string } `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		return envelope.Data.TenantID
+	}
+	first := create("first")
+	secondValue, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "second", DisplayName: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := secondValue.TenantID
+	auth, err := NewStaticAuthenticator("admin-token", []string{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.config.Authenticator = auth
+	req := httptest.NewRequest(http.MethodGet, "/admin/v1/me", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), first) || !strings.Contains(rec.Body.String(), second) {
+		t.Fatalf("me response = %d %s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/admin/v1/tenants?limit=1", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tenant list = %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"items"`) {
+		t.Fatalf("tenant list missing items: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), first) && !strings.Contains(rec.Body.String(), second) {
+		t.Fatalf("tenant list missing scoped item: %s", rec.Body.String())
+	}
+}
+
 func TestAdminGlobalFirstTenantCreationIsSerialized(t *testing.T) {
 	handler, _ := testHandler(t)
 	const attempts = 16

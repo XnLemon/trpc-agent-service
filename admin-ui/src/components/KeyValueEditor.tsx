@@ -31,13 +31,14 @@ export function KeyValueEditor({
     <div>
       {entries.map(([key, val], index) => (
         <div className="admin-kv-row" key={index}>
-          <Input value={key} placeholder={keyPlaceholder} onChange={(v) => update(index, String(v), val)} />
-          <Input value={val} placeholder={valuePlaceholder} onChange={(v) => update(index, key, String(v))} />
+          <Input aria-label={`选项 ${index + 1} 的键`} value={key} placeholder={keyPlaceholder} onChange={(v) => update(index, String(v), val)} />
+          <Input aria-label={`选项 ${index + 1} 的值`} value={val} placeholder={valuePlaceholder} onChange={(v) => update(index, key, String(v))} />
           <Button
             shape="square"
             variant="outline"
             theme="danger"
             icon={<DeleteIcon />}
+            aria-label={`移除选项 ${index + 1}`}
             onClick={() => {
               const next = { ...safeValue };
               delete next[key];

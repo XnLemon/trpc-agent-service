@@ -40,6 +40,12 @@ export interface Connection {
   token: string;
 }
 
+export interface ListResponse<T> {
+  items: T[];
+  next_cursor?: string;
+  total?: number | null;
+}
+
 interface RequestResult<T> {
   data: T;
   requestId: string;
@@ -96,6 +102,20 @@ export class AdminClient {
   private patch<T>(path: string, body: unknown) {
     return this.request<T>('PATCH', path, body);
   }
+
+  private list<T>(path: string, params: Record<string, string | number | undefined> = {}) {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') query.set(key, String(value));
+    return this.get<ListResponse<T>>(`${path}${query.toString() ? `?${query}` : ''}`);
+  }
+
+  getMe() { return this.get<{ subject_id: string; global: boolean; tenant_scopes: string[]; can_create_tenant: boolean }>('/admin/v1/me'); }
+  listTenants(params: Record<string, string | number | undefined> = {}) { return this.list<Tenant>('/admin/v1/tenants', params); }
+  listApps(tenantId: string, params: Record<string, string | number | undefined> = {}) { return this.list<App>(this.tenantPath(tenantId, 'apps'), params); }
+  listRevisions(tenantId: string, appId: string, params: Record<string, string | number | undefined> = {}) { return this.list<Revision>(this.tenantPath(tenantId, `apps/${encodeURIComponent(appId)}/revisions`), params); }
+  listModels(tenantId: string, params: Record<string, string | number | undefined> = {}) { return this.list<ModelProfile>(this.tenantPath(tenantId, 'models'), params); }
+  listBackends(tenantId: string, params: Record<string, string | number | undefined> = {}) { return this.list<BackendProfile>(this.tenantPath(tenantId, 'backends'), params); }
+  listBindings(tenantId: string, params: Record<string, string | number | undefined> = {}) { return this.list<ChannelBinding>(this.tenantPath(tenantId, 'bindings'), params); }
 
   // --- Tenant -------------------------------------------------------------
 

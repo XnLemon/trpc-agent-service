@@ -56,7 +56,7 @@ export function BindingsEditor({ value, onChange }: BindingsEditorProps) {
   };
 
   return (
-    <Space direction="vertical" size="small" style={{ width: '100%' }}>
+    <Space direction="vertical" size="small" className="admin-stack-full">
       {list.map((binding, index) => (
         <Card
           key={index}
@@ -69,7 +69,7 @@ export function BindingsEditor({ value, onChange }: BindingsEditorProps) {
             </Button>
           }
         >
-          <Form layout="vertical" colon className="admin-form-grid">
+          <Form layout="vertical" labelAlign="top" colon className="admin-form-grid">
             <Form.FormItem label="能力（Capability）">
               <Select value={binding.capability} options={CAPABILITY_OPTIONS} onChange={(v) => patchAt(index, { capability: String(v) })} />
             </Form.FormItem>
@@ -83,7 +83,7 @@ export function BindingsEditor({ value, onChange }: BindingsEditorProps) {
               <Input value={binding.secretRef} onChange={(v) => patchAt(index, { secretRef: String(v) })} />
             </Form.FormItem>
           </Form>
-          <Form layout="vertical" colon style={{ marginTop: 8 }}>
+          <Form layout="vertical" labelAlign="top" colon className="admin-space-top">
             <Form.FormItem label="Options" help="键集合受 Catalog 限制，键名保持原样提交。">
               <KeyValueEditor value={binding.options} onChange={(options) => patchAt(index, { options })} />
             </Form.FormItem>

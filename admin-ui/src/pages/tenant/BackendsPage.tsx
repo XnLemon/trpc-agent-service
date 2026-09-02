@@ -64,7 +64,7 @@ export function BackendsPage() {
       createTitle="创建存储后端配置"
       createDescription="绑定 session / memory / summary / knowledge / artifact / audit 能力的 Provider；active 状态至少需要一条 session 绑定。"
       createForm={
-        <Form layout="vertical" colon>
+        <Form layout="vertical" labelAlign="top" colon>
           <Form.FormItem label="Profile Key" help="创建后不可修改，租户内唯一。">
             <Input value={profileKey} onChange={(v) => setProfileKey(String(v))} placeholder="例如 primary-store" />
           </Form.FormItem>

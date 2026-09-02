@@ -74,7 +74,7 @@ export function ModelsPage() {
       createTitle="创建模型配置"
       createDescription="provider / model / options 受服务端 Catalog 限制；secret_ref 仅为不透明引用，禁止填写明文密钥。"
       createForm={
-        <Form layout="vertical" colon>
+        <Form layout="vertical" labelAlign="top" colon>
           <Form.FormItem label="Profile Key" help="创建后不可修改，租户内唯一。">
             <Input value={profileKey} onChange={(v) => setProfileKey(String(v))} placeholder="例如 gpt-main" />
           </Form.FormItem>

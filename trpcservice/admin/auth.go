@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -20,6 +21,16 @@ type Principal struct {
 	SubjectID    string
 	TenantScopes map[string]struct{}
 	Global       bool
+}
+
+// ScopeIDs returns a stable, defensive list for the /me response.
+func (p Principal) ScopeIDs() []string {
+	values := make([]string, 0, len(p.TenantScopes))
+	for scope := range p.TenantScopes {
+		values = append(values, scope)
+	}
+	sort.Strings(values)
+	return values
 }
 
 // Allows reports whether the principal may access the tenant operation.

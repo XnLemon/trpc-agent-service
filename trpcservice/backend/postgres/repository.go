@@ -11,6 +11,60 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 )
 
+func (r *BackendRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*backend.Profile, string, error) {
+	if r == nil || r.db == nil {
+		return nil, "", ErrStorage
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset := 0
+	if cursor != "" {
+		if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+			return nil, "", fmt.Errorf("invalid cursor")
+		}
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT profile_id FROM public.backend_profile WHERE tenant_id=$1 ORDER BY profile_id`, tenantID)
+	if err != nil {
+		return nil, "", ErrStorage
+	}
+	defer rows.Close()
+	items := make([]*backend.Profile, 0)
+	q := strings.ToLower(strings.TrimSpace(query))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, "", ErrStorage
+		}
+		value, err := loadBackendProfile(ctx, r.db, r.catalog, tenantID, id, false)
+		if err != nil {
+			return nil, "", ErrStorage
+		}
+		if status != "" && string(value.Status) != status {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(value.ProfileID+" "+value.ProfileKey+" "+value.DisplayName), q) {
+			continue
+		}
+		items = append(items, value)
+	}
+	if offset >= len(items) {
+		return []*backend.Profile{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = fmt.Sprintf("%d", end)
+	}
+	return items[offset:end], next, nil
+}
+
 // BackendRepository persists Backend Profiles and their capability bindings.
 type BackendRepository struct {
 	db      *sql.DB

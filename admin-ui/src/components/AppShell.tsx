@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { Button, Layout, Menu } from 'tdesign-react';
+import { Button, Layout, Menu, Tag } from 'tdesign-react';
 import { AppIcon, DataBaseIcon, HomeIcon, LayersIcon, LinkIcon, LogoutIcon, ViewListIcon } from 'tdesign-icons-react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useConnection } from '@/lib/connection';
@@ -49,14 +49,27 @@ export function AppShell() {
   return (
     <Layout className="admin-shell">
       <Header className="admin-shell-header">
-        <span className="admin-shell-logo">tRPC Agent 管理控制台</span>
-        {tenantId ? (
-          <span className="admin-page-subtitle">
-            当前租户：<span className="admin-mono">{tenantId}</span>
+        <div className="admin-shell-brand">
+          <span className="admin-shell-brand-mark" aria-hidden="true">
+            <LayersIcon />
           </span>
+          <div className="admin-shell-brand-copy">
+            <strong className="admin-shell-logo">tRPC Agent</strong>
+            <span>管理控制台</span>
+          </div>
+        </div>
+        {tenantId ? (
+          <div className="admin-shell-context">
+            <span className="admin-shell-context-label">当前租户</span>
+            <span className="admin-mono">{tenantId}</span>
+          </div>
         ) : null}
         <span className="admin-shell-header-spacer" />
-        <span className="admin-page-subtitle">API：{connection?.baseUrl || '同源 /admin（开发代理或 BFF）'}</span>
+        <div className="admin-shell-endpoint">
+          <span className="admin-shell-endpoint-label">API endpoint</span>
+          <span>{connection?.baseUrl || '同源 /admin'}</span>
+        </div>
+        <Tag theme="primary" variant="light">Admin</Tag>
         <Button
           size="small"
           variant="outline"
@@ -69,15 +82,21 @@ export function AppShell() {
           断开连接
         </Button>
       </Header>
-      <Layout style={{ height: 'calc(100vh - 64px)' }}>
+      <Layout className="admin-shell-body">
         <Aside width="220px" className="admin-shell-aside">
-          <Menu value={activeValue} onChange={(value) => navigate(String(value))} style={{ width: '100%' }}>
+          <div className="admin-nav-caption">工作区</div>
+          <Menu theme="light" width="100%" value={activeValue} onChange={(value) => navigate(String(value))}>
             {items.map((item) => (
               <Menu.MenuItem key={item.value} value={item.value} icon={item.icon}>
                 {item.label}
               </Menu.MenuItem>
             ))}
           </Menu>
+          <div className="admin-aside-footer">
+            <span className="admin-aside-footer-dot" aria-hidden="true" />
+            <span>控制面配置</span>
+            <span className="admin-mono">v1</span>
+          </div>
         </Aside>
         <Layout>
           <Content className="admin-shell-content">

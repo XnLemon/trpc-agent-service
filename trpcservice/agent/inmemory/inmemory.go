@@ -4,11 +4,112 @@ package inmemory
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 )
+
+// List returns a stable page of Apps belonging to one tenant.
+func (r *InMemoryRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*agent.App, string, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, "", err
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset, err := decodeCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := r.mu.rlock(ctx); err != nil {
+		return nil, "", err
+	}
+	defer r.mu.runlock()
+	query, status = strings.ToLower(strings.TrimSpace(query)), strings.TrimSpace(status)
+	items := make([]*agent.App, 0)
+	for scope, value := range r.apps {
+		if scope.tenantID != tenantID || (status != "" && string(value.Status) != status) {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(value.AppID+" "+value.AppKey+" "+value.DisplayName), query) {
+			continue
+		}
+		items = append(items, cloneApp(value))
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].AppID < items[j].AppID })
+	if offset >= len(items) {
+		return []*agent.App{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = encodeCursor(end)
+	}
+	return items[offset:end], next, nil
+}
+
+// ListRevisions returns revisions for one App using stable numeric ordering.
+func (r *InMemoryRepository) ListRevisions(ctx context.Context, tenantID, appID, query, status, cursor string, limit int) ([]*agent.Revision, string, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, "", err
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset, err := decodeCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := r.mu.rlock(ctx); err != nil {
+		return nil, "", err
+	}
+	defer r.mu.runlock()
+	values := r.revisions[appScope{tenantID: tenantID, appID: appID}]
+	items := make([]*agent.Revision, 0, len(values))
+	status = strings.TrimSpace(status)
+	for _, value := range values {
+		if status != "" && string(value.State) != status {
+			continue
+		}
+		items = append(items, cloneRevision(value))
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Revision < items[j].Revision })
+	if offset >= len(items) {
+		return []*agent.Revision{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = encodeCursor(end)
+	}
+	return items[offset:end], next, nil
+}
+
+func decodeCursor(cursor string) (int, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	var offset int
+	if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+		return 0, fmt.Errorf("invalid cursor")
+	}
+	return offset, nil
+}
+func encodeCursor(offset int) string { return fmt.Sprintf("%d", offset) }
 
 type appScope struct {
 	tenantID string

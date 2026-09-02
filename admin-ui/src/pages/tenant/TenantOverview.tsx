@@ -126,7 +126,7 @@ export function TenantOverview() {
           </Space>
         }
       >
-        <Form layout="vertical" colon className="admin-form-grid">
+        <Form layout="vertical" labelAlign="top" colon className="admin-form-grid">
           <Form.FormItem label="展示名">
             <Input value={form.displayName} onChange={(value) => patch({ displayName: String(value) })} />
           </Form.FormItem>
@@ -135,7 +135,7 @@ export function TenantOverview() {
               value={form.rateLimitRPM ?? undefined}
               min={0}
               placeholder="不限制"
-              style={{ width: '100%' }}
+              className="admin-full-width"
               onChange={(value) => patch({ rateLimitRPM: nullableNumber(value) })}
             />
           </Form.FormItem>
@@ -144,7 +144,7 @@ export function TenantOverview() {
               value={form.maxConcurrentExecutions ?? undefined}
               min={0}
               placeholder="不限制"
-              style={{ width: '100%' }}
+              className="admin-full-width"
               onChange={(value) => patch({ maxConcurrentExecutions: nullableNumber(value) })}
             />
           </Form.FormItem>
@@ -153,7 +153,7 @@ export function TenantOverview() {
               value={form.monthlyTokenBudget ?? undefined}
               min={0}
               placeholder="不限制"
-              style={{ width: '100%' }}
+              className="admin-full-width"
               onChange={(value) => patch({ monthlyTokenBudget: nullableNumber(value) })}
             />
           </Form.FormItem>
@@ -162,7 +162,7 @@ export function TenantOverview() {
               value={form.monthlySpendLimitMinor ?? undefined}
               min={0}
               placeholder="不限制"
-              style={{ width: '100%' }}
+              className="admin-full-width"
               onChange={(value) => patch({ monthlySpendLimitMinor: nullableNumber(value) })}
             />
           </Form.FormItem>
@@ -177,7 +177,7 @@ export function TenantOverview() {
             <InputNumber
               value={form.auditRetentionDays}
               min={1}
-              style={{ width: '100%' }}
+              className="admin-full-width"
               onChange={(value) => patch({ auditRetentionDays: nullableNumber(value) ?? 90 })}
             />
           </Form.FormItem>
@@ -199,7 +199,7 @@ export function TenantOverview() {
               max={1}
               step={0.05}
               decimalPlaces={2}
-              style={{ width: '100%' }}
+              className="admin-full-width"
               onChange={(value) => patch({ traceSamplingRate: nullableNumber(value) ?? 0 })}
             />
           </Form.FormItem>
@@ -220,7 +220,7 @@ export function TenantOverview() {
         </Form>
       </Card>
       <Card title="状态操作" bordered>
-        <Space direction="vertical" size="small" style={{ width: '100%' }}>
+        <Space direction="vertical" size="small" className="admin-stack-full">
           <div className="admin-page-subtitle">
             合法迁移：active → suspended / disabled；suspended → active / disabled；disabled 为终态。所有状态操作都会写入审计。
           </div>

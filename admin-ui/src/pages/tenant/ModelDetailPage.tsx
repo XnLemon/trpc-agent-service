@@ -171,7 +171,7 @@ export function ModelDetailPage() {
             <Descriptions
               size="small"
               colon
-              style={{ marginTop: 8 }}
+              className="admin-description-meta"
               items={[
                 { label: 'Profile Key', content: profile.ProfileKey },
                 { label: 'Profile ID', content: <span className="admin-mono">{profile.ProfileID}</span> },
@@ -196,7 +196,7 @@ export function ModelDetailPage() {
               </Button>
             }
           >
-            <Form layout="vertical" colon className="admin-form-grid">
+            <Form layout="vertical" labelAlign="top" colon className="admin-form-grid">
               <Form.FormItem label="展示名">
                 <Input value={form.displayName} onChange={(v) => patch({ displayName: String(v) })} />
               </Form.FormItem>
@@ -220,7 +220,7 @@ export function ModelDetailPage() {
                   step={0.1}
                   decimalPlaces={2}
                   placeholder="默认"
-                  style={{ width: '100%' }}
+                  className="admin-full-width"
                   onChange={(v) => patch({ temperature: nullableNumber(v) })}
                 />
               </Form.FormItem>
@@ -232,7 +232,7 @@ export function ModelDetailPage() {
                   step={0.05}
                   decimalPlaces={2}
                   placeholder="默认"
-                  style={{ width: '100%' }}
+                  className="admin-full-width"
                   onChange={(v) => patch({ topP: nullableNumber(v) })}
                 />
               </Form.FormItem>
@@ -241,12 +241,12 @@ export function ModelDetailPage() {
                   value={form.maxOutputTokens ?? undefined}
                   min={1}
                   placeholder="默认"
-                  style={{ width: '100%' }}
+                  className="admin-full-width"
                   onChange={(v) => patch({ maxOutputTokens: nullableNumber(v) })}
                 />
               </Form.FormItem>
             </Form>
-            <Form layout="vertical" colon>
+            <Form layout="vertical" labelAlign="top" colon>
               <Form.FormItem label="描述">
                 <Textarea value={form.description} onChange={(v) => patch({ description: String(v) })} autosize={{ minRows: 2, maxRows: 4 }} />
               </Form.FormItem>
@@ -258,7 +258,7 @@ export function ModelDetailPage() {
           </Card>
 
           <Card title="状态操作" bordered>
-            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+            <Space direction="vertical" size="small" className="admin-stack-full">
               <div className="admin-page-subtitle">active ↔ suspended；disabled 为终态。暂停后运行时将拒绝新执行。</div>
               <StatusActions status={profile.Status} busy={saving} onTransition={transition} />
             </Space>

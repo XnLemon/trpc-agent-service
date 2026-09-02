@@ -15,6 +15,60 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 )
 
+func (r *ChannelRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*channels.Binding, string, error) {
+	if r == nil || r.db == nil {
+		return nil, "", ErrStorage
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset := 0
+	if cursor != "" {
+		if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+			return nil, "", fmt.Errorf("invalid cursor")
+		}
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT binding_id FROM public.channel_binding WHERE tenant_id=$1 ORDER BY binding_id`, tenantID)
+	if err != nil {
+		return nil, "", ErrStorage
+	}
+	defer rows.Close()
+	items := make([]*channels.Binding, 0)
+	q := strings.ToLower(strings.TrimSpace(query))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, "", ErrStorage
+		}
+		value, err := r.Get(ctx, tenantID, id)
+		if err != nil {
+			return nil, "", ErrStorage
+		}
+		if status != "" && string(value.Status) != status {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(value.BindingID+" "+value.BindingKey+" "+string(value.Channel)+" "+value.ProviderAccountID), q) {
+			continue
+		}
+		items = append(items, value)
+	}
+	if offset >= len(items) {
+		return []*channels.Binding{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = fmt.Sprintf("%d", end)
+	}
+	return items[offset:end], next, nil
+}
+
 const (
 	postgresCandidateTTL  = channels.DefaultCandidateTTL
 	postgresMaxCandidates = 4096

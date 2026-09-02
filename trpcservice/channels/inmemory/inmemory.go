@@ -8,10 +8,67 @@ import (
 	"encoding/base64"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 )
+
+// List returns a stable page of channel bindings in one tenant.
+func (r *InMemoryRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*channels.Binding, string, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, "", err
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset, err := decodeCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := r.rlock(ctx); err != nil {
+		return nil, "", err
+	}
+	defer r.runlock()
+	query, status = strings.ToLower(strings.TrimSpace(query)), strings.TrimSpace(status)
+	items := make([]*channels.Binding, 0)
+	for scope, value := range r.byID {
+		if scope.tenantID != tenantID || (status != "" && string(value.Status) != status) {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(value.BindingID+" "+value.BindingKey+" "+string(value.Channel)+" "+value.ProviderAccountID), query) {
+			continue
+		}
+		items = append(items, cloneBinding(value))
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].BindingID < items[j].BindingID })
+	if offset >= len(items) {
+		return []*channels.Binding{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = fmt.Sprintf("%d", end)
+	}
+	return items[offset:end], next, nil
+}
+
+func decodeCursor(cursor string) (int, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	var offset int
+	if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+		return 0, fmt.Errorf("invalid cursor")
+	}
+	return offset, nil
+}
 
 const defaultCandidateTTL = channels.DefaultCandidateTTL
 

@@ -123,7 +123,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parts := splitPath(strings.TrimPrefix(r.URL.Path, "/admin/v1"))
-	if len(parts) == 0 || parts[0] != "tenants" {
+	if len(parts) == 0 {
+		writeError(w, requestID, http.StatusNotFound, "not_found")
+		return
+	}
+	if parts[0] == "me" {
+		if r.Method != http.MethodGet {
+			writeError(w, requestID, http.StatusNotFound, "not_found")
+			return
+		}
+		writeJSON(w, requestID, http.StatusOK, map[string]any{
+			"subject_id":        principal.SubjectID,
+			"global":            principal.Global,
+			"tenant_scopes":     principal.ScopeIDs(),
+			"can_create_tenant": principal.Global,
+		})
+		return
+	}
+	if parts[0] != "tenants" {
 		writeError(w, requestID, http.StatusNotFound, "not_found")
 		return
 	}
@@ -312,6 +329,15 @@ var errNotFound = errors.New("admin route not found")
 var errInvalidRequest = errors.New("invalid admin request")
 
 func (h *Handler) tenants(ctx context.Context, r *http.Request, p Principal) (int, any, error) {
+	if r.Method == http.MethodGet {
+		lister, ok := h.config.Tenants.(TenantLister)
+		if !ok {
+			return 0, nil, errListUnsupported
+		}
+		o := listOptions(r)
+		items, next, err := lister.List(ctx, o.Query, o.Status, o.Cursor, o.Limit)
+		return http.StatusOK, listEnvelope{Items: items, NextCursor: next}, err
+	}
 	if r.Method != http.MethodPost || !p.Allows("", true) {
 		return 0, nil, ErrForbidden
 	}
@@ -405,6 +431,15 @@ func (h *Handler) tenantRoute(ctx context.Context, r *http.Request, p Principal,
 //nolint:gocyclo // App routes coordinate several independently authorized mutations.
 func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenantID string, parts []string) (int, any, error) {
 	if len(parts) == 0 {
+		if r.Method == http.MethodGet {
+			lister, ok := h.config.Apps.(AppLister)
+			if !ok {
+				return 0, nil, errListUnsupported
+			}
+			o := listOptions(r)
+			items, next, err := lister.List(ctx, tenantID, o.Query, o.Status, o.Cursor, o.Limit)
+			return http.StatusOK, listEnvelope{Items: items, NextCursor: next}, err
+		}
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
@@ -495,6 +530,15 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 
 func (h *Handler) revisions(ctx context.Context, r *http.Request, p Principal, tenantID, appID string, parts []string) (int, any, error) {
 	if len(parts) == 0 {
+		if r.Method == http.MethodGet {
+			lister, ok := h.config.Apps.(RevisionLister)
+			if !ok {
+				return 0, nil, errListUnsupported
+			}
+			o := listOptions(r)
+			items, next, err := lister.ListRevisions(ctx, tenantID, appID, o.Query, o.Status, o.Cursor, o.Limit)
+			return http.StatusOK, listEnvelope{Items: items, NextCursor: next}, err
+		}
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
@@ -542,6 +586,15 @@ func (h *Handler) revisions(ctx context.Context, r *http.Request, p Principal, t
 
 func (h *Handler) models(ctx context.Context, r *http.Request, p Principal, tenantID string, parts []string) (int, any, error) {
 	if len(parts) == 0 {
+		if r.Method == http.MethodGet {
+			lister, ok := h.config.Models.(ModelLister)
+			if !ok {
+				return 0, nil, errListUnsupported
+			}
+			o := listOptions(r)
+			items, next, err := lister.List(ctx, tenantID, o.Query, o.Status, o.Cursor, o.Limit)
+			return http.StatusOK, listEnvelope{Items: items, NextCursor: next}, err
+		}
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
@@ -584,6 +637,15 @@ func (h *Handler) models(ctx context.Context, r *http.Request, p Principal, tena
 
 func (h *Handler) backends(ctx context.Context, r *http.Request, p Principal, tenantID string, parts []string) (int, any, error) {
 	if len(parts) == 0 {
+		if r.Method == http.MethodGet {
+			lister, ok := h.config.Backends.(BackendLister)
+			if !ok {
+				return 0, nil, errListUnsupported
+			}
+			o := listOptions(r)
+			items, next, err := lister.List(ctx, tenantID, o.Query, o.Status, o.Cursor, o.Limit)
+			return http.StatusOK, listEnvelope{Items: items, NextCursor: next}, err
+		}
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
@@ -626,6 +688,15 @@ func (h *Handler) backends(ctx context.Context, r *http.Request, p Principal, te
 
 func (h *Handler) bindings(ctx context.Context, r *http.Request, p Principal, tenantID string, parts []string) (int, any, error) {
 	if len(parts) == 0 {
+		if r.Method == http.MethodGet {
+			lister, ok := h.config.Bindings.(BindingLister)
+			if !ok {
+				return 0, nil, errListUnsupported
+			}
+			o := listOptions(r)
+			items, next, err := lister.List(ctx, tenantID, o.Query, o.Status, o.Cursor, o.Limit)
+			return http.StatusOK, listEnvelope{Items: items, NextCursor: next}, err
+		}
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}

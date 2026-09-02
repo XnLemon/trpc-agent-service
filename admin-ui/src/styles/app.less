@@ -1,56 +1,266 @@
+:root {
+  // Keep the admin shell on the same design-token surface as TDesign. The
+  // aliases make the application-specific rules readable while allowing the
+  // ConfigProvider/theme to remain the single source of truth for color,
+  // typography, radius and elevation.
+  --admin-page-background: var(--td-bg-color-page);
+  --admin-panel-background: var(--td-bg-color-container);
+  --admin-border: var(--td-component-border);
+  --admin-brand: var(--td-brand-color);
+  --admin-brand-hover: var(--td-brand-color-hover);
+  --admin-brand-soft: var(--td-brand-color-light);
+  --admin-text: var(--td-text-color-primary);
+  --admin-muted: var(--td-text-color-secondary);
+  --admin-success: var(--td-success-color);
+  --admin-shadow: var(--td-shadow-1);
+  --admin-shadow-elevated: var(--td-shadow-2);
+  --admin-sidebar-width: 220px;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--admin-page-background);
+  color: var(--admin-text);
+  font-family: var(--td-font-family);
+  font-size: var(--td-font-size-body-medium);
+  line-height: var(--td-line-height-body-medium);
+}
+
+* {
+  box-sizing: border-box;
+}
+
 .admin-shell {
-  height: 100vh;
+  height: 100dvh;
+  min-height: 620px;
   overflow: hidden;
+  background: var(--admin-page-background);
+}
 
-  .admin-shell-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 0 24px;
-    background: var(--td-bg-color-container);
-    border-bottom: 1px solid var(--td-component-border);
-  }
+.admin-shell-header {
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  height: 64px;
+  padding: 0 28px;
+  background: var(--admin-panel-background);
+  border-bottom: 1px solid var(--admin-border);
+}
 
-  .admin-shell-logo {
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--td-text-color-primary);
-    white-space: nowrap;
-  }
+.admin-shell-brand,
+.admin-shell-context,
+.admin-shell-endpoint,
+.admin-context-title-row {
+  display: flex;
+  align-items: center;
+}
 
-  .admin-shell-header-spacer {
-    flex: 1;
-  }
+.admin-shell-brand {
+  gap: 10px;
+  min-width: 196px;
+}
 
-  .admin-shell-aside {
-    border-right: 1px solid var(--td-component-border);
-    overflow-y: auto;
-  }
+.admin-shell-brand-mark,
+.admin-connect-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--td-text-color-anti);
+  background: var(--admin-brand);
+}
 
-  .admin-shell-content {
-    padding: 24px;
-    overflow-y: auto;
-    background: var(--td-bg-color-page);
-  }
+.admin-shell-brand-mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  font-size: 18px;
+}
+
+.admin-shell-brand-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  color: var(--admin-muted);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.admin-shell-logo {
+  color: var(--admin-text);
+  font-size: 16px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.admin-shell-context {
+  gap: 8px;
+  min-width: 0;
+  padding-left: 20px;
+  border-left: 1px solid var(--admin-border);
+  color: var(--admin-text);
+}
+
+.admin-shell-context-label,
+.admin-shell-endpoint-label,
+.admin-nav-caption,
+.admin-page-eyebrow,
+.admin-connect-kicker {
+  color: var(--admin-muted);
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.admin-shell-context .admin-mono {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-shell-header-spacer {
+  flex: 1;
+}
+
+.admin-shell-endpoint {
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--admin-text);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.admin-shell-endpoint-label {
+  font-size: 10px;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.admin-shell-body {
+  height: calc(100dvh - 64px);
+  min-height: 0;
+}
+
+.admin-shell-aside {
+  position: relative;
+  width: var(--admin-sidebar-width) !important;
+  padding: 22px 12px 16px;
+  overflow-y: auto;
+  background: var(--admin-panel-background);
+  border-right: 1px solid var(--admin-border);
+}
+
+.admin-nav-caption {
+  padding: 0 12px 10px;
+  font-weight: 600;
+}
+
+.admin-shell-aside .t-menu {
+  width: 100%;
+  border-right: 0;
+  background: transparent;
+}
+
+.admin-shell-aside .t-menu__item {
+  height: 42px;
+  margin: 3px 0;
+  border-radius: 6px;
+}
+
+.admin-shell-aside .t-menu__item--active {
+  color: var(--admin-brand);
+  background: var(--admin-brand-soft);
+}
+
+.admin-shell-aside .t-menu__item--active::after {
+  right: 0;
+  width: 3px;
+  border-radius: 2px;
+}
+
+.admin-shell-aside .t-menu__item:focus-visible,
+.admin-shell-header .t-button:focus-visible {
+  outline: 2px solid var(--td-brand-color-focus);
+  outline-offset: 2px;
+}
+
+.admin-aside-footer {
+  position: absolute;
+  right: 20px;
+  bottom: 18px;
+  left: 20px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--admin-muted);
+  font-size: 11px;
+}
+
+.admin-aside-footer-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--admin-success);
+}
+
+.admin-aside-footer .admin-mono {
+  margin-left: auto;
+  font-size: 10px;
+}
+
+.admin-shell-content {
+  min-width: 0;
+  padding: 30px 32px 48px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--admin-page-background);
 }
 
 .admin-page {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  max-width: 1080px;
+  gap: 20px;
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.admin-page-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-bottom: 2px;
+}
+
+.admin-page-eyebrow {
+  font-weight: 600;
+  text-transform: uppercase;
 }
 
 .admin-page-title {
   margin: 0;
-  font-size: 20px;
+  color: var(--admin-text);
+  font-size: 24px;
   font-weight: 600;
-  color: var(--td-text-color-primary);
+  line-height: 1.35;
 }
 
-.admin-page-subtitle {
-  color: var(--td-text-color-secondary);
+.admin-page-subtitle,
+.admin-panel-description {
+  color: var(--admin-muted);
   font-size: 13px;
+  line-height: 1.6;
+}
+
+.admin-panel-description {
+  margin: -6px 0 16px;
 }
 
 .admin-card-actions {
@@ -59,10 +269,116 @@
   flex-wrap: wrap;
 }
 
+.admin-lobby-grid {
+  display: grid;
+  grid-template-columns: minmax(250px, 0.75fr) minmax(420px, 1.25fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.admin-panel,
+.admin-context-card {
+  border-color: var(--admin-border);
+  border-radius: var(--td-radius-medium);
+  box-shadow: none;
+}
+
+.admin-panel .t-card__header,
+.admin-context-card .t-card__header {
+  min-height: 56px;
+  padding: 0 20px;
+  border-bottom-color: var(--admin-border);
+}
+
+.admin-panel .t-card__body,
+.admin-context-card .t-card__body {
+  padding: 20px;
+}
+
+.admin-recent-panel .t-card__body {
+  padding-top: 12px;
+}
+
+.admin-context-card {
+  width: 100%;
+}
+
+.admin-context-title-row {
+  gap: 10px;
+}
+
+.admin-tenant-page {
+  max-width: 1180px;
+}
+
 .admin-form-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   column-gap: 24px;
+  align-items: start;
+}
+
+.admin-form-grid .t-form__item {
+  min-width: 0;
+}
+
+.admin-form-grid .t-form__item-label {
+  display: block;
+  width: auto;
+  max-width: 100%;
+}
+
+.admin-form-grid .t-input-number,
+.admin-form-grid .t-input,
+.admin-form-grid .t-select,
+.admin-form-grid .t-textarea {
+  width: 100%;
+  max-width: 100%;
+}
+
+// Keep detail pages consistent even when a card does not need a page-specific
+// class. These values intentionally follow TDesign's container and border
+// tokens instead of introducing a second component style system.
+.admin-page > .t-card {
+  width: 100%;
+  max-width: 100%;
+  border-color: var(--admin-border);
+  border-radius: var(--td-radius-medium);
+  box-shadow: none;
+}
+
+.admin-page > .t-card .t-card__header {
+  min-height: 56px;
+  padding: 0 20px;
+  border-bottom-color: var(--admin-border);
+}
+
+.admin-page > .t-card .t-card__title,
+.admin-page > .t-card .t-card__actions {
+  min-width: 0;
+}
+
+.admin-page > .t-card .t-card__title {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.admin-page > .t-card .t-card__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.admin-page > .t-card .t-card__body {
+  min-width: 0;
+  padding: 20px;
+}
+
+.admin-page > .t-card .t-card__body > .t-form:last-child,
+.admin-page > .t-card .t-card__body > .t-space:last-child {
+  margin-bottom: 0;
 }
 
 .admin-kv-row {
@@ -72,6 +388,10 @@
   margin-bottom: 8px;
 }
 
+.admin-kv-row > .t-input {
+  min-width: 0;
+}
+
 .admin-mono {
   font-family: var(--td-font-family-code, Consolas, Monaco, monospace);
   font-size: 12px;
@@ -79,16 +399,142 @@
 }
 
 .admin-connect-page {
-  min-height: 100vh;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 320px) minmax(0, 460px);
+  gap: 48px;
   align-items: center;
   justify-content: center;
-  background: var(--td-bg-color-page);
-  padding: 24px;
+  width: 100%;
+  min-width: 0;
+  min-height: 100dvh;
+  padding: 32px;
+  background: var(--admin-page-background);
+}
 
-  .admin-connect-card {
-    width: 460px;
-  }
+.admin-connect-page > * {
+  min-width: 0;
+}
+
+.admin-connect-intro {
+  max-width: 300px;
+}
+
+.admin-connect-mark {
+  width: 46px;
+  height: 46px;
+  margin-bottom: 22px;
+  border-radius: 8px;
+  font-size: 26px;
+}
+
+.admin-connect-kicker {
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.admin-connect-intro h1 {
+  margin: 0;
+  color: var(--admin-text);
+  font-size: 32px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.admin-connect-intro p {
+  margin: 12px 0 0;
+  color: var(--admin-muted);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.admin-connect-card {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border-color: var(--admin-border);
+  border-radius: var(--td-radius-medium);
+  box-shadow: var(--admin-shadow-elevated);
+}
+
+.admin-connect-card .t-card__header {
+  min-height: 60px;
+  padding: 0 24px;
+}
+
+.admin-connect-card .t-card__body {
+  min-width: 0;
+  padding: 24px;
+  overflow: hidden;
+}
+
+.admin-connect-card .t-card__body > div,
+.admin-connect-card .t-form,
+.admin-connect-card .t-alert,
+.admin-connect-card .t-form__controls-content,
+.admin-connect-card .t-input__wrap,
+.admin-connect-card .t-input {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.admin-connect-card .t-form__item,
+.admin-connect-card .t-form__controls,
+.admin-connect-card .t-form__controls-content {
+  min-width: 0;
+}
+
+.admin-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--td-size-4);
+}
+
+.admin-stack-full {
+  width: 100%;
+}
+
+.admin-full-width {
+  width: 100%;
+  max-width: 100%;
+}
+
+.admin-connect-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--td-size-6);
+  width: 100%;
+}
+
+.admin-description-meta {
+  margin-top: var(--td-size-4);
+}
+
+.admin-description-spaced {
+  margin-bottom: var(--td-size-5);
+}
+
+.admin-space-top {
+  margin-top: var(--td-size-4);
+}
+
+.admin-inline-label {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.admin-load-state {
+  min-height: 160px;
+}
+
+.admin-connect-card .t-alert__content,
+.admin-connect-card .t-alert__description,
+.admin-connect-card .t-input__help,
+.admin-connect-card .t-form__label label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .admin-toolbar {
@@ -100,4 +546,98 @@
 
 .admin-toolbar-spacer {
   flex: 1;
+}
+
+@media (max-width: 900px) {
+  .admin-shell-header {
+    padding: 0 18px;
+  }
+
+  .admin-shell-endpoint,
+  .admin-shell-header .t-tag {
+    display: none;
+  }
+
+  .admin-shell-content {
+    padding: 24px 20px 40px;
+  }
+
+  .admin-lobby-grid,
+  .admin-connect-page {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-connect-page {
+    gap: 24px;
+    width: min(100%, 560px);
+    max-width: calc(100vw - 32px);
+    margin: 0 auto;
+  }
+
+  .admin-connect-intro {
+    max-width: none;
+  }
+
+  .admin-connect-mark {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .admin-shell {
+    min-height: 100dvh;
+  }
+
+  .admin-shell-brand {
+    min-width: 0;
+  }
+
+  .admin-shell-context {
+    display: none;
+  }
+
+  .admin-shell-aside {
+    width: 64px !important;
+    padding: 18px 8px;
+  }
+
+  .admin-shell-aside .admin-nav-caption,
+  .admin-shell-aside .admin-aside-footer,
+  .admin-shell-aside .t-menu__content {
+    display: none;
+  }
+
+  .admin-shell-aside .t-menu__item {
+    justify-content: center;
+    padding: 0;
+  }
+
+  .admin-shell-content {
+    padding: 20px 14px 32px;
+  }
+
+  .admin-page-title {
+    font-size: 21px;
+  }
+
+  .admin-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-connect-page {
+    padding: 22px 16px;
+    width: 100%;
+    max-width: calc(100vw - 32px);
+    overflow-x: hidden;
+  }
+
+  .admin-page > .t-card .t-card__header,
+  .admin-page > .t-card .t-card__body {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .admin-page > .t-card .t-card__header {
+    min-height: 52px;
+  }
 }

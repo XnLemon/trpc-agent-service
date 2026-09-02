@@ -54,7 +54,7 @@ export function AppsPage() {
       createTitle="创建应用"
       createDescription="新应用为 draft 状态；首次发布版本后自动转为 active。"
       createForm={
-        <Form layout="vertical" colon>
+        <Form layout="vertical" labelAlign="top" colon>
           <Form.FormItem label="应用 Key" help="创建后不可修改，租户内唯一。">
             <Input value={appKey} onChange={(value) => setAppKey(String(value))} placeholder="例如 support-bot" />
           </Form.FormItem>

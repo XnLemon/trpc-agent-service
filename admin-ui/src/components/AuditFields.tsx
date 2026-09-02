@@ -17,7 +17,7 @@ export function AuditFields({ reason, correlationId, onReasonChange }: AuditFiel
       <Form.FormItem label="操作原因" help="必填，将写入审计记录。">
         <Input value={reason} maxlength={256} placeholder="例如：接入新的模型提供方" onChange={(value) => onReasonChange(String(value))} />
       </Form.FormItem>
-      <div className="admin-page-subtitle" style={{ marginBottom: 12 }}>
+      <div className="admin-page-subtitle admin-description-spaced">
         本次操作 correlation_id：<span className="admin-mono">{correlationId}</span>
       </div>
     </>

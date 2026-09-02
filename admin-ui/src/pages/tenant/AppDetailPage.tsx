@@ -252,7 +252,7 @@ export function AppDetailPage() {
             <Descriptions
               size="small"
               colon
-              style={{ marginTop: 8 }}
+              className="admin-description-meta"
               items={[
                 { label: '应用 Key', content: app.AppKey },
                 { label: '应用 ID', content: <span className="admin-mono">{app.AppID}</span> },
@@ -273,7 +273,7 @@ export function AppDetailPage() {
               </Button>
             }
           >
-            <Form layout="vertical" colon>
+            <Form layout="vertical" labelAlign="top" colon>
               <Form.FormItem label="展示名">
                 <Input value={displayName} onChange={(value) => setDisplayName(String(value))} />
               </Form.FormItem>
@@ -284,7 +284,7 @@ export function AppDetailPage() {
           </Card>
 
           <Card title="状态操作" bordered>
-            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+            <Space direction="vertical" size="small" className="admin-stack-full">
               <div className="admin-page-subtitle">
                 首次发布版本会使 draft → active；之后 active ↔ suspended；disabled 为终态。
               </div>
@@ -313,7 +313,7 @@ export function AppDetailPage() {
             }
           >
             {draftForm ? (
-              <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              <Space direction="vertical" size="small" className="admin-stack-full">
                 {draft ? (
                   <Alert
                     theme="info"
@@ -350,13 +350,13 @@ export function AppDetailPage() {
 
           <Card title="发布控制" bordered>
             <div className="admin-form-grid">
-              <Form layout="vertical" colon>
+              <Form layout="vertical" labelAlign="top" colon>
                 <Form.FormItem label="回滚到已发布版本" help="将当前版本指针指回一个已发布的 Revision，不复制内容。">
                   <InputNumber
                     value={rollbackTarget ?? undefined}
                     min={1}
                     placeholder="目标 Revision 号"
-                    style={{ width: '100%' }}
+                    className="admin-full-width"
                     onChange={(value) => setRollbackTarget(value === undefined || value === null ? null : Number(value))}
                   />
                 </Form.FormItem>
@@ -364,13 +364,13 @@ export function AppDetailPage() {
                   回滚
                 </Button>
               </Form>
-              <Form layout="vertical" colon>
+              <Form layout="vertical" labelAlign="top" colon>
                 <Form.FormItem label="Canary 候选版本" help="仅允许选择已发布的 Revision；清除后流量不再分流。">
                   <InputNumber
                     value={canaryTarget ?? undefined}
                     min={1}
                     placeholder="候选 Revision 号"
-                    style={{ width: '100%' }}
+                    className="admin-full-width"
                     onChange={(value) => setCanaryTarget(value === undefined || value === null ? null : Number(value))}
                   />
                 </Form.FormItem>

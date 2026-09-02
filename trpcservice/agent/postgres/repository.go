@@ -12,6 +12,121 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 )
 
+func (r *AgentRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*agent.App, string, error) {
+	if r == nil || r.db == nil {
+		return nil, "", ErrStorage
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset := 0
+	if cursor != "" {
+		if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+			return nil, "", fmt.Errorf("invalid cursor")
+		}
+	}
+	rows, err := r.db.QueryContext(ctx, agentAppSelect+` WHERE tenant_id = $1 ORDER BY app_id`, tenantID)
+	if err != nil {
+		return nil, "", mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
+	}
+	defer rows.Close()
+	q := strings.ToLower(strings.TrimSpace(query))
+	items := make([]*agent.App, 0)
+	for rows.Next() {
+		var v agent.App
+		var st string
+		var cur, can sql.NullInt64
+		if err := rows.Scan(&v.TenantID, &v.AppID, &v.AppKey, &v.DisplayName, &v.Description, &st, &cur, &can, &v.Version, &v.CreatedAt, &v.UpdatedAt); err != nil {
+			return nil, "", ErrStorage
+		}
+		v.Status = agent.Status(st)
+		v.CurrentRevision = nullableInt(cur)
+		v.CanaryRevision = nullableInt(can)
+		v.CreatedAt = asUTC(v.CreatedAt)
+		v.UpdatedAt = asUTC(v.UpdatedAt)
+		if status != "" && st != status {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(v.AppID+" "+v.AppKey+" "+v.DisplayName), q) {
+			continue
+		}
+		if err := v.Validate(); err != nil {
+			return nil, "", ErrStorage
+		}
+		clone := v.Clone()
+		items = append(items, &clone)
+	}
+	if offset >= len(items) {
+		return []*agent.App{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = fmt.Sprintf("%d", end)
+	}
+	return items[offset:end], next, nil
+}
+
+func (r *AgentRepository) ListRevisions(ctx context.Context, tenantID, appID, query, status, cursor string, limit int) ([]*agent.Revision, string, error) {
+	if r == nil || r.db == nil {
+		return nil, "", ErrStorage
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset := 0
+	if cursor != "" {
+		if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+			return nil, "", fmt.Errorf("invalid cursor")
+		}
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT revision FROM public.agent_app_revision WHERE tenant_id=$1 AND app_id=$2 ORDER BY revision`, tenantID, appID)
+	if err != nil {
+		return nil, "", mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
+	}
+	defer rows.Close()
+	items := make([]*agent.Revision, 0)
+	q := strings.ToLower(strings.TrimSpace(query))
+	for rows.Next() {
+		var number int64
+		if err := rows.Scan(&number); err != nil {
+			return nil, "", ErrStorage
+		}
+		v, err := loadAgentRevision(ctx, r.db, tenantID, appID, number, false)
+		if err != nil {
+			return nil, "", ErrStorage
+		}
+		if status != "" && string(v.State) != status {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(v.Description+" "+v.Instruction), q) {
+			continue
+		}
+		items = append(items, v)
+	}
+	if offset >= len(items) {
+		return []*agent.Revision{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = fmt.Sprintf("%d", end)
+	}
+	return items[offset:end], next, nil
+}
+
 // AgentRepository persists Agent App roots, mutable drafts and immutable
 // published revisions.
 type AgentRepository struct {

@@ -135,7 +135,7 @@ export function BindingDetailPage() {
             <Descriptions
               size="small"
               colon
-              style={{ marginTop: 8 }}
+              className="admin-description-meta"
               items={[
                 { label: '渠道', content: binding.Channel === 'wecom' ? '企业微信' : 'Telegram' },
                 { label: 'Binding ID', content: <span className="admin-mono">{binding.BindingID}</span> },
@@ -160,7 +160,7 @@ export function BindingDetailPage() {
               </Button>
             }
           >
-            <Form layout="vertical" colon className="admin-form-grid">
+            <Form layout="vertical" labelAlign="top" colon className="admin-form-grid">
               <Form.FormItem label="目标应用 ID">
                 <Input value={form.appId} onChange={(v) => setForm({ ...form, appId: String(v) })} />
               </Form.FormItem>
@@ -174,14 +174,14 @@ export function BindingDetailPage() {
                 <Input value={form.secretRef} onChange={(v) => setForm({ ...form, secretRef: String(v) })} />
               </Form.FormItem>
             </Form>
-            <Form layout="vertical" colon>
+            <Form layout="vertical" labelAlign="top" colon>
               <ProtocolFields channel={binding.Channel} value={form.protocol} onChange={(protocol) => setForm({ ...form, protocol })} />
               <AuditFields reason={form.reason} correlationId={correlationId} onReasonChange={(reason) => setForm({ ...form, reason })} />
             </Form>
           </Card>
 
           <Card title="状态操作" bordered>
-            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+            <Space direction="vertical" size="small" className="admin-stack-full">
               <div className="admin-page-subtitle">
                 draft → active / disabled；active ↔ suspended；disabled 为终态。激活前请确认协议配置与 Secret 引用已验证。
               </div>

@@ -11,7 +11,7 @@ const STATUS_META: Record<string, { theme: 'success' | 'default' | 'warning' | '
 export function StatusTag({ status }: { status: string }) {
   const meta = STATUS_META[status] ?? { theme: 'default' as const, label: status || '未知' };
   return (
-    <Tag theme={meta.theme} variant="light">
+    <Tag theme={meta.theme} variant="light-outline">
       {meta.label}
     </Tag>
   );

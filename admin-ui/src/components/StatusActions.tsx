@@ -46,18 +46,18 @@ function legalTransitions(status: LifecycleStatus, allowActivate: boolean): Pend
   switch (status) {
     case 'draft':
       return [
-        ...(allowActivate ? [{ next: 'active' as const, label: meta.activate.label, ...meta.activate }] : []),
-        { next: 'disabled', label: meta.disable.label, ...meta.disable },
+        ...(allowActivate ? [{ next: 'active' as const, ...meta.activate }] : []),
+        { next: 'disabled', ...meta.disable },
       ];
     case 'active':
       return [
-        { next: 'suspended', label: meta.suspend.label, ...meta.suspend },
-        { next: 'disabled', label: meta.disable.label, ...meta.disable },
+        { next: 'suspended', ...meta.suspend },
+        { next: 'disabled', ...meta.disable },
       ];
     case 'suspended':
       return [
-        { next: 'active', label: meta.resume.label, ...meta.resume },
-        { next: 'disabled', label: meta.disable.label, ...meta.disable },
+        { next: 'active', ...meta.resume },
+        { next: 'disabled', ...meta.disable },
       ];
     default:
       return [];
@@ -77,7 +77,7 @@ export function StatusActions({ status, busy, allowActivate, onTransition }: Sta
         {transitions.map((transition) => (
           <Button
             key={transition.next}
-            theme={transition.confirmTheme === 'danger' ? 'danger' : 'default'}
+            theme={transition.confirmTheme}
             variant={transition.confirmTheme === 'danger' ? 'outline' : 'base'}
             disabled={busy}
             onClick={() => setPending(transition)}

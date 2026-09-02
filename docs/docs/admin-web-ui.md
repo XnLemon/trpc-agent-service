@@ -1,242 +1,491 @@
-# Admin Web UI 开发准备：功能与接口梳理
+# Admin 控制台产品与技术设计
 
-> 基于当前仓库代码与测试整理，基线提交：`e9a2ffff2608245555b0341262f1959f77485163`（2026-09-01）。本文描述的是已实现行为，不把 Issue 文档中的早期设计当作现状。
+> 本文是 Admin Web UI 的目标设计。它把当前的“输入资源 ID 的深链接编辑器”重新定义为一个真正的多租户控制面：管理员使用账号密码登录，进入同源 `/admin`，通过租户列表和租户内资源列表完成发现、查看、编辑、发布和审计。
 
-## 结论
+## 0. 设计结论
 
-当前服务已经具备独立的 Admin 控制面 API，可管理 Tenant、Agent App、Agent Revision、Model Profile、Backend Profile 与 Channel Binding 六类配置资源。它适合用于受控的单资源配置和发布操作，但**尚不具备完整后台所需的列表、资源发现、审计查询、用量查询、浏览器身份认证等读取能力**。
-
-因此，推荐按两个阶段推进：
-
-1. 先补齐 Admin API 的查询与身份边界，再做完整的多租户 Web UI。
-2. 在接口补齐之前，前端只能做“已知 tenant/app/profile ID 的深链接编辑器”，不能做正常的资源列表、租户切换和运营看板。
-
-## 控制面定位
-
-Admin API 由 Gateway 同一 HTTP 服务暴露，但认证与聊天 API 完全独立：
+Admin UI 的核心交互应当是：
 
 ```mermaid
 flowchart LR
-  U[管理员浏览器] --> BFF[Web BFF / 反向代理]
-  BFF -->|受控 Bearer 凭证| A[/admin/v1/*]
-  A --> CP[控制面 Repository]
-  CP --> DB[(PostgreSQL / MySQL)]
-  A --> AU[审计 Writer]
-  A --> CI[Runner 缓存失效]
-  G[/v1/chat] --> R[Gateway Runtime]
+  L[账号密码登录] --> H[Admin 控制台]
+  H --> T[租户列表]
+  T --> TD[租户详情/租户工作区]
+  TD --> A[Agent App 列表]
+  TD --> M[Model Profile 列表]
+  TD --> B[Backend Profile 列表]
+  TD --> C[Channel Binding 列表]
+  A --> AD[App 详情与版本管理]
+  M --> MD[Model 详情]
+  B --> BD[Backend 详情]
+  C --> CD[Binding 详情]
 ```
 
-- 路由前缀：`/admin/v1/*`。
-- 服务启动时由 `TRPC_ADMIN_TOKEN` 与 `TRPC_ADMIN_TENANTS` 创建静态 Admin principal；它不能用聊天 API token 替代。
-- `TRPC_ADMIN_TENANTS=*` 只允许创建**首个** Tenant，不是已有 Tenant 的通配读写权限。创建后需配置明确的 Tenant ID scope。
-- 每次成功的控制面写入会触发进程内 Runner 缓存失效；Model、Backend、App、Tenant 与 Binding 的修改会影响后续请求使用的运行时配置。
-- `GET /healthz` 和 `GET /readyz` 由 Gateway 提供；前者只表示进程存活，后者表示运行时依赖可接流。
+目标产品不是让管理员记住 `tenant_id`、`app_id` 或 `profile_id`，而是提供：
 
-## 已有功能
+- 同源访问：用户打开部署域名后进入 `/admin`，不手动填写 API 地址。
+- 账号会话：登录接口负责账号密码校验，浏览器只持有 HttpOnly 会话 Cookie。
+- 多租户发现：服务端返回当前账号有权限管理的租户列表。
+- 资源列表：租户下的 App、Revision、Model、Backend、Binding 都有列表、搜索、筛选、分页。
+- 详情管理：列表每一行都能进入详情页，详情页显示内部信息和可执行操作。
+- 可追溯变更：发布、回滚、状态迁移等高影响操作需要 reason、correlation ID 和审计记录。
+- 服务端授权：前端只负责呈现，租户范围、资源权限和操作权限始终由服务端决定。
 
-| 资源 | 已有管理能力 | 在运行时中的作用 | Web UI 页面 |
-| --- | --- | --- | --- |
-| Tenant | 创建、读取、完整配置替换、状态迁移 | 隔离根节点、限流/并发/预算/审计/默认 App 与 Backend | 租户概览、设置、状态操作 |
-| Agent App | 创建、读取、元数据修改、状态迁移 | 应用身份与当前发布版本指针 | 应用列表、详情、发布控制 |
-| Agent Revision | 创建草稿、更新草稿、发布、回滚、设置/清除 Canary | 可执行 Agent 配置；已发布版本不可修改 | 版本编辑器、发布与回滚历史 |
-| Model Profile | 创建、读取、完整配置替换、状态迁移 | Provider、模型、endpoint、secret reference、生成参数 | 模型配置页 |
-| Backend Profile | 创建、读取、完整配置替换、状态迁移 | Session/Memory 等运行时能力的提供者绑定 | 存储后端配置页 |
-| Channel Binding | 创建、读取、完整配置替换、状态迁移 | 企业微信或 Telegram 入站流量到 Agent App 的路由 | 渠道绑定页 |
-| 审计与用量 | 领域层支持记录、查询和聚合 | 记录控制面变更、执行结果、成本和用量 | 尚未向 Admin HTTP 暴露 |
+## 1. 产品范围与非目标
 
-所有资源均为租户作用域。当前 API 不支持删除；`disabled` 是终态，不能恢复。
+### 1.1 首期范围
 
-## 现有 HTTP 接口
+首期控制台覆盖以下资源：
 
-所有成功响应统一为：
+| 层级 | 资源 | 主要操作 |
+| --- | --- | --- |
+| 平台 | 管理员会话 | 登录、登出、当前账号、会话失效 |
+| 平台 | 租户 | 列表、搜索、创建、查看、编辑、状态迁移 |
+| 租户 | Agent App | 列表、创建、元数据编辑、状态迁移、详情 |
+| App | Agent Revision | 列表、创建草稿、编辑、发布、回滚、Canary |
+| 租户 | Model Profile | 列表、创建、完整配置替换、状态迁移、详情 |
+| 租户 | Backend Profile | 列表、创建、能力绑定编辑、状态迁移、详情 |
+| 租户 | Channel Binding | 列表、创建、协议配置编辑、状态迁移、详情 |
+
+审计查询、用量成本、系统健康聚合属于后续阶段，但所有写操作从首期开始就必须产生审计上下文。
+
+### 1.2 非目标
+
+- 不在浏览器中保存或展示 `TRPC_ADMIN_TOKEN`、模型密钥、DSN 或渠道凭据。
+- 不在没有服务端数据支撑时制作“实时运营大盘”或估算指标。
+- 不让前端通过隐藏按钮代替服务端权限控制。
+- 不把当前静态 Token 登录页直接包装成最终生产身份系统。
+
+## 2. 用户与权限模型
+
+### 2.1 管理员角色
+
+系统至少区分两类管理员：
+
+| 角色 | 权限 |
+| --- | --- |
+| 平台管理员 | 管理平台允许范围内的所有租户，可创建首个租户和管理管理员策略 |
+| 租户管理员 | 只能管理显式授权的一个或多个租户及其资源 |
+
+权限由服务端返回并执行。前端可以根据权限隐藏入口，但隐藏不是安全边界；任何列表、详情和写入接口都必须再次做 scope 校验。
+
+### 2.2 权限范围
+
+登录会话对应一个 principal：
 
 ```json
-{"request_id":"<id>","data":{}}
+{
+  "subject_id": "user_01J...",
+  "role": "tenant_admin",
+  "tenant_scopes": ["t_01...", "t_02..."],
+  "can_create_tenant": false
+}
 ```
 
-所有失败响应统一为：
+跨租户对象不得通过错误信息、数量、分页或 URL 侧信道泄露。无权详情统一返回 `404 not_found`；无权写入返回 `403 forbidden`。
+
+## 3. 同源部署与登录会话
+
+### 3.1 访问地址
+
+生产环境推荐单域名部署：
+
+```text
+https://console.example.com/admin
+```
+
+浏览器访问 `/admin`，静态资源和 Admin API 使用同源地址：
+
+```text
+/admin/auth/login
+/admin/auth/session
+/admin/v1/tenants
+/admin/v1/tenants/{tenant_id}/apps
+```
+
+开发环境可以继续使用 Vite：
+
+```text
+http://localhost:5173/admin  -> Vite 静态页面
+http://localhost:5173/admin/* -> 代理到 http://127.0.0.1:8080/admin/*
+```
+
+前端不再提供“API 地址”输入框。反向代理或 Vite proxy 负责把同源路径转发到 Gateway。
+
+### 3.2 登录流程
+
+```mermaid
+sequenceDiagram
+  participant B as 浏览器
+  participant A as Admin BFF/Gateway
+  participant S as Session Store
+  B->>A: POST /admin/auth/login (username,password)
+  A->>A: 校验密码哈希、账号状态、登录限流
+  A->>S: 创建短期会话
+  S-->>A: session_id
+  A-->>B: Set-Cookie: admin_session=...
+  B->>A: GET /admin/auth/session
+  A->>S: 读取 principal 与 tenant scopes
+  S-->>A: principal
+  A-->>B: 当前账号、角色、租户范围
+```
+
+会话要求：
+
+- Cookie 使用 `HttpOnly`、`Secure`、`SameSite=Lax/Strict`，生产环境禁止通过 JavaScript 读取。
+- 写请求校验 CSRF Token 或同等的 Origin/Referer 策略。
+- 登录失败、验证码/锁定策略和会话过期由服务端控制。
+- 登出应立即使当前会话失效；修改密码、移除权限和管理员禁用也应能吊销会话。
+- 密码只保存 Argon2id 或等价强度的哈希，不进入日志、审计 payload 或前端状态。
+- 可在同一会话模型上接入 OIDC/SSO，不改变前端资源权限模型。
+
+当前 `StaticAuthenticator` 仍是服务进程级 Bearer Token 边界，只适合作为迁移期或内部 BFF 的上游凭证，不能作为最终浏览器登录体验。详见“迁移策略”。
+
+## 4. 信息架构与路由
+
+```text
+/admin/login
+/admin
+├── /overview                         # 可选：只放真实聚合数据
+├── /tenants                          # 租户列表
+├── /tenants/new                      # 创建租户
+├── /tenants/:tenantId                # 租户详情与设置
+├── /tenants/:tenantId/apps           # App 列表
+├── /tenants/:tenantId/apps/new       # 创建 App
+├── /tenants/:tenantId/apps/:appId    # App 详情
+├── /tenants/:tenantId/apps/:appId/revisions
+├── /tenants/:tenantId/models         # Model Profile 列表
+├── /tenants/:tenantId/models/:id     # Model 详情
+├── /tenants/:tenantId/backends       # Backend Profile 列表
+├── /tenants/:tenantId/backends/:id   # Backend 详情
+├── /tenants/:tenantId/bindings       # Channel Binding 列表
+├── /tenants/:tenantId/bindings/:id   # Binding 详情
+├── /audit                            # 后续：跨租户审计（按权限过滤）
+└── /account                          # 当前账号、会话、退出登录
+```
+
+### 4.1 全局壳层
+
+全局壳层使用 TDesign Layout/Menu/Breadcrumb/Dropdown/Notification 等组件：
+
+- 顶部：产品名称、当前租户、面包屑、系统状态、当前管理员、退出登录。
+- 左侧：租户管理与当前租户资源导航；根据 `session` 权限显示可用入口。
+- 主区域：页面标题、筛选工具栏、列表或详情内容。
+- 移动端：侧栏折叠为图标导航，当前租户和面包屑仍可追溯。
+
+### 4.2 租户列表
+
+这是登录后的默认页，不再要求输入 Tenant ID。
+
+表格列建议：
+
+```text
+租户名称 | Tenant Key | 状态 | App 数 | Model 数 | Backend 数 | 更新时间 | 操作
+```
+
+支持：
+
+- 关键字搜索：名称、Tenant Key、Tenant ID。
+- 状态筛选：active、suspended、disabled。
+- 服务端分页和稳定排序。
+- “创建租户”按钮，仅在 `can_create_tenant=true` 时出现。
+- 行操作：查看详情、进入租户、更多操作。
+- 空状态、加载骨架、权限错误、网络错误和分页失败状态。
+
+App/Model/Backend 数量必须来自服务端聚合字段，不能由前端根据当前页猜测。
+
+### 4.3 租户详情与租户工作区
+
+租户详情页既是租户设置页，也是进入租户资源的工作区。顶部显示：
+
+- 租户名称、Tenant Key、Tenant ID、状态标签。
+- 创建时间、更新时间、配置版本。
+- 当前管理员对该租户的权限范围。
+- “进入租户工作区”或面包屑入口。
+
+设置区展示并编辑：
+
+- 限流 RPM、最大并发执行数。
+- 月度 Token 预算、金额上限、账单币种。
+- 审计保留天数、日志脱敏级别、Trace 采样率。
+- 默认 App、默认 Backend。
+
+租户下资源通过 TDesign Tabs 或二级导航进入四个标准列表：Apps、Models、Backends、Bindings。
+
+### 4.4 Agent App 列表与详情
+
+App 列表列：
+
+```text
+展示名 | App Key | 状态 | 当前版本 | Canary 版本 | 配置版本 | 更新时间 | 操作
+```
+
+App 详情分为四个区域：
+
+1. **基本信息**：App ID、App Key、展示名、描述、所属租户、状态、版本信息。
+2. **版本列表**：Revision、状态、Draft Version、创建时间、发布时间、操作。
+3. **草稿编辑器**：Instruction、Global Instruction、Model Profile、Generation、Runtime、工具白名单。
+4. **发布控制**：发布、回滚、设置/清除 Canary、状态迁移。
+
+已发布 Revision 只读；草稿允许编辑。发布、回滚、Canary 和禁用必须使用二次确认和 reason。
+
+### 4.5 Model / Backend / Binding 列表与详情
+
+这三类资源都遵循同一个页面契约：
+
+```text
+列表页（搜索/筛选/分页/新建）
+  -> 详情页（内部信息/版本/状态）
+  -> 编辑页或页内编辑（完整替换）
+  -> 状态操作（审计确认）
+```
+
+Model Profile 列表显示 Profile Key、名称、Provider、Model、状态、版本和更新时间；详情显示 endpoint、options、generation 和 `secret_ref` 摘要。不得显示明文密钥。
+
+Backend Profile 列表显示 Profile Key、名称、状态、能力数量和更新时间；详情显示每一条 capability binding 的 provider、endpoint、options、`secret_ref` 摘要。
+
+Channel Binding 列表显示 Binding Key、渠道、目标 App、Provider Account、状态和更新时间；详情显示协议配置、路由 digest、Secret Reference 和版本。不得回显 route key 原文或渠道凭据。
+
+## 5. 列表与详情的通用交互规范
+
+### 5.1 列表状态
+
+每个列表都必须有以下状态：
+
+| 状态 | 呈现 |
+| --- | --- |
+| 首次加载 | 与表格结构一致的 Skeleton，而不是空白页面 |
+| 有数据 | TDesign Table，稳定 row key，支持 hover 和列省略 |
+| 无数据 | Empty + 当前筛选条件 + 创建/清除筛选操作 |
+| 无权限 | 明确提示当前账号无权限，不暴露对象存在性 |
+| 请求失败 | Alert + 重试；保留筛选条件 |
+| 写入中 | 按钮 loading，避免重复提交 |
+
+### 5.2 详情状态
+
+详情页必须支持：
+
+- 面包屑返回列表，不依赖浏览器后退。
+- 加载骨架和 404/403 统一错误页。
+- 版本信息和 `updated_at` 明确显示。
+- 配置编辑采用完整替换语义，不能只提交局部字段。
+- 409 conflict 时保留本地草稿，重新读取服务端对象，让管理员确认覆盖。
+- 503 `audit_unavailable` 时显示“提交状态待确认”，禁止自动重试。
+
+### 5.3 高影响操作
+
+以下操作必须二次确认：
+
+- 发布 Revision。
+- 回滚 App。
+- 设置或清除 Canary。
+- 激活、暂停、恢复、禁用资源。
+
+确认弹窗必须使用 TDesign Dialog，包含：
+
+- 操作对象和目标状态/版本。
+- 风险说明。
+- 必填 reason。
+- 本次 `correlation_id`。
+- 确认按钮 loading 和重复点击保护。
+
+## 6. Admin API 合约
+
+### 6.1 会话接口
+
+目标接口：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/admin/auth/login` | 账号密码登录，设置会话 Cookie |
+| GET | `/admin/auth/session` | 返回当前管理员、角色、tenant scopes、功能权限 |
+| POST | `/admin/auth/logout` | 吊销当前会话 |
+| POST | `/admin/auth/refresh` | 可选，轮换短期会话 |
+
+### 6.2 列表接口
+
+所有列表接口统一支持 `cursor`、`limit`、`q`、`status`、`sort`，并返回稳定分页信息：
 
 ```json
-{"request_id":"<id>","error":"<stable-category>"}
+{
+  "request_id": "req_...",
+  "data": {
+    "items": [],
+    "next_cursor": null,
+    "total": null
+  }
+}
 ```
 
-写请求可带 `X-Request-ID`；服务端会原样放入响应，否则生成 UUID。请求字段接受项目定义的 snake_case。资源对象的返回字段当前多数来自 Go 默认 JSON 编码，因而是 `TenantID`、`DisplayName` 这类 PascalCase，只有内部配置中声明过 JSON tag 的字段（例如 `secret_ref`）保持 snake_case。前端实现前应先在 BFF 或新增 API 版本中统一响应命名。
+建议接口：
 
-### Tenant
+```text
+GET /admin/v1/tenants
+GET /admin/v1/tenants/{tenant_id}/apps
+GET /admin/v1/tenants/{tenant_id}/apps/{app_id}/revisions
+GET /admin/v1/tenants/{tenant_id}/models
+GET /admin/v1/tenants/{tenant_id}/backends
+GET /admin/v1/tenants/{tenant_id}/bindings
+```
 
-| 方法 | 路径 | 用途 | 成功响应 |
-| --- | --- | --- | --- |
-| POST | `/admin/v1/tenants` | 创建 Tenant；仅 global principal 且只能创建首个 Tenant | `201 Tenant` |
-| GET | `/admin/v1/tenants/{tenant_id}` | 查询一个获授权 Tenant | `200 Tenant` |
-| PATCH | `/admin/v1/tenants/{tenant_id}` | 以 `expected_version` 完整替换可变配置 | `200 Tenant` |
-| POST | `/admin/v1/tenants/{tenant_id}/status` | 迁移 Tenant 状态 | `200 {tenant,event}` |
+列表最少返回 `id`、`key`、`display_name`、`status`、`version`、`updated_at` 和页面所需关联 ID。服务端负责按 principal scope 过滤，不能返回全量数据让浏览器自行筛选。
 
-Tenant 可编辑字段包括展示名、RPM、最大并发、月 token/金额预算、账单币种、审计保留天数、日志脱敏级别、trace 采样率、默认 App 与默认 Backend。Tenant key 与 ID 不可修改。
+### 6.3 详情与写入接口
 
-### Agent App 与 Revision
+当前已有的详情和写入路由可以继续复用，但应通过 BFF 或 `/admin/v2` 统一响应命名、错误结构和权限上下文：
 
-| 方法 | 路径 | 用途 | 成功响应 |
-| --- | --- | --- | --- |
-| POST | `/admin/v1/tenants/{tenant_id}/apps` | 创建 Draft 状态的 App | `201 App` |
-| GET | `/admin/v1/tenants/{tenant_id}/apps/{app_id}` | 查询 App | `200 App` |
-| PATCH | `/admin/v1/tenants/{tenant_id}/apps/{app_id}` | 完整替换展示名与描述 | `200 App` |
-| POST | `/admin/v1/tenants/{tenant_id}/apps/{app_id}/status` | 迁移 App 状态 | `200 {app,event}` |
-| POST | `/admin/v1/tenants/{tenant_id}/apps/{app_id}/revisions` | 创建下一个 Revision 的草稿 | `201 Revision` |
-| PATCH | `/admin/v1/tenants/{tenant_id}/apps/{app_id}/revisions/{revision}` | 完整替换草稿配置 | `200 Revision` |
-| POST | `/admin/v1/tenants/{tenant_id}/apps/{app_id}/revisions/{revision}/publish` | 原子发布草稿并更新 current revision | `200 {app,revision,event}` |
-| POST | `/admin/v1/tenants/{tenant_id}/apps/{app_id}/rollback` | 将 current revision 指回一个已发布版本 | `200 {app,event}` |
-| POST | `/admin/v1/tenants/{tenant_id}/apps/{app_id}/canary` | 设置或清除已发布的 candidate revision | `200 {app,event}` |
+```text
+GET/PATCH /admin/v1/tenants/{tenant_id}
+GET/PATCH /admin/v1/tenants/{tenant_id}/apps/{app_id}
+POST      /admin/v1/tenants/{tenant_id}/apps/{app_id}/status
+POST      /admin/v1/tenants/{tenant_id}/apps/{app_id}/revisions
+PATCH     /admin/v1/tenants/{tenant_id}/apps/{app_id}/revisions/{revision}
+POST      /admin/v1/tenants/{tenant_id}/apps/{app_id}/revisions/{revision}/publish
+POST      /admin/v1/tenants/{tenant_id}/apps/{app_id}/rollback
+POST      /admin/v1/tenants/{tenant_id}/apps/{app_id}/canary
+GET/PATCH /admin/v1/tenants/{tenant_id}/models/{profile_id}
+GET/PATCH /admin/v1/tenants/{tenant_id}/backends/{profile_id}
+GET/PATCH /admin/v1/tenants/{tenant_id}/bindings/{binding_id}
+```
 
-Revision 配置包含 `description`、`instruction`、`global_instruction`、`model_profile_id`、`generation`、`runtime` 与 `tools`。当前仅支持 `kind=llm`、`schema_version=1`。已发布 Revision 不能修改，只能创建新 Draft、发布或回滚。
+所有 `PATCH` 都是完整配置替换，必须携带最新版本号。所有需要审计的写操作必须携带 `reason` 和 `correlation_id`。
 
-> 注意：当前请求键标准化遗漏了 `global_instruction`；使用 snake_case 提交时会被静默忽略。实施 Web UI 前应先修复服务端映射并增加线协议测试，或暂时以 `GlobalInstruction` 发送该字段。该问题也说明不应让前端直接依赖当前不一致的 JSON 命名。
+### 6.4 线协议统一
 
-### Model Profile
+当前服务返回字段存在 PascalCase 与 snake_case 混用，例如 `TenantID`、`DisplayName` 与 `secret_ref` 并存。长期 Web 合约应统一为一种 DTO 命名（推荐 JSON snake_case 或 lowerCamelCase），并明确：
 
-| 方法 | 路径 | 用途 | 成功响应 |
-| --- | --- | --- | --- |
-| POST | `/admin/v1/tenants/{tenant_id}/models` | 创建模型配置 | `201 {profile,event}` |
-| GET | `/admin/v1/tenants/{tenant_id}/models/{profile_id}` | 查询模型配置 | `200 Profile` |
-| PATCH | `/admin/v1/tenants/{tenant_id}/models/{profile_id}` | 完整替换模型配置 | `200 {profile,event}` |
-| POST | `/admin/v1/tenants/{tenant_id}/models/{profile_id}/status` | 暂停、恢复或禁用 | `200 {profile,event}` |
+- 字段缺失、空值和 `null` 的语义。
+- 资源列表和详情的最小字段集合。
+- 409、403、404、503 的稳定错误类别。
+- secret、route key、DSN 的脱敏规则。
+- `global_instruction` 等特殊字段的映射测试。
 
-配置结构为 `provider`、`model`、可选 `endpoint`、受 Catalog 限制的 `options`、`secret_ref` 与 `generation`。`secret_ref` 是不透明引用；页面只能编辑或展示引用，不能接收、显示或回显明文密钥。
+## 7. 前端实现建议
 
-### Backend Profile
+### 7.1 技术结构
 
-| 方法 | 路径 | 用途 | 成功响应 |
-| --- | --- | --- | --- |
-| POST | `/admin/v1/tenants/{tenant_id}/backends` | 创建存储后端配置 | `201 {profile,event}` |
-| GET | `/admin/v1/tenants/{tenant_id}/backends/{profile_id}` | 查询存储后端配置 | `200 Profile` |
-| PATCH | `/admin/v1/tenants/{tenant_id}/backends/{profile_id}` | 完整替换能力绑定 | `200 {profile,event}` |
-| POST | `/admin/v1/tenants/{tenant_id}/backends/{profile_id}/status` | 暂停、恢复或禁用 | `200 {profile,event}` |
+继续使用当前 React + React Router + TDesign，不迁移框架：
 
-每个 `bindings[]` 项包含 `capability`、`provider`、`endpoint`、`options`、`secret_ref`。可用能力为 `session`、`memory`、`summary`、`knowledge`、`artifact`、`audit`。Active Profile 至少要有一个 `session` binding。
+```text
+src/
+├── auth/                 # session、login、route guard
+├── layout/               # AdminShell、TenantContext、Breadcrumb
+├── pages/
+│   ├── LoginPage
+│   ├── OverviewPage
+│   ├── tenants/
+│   └── tenant/
+├── features/
+│   ├── resource-list/    # 通用 Table、筛选、分页、状态
+│   ├── resource-detail/  # 详情、版本、编辑、冲突
+│   └── audit-action/     # reason、correlation、确认弹窗
+├── api/                  # session-aware client、DTO、error mapping
+└── styles/               # TDesign token overrides only
+```
 
-### Channel Binding
+### 7.2 TDesign 组件约束
 
-| 方法 | 路径 | 用途 | 成功响应 |
-| --- | --- | --- | --- |
-| POST | `/admin/v1/tenants/{tenant_id}/bindings` | 创建渠道绑定 | `201 {binding,event}` |
-| GET | `/admin/v1/tenants/{tenant_id}/bindings/{binding_id}` | 查询渠道绑定 | `200 Binding` |
-| PATCH | `/admin/v1/tenants/{tenant_id}/bindings/{binding_id}` | 完整替换渠道可变配置 | `200 {binding,event}` |
-| POST | `/admin/v1/tenants/{tenant_id}/bindings/{binding_id}/status` | 激活、暂停、恢复或禁用 | `200 {binding,event}` |
+优先使用 TDesign 现有组件，不自行复制一套组件样式：
 
-支持 `wecom` 与 `telegram`。Binding 保存 `provider_account_id`、`public_route_key_digest`、`app_id`、`secret_ref` 和非秘密 `protocol` 配置；不保存路由原文和渠道凭据。企业微信可配置 `corp_id`、`agent_id`、`receive_id`；Telegram 可配置 HTTPS `api_base_url` 与以 `/` 开头的 `webhook_path`。
+- `Layout`、`Menu`、`Breadcrumb`：全局壳层和导航。
+- `Table`、`Pagination`、`Input`、`Select`、`DateRangePicker`：资源列表和筛选。
+- `Card`、`Descriptions`、`Form`、`InputNumber`、`Textarea`、`Switch`：详情和编辑。
+- `Tag`、`Alert`、`Empty`、`Skeleton`、`Loading`：状态和反馈。
+- `Dialog`、`MessagePlugin`、`NotificationPlugin`：高影响操作和异步反馈。
 
-## 写入约束与 UI 交互规则
+业务 CSS 只能补充布局和响应式规则，颜色、字体、圆角、阴影、间距应尽量引用 TDesign token。
 
-### 乐观锁与完整替换
+## 8. 从当前 UI 到目标控制台的迁移策略
 
-所有 `PATCH` 与状态/发布/回滚/Canary 操作都要求页面带上最新版本号：
+当前 admin-ui 已经具备 TDesign 组件化的详情编辑能力，但仍是“输入 ID → 打开资源”的模式。迁移分四步：
 
-| 操作 | 必填版本字段 |
-| --- | --- |
-| Tenant / App / Profile / Binding 配置与状态 | `expected_version` |
-| 创建 Revision | `expected_app_version` |
-| 更新 Draft | `expected_app_version`、`expected_draft_version` |
-| 发布 Draft | `expected_app_version`、`expected_draft_version` |
-| 回滚与 Canary | `expected_app_version` |
+### 阶段 1：身份与同源壳层
 
-虽然 HTTP 方法为 `PATCH`，实现语义是**完整替换**而不是局部更新。编辑页必须先读取最新对象，以完整表单提交所有可变字段，不能只提交一个变更字段。
+1. 增加 `/admin/login` 和 session API。
+2. 将当前 `/connect` 页面替换为账号密码登录，不再要求 API 地址和 Admin Token。
+3. 让生产静态资源与 `/admin/*` API 走同源反向代理。
+4. 保留当前 Static Admin Token 作为 BFF 到服务端的内部凭证，浏览器不可见。
 
-收到 `409 conflict` 后，前端应保留用户草稿、重新读取服务端对象、提示版本已变更，并让用户确认覆盖内容后再以新的版本号提交。不能自动重试覆盖。
+### 阶段 2：列表 API 与租户工作区
 
-### 状态机
+1. 增加 Tenant/App/Model/Backend/Binding/Revision 列表接口。
+2. 增加 `/admin/auth/session`，返回租户范围和功能权限。
+3. 将 `ResourceLobby` 从“按 ID 打开”改为真实列表；已知 ID 深链接作为兼容入口保留。
+4. 增加搜索、筛选、分页、空态、错误态和服务端排序。
 
-| 资源 | 初始状态 | 合法迁移 |
-| --- | --- | --- |
-| Tenant | `active` 或 `suspended` | `active -> suspended/disabled`；`suspended -> active/disabled` |
-| Agent App | `draft` | 首次发布使 `draft -> active`；之后 `active <-> suspended`，均可到 `disabled`；Draft 只能到 `disabled` |
-| Model / Backend Profile | `active` 或 `suspended` | `active <-> suspended`，均可到 `disabled` |
-| Channel Binding | `draft` | `draft -> active/disabled`；`active <-> suspended`，均可到 `disabled` |
+### 阶段 3：详情与发布工作流
 
-页面应根据当前状态只展示合法操作。`disabled` 不展示“恢复”按钮；高影响操作（发布、回滚、禁用、激活渠道、设置 Canary）需要二次确认并要求填写 reason。
+1. 列表行统一进入详情页。
+2. 详情页补充内部信息、关联资源和版本列表。
+3. 统一 409 冲突、503 audit unavailable 和本地草稿处理。
+4. 将发布、回滚、Canary、禁用等操作统一接入审计确认组件。
 
-### 审计字段
+### 阶段 4：审计、用量与运营能力
 
-状态迁移、Model/Backend/Binding 的创建和配置修改、Revision 发布、回滚与 Canary 都需要 `reason`、`correlation_id`。服务端将 actor 固定为 Admin principal，调用方不能伪造。
+1. 增加按租户、资源、事件类型和时间范围筛选的审计列表。
+2. 增加服务端聚合的用量和成本查询。
+3. 增加受控健康摘要和配置预检。
+4. 记录真实管理员 subject，替代固定的 `admin` actor。
 
-前端应在一次用户操作开始时生成一个 UUID 作为 `correlation_id`，并在确认弹窗中强制填写 `reason`。同一次提交发生网络不确定性时应保留这两个值，便于人工核对审计记录。
+## 9. 验收标准
 
-### 审计失败的特殊处理
+### 9.1 用户路径
 
-`audit_unavailable`（503）并不保证写入未发生：当前 Handler 先提交 Repository 变更，再写审计；若审计写失败，会向客户端返回 503，但控制面数据可能已经更新，缓存失效也尚未触发。此时 UI 应：
+- 管理员打开系统域名后能进入 `/admin/login`。
+- 登录成功后直接看到自己有权限的租户列表。
+- 管理员无需输入 API 地址、Bearer Token 或资源 ID 即可找到租户和 App。
+- 租户、App、Revision、Model、Backend、Binding 均有列表和详情页面。
+- 刷新页面不会泄露凭证；退出登录后所有受保护页面失效。
 
-1. 不自动重试写请求。
-2. 立即重新读取目标资源并比较版本、状态或内容摘要。
-3. 将结果标记为“提交状态待确认”，提示管理员按 request/correlation ID 排查审计链路。
+### 9.2 权限与安全
 
-## 建议的信息架构
+- 不同管理员只能看到服务端授权的租户和资源。
+- 通过修改 URL、分页参数或请求体不能越权。
+- 浏览器、日志、错误 toast、审计事件中不出现明文密码、Admin Token、模型密钥、DSN 或 route key。
+- 写请求具备 CSRF 防护、幂等/重复提交保护和审计上下文。
 
-| 路由/页面 | 核心内容 | 依赖的服务端能力 |
-| --- | --- | --- |
-| `/login` | 企业身份登录与会话建立 | 新增浏览器身份认证或 BFF |
-| `/tenants` | 可访问租户列表、状态、默认配置 | 缺少 Tenant list / current principal |
-| `/tenants/:tenantId/overview` | 配置健康度、默认 App/Backend、readyz 状态 | 缺少聚合查询；可先做详情卡片 |
-| `/tenants/:tenantId/apps` | App 列表、状态、当前/Canary 版本 | 缺少 App list |
-| `/tenants/:tenantId/apps/:appId` | 元数据、版本列表、草稿编辑、发布/回滚/Canary | 缺少 Revision list 与 detail read |
-| `/tenants/:tenantId/models` | Model Profile 列表与配置表单 | 缺少 Model list 与 Catalog |
-| `/tenants/:tenantId/backends` | Backend Profile 列表、能力绑定编辑器 | 缺少 Backend list 与 Catalog |
-| `/tenants/:tenantId/bindings` | 渠道列表、路由、协议和状态管理 | 缺少 Binding list；缺少路由 digest 辅助 |
-| `/tenants/:tenantId/audit` | 控制面变更、执行失败、用量成本 | 领域层已有能力，但无 HTTP API |
+### 9.3 数据与操作
 
-首个可交付版本建议只包含“租户设置、App/Revision、Model、Backend、Binding”五类配置页面和基础状态操作；审计与用量页面在其读取 API 完成后加入。不要先做假数据 Dashboard，因为当前不存在能支撑实时指标的 Admin HTTP 聚合接口。
+- 列表分页、搜索、筛选由服务端执行，刷新后状态可恢复。
+- 详情显示完整内部信息，但对秘密字段只显示引用或摘要。
+- 配置修改遵守 optimistic lock；409 时不覆盖用户草稿。
+- 发布、回滚、Canary、禁用等操作都有二次确认、reason、correlation ID。
+- `audit_unavailable` 不自动重试，并能引导管理员确认提交结果。
 
-## 必须补齐的服务端接口
+### 9.4 视觉与可用性
 
-### P0：完整后台上线前
+- 全局壳层、表格、表单、标签、弹窗和反馈统一使用 TDesign。
+- 桌面端和窄屏端都能访问导航、列表操作和详情表单。
+- 所有交互控件有 hover、focus、loading、disabled 和错误状态。
+- 键盘可完成登录、筛选、列表导航和确认操作。
 
-| 能力 | 建议接口 | 原因 |
-| --- | --- | --- |
-| 当前用户与权限 | `GET /admin/v1/me` | 返回 subject、role、显式 tenant scopes、是否可创建首租户；用于菜单和路由守卫 |
-| Tenant 列表 | `GET /admin/v1/tenants?cursor=&limit=` | 目前只能按已知 ID 获取 Tenant，无法做租户选择 |
-| 资源列表 | `GET .../apps`、`models`、`backends`、`bindings` | 列表页、下拉引用选择、空状态和搜索的基本前提 |
-| Revision 读取 | `GET .../revisions` 与 `GET .../revisions/{revision}` | 现在无法展示、恢复或比较历史版本；HTTP 层也没有 Revision GET |
-| Catalog 读取 | `GET /admin/v1/catalog/models`、`GET /admin/v1/catalog/backends` | 表单需要受信 provider、model、capability、option、endpoint/secret policy；不能在前端硬编码 |
-| 线协议统一 | 新增 `/admin/v2` 或 BFF 适配层 | 请求 snake_case、响应 PascalCase 且有字段映射缺口，不适合作为长期 Web 合约 |
-| 浏览器认证 | OIDC/SSO 或 BFF session | 现有静态 token 不能下发给浏览器，也没有用户级 subject、CORS、CSRF 防护 |
+## 10. 当前实现对照
 
-列表接口应采用 cursor pagination、稳定排序和显式 filter，最低返回 `id`、`key`、`display_name`、`status`、`version`、`updated_at` 以及页面所需的关联 ID。必须由服务端按 principal scope 过滤，不能将 Tenant scope 交给浏览器判断。
+当前代码已经提供：
 
-### P1：运营与可维护性
+- React Router 多页面结构。
+- TDesign React 组件与仓库内 TDesign 源码集成。
+- Tenant、App、Revision、Model、Backend、Binding 的详情编辑和写入调用。
+- optimistic lock、reason、correlation ID、状态迁移和本地草稿处理。
 
-| 能力 | 建议接口/设计 |
-| --- | --- |
-| 审计日志 | `GET /admin/v1/tenants/{tenant_id}/audit`，支持 event type、时间范围、cursor；严禁返回 secret 或路由原文 |
-| 用量与成本 | `GET .../usage?from=&to=&group_by=app,model,channel`，复用现有 `audit.Aggregator` |
-| 配置预检 | 表单提交前/后提供 `validate` 或 dry-run；至少返回稳定字段级错误码 |
-| 渠道路由摘要 | 服务端计算 `public_route_key_digest`，浏览器只在本次提交中传入原始 route key，不持久化、不回显 |
-| 健康摘要 | 受控的 `/admin/v1/system/health`，聚合 readiness 与依赖类别，不泄露 DSN、endpoint 或 secret reference |
-| 变更可追溯 | 按 `correlation_id` 查询操作结果与审计状态，解决网络中断和 `audit_unavailable` 场景 |
+当前仍缺少、也是下一步开发重点的能力：
 
-## 前端技术与安全边界
+- 账号密码登录、服务端会话和管理员账号体系。
+- 同源生产部署与 BFF 身份边界。
+- Tenant 及各类资源的服务端列表接口。
+- Revision 列表/读取接口和统一 DTO 命名。
+- 审计、用量、Catalog、健康摘要查询接口。
 
-- 不要把 `TRPC_ADMIN_TOKEN` 打包到前端、浏览器 localStorage 或客户端配置。它目前是唯一静态 Admin 凭证，泄露等同于该 scope 的控制面权限泄露。
-- 推荐部署形态是同域 Web BFF：浏览器使用 HttpOnly、Secure、SameSite Cookie；BFF 验证用户身份、执行 CSRF 校验、向 Admin API 注入服务端保管的凭证或映射后的 principal。
-- 当前 `StaticAuthenticator` 的 subject 固定为 `admin`，因此审计无法区分具体网页操作者。上线多人后台前，应让 Admin principal 从可信身份提供方携带真实 subject，并保留租户 scope。
-- API 错误只提供稳定类别：`invalid_request`、`unauthorized`、`forbidden`、`not_found`、`conflict`、`storage_unavailable`、`audit_unavailable`、`internal_error`。表单层需根据类别给出通用提示，不能依赖后端错误文本。
-- 未授权的 GET 返回 `404 not_found`，写入返回 `403 forbidden`。页面在深链接失败时统一显示无权限/资源不存在，避免暴露跨租户对象是否存在。
-- API 中仅允许 `secret_ref`，明文密钥、DSN、Token、route key 原文均不应进入表单回显、日志、埋点、错误 toast 或前端状态持久化。
+因此，现有 UI 可以作为详情表单和高影响操作组件的基础，但不应继续扩展“最近打开/手动输入 ID”作为主导航模型。
 
-## 实施顺序与验收
-
-1. **先收敛服务端合约**：完成 P0 查询接口、snake_case 响应 DTO、`global_instruction` 映射修复，并为每个接口覆盖权限、分页、跨租户隐藏、版本冲突和秘密字段脱敏测试。
-2. **建立 BFF 身份边界**：接入登录、会话、CSRF、真实 subject 与 scope；确保浏览器端永远拿不到 Admin token。
-3. **实现资源管理页面**：先实现列表/详情/新建/完整编辑，统一封装 `request_id`、`correlation_id`、版本号和 `409` 冲突处理。
-4. **实现发布工作流**：Draft 编辑、版本比较、发布确认、回滚、Canary 设置/清除；所有不可逆或影响流量的操作必须二次确认和填写 reason。
-5. **接入审计与用量**：在 P1 API 可用后实现可筛选审计、用量趋势和成本汇总，不在前端拼接或估算来源数据。
-
-完成标准：管理员可在不知晓内部 ID 的前提下，在授权 Tenant 内完成资源浏览、创建、编辑、状态迁移、Draft 发布、回滚与 Canary；所有写入能处理冲突与不确定结果；不会向浏览器暴露 Admin token、明文凭据或跨租户资源。
-
-## 代码证据索引
+## 11. 代码与接口证据
 
 | 主题 | 位置 |
 | --- | --- |
-| Admin 路由、响应封装、错误映射、缓存失效 | `trpcservice/admin/api.go` |
-| Admin 静态认证与租户 scope 行为 | `trpcservice/admin/auth.go` |
-| Gateway 对 `/admin/v1/*` 的挂载与健康检查 | `trpcservice/gateway/http.go` |
-| Bootstrap 的 Admin Handler 装配 | `trpcservice/bootstrap/bootstrap.go`、`trpcservice/bootstrap/environment.go` |
-| Tenant、App/Revision、Model、Backend、Binding 领域约束 | `trpcservice/tenant/`、`trpcservice/agent/`、`trpcservice/model/`、`trpcservice/backend/`、`trpcservice/channels/` |
-| 审计与用量领域查询能力 | `trpcservice/audit/audit.go`、`trpcservice/audit/postgres/repository.go` |
-| Admin API 路由与写入行为测试 | `trpcservice/admin/api_test.go`、`trpcservice/bootstrap/restart_test.go` |
+| 当前 Admin 路由、响应封装、错误映射 | `trpcservice/admin/api.go` |
+| 当前静态 Admin Bearer 鉴权与租户 scope | `trpcservice/admin/auth.go` |
+| Gateway 对 `/admin/v1/*` 的挂载 | `trpcservice/gateway/http.go` |
+| 启动配置与 `TRPC_ADMIN_TOKEN` / `TRPC_ADMIN_TENANTS` | `trpcservice/bootstrap/environment.go`、`deploy/example.env` |
+| 当前 React 路由与 TDesign 壳层 | `admin-ui/src/App.tsx`、`admin-ui/src/components/AppShell.tsx` |
+| 当前 Admin API 客户端 | `admin-ui/src/api/client.ts` |
+| 当前详情表单与状态操作 | `admin-ui/src/pages/tenant/`、`admin-ui/src/components/StatusActions.tsx` |

@@ -1,23 +1,28 @@
-import { useState } from 'react';
-import { Alert, Button, Form, Input, MessagePlugin } from 'tdesign-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Button, Card, Form, Input, MessagePlugin } from 'tdesign-react';
 import { useNavigate } from 'react-router-dom';
-import { ResourceLobby } from '@/components/ResourceLobby';
+import { ResourceTable, StatusTag, type ResourceTableColumn } from '@/components/ResourceTable';
 import { useAdminClient } from '@/lib/connection';
 import { runMutation } from '@/lib/mutation';
-import { addRecent, listRecents, removeRecent } from '@/lib/recents';
+import type { Tenant } from '@/api/types';
 
 export function TenantsPage() {
   const client = useAdminClient();
   const navigate = useNavigate();
-  const [recents, setRecents] = useState(() => listRecents('tenant', null));
+  const [items, setItems] = useState<Tenant[]>([]);
+  const [nextCursor, setNextCursor] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [query, setQuery] = useState('');
+  const [status, setStatus] = useState('');
   const [tenantKey, setTenantKey] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [creating, setCreating] = useState(false);
 
-  const openTenant = (id: string, label?: string) => {
-    setRecents(addRecent('tenant', null, { id, label: label ?? id }));
-    navigate(`/tenants/${encodeURIComponent(id)}`);
-  };
+  const load = useCallback(async (append = false) => {
+    setLoading(true);
+    try { const result = await client.listTenants({ q: query, status, cursor: append ? nextCursor : undefined, limit: 25 }); setItems((current) => append ? [...current, ...result.data.items] : result.data.items); setNextCursor(result.data.next_cursor ?? ''); } finally { setLoading(false); }
+  }, [client, query, status, nextCursor]);
+  useEffect(() => { void load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const createTenant = async () => {
     if (!tenantKey.trim() || !displayName.trim() || creating) {
@@ -30,7 +35,7 @@ export function TenantsPage() {
       );
       if (result.ok) {
         MessagePlugin.success('租户已创建。请将新的租户 ID 加入服务端 TRPC_ADMIN_TENANTS scope 后再进行配置。');
-        openTenant(result.value.TenantID, result.value.DisplayName);
+        navigate(`/tenants/${encodeURIComponent(result.value.TenantID)}`);
       }
     } finally {
       setCreating(false);
@@ -38,37 +43,9 @@ export function TenantsPage() {
   };
 
   return (
-    <ResourceLobby
-      title="租户入口"
-      subtitle="控制面暂无租户列表接口（P0 缺口），请通过已知租户 ID 打开，或在全局凭证下创建首个租户。"
-      alert={
-        <Alert
-          theme="info"
-          message="关于权限"
-          description="TRPC_ADMIN_TENANTS=* 仅允许创建首个租户，并不代表已有租户的通读权限；创建后需在服务端配置明确的租户 ID scope。未授权的查询统一返回 404。"
-        />
-      }
-      idLabel="租户 ID"
-      idPlaceholder="例如 t_01ARZ3NDEKTSV4RRFFQ69G5FAV"
-      onOpen={(id) => openTenant(id)}
-      createTitle="创建首个租户"
-      createDescription="仅当当前凭证为 global principal 且系统中尚无租户时可用。"
-      createForm={
-        <Form layout="vertical" colon>
-          <Form.FormItem label="租户 Key" help="创建后不可修改；小写字母、数字与中划线。">
-            <Input value={tenantKey} onChange={(value) => setTenantKey(String(value))} placeholder="例如 acme" />
-          </Form.FormItem>
-          <Form.FormItem label="展示名">
-            <Input value={displayName} onChange={(value) => setDisplayName(String(value))} placeholder="例如 Acme 有限公司" />
-          </Form.FormItem>
-          <Button theme="primary" loading={creating} disabled={!tenantKey.trim() || !displayName.trim()} onClick={createTenant}>
-            创建租户
-          </Button>
-        </Form>
-      }
-      recents={recents}
-      onOpenRecent={(id) => openTenant(id)}
-      onRemoveRecent={(id) => setRecents(removeRecent('tenant', null, id))}
-    />
+    <div className="admin-page"><div className="admin-page-heading"><div className="admin-page-eyebrow">控制面资源</div><h1 className="admin-page-title">租户管理</h1><div className="admin-page-subtitle">查看并管理当前账号获授权的租户，所有数据由服务端按权限范围返回。</div></div><Card className="admin-panel" bordered><ResourceTable data={items} loading={loading} columns={[
+      { colKey: 'DisplayName', title: '租户名称', cell: ({ row }: { row: Tenant }) => <Button variant="text" theme="primary" onClick={() => navigate(`/tenants/${encodeURIComponent(row.TenantID)}`)}>{row.DisplayName}</Button> },
+      { colKey: 'TenantKey', title: 'Tenant Key' }, { colKey: 'Status', title: '状态', cell: ({ row }: { row: Tenant }) => <StatusTag value={row.Status} /> }, { colKey: 'TenantID', title: 'Tenant ID' }, { colKey: 'UpdatedAt', title: '更新时间' },
+    ] as ResourceTableColumn<Tenant>[]} rowKey="TenantID" query={query} status={status} onQueryChange={setQuery} onStatusChange={setStatus} onSearch={() => void load()} onReset={() => { setQuery(''); setStatus(''); setNextCursor(''); void load(); }} onLoadMore={() => void load(true)} hasMore={Boolean(nextCursor)} /></Card><Card className="admin-panel" title="创建租户" bordered><Form layout="vertical" labelAlign="top" colon><Form.FormItem label="租户 Key"><Input value={tenantKey} onChange={(v) => setTenantKey(String(v))} /></Form.FormItem><Form.FormItem label="展示名"><Input value={displayName} onChange={(v) => setDisplayName(String(v))} /></Form.FormItem><Button theme="primary" loading={creating} disabled={!tenantKey.trim() || !displayName.trim()} onClick={createTenant}>创建</Button></Form></Card></div>
   );
 }

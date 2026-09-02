@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Alert, Button, Card, Form, Input } from 'tdesign-react';
+import { LayersIcon } from 'tdesign-icons-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { readStoredBaseUrl, useConnection } from '@/lib/connection';
 
@@ -27,14 +28,20 @@ export function ConnectPage() {
 
   return (
     <div className="admin-connect-page">
+      <div className="admin-connect-intro">
+        <div className="admin-connect-mark" aria-hidden="true"><LayersIcon /></div>
+        <div className="admin-connect-kicker">tRPC Agent / CONTROL PLANE</div>
+        <h1>管理控制台</h1>
+        <p>集中管理租户、Agent 应用、模型、存储后端与渠道绑定。</p>
+      </div>
       <Card className="admin-connect-card" title="连接 Admin API" bordered>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div className="admin-connect-stack">
           <Alert
             theme="warning"
             message="凭证仅保存在内存中"
             description="Admin token 不会写入 localStorage、Cookie 或前端构建产物；刷新页面后需重新输入。请勿在不可信的设备上使用高权限凭证。"
           />
-          <Form layout="vertical" colon>
+          <Form layout="vertical" labelAlign="top" colon>
             <Form.FormItem label="API 地址" help="留空表示同源 /admin（开发环境走 Vite 代理，生产环境由 BFF/反代转发）。">
               <Input
                 value={baseUrl}

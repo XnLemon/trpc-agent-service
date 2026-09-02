@@ -109,8 +109,8 @@ export function DraftEditor({ value, onChange }: DraftEditorProps) {
   const patch = (partial: Partial<DraftFormState>) => onChange({ ...value, ...partial });
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <Form layout="vertical" colon className="admin-form-grid">
+    <div className="admin-stack">
+      <Form layout="vertical" labelAlign="top" colon className="admin-form-grid">
         <Form.FormItem label="版本说明">
           <Input value={value.description} onChange={(v) => patch({ description: String(v) })} placeholder="本版本的变更摘要" />
         </Form.FormItem>
@@ -122,7 +122,7 @@ export function DraftEditor({ value, onChange }: DraftEditorProps) {
           />
         </Form.FormItem>
       </Form>
-      <Form layout="vertical" colon>
+      <Form layout="vertical" labelAlign="top" colon>
         <Form.FormItem label="Instruction（系统指令）">
           <Textarea value={value.instruction} onChange={(v) => patch({ instruction: String(v) })} autosize={{ minRows: 5, maxRows: 14 }} />
         </Form.FormItem>
@@ -134,7 +134,7 @@ export function DraftEditor({ value, onChange }: DraftEditorProps) {
           />
         </Form.FormItem>
       </Form>
-      <Form layout="vertical" colon className="admin-form-grid">
+      <Form layout="vertical" labelAlign="top" colon className="admin-form-grid">
         <Form.FormItem label="Temperature" help="留空使用 Provider 默认值。">
           <InputNumber
             value={value.temperature ?? undefined}
@@ -143,7 +143,7 @@ export function DraftEditor({ value, onChange }: DraftEditorProps) {
             step={0.1}
             decimalPlaces={2}
             placeholder="默认"
-            style={{ width: '100%' }}
+            className="admin-full-width"
             onChange={(v) => patch({ temperature: nullableNumber(v) })}
           />
         </Form.FormItem>
@@ -155,7 +155,7 @@ export function DraftEditor({ value, onChange }: DraftEditorProps) {
             step={0.05}
             decimalPlaces={2}
             placeholder="默认"
-            style={{ width: '100%' }}
+            className="admin-full-width"
             onChange={(v) => patch({ topP: nullableNumber(v) })}
           />
         </Form.FormItem>
@@ -164,7 +164,7 @@ export function DraftEditor({ value, onChange }: DraftEditorProps) {
             value={value.maxOutputTokens ?? undefined}
             min={1}
             placeholder="默认"
-            style={{ width: '100%' }}
+            className="admin-full-width"
             onChange={(v) => patch({ maxOutputTokens: nullableNumber(v) })}
           />
         </Form.FormItem>
@@ -172,7 +172,7 @@ export function DraftEditor({ value, onChange }: DraftEditorProps) {
           <InputNumber
             value={value.maxLlmCalls}
             min={1}
-            style={{ width: '100%' }}
+            className="admin-full-width"
             onChange={(v) => patch({ maxLlmCalls: nullableNumber(v) ?? DEFAULT_RUNTIME.maxLlmCalls })}
           />
         </Form.FormItem>
@@ -180,7 +180,7 @@ export function DraftEditor({ value, onChange }: DraftEditorProps) {
           <InputNumber
             value={value.maxToolCalls}
             min={0}
-            style={{ width: '100%' }}
+            className="admin-full-width"
             onChange={(v) => patch({ maxToolCalls: nullableNumber(v) ?? DEFAULT_RUNTIME.maxToolCalls })}
           />
         </Form.FormItem>
@@ -189,7 +189,7 @@ export function DraftEditor({ value, onChange }: DraftEditorProps) {
             value={value.maxParallelTools}
             min={1}
             disabled={!value.enableParallelTools}
-            style={{ width: '100%' }}
+            className="admin-full-width"
             onChange={(v) => patch({ maxParallelTools: nullableNumber(v) ?? DEFAULT_RUNTIME.maxParallelTools })}
           />
         </Form.FormItem>
@@ -197,7 +197,7 @@ export function DraftEditor({ value, onChange }: DraftEditorProps) {
           <InputNumber
             value={value.executionTimeoutSeconds}
             min={1}
-            style={{ width: '100%' }}
+            className="admin-full-width"
             onChange={(v) => patch({ executionTimeoutSeconds: nullableNumber(v) ?? DEFAULT_RUNTIME.executionTimeoutSeconds })}
           />
         </Form.FormItem>
@@ -205,7 +205,7 @@ export function DraftEditor({ value, onChange }: DraftEditorProps) {
           <Switch value={value.enableParallelTools} onChange={(v) => patch({ enableParallelTools: Boolean(v) })} />
         </Form.FormItem>
       </Form>
-      <Form layout="vertical" colon>
+      <Form layout="vertical" labelAlign="top" colon>
         <Form.FormItem label="工具白名单" help="按 tool_id 逐项授权（deny-by-default）。">
           <div>
             {value.tools.map((tool, index) => (
@@ -218,7 +218,7 @@ export function DraftEditor({ value, onChange }: DraftEditorProps) {
                     patch({ tools });
                   }}
                 />
-                <span className="admin-page-subtitle" style={{ whiteSpace: 'nowrap' }}>
+                <span className="admin-page-subtitle admin-inline-label">
                   必需
                 </span>
                 <Switch
@@ -233,6 +233,7 @@ export function DraftEditor({ value, onChange }: DraftEditorProps) {
                   variant="outline"
                   theme="danger"
                   icon={<DeleteIcon />}
+                  aria-label={`移除工具 ${index + 1}`}
                   onClick={() => patch({ tools: value.tools.filter((_, i) => i !== index) })}
                 />
               </div>
