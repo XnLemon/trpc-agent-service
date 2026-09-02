@@ -84,6 +84,28 @@ type claimStoreStub struct {
 	getErr, createErr, recordErr, transitionErr error
 }
 
+type stagedContext struct {
+	context.Context
+	done      chan struct{}
+	firstErr  chan struct{}
+	errAfter  int
+	errCalls  int
+	firstOnce sync.Once
+}
+
+func (ctx *stagedContext) Done() <-chan struct{} {
+	return ctx.done
+}
+
+func (ctx *stagedContext) Err() error {
+	ctx.errCalls++
+	ctx.firstOnce.Do(func() { close(ctx.firstErr) })
+	if ctx.errCalls > ctx.errAfter {
+		return context.Canceled
+	}
+	return nil
+}
+
 func (s *claimStoreStub) GetSession(context.Context, string, string) (runtimestorage.Session, error) {
 	if s.getErr != nil {
 		return runtimestorage.Session{}, s.getErr
@@ -1201,6 +1223,82 @@ func TestDispatcherCancellationWinsLateReadyRunnerEvent(t *testing.T) {
 	}
 }
 
+func TestDispatcherForwardChecksCancellationAfterReceivingRunnerEvent(t *testing.T) {
+	dispatcher, principal := newTestDispatcher(t, &testRunner{})
+	ctx := &stagedContext{Context: context.Background(), done: make(chan struct{}), firstErr: make(chan struct{}), errAfter: 1}
+	runnerEvents := make(chan *trpcevent.Event, 1)
+	runnerEvents <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
+	close(runnerEvents)
+	output := make(chan DispatchEvent, 4)
+	_, span := dispatcher.telemetry.Tracer("test").Start(ctx, "forward")
+	dispatcher.forward(ctx, "request-forward-cancel", "trace", runnerEvents, &RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{})
+	events := collectDispatchEvents(output)
+	if len(events) != 2 || events[0].Error != ErrExecutionCanceled.Error() || !events[1].Done {
+		t.Fatalf("events = %+v", events)
+	}
+}
+
+func TestDispatcherForwardSelectCancellationBranch(t *testing.T) {
+	dispatcher, principal := newTestDispatcher(t, &testRunner{})
+	ctx := &stagedContext{Context: context.Background(), done: make(chan struct{}), firstErr: make(chan struct{}), errAfter: 1}
+	runnerEvents := make(chan *trpcevent.Event)
+	output := make(chan DispatchEvent, 4)
+	_, span := dispatcher.telemetry.Tracer("test").Start(ctx, "forward")
+	finished := make(chan struct{})
+	go func() {
+		dispatcher.forward(ctx, "request-select-cancel", "trace", runnerEvents, &RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{})
+		close(finished)
+	}()
+	<-ctx.firstErr
+	close(ctx.done)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("forward did not finish after cancellation")
+	}
+	events := collectDispatchEvents(output)
+	if len(events) != 2 || events[0].Error != ErrExecutionCanceled.Error() || !events[1].Done {
+		t.Fatalf("events = %+v", events)
+	}
+}
+
+func TestDispatcherRunnerEventCancellationAtTerminalizationBoundaries(t *testing.T) {
+	tests := []struct {
+		name     string
+		errAfter int
+	}{
+		{name: "after audit classification", errAfter: 1},
+		{name: "before mapped event", errAfter: 2},
+		{name: "before handoff", errAfter: 3},
+		{name: "before terminal send", errAfter: 4},
+		{name: "during terminal send", errAfter: 5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dispatcher, _ := newTestDispatcher(t, &testRunner{})
+			ctx := &stagedContext{Context: context.Background(), done: make(chan struct{}), firstErr: make(chan struct{}), errAfter: tt.errAfter}
+			runnerEvents := make(chan *trpcevent.Event)
+			output := make(chan DispatchEvent, 4)
+			var terminalErr error
+			var terminalEventType audit.EventType
+			var terminalErrorType string
+			var reply strings.Builder
+			done := dispatcher.handleForwardRunnerEvent(ctx, "request-boundary-cancel", "trace", runnerEvents,
+				output, &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}, &reply, &terminalErr,
+				&terminalEventType, &terminalErrorType,
+				func(audit.EventType, string) error { return nil },
+				func(audit.ExecutionResult, string) error { return nil })
+			if !done || !errors.Is(terminalErr, context.Canceled) || terminalEventType != audit.EventExecutionCanceled {
+				t.Fatalf("done=%v err=%v event=%q", done, terminalErr, terminalEventType)
+			}
+			events := []DispatchEvent{<-output, <-output}
+			if events[0].Error != ErrExecutionCanceled.Error() || !events[1].Done {
+				t.Fatalf("events = %+v", events)
+			}
+		})
+	}
+}
+
 func TestDispatcherRunnerEventCancellationAfterReceiptDoesNotComplete(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1398,6 +1496,11 @@ func TestDispatcherRunAndChannelTerminalEdges(t *testing.T) {
 	stop()
 	if sendDispatchEvent(ctx, make(chan DispatchEvent), DispatchEvent{}) {
 		t.Fatal("sendDispatchEvent succeeded after cancellation")
+	}
+	doneOnly := &stagedContext{Context: context.Background(), done: make(chan struct{}), firstErr: make(chan struct{}), errAfter: 1}
+	close(doneOnly.done)
+	if sendDispatchEvent(doneOnly, make(chan DispatchEvent), DispatchEvent{}) {
+		t.Fatal("sendDispatchEvent succeeded after Done closed")
 	}
 	drainRunnerEvents(nil, time.Millisecond)
 	drainRunnerEvents(make(chan *trpcevent.Event), time.Millisecond)
