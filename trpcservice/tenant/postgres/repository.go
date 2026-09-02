@@ -13,6 +13,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
+// List returns a stable page of tenant roots visible to the caller.
 func (r *TenantRepository) List(ctx context.Context, query, status, cursor string, limit int) ([]*tenant.Tenant, string, error) {
 	if r == nil || r.db == nil {
 		return nil, "", ErrStorage

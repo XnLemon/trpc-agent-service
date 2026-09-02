@@ -11,6 +11,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 )
 
+// List returns a stable page of Model Profiles belonging to one tenant.
 func (r *ModelRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*model.Profile, string, error) {
 	if r == nil || r.db == nil {
 		return nil, "", ErrStorage
