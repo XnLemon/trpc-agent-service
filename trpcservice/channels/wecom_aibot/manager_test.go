@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -291,6 +292,12 @@ func TestConfigurationAndProtocolHelpers(t *testing.T) {
 	if got := randomizedJitter(0); got != 0 {
 		t.Fatalf("zero jitter = %s", got)
 	}
+	if _, err := encodeFrame(Frame{}); !errors.Is(err, ErrMalformedFrame) {
+		t.Fatalf("missing request ID encoding error = %v", err)
+	}
+	if _, err := encodeFrame(Frame{Headers: Headers{ReqID: strings.Repeat("x", 257)}}); !errors.Is(err, ErrMalformedFrame) {
+		t.Fatalf("oversized request ID encoding error = %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if sleepBackoff(ctx, time.Second, time.Second, 0) {
@@ -512,8 +519,16 @@ func TestProviderAndBindingProviderBoundaries(t *testing.T) {
 		t.Fatal("unrouted durable reply was accepted")
 	}
 	value.ReplyTarget.BindingID = "binding"
+	boundManager.ready = true
+	if _, err := bound.Deliver(context.Background(), value); !isDeliveryError(err, "unavailable", true) {
+		t.Fatalf("bound unavailable delivery error = %v", err)
+	}
 	if status, _, err := bound.Reconcile(context.Background(), value); err != nil || status != outbox.DeliveryUnknown {
 		t.Fatalf("bound reconcile = %q %v", status, err)
+	}
+	var nilBindingProvider *BindingProvider
+	if status, _, err := nilBindingProvider.Reconcile(context.Background(), value); !isDeliveryError(err, "invalid", false) || status != outbox.DeliveryUnknown {
+		t.Fatalf("nil binding provider reconcile = %q %v", status, err)
 	}
 }
 
