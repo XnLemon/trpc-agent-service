@@ -697,6 +697,31 @@ func TestManagerReconnectFailuresRespectCancellation(t *testing.T) {
 	}
 }
 
+func TestManagerAuthenticationFailureClosesConnection(t *testing.T) {
+	connection := newTestConn()
+	dialer := &testDialer{connections: make(chan Conn, 1)}
+	dialer.connections <- connection
+	manager := &Manager{
+		botID: "bot-1", secret: "secret-1", wsURL: defaultWSURL, dialer: dialer,
+		queueSize: 1, heartbeat: time.Hour, reconnectBase: time.Hour, reconnectMax: time.Hour,
+		executionTimeout: time.Second,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	auth := readFrame(t, connection.writes)
+	connection.reads <- ackFrame(t, auth.Headers.ReqID, 1)
+	select {
+	case <-connection.closed:
+	case <-time.After(time.Second):
+		t.Fatal("authentication failure left the connection open")
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("authentication failure run error = %v", err)
+	}
+}
+
 func TestManagerCancellationDoesNotQueueAuthenticationOrReplies(t *testing.T) {
 	manager := &Manager{botID: "bot-1", secret: "secret-1"}
 	ctx, cancel := context.WithCancel(context.Background())
