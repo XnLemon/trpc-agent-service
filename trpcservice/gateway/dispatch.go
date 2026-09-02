@@ -602,17 +602,19 @@ func (dispatcher *Dispatcher) handleForwardStreamClosed(requestID, traceID strin
 	return nil
 }
 
-func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent, event *trpcevent.Event, reply *strings.Builder, terminalErr *error, terminalEventType *audit.EventType, terminalErrorType *string, finalizeAudit func(audit.EventType, string) error, finalizeHandoff func(audit.ExecutionResult, string) error) bool {
-	cancel := func() bool {
-		if ctx.Err() == nil {
-			return false
-		}
-		*terminalErr = ctx.Err()
-		*terminalEventType, *terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
-		*terminalErr = dispatcher.handleForwardCancellation(ctx, requestID, traceID, runnerEvents, output, finalizeAudit, finalizeHandoff)
-		return true
+func (dispatcher *Dispatcher) cancelForwardIfNeeded(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent, terminalErr *error, terminalEventType *audit.EventType, terminalErrorType *string, finalizeAudit func(audit.EventType, string) error, finalizeHandoff func(audit.ExecutionResult, string) error) bool {
+	if ctx.Err() == nil {
+		return false
 	}
-	if cancel() {
+	*terminalErr = ctx.Err()
+	*terminalEventType, *terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
+	*terminalErr = dispatcher.handleForwardCancellation(ctx, requestID, traceID, runnerEvents, output, finalizeAudit, finalizeHandoff)
+	return true
+}
+
+//nolint:gocyclo // terminal event mapping, cancellation, audit, handoff, and stream ownership are one state transition.
+func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent, event *trpcevent.Event, reply *strings.Builder, terminalErr *error, terminalEventType *audit.EventType, terminalErrorType *string, finalizeAudit func(audit.EventType, string) error, finalizeHandoff func(audit.ExecutionResult, string) error) bool {
+	if dispatcher.cancelForwardIfNeeded(ctx, requestID, traceID, runnerEvents, output, terminalErr, terminalEventType, terminalErrorType, finalizeAudit, finalizeHandoff) {
 		return true
 	}
 	mapped, done := mapRunnerEvent(event, requestID, traceID)
@@ -628,7 +630,7 @@ func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requ
 			eventType, errorType = audit.EventExecutionFailed, string(audit.ErrorUnavailable)
 		}
 		*terminalEventType, *terminalErrorType = eventType, errorType
-		if cancel() {
+		if dispatcher.cancelForwardIfNeeded(ctx, requestID, traceID, runnerEvents, output, terminalErr, terminalEventType, terminalErrorType, finalizeAudit, finalizeHandoff) {
 			return true
 		}
 		if err := finalizeAudit(eventType, errorType); err != nil {
@@ -638,7 +640,7 @@ func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requ
 		}
 	}
 	for _, item := range mapped {
-		if cancel() {
+		if dispatcher.cancelForwardIfNeeded(ctx, requestID, traceID, runnerEvents, output, terminalErr, terminalEventType, terminalErrorType, finalizeAudit, finalizeHandoff) {
 			return true
 		}
 		if done && item.Type == DispatchEventDone {
@@ -663,7 +665,7 @@ func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requ
 	if *terminalErr != nil {
 		result = audit.ResultFailure
 	}
-	if cancel() {
+	if dispatcher.cancelForwardIfNeeded(ctx, requestID, traceID, runnerEvents, output, terminalErr, terminalEventType, terminalErrorType, finalizeAudit, finalizeHandoff) {
 		return true
 	}
 	if err := finalizeHandoff(result, *terminalErrorType); err != nil {
@@ -673,7 +675,7 @@ func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requ
 	}
 	for _, item := range mapped {
 		if item.Type == DispatchEventDone {
-			if cancel() {
+			if dispatcher.cancelForwardIfNeeded(ctx, requestID, traceID, runnerEvents, output, terminalErr, terminalEventType, terminalErrorType, finalizeAudit, finalizeHandoff) {
 				return true
 			}
 			_ = sendDispatchEvent(ctx, output, item)
