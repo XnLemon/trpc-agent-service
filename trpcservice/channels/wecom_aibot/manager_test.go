@@ -594,19 +594,21 @@ func TestManagerLifecycleAndWritePumpBoundaries(t *testing.T) {
 	connection := newTestConn()
 	ctx, cancel := context.WithCancel(context.Background())
 	errs := make(chan error, 1)
-	go manager.writePump(ctx, connection, make(chan outboundFrame), errs)
+	done := runWritePump(manager, ctx, connection, make(chan outboundFrame), errs)
 	cancel()
 	if err := <-errs; !errors.Is(err, ErrClosed) {
 		t.Fatalf("canceled write pump error = %v", err)
 	}
+	<-done
 
 	nilQueue := make(chan outboundFrame, 1)
 	nilQueue <- outboundFrame{}
 	errs = make(chan error, 1)
-	go manager.writePump(context.Background(), connection, nilQueue, errs)
+	done = runWritePump(manager, context.Background(), connection, nilQueue, errs)
 	if err := <-errs; err != nil {
 		t.Fatalf("empty outbound frame error = %v", err)
 	}
+	<-done
 
 	expiredCtx, expire := context.WithCancel(context.Background())
 	expire()
@@ -615,13 +617,14 @@ func TestManagerLifecycleAndWritePumpBoundaries(t *testing.T) {
 	expiredQueue <- outboundFrame{context: expiredCtx, data: []byte("expired"), ack: expiredAck}
 	expiredQueue <- outboundFrame{}
 	errs = make(chan error, 1)
-	go manager.writePump(context.Background(), connection, expiredQueue, errs)
+	done = runWritePump(manager, context.Background(), connection, expiredQueue, errs)
 	if err := <-expiredAck; !errors.Is(err, ErrAcknowledgementTimeout) {
 		t.Fatalf("expired outbound acknowledgement = %v", err)
 	}
 	if err := <-errs; err != nil {
 		t.Fatalf("expired outbound pump error = %v", err)
 	}
+	<-done
 
 	pendingAck, pendingDone := make(chan error, 1), make(chan struct{})
 	manager.pending = &pendingReply{reqID: "active", ack: pendingAck, done: pendingDone}
@@ -630,13 +633,14 @@ func TestManagerLifecycleAndWritePumpBoundaries(t *testing.T) {
 	conflictQueue <- outboundFrame{data: []byte("reply"), replyReqID: "conflict", ack: conflictAck, done: make(chan struct{})}
 	conflictQueue <- outboundFrame{}
 	errs = make(chan error, 1)
-	go manager.writePump(context.Background(), connection, conflictQueue, errs)
+	done = runWritePump(manager, context.Background(), connection, conflictQueue, errs)
 	if err := <-conflictAck; !errors.Is(err, ErrClosed) {
 		t.Fatalf("conflicting reply acknowledgement = %v", err)
 	}
 	if err := <-errs; err != nil {
 		t.Fatalf("conflicting reply pump error = %v", err)
 	}
+	<-done
 	if err := <-pendingAck; !errors.Is(err, ErrClosed) {
 		t.Fatalf("existing reply acknowledgement = %v", err)
 	}
@@ -644,6 +648,26 @@ func TestManagerLifecycleAndWritePumpBoundaries(t *testing.T) {
 	case <-pendingDone:
 	default:
 		t.Fatal("existing pending reply did not unblock")
+	}
+}
+
+func TestManagerCloseStopsAnAuthenticatedConnection(t *testing.T) {
+	connection := newTestConn()
+	manager, stop := startTestManager(t, connection, &testDispatcher{}, 1)
+	auth := readFrame(t, connection.writes)
+	connection.reads <- ackFrame(t, auth.Headers.ReqID, 0)
+	waitReady(t, manager)
+	if err := manager.Close(); err != nil {
+		t.Fatalf("manager close error = %v", err)
+	}
+	stop()
+	if manager.Ready() {
+		t.Fatal("closed manager reported ready")
+	}
+	select {
+	case <-connection.closed:
+	default:
+		t.Fatal("manager close left the active connection open")
 	}
 }
 
@@ -799,6 +823,15 @@ func (c testAIBotCredentials) Resolve(_ context.Context, _ channels.SecretScope)
 func isDeliveryError(err error, class string, retryable bool) bool {
 	var deliveryErr *outbox.DeliveryError
 	return errors.As(err, &deliveryErr) && deliveryErr.Class == class && deliveryErr.Retryable == retryable
+}
+
+func runWritePump(manager *Manager, ctx context.Context, connection Conn, queue <-chan outboundFrame, errs chan<- error) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		manager.writePump(ctx, connection, queue, errs)
+	}()
+	return done
 }
 
 type targetConsumer struct{ binding *channels.Binding }
