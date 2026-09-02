@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+//nolint:gocyclo // Exercises the complete list contract in one focused fixture.
 func TestListScopesFiltersAndPaginatesAppsAndRevisions(t *testing.T) {
 	repository := NewRepository()
 	first := createApp(t, repository, tenantOne, "first")

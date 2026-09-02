@@ -21,6 +21,8 @@ type TenantRepository struct {
 var _ tenant.Repository = (*TenantRepository)(nil)
 
 // List returns a stable page of only the requested tenant scopes.
+//
+//nolint:gocyclo // Collection listing coordinates scope, filter, and paging boundaries.
 func (r *TenantRepository) List(ctx context.Context, scopes []string, query, status, cursor string, limit int) ([]*tenant.Tenant, string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
@@ -57,7 +59,8 @@ func (r *TenantRepository) List(ctx context.Context, scopes []string, query, sta
 	for i, id := range ids {
 		args[i] = id
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT tenant_id FROM tenant WHERE tenant_id IN (`+placeholders+`) ORDER BY tenant_id`, args...)
+	// Placeholders are generated from validated scope count; values remain bound arguments.
+	rows, err := r.db.QueryContext(ctx, `SELECT tenant_id FROM tenant WHERE tenant_id IN (`+placeholders+`) ORDER BY tenant_id`, args...) //nolint:gosec // placeholder list contains no user-controlled SQL
 	if err != nil {
 		return nil, "", ErrStorage
 	}
