@@ -565,6 +565,181 @@ func TestWritePumpFailureAndDrainPaths(t *testing.T) {
 	}
 }
 
+func TestManagerLifecycleAndWritePumpBoundaries(t *testing.T) {
+	var nilManager *Manager
+	if nilManager.Ready() {
+		t.Fatal("nil manager reported ready")
+	}
+	if err := nilManager.Run(context.Background()); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil manager run error = %v", err)
+	}
+	manager := &Manager{}
+	if err := manager.Run(nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil run context error = %v", err)
+	}
+	manager.closing = true
+	if err := manager.Run(context.Background()); !errors.Is(err, ErrClosed) {
+		t.Fatalf("closing manager run error = %v", err)
+	}
+	manager.closing = false
+	manager.runCancel = func() {}
+	if err := manager.Run(context.Background()); !errors.Is(err, ErrClosed) {
+		t.Fatalf("concurrent manager run error = %v", err)
+	}
+	manager.runCancel = nil
+	if err := manager.serveConnection(context.Background(), nil); !errors.Is(err, ErrClosed) {
+		t.Fatalf("nil connection error = %v", err)
+	}
+
+	connection := newTestConn()
+	ctx, cancel := context.WithCancel(context.Background())
+	errs := make(chan error, 1)
+	go manager.writePump(ctx, connection, make(chan outboundFrame), errs)
+	cancel()
+	if err := <-errs; !errors.Is(err, ErrClosed) {
+		t.Fatalf("canceled write pump error = %v", err)
+	}
+
+	nilQueue := make(chan outboundFrame, 1)
+	nilQueue <- outboundFrame{}
+	errs = make(chan error, 1)
+	go manager.writePump(context.Background(), connection, nilQueue, errs)
+	if err := <-errs; err != nil {
+		t.Fatalf("empty outbound frame error = %v", err)
+	}
+
+	expiredCtx, expire := context.WithCancel(context.Background())
+	expire()
+	expiredAck := make(chan error, 1)
+	expiredQueue := make(chan outboundFrame, 2)
+	expiredQueue <- outboundFrame{context: expiredCtx, data: []byte("expired"), ack: expiredAck}
+	expiredQueue <- outboundFrame{}
+	errs = make(chan error, 1)
+	go manager.writePump(context.Background(), connection, expiredQueue, errs)
+	if err := <-expiredAck; !errors.Is(err, ErrAcknowledgementTimeout) {
+		t.Fatalf("expired outbound acknowledgement = %v", err)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("expired outbound pump error = %v", err)
+	}
+
+	pendingAck, pendingDone := make(chan error, 1), make(chan struct{})
+	manager.pending = &pendingReply{reqID: "active", ack: pendingAck, done: pendingDone}
+	conflictAck := make(chan error, 1)
+	conflictQueue := make(chan outboundFrame, 2)
+	conflictQueue <- outboundFrame{data: []byte("reply"), replyReqID: "conflict", ack: conflictAck, done: make(chan struct{})}
+	conflictQueue <- outboundFrame{}
+	errs = make(chan error, 1)
+	go manager.writePump(context.Background(), connection, conflictQueue, errs)
+	if err := <-conflictAck; !errors.Is(err, ErrClosed) {
+		t.Fatalf("conflicting reply acknowledgement = %v", err)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("conflicting reply pump error = %v", err)
+	}
+	if err := <-pendingAck; !errors.Is(err, ErrClosed) {
+		t.Fatalf("existing reply acknowledgement = %v", err)
+	}
+	select {
+	case <-pendingDone:
+	default:
+		t.Fatal("existing pending reply did not unblock")
+	}
+}
+
+func TestManagerIgnoresInvalidCallbacksAndEvents(t *testing.T) {
+	manager := &Manager{botID: "bot-1", ready: true}
+	for _, frame := range []Frame{
+		{Body: []byte("not-json")},
+		{Body: mustJSON(Event{AIBotID: "other"})},
+		{Body: mustJSON(Event{AIBotID: "bot-1", Event: struct {
+			EventType string `json:"eventtype"`
+		}{EventType: "subscribed_event"}})},
+	} {
+		if err := manager.handleEventCallback(frame); err != nil {
+			t.Fatalf("ignored event error = %v", err)
+		}
+	}
+	if !manager.Ready() {
+		t.Fatal("ignored event changed connection readiness")
+	}
+
+	called := make(chan struct{}, 1)
+	manager.dispatcher = dispatchFunc(func(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+		called <- struct{}{}
+		return nil, errors.New("dispatch failed")
+	})
+	manager.handleCallback(context.Background(), Frame{Body: []byte("not-json")})
+	select {
+	case <-called:
+		t.Fatal("malformed callback reached dispatcher")
+	default:
+	}
+	frame, err := decodeFrame(callbackFrame(t, "callback", "message", "", "user"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.handleCallback(context.Background(), frame)
+	<-called
+
+	manager.dispatcher = dispatchFunc(func(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+		called <- struct{}{}
+		return nil, nil
+	})
+	manager.handleCallback(context.Background(), frame)
+	<-called
+}
+
+func TestTrustedBindingAndDurableReplyRejectionBoundaries(t *testing.T) {
+	target, consumer := testRoutingTarget(t)
+	if _, err := New(Config{Secret: "secret", Target: target, Dispatcher: &testDispatcher{}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing bot ID error = %v", err)
+	}
+	if _, err := New(Config{BotID: "bot", Target: target, Dispatcher: &testDispatcher{}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing bot secret error = %v", err)
+	}
+	if _, err := New(Config{BotID: "bot", Secret: "secret", Target: target}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing dispatcher error = %v", err)
+	}
+	if _, err := NewForBinding(nil, BindingConfig{Target: target, Bindings: consumer, Credentials: testAIBotCredentials{secret: "secret"}, Dispatcher: &testDispatcher{}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil binding context error = %v", err)
+	}
+	staleTarget := target
+	staleTarget.BindingVersion++
+	if _, err := NewForBinding(context.Background(), BindingConfig{Target: staleTarget, Bindings: consumer, Credentials: testAIBotCredentials{secret: "secret"}, Dispatcher: &testDispatcher{}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("stale binding error = %v", err)
+	}
+	if _, err := NewForBinding(context.Background(), BindingConfig{Target: target, Bindings: consumer, Credentials: testAIBotCredentials{err: errors.New("secret unavailable")}, Dispatcher: &testDispatcher{}}); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("credential resolution error = %v", err)
+	}
+
+	manager := &Manager{ready: true}
+	value := storage.ReplyOutbox{TenantID: "tenant", EventID: "event", ReplyID: "reply", Payload: "payload"}
+	for _, correlations := range []storage.ReplyCorrelationStore{
+		testCorrelations{},
+		testCorrelations{err: errors.New("correlation unavailable")},
+	} {
+		provider, err := NewProvider(manager, correlations)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := provider.Deliver(context.Background(), value); !isDeliveryError(err, "unavailable", true) {
+			t.Fatalf("correlation failure error = %v", err)
+		}
+	}
+	boundManager := &Manager{target: channels.RoutingTarget{BindingID: "binding"}}
+	if _, err := NewBindingProvider(testCorrelations{}, boundManager, boundManager); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("duplicate binding manager error = %v", err)
+	}
+	if _, err := NewBindingProvider(nil, boundManager); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil correlation store error = %v", err)
+	}
+	var provider *BindingProvider
+	if _, err := provider.Deliver(context.Background(), value); !isDeliveryError(err, "invalid", false) {
+		t.Fatalf("nil binding provider error = %v", err)
+	}
+}
+
 type testDispatcher struct {
 	requests chan gateway.DispatchRequest
 	events   func() <-chan gateway.DispatchEvent
@@ -582,10 +757,19 @@ func (d *testDispatcher) Dispatch(_ context.Context, request gateway.DispatchReq
 	return d.events(), nil
 }
 
-type testCorrelations struct{ requestID string }
+type dispatchFunc func(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error)
+
+func (fn dispatchFunc) Dispatch(ctx context.Context, request gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+	return fn(ctx, request)
+}
+
+type testCorrelations struct {
+	requestID string
+	err       error
+}
 
 func (c testCorrelations) GetReplyCorrelation(context.Context, string, string) (storage.ReplyCorrelation, error) {
-	return storage.ReplyCorrelation{RequestID: c.requestID}, nil
+	return storage.ReplyCorrelation{RequestID: c.requestID}, c.err
 }
 
 type testDialer struct {
@@ -603,10 +787,18 @@ func (d *testDialer) DialContext(ctx context.Context, _ string, _ http.Header) (
 	}
 }
 
-type testAIBotCredentials struct{ secret string }
+type testAIBotCredentials struct {
+	secret string
+	err    error
+}
 
 func (c testAIBotCredentials) Resolve(_ context.Context, _ channels.SecretScope) (Credentials, error) {
-	return Credentials{BotSecret: c.secret}, nil
+	return Credentials{BotSecret: c.secret}, c.err
+}
+
+func isDeliveryError(err error, class string, retryable bool) bool {
+	var deliveryErr *outbox.DeliveryError
+	return errors.As(err, &deliveryErr) && deliveryErr.Class == class && deliveryErr.Retryable == retryable
 }
 
 type targetConsumer struct{ binding *channels.Binding }

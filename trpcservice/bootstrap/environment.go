@@ -321,26 +321,9 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 
 func openEnvironmentDatabaseForConfig(ctx context.Context, config environmentConfig) (*sql.DB, func(context.Context, *sql.DB) error, func(context.Context, *sql.DB) error, error) {
 	if config.driver != ControlPlaneDriverMySQL {
-		db, err := openEnvironmentDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+		db, err := openPostgresEnvironmentDatabaseForConfig(ctx, config)
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil, nil, nil, ctx.Err()
-			}
-			return nil, nil, nil, fmt.Errorf("%w: %s control plane is unavailable", ErrInvalidConfig, config.driver)
-		}
-		if err := applyEnvironmentMigrations(ctx, db); err != nil {
-			_ = db.Close()
-			if ctx.Err() != nil {
-				return nil, nil, nil, ctx.Err()
-			}
-			return nil, nil, nil, fmt.Errorf("%w: PostgreSQL migrations are not ready", ErrInvalidConfig)
-		}
-		if err := verifyEnvironmentMigrations(ctx, db); err != nil {
-			_ = db.Close()
-			if ctx.Err() != nil {
-				return nil, nil, nil, ctx.Err()
-			}
-			return nil, nil, nil, fmt.Errorf("%w: PostgreSQL migrations are not ready", ErrInvalidConfig)
+			return nil, nil, nil, err
 		}
 		return db, nil, nil, nil
 	}
@@ -388,6 +371,31 @@ func openEnvironmentDatabaseForConfig(ctx context.Context, config environmentCon
 	// The application account is verification-only during bootstrap; migrations
 	// and trigger metadata are handled through the migration account above.
 	return db, nil, nil, nil
+}
+
+func openPostgresEnvironmentDatabaseForConfig(ctx context.Context, config environmentConfig) (*sql.DB, error) {
+	db, err := openEnvironmentDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("%w: %s control plane is unavailable", ErrInvalidConfig, config.driver)
+	}
+	if err := applyEnvironmentMigrations(ctx, db); err != nil {
+		_ = db.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("%w: PostgreSQL migrations are not ready", ErrInvalidConfig)
+	}
+	if err := verifyEnvironmentMigrations(ctx, db); err != nil {
+		_ = db.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("%w: PostgreSQL migrations are not ready", ErrInvalidConfig)
+	}
+	return db, nil
 }
 
 func environmentRepositories(config environmentConfig, db *sql.DB) (tenant.Repository, agent.Repository, channels.CandidateConsumer, audit.Writer, error) {
