@@ -10,10 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	storage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
 func TestManagerAuthenticatesAndMapsDirectAndGroupCallbacks(t *testing.T) {
@@ -194,6 +196,270 @@ func TestPendingReplyFailsWhenConnectionCloses(t *testing.T) {
 	}
 }
 
+func TestReplyAcknowledgementTimeoutReleasesWriter(t *testing.T) {
+	connection := newTestConn()
+	manager, stop := startTestManager(t, connection, &testDispatcher{}, 2)
+	defer stop()
+	manager.replyACKTimeout = 10 * time.Millisecond
+	auth := readFrame(t, connection.writes)
+	connection.reads <- ackFrame(t, auth.Headers.ReqID, 0)
+	waitReady(t, manager)
+
+	first := make(chan error, 1)
+	go func() { first <- manager.sendReply(context.Background(), "req-timeout", StreamReply{}) }()
+	_ = readFrame(t, connection.writes)
+	if err := <-first; !errors.Is(err, ErrAcknowledgementTimeout) {
+		t.Fatalf("first reply error = %v", err)
+	}
+
+	second := make(chan error, 1)
+	go func() { second <- manager.sendReply(context.Background(), "req-after-timeout", StreamReply{}) }()
+	frame := readFrame(t, connection.writes)
+	if frame.Headers.ReqID != "req-after-timeout" {
+		t.Fatalf("reply after timeout = %+v", frame)
+	}
+	connection.reads <- ackFrame(t, frame.Headers.ReqID, 0)
+	if err := <-second; err != nil {
+		t.Fatalf("reply after timeout error = %v", err)
+	}
+}
+
+func TestHeartbeatDoesNotSetReadDeadline(t *testing.T) {
+	connection := newTestConn()
+	dialer := &testDialer{connections: make(chan Conn, 1)}
+	dialer.connections <- connection
+	manager := &Manager{botID: "bot-1", secret: "secret-1", wsURL: defaultWSURL, dialer: dialer, queueSize: 2, heartbeat: 10 * time.Millisecond, reconnectBase: time.Millisecond, reconnectMax: time.Millisecond, executionTimeout: time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	auth := readFrame(t, connection.writes)
+	connection.reads <- ackFrame(t, auth.Headers.ReqID, 0)
+	waitReady(t, manager)
+	if ping := readFrame(t, connection.writes); ping.Cmd != cmdPing {
+		t.Fatalf("heartbeat command = %q", ping.Cmd)
+	}
+	if calls := connection.readDeadlineCalls.Load(); calls != 0 {
+		t.Fatalf("read deadlines = %d", calls)
+	}
+	manager.BeginShutdown()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("manager did not stop")
+	}
+}
+
+func TestDisconnectedEventStopsManagerWithoutReconnect(t *testing.T) {
+	first, second := newTestConn(), newTestConn()
+	dialer := &testDialer{connections: make(chan Conn, 2)}
+	dialer.connections <- first
+	dialer.connections <- second
+	manager := &Manager{botID: "bot-1", secret: "secret-1", wsURL: defaultWSURL, dialer: dialer, queueSize: 2, heartbeat: time.Hour, reconnectBase: time.Millisecond, reconnectMax: time.Millisecond, executionTimeout: time.Second}
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(context.Background()) }()
+	auth := readFrame(t, first.writes)
+	first.reads <- ackFrame(t, auth.Headers.ReqID, 0)
+	waitReady(t, manager)
+	first.reads <- disconnectedEventFrame(t, "event-replaced")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("replacement run error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("manager did not stop after replacement event")
+	}
+	if manager.Ready() || dialer.calls.Load() != 1 {
+		t.Fatalf("replacement state = ready:%v calls:%d", manager.Ready(), dialer.calls.Load())
+	}
+}
+
+func TestConfigurationAndProtocolHelpers(t *testing.T) {
+	defaults := withDefaults(Config{})
+	if defaults.WSURL != defaultWSURL || defaults.QueueSize != 128 || defaults.HeartbeatInterval != 30*time.Second || defaults.ReconnectBase != time.Second || defaults.ReconnectMax != time.Minute || defaults.ExecutionTimeout != 4*time.Minute || defaults.Dialer == nil {
+		t.Fatalf("defaults = %+v", defaults)
+	}
+	if value, err := normalizeWebSocketURL(" wss://example.test/ "); err != nil || value != "wss://example.test" {
+		t.Fatalf("normalized websocket URL = %q, %v", value, err)
+	}
+	for _, value := range []string{"", "ws://example.test", "wss://example.test/path", "wss://user@example.test", "wss://example.test?query=1"} {
+		if _, err := normalizeWebSocketURL(value); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("websocket URL %q error = %v", value, err)
+		}
+	}
+	if got := randomizedJitter(0); got != 0 {
+		t.Fatalf("zero jitter = %s", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if sleepBackoff(ctx, time.Second, time.Second, 0) {
+		t.Fatal("canceled backoff completed")
+	}
+}
+
+func TestHeartbeatAndInboundReadHelpers(t *testing.T) {
+	queue := make(chan outboundFrame, 1)
+	if err := sendHeartbeat(queue); err != nil {
+		t.Fatal(err)
+	}
+	outbound := <-queue
+	frame, err := decodeFrame(outbound.data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Cmd != cmdPing {
+		t.Fatalf("heartbeat frame = %+v", frame)
+	}
+	queue <- outboundFrame{data: []byte("occupied")}
+	if err := sendHeartbeat(queue); !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("full queue error = %v", err)
+	}
+
+	connection := newTestConn()
+	reads := make(chan inboundReadResult, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go readInboundFrames(ctx, connection, reads)
+	connection.reads <- ackFrame(t, "read", 0)
+	select {
+	case result := <-reads:
+		if result.err != nil || len(result.data) == 0 {
+			t.Fatalf("inbound result = %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("inbound read did not arrive")
+	}
+}
+
+func TestManagerAuthenticationAndReplyStateBoundaries(t *testing.T) {
+	manager := &Manager{authReqID: "auth"}
+	if err := manager.handleInboundFrame(context.Background(), Frame{Headers: Headers{ReqID: "auth"}}); !errors.Is(err, ErrAuthentication) {
+		t.Fatalf("missing authentication code error = %v", err)
+	}
+	code := 0
+	if err := manager.handleInboundFrame(context.Background(), Frame{Headers: Headers{ReqID: "auth"}, ErrCode: &code}); err != nil || !manager.Ready() {
+		t.Fatalf("authentication result = %v ready=%v", err, manager.Ready())
+	}
+	ack, done := make(chan error, 1), make(chan struct{})
+	manager.pending = &pendingReply{reqID: "reply", ack: ack, done: done}
+	manager.completeReplyAck("other", nil)
+	manager.clearPendingReplyFor("reply", ErrAcknowledgementTimeout)
+	if err := <-ack; !errors.Is(err, ErrAcknowledgementTimeout) {
+		t.Fatalf("cleared reply error = %v", err)
+	}
+	select {
+	case <-done:
+	default:
+		t.Fatal("cleared reply did not unblock writer")
+	}
+	if err := (&Manager{}).sendReply(context.Background(), "", StreamReply{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid reply error = %v", err)
+	}
+	if err := (&Manager{}).sendReply(context.Background(), "reply", StreamReply{}); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("unready reply error = %v", err)
+	}
+	ack, done = make(chan error, 1), make(chan struct{})
+	manager.pending = &pendingReply{reqID: "rejected", ack: ack, done: done}
+	rejected := 1
+	manager.acknowledgeReply(Frame{Headers: Headers{ReqID: "rejected"}, ErrCode: &rejected})
+	if err := <-ack; !errors.Is(err, ErrClosed) {
+		t.Fatalf("rejected acknowledgement error = %v", err)
+	}
+}
+
+func TestProviderAndBindingProviderBoundaries(t *testing.T) {
+	if _, err := NewProvider(nil, testCorrelations{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil manager provider error = %v", err)
+	}
+	manager := &Manager{}
+	provider, err := NewProvider(manager, testCorrelations{requestID: "request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.Deliver(context.Background(), storage.ReplyOutbox{}); err == nil {
+		t.Fatal("invalid durable reply was accepted")
+	}
+	value := storage.ReplyOutbox{TenantID: "tenant", EventID: "event", ReplyID: "reply", Payload: "payload"}
+	if _, err := provider.Deliver(context.Background(), value); err == nil {
+		t.Fatal("unready durable reply was accepted")
+	}
+	provider.receipts["tenant\x00reply\x000"] = "request:0"
+	if receipt, err := provider.Deliver(context.Background(), value); err != nil || receipt != "request:0" {
+		t.Fatalf("cached receipt = %q, %v", receipt, err)
+	}
+	if status, receipt, err := provider.Reconcile(context.Background(), value); err != nil || status != outbox.DeliveryAccepted || receipt != "request:0" {
+		t.Fatalf("reconcile = %q %q %v", status, receipt, err)
+	}
+	if status, _, err := (&Provider{}).Reconcile(context.Background(), value); err != nil || status != outbox.DeliveryUnknown {
+		t.Fatalf("nil provider reconcile = %q %v", status, err)
+	}
+
+	if _, err := NewBindingProvider(testCorrelations{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty binding provider error = %v", err)
+	}
+	boundManager := &Manager{target: channels.RoutingTarget{BindingID: "binding"}}
+	bound, err := NewBindingProvider(testCorrelations{}, boundManager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bound.Deliver(context.Background(), value); err == nil {
+		t.Fatal("unrouted durable reply was accepted")
+	}
+	value.ReplyTarget.BindingID = "binding"
+	if status, _, err := bound.Reconcile(context.Background(), value); err != nil || status != outbox.DeliveryUnknown {
+		t.Fatalf("bound reconcile = %q %v", status, err)
+	}
+}
+
+func TestConstructorsUseTrustedBindingAndDefaults(t *testing.T) {
+	target, consumer := testRoutingTarget(t)
+	manager, err := New(Config{BotID: " bot-1 ", Secret: "secret", WSURL: " wss://example.test/ ", Target: target, Dispatcher: &testDispatcher{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.botID != "bot-1" || manager.wsURL != "wss://example.test" || manager.Channel() != channels.ChannelWeComAIBot || manager.dialer == nil {
+		t.Fatalf("manager = %+v", manager)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(Config{BotID: "bot", Secret: "secret", WSURL: "ws://example.test", Target: target, Dispatcher: &testDispatcher{}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("insecure manager configuration error = %v", err)
+	}
+	bound, err := NewForBinding(context.Background(), BindingConfig{Target: target, Bindings: consumer, Credentials: testAIBotCredentials{secret: "secret"}, Dispatcher: &testDispatcher{}})
+	if err != nil || bound.botID != "bot-1" {
+		t.Fatalf("binding manager = %+v %v", bound, err)
+	}
+	if _, err := NewForBinding(context.Background(), BindingConfig{Target: target, Bindings: consumer, Credentials: testAIBotCredentials{}, Dispatcher: &testDispatcher{}}); !errors.Is(err, ErrNotReady) {
+		t.Fatalf("missing binding secret error = %v", err)
+	}
+}
+
+func TestWritePumpFailureAndDrainPaths(t *testing.T) {
+	manager := &Manager{}
+	for _, connection := range []Conn{writeFailureConn{testConn: newTestConn(), deadlineErr: errors.New("deadline")}, writeFailureConn{testConn: newTestConn(), writeErr: errors.New("write")}} {
+		queue := make(chan outboundFrame, 1)
+		queue <- outboundFrame{data: []byte("frame")}
+		errs := make(chan error, 1)
+		go manager.writePump(context.Background(), connection, queue, errs)
+		select {
+		case err := <-errs:
+			if !errors.Is(err, ErrClosed) {
+				t.Fatalf("write failure error = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("write failure was not reported")
+		}
+	}
+	queue := make(chan outboundFrame, 2)
+	queue <- outboundFrame{data: []byte("queued"), ack: make(chan error, 1)}
+	drainOutboundReplies(queue, ErrClosed)
+	if len(queue) != 0 {
+		t.Fatal("queued replies were not drained")
+	}
+}
+
 type testDispatcher struct {
 	requests chan gateway.DispatchRequest
 	events   func() <-chan gateway.DispatchEvent
@@ -217,9 +483,13 @@ func (c testCorrelations) GetReplyCorrelation(context.Context, string, string) (
 	return storage.ReplyCorrelation{RequestID: c.requestID}, nil
 }
 
-type testDialer struct{ connections chan Conn }
+type testDialer struct {
+	connections chan Conn
+	calls       atomic.Int32
+}
 
 func (d *testDialer) DialContext(ctx context.Context, _ string, _ http.Header) (Conn, error) {
+	d.calls.Add(1)
 	select {
 	case connection := <-d.connections:
 		return connection, nil
@@ -228,13 +498,95 @@ func (d *testDialer) DialContext(ctx context.Context, _ string, _ http.Header) (
 	}
 }
 
+type testAIBotCredentials struct{ secret string }
+
+func (c testAIBotCredentials) Resolve(_ context.Context, _ channels.SecretScope) (Credentials, error) {
+	return Credentials{BotSecret: c.secret}, nil
+}
+
+type targetConsumer struct{ binding *channels.Binding }
+
+func (c targetConsumer) LookupCandidates(context.Context, channels.Channel, string) ([]channels.CandidateBindingContext, error) {
+	return nil, nil
+}
+
+func (c targetConsumer) Get(_ context.Context, tenantID, bindingID string) (*channels.Binding, error) {
+	if c.binding == nil || c.binding.TenantID != tenantID || c.binding.BindingID != bindingID {
+		return nil, channels.ErrNotFound
+	}
+	value := c.binding.Clone()
+	return &value, nil
+}
+
+func (targetConsumer) ConsumeCandidate(context.Context, channels.CandidateBindingContext) (*channels.Binding, error) {
+	return nil, channels.ErrCandidateUnavailable
+}
+
+type targetTenantRepository struct {
+	tenant.Repository
+	value *tenant.Tenant
+}
+
+func (r targetTenantRepository) Get(_ context.Context, tenantID string) (*tenant.Tenant, error) {
+	if r.value == nil || r.value.TenantID != tenantID {
+		return nil, tenant.ErrNotFound
+	}
+	value := r.value.Clone()
+	return &value, nil
+}
+
+type targetAppRepository struct {
+	agent.Repository
+	value *agent.App
+}
+
+func (r targetAppRepository) Get(_ context.Context, tenantID, appID string) (*agent.App, error) {
+	if r.value == nil || r.value.TenantID != tenantID || r.value.AppID != appID {
+		return nil, agent.ErrNotFound
+	}
+	value := r.value.Clone()
+	return &value, nil
+}
+
+func testRoutingTarget(t *testing.T) (channels.RoutingTarget, targetConsumer) {
+	t.Helper()
+	root, err := tenant.NewTenant(tenant.CreateInput{TenantKey: "aibot-test", DisplayName: "AI Bot Test", AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := agent.NewApp(agent.CreateInput{TenantID: root.TenantID, AppKey: "aibot", DisplayName: "AI Bot", Description: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := int64(1)
+	app.Status, app.CurrentRevision, app.Version, app.UpdatedAt = agent.StatusActive, &revision, 2, app.CreatedAt.Add(time.Second)
+	if err := app.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeComAIBot, "aibot-test-route")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := channels.NewBinding(channels.CreateInput{TenantID: root.TenantID, BindingKey: "aibot", Channel: channels.ChannelWeComAIBot, ProviderAccountID: "bot-account", PublicRouteKeyDigest: routeDigest, AppID: app.AppID, SecretRef: "secret/aibot", Protocol: channels.ProtocolConfiguration{WeComAIBot: &channels.WeComAIBotProtocolConfiguration{BotID: "bot-1"}}, Status: channels.StatusActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer := targetConsumer{binding: binding}
+	target, err := channels.ResolveConfiguredRoutingTarget(context.Background(), consumer, targetTenantRepository{value: root}, targetAppRepository{value: app}, root.TenantID, binding.BindingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return target, consumer
+}
+
 type testConn struct {
-	reads     chan []byte
-	writes    chan []byte
-	closed    chan struct{}
-	closeOnce sync.Once
-	writesNow atomic.Int32
-	maxWrites atomic.Int32
+	reads             chan []byte
+	writes            chan []byte
+	closed            chan struct{}
+	closeOnce         sync.Once
+	writesNow         atomic.Int32
+	maxWrites         atomic.Int32
+	readDeadlineCalls atomic.Int32
 }
 
 func newTestConn() *testConn {
@@ -264,10 +616,19 @@ func (c *testConn) WriteMessage(_ int, data []byte) error {
 		return errors.New("closed")
 	}
 }
-func (*testConn) SetReadDeadline(time.Time) error   { return nil }
+func (c *testConn) SetReadDeadline(time.Time) error { c.readDeadlineCalls.Add(1); return nil }
 func (*testConn) SetWriteDeadline(time.Time) error  { return nil }
 func (*testConn) SetPongHandler(func(string) error) {}
 func (c *testConn) Close() error                    { c.closeOnce.Do(func() { close(c.closed) }); return nil }
+
+type writeFailureConn struct {
+	*testConn
+	deadlineErr error
+	writeErr    error
+}
+
+func (c writeFailureConn) SetWriteDeadline(time.Time) error { return c.deadlineErr }
+func (c writeFailureConn) WriteMessage(int, []byte) error   { return c.writeErr }
 
 type heartbeatConn struct {
 	*testConn
@@ -360,6 +721,18 @@ func callbackFrame(t *testing.T, reqID, msgID, chatID, userID string) []byte {
 		t.Fatal(err)
 	}
 	data, err := encodeFrame(Frame{Cmd: cmdCallback, Headers: Headers{ReqID: reqID}, Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+func disconnectedEventFrame(t *testing.T, reqID string) []byte {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"msgid": "event", "aibotid": "bot-1", "event": map[string]string{"eventtype": "disconnected_event"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := encodeFrame(Frame{Cmd: cmdEventCallback, Headers: Headers{ReqID: reqID}, Body: body})
 	if err != nil {
 		t.Fatal(err)
 	}

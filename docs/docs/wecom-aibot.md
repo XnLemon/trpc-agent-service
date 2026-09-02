@@ -17,4 +17,12 @@
 
 运行时必须允许出站 `wss://`，并将连接 Manager 的生命周期交给 Bootstrap Runtime。`BeginShutdown` 会停止新执行、取消连接和心跳；`Close` 等待 read/write pumps 退出。Secret、原始帧和消息正文不会进入日志、trace、audit 或错误响应。
 
+使用 `NewFromEnvironment` 时，通过 `WECOM_AIBOT_CONNECTIONS` 配置当前单租户进程应持有的 Binding。该 JSON 数组的每项包含 `binding_id`、`secret_ref` 和 `bot_secret`；`secret_ref` 必须与控制面 Binding 一致，`bot_secret` 仅在进程内用于该受信任 Binding。Bootstrap 会验证 Binding、租户和应用均可接收执行，并把同一个 Outbox worker 按 BindingID 路由到 AI Bot 或现有 WeCom provider。
+
+```json
+[{"binding_id":"binding_xxx","secret_ref":"env/wecom-aibot","bot_secret":"..."}]
+```
+
+最终回复必须在 30 秒内收到 WebSocket 确认；否则会以可重试交付失败回到 Outbox。`disconnected_event` 表示此 Manager 已被替换，连接会停止而不是自动重拨。
+
 官方协议参考：[文档 60904](https://developer.work.weixin.qq.com/document/60904)；SDK：[aibot-node-sdk](https://github.com/WecomTeam/aibot-node-sdk)。

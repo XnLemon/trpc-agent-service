@@ -22,6 +22,7 @@ type Provider struct {
 
 var _ outbox.Provider = (*Provider)(nil)
 
+// NewProvider creates the durable final-reply adapter for one manager.
 func NewProvider(manager *Manager, correlations storage.ReplyCorrelationStore) (*Provider, error) {
 	if manager == nil || correlations == nil {
 		return nil, ErrInvalid
@@ -29,6 +30,7 @@ func NewProvider(manager *Manager, correlations storage.ReplyCorrelationStore) (
 	return &Provider{manager: manager, correlations: correlations, receipts: make(map[string]string)}, nil
 }
 
+// Deliver sends and acknowledges a durable final reply for its correlated request.
 func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (string, error) {
 	if p == nil || p.manager == nil || p.correlations == nil || ctx == nil || strings.TrimSpace(value.Payload) == "" || value.ReplyID == "" {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
@@ -63,6 +65,7 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 	return receipt, nil
 }
 
+// Reconcile reports locally acknowledged replies as accepted.
 func (p *Provider) Reconcile(_ context.Context, value storage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
 	if p == nil {
 		return outbox.DeliveryUnknown, "", nil

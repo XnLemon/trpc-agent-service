@@ -40,6 +40,7 @@ func NewBindingProvider(correlations storage.ReplyCorrelationStore, managers ...
 	return &BindingProvider{providers: providers}, nil
 }
 
+// Deliver routes a durable reply to the manager selected by its BindingID.
 func (p *BindingProvider) Deliver(ctx context.Context, value storage.ReplyOutbox) (string, error) {
 	provider, err := p.provider(value)
 	if err != nil {
@@ -48,6 +49,7 @@ func (p *BindingProvider) Deliver(ctx context.Context, value storage.ReplyOutbox
 	return provider.Deliver(ctx, value)
 }
 
+// Reconcile returns the persisted delivery state for the selected manager.
 func (p *BindingProvider) Reconcile(ctx context.Context, value storage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
 	provider, err := p.provider(value)
 	if err != nil {

@@ -22,6 +22,7 @@ import (
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom_aibot"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
@@ -517,6 +518,61 @@ func TestEnvironmentWeComCredentialsMustBeConfiguredTogether(t *testing.T) {
 	}
 	if _, err := resolver.Resolve(context.Background(), channels.SecretScope{TenantID: config.tenantID, SecretRef: "env/other"}); err == nil {
 		t.Fatal("mismatched WeCom secret reference was accepted")
+	}
+}
+
+func TestEnvironmentWeComAIBotConnectionsAreScopedAndValidated(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	config := environmentConfig{tenantID: tenantID, apiIdentities: map[string]gateway.APIIdentity{"token": {TenantID: tenantID, AppID: "app_00000000000000000000000000", SubjectID: "service"}}}
+	t.Setenv(envWeComAIBotConnections, `[{"binding_id":"cb_00000000000000000000000000","secret_ref":"env/wecom-aibot","bot_secret":"test-secret"}]`)
+	if err := config.loadWeComAIBots(); err != nil {
+		t.Fatal(err)
+	}
+	if len(config.wecomAIBots) != 1 || config.wecomAIBots[0].BindingID == "" {
+		t.Fatalf("AI Bot connections = %+v", config.wecomAIBots)
+	}
+	resolver := environmentWeComAIBotCredentialResolver{tenantID: tenantID, secrets: map[string]string{"env/wecom-aibot": "test-secret"}}
+	credentials, err := resolver.Resolve(context.Background(), channels.SecretScope{TenantID: tenantID, SecretRef: "env/wecom-aibot"})
+	if err != nil || credentials.BotSecret != "test-secret" {
+		t.Fatalf("AI Bot credentials = %+v %v", credentials, err)
+	}
+	if _, err := resolver.Resolve(context.Background(), channels.SecretScope{TenantID: tenantID, SecretRef: "other"}); err == nil {
+		t.Fatal("unknown AI Bot secret reference was accepted")
+	}
+
+	for _, value := range []string{`[]`, `[{"binding_id":"","secret_ref":"env/wecom-aibot","bot_secret":"test-secret"}]`, `[{"binding_id":"one","secret_ref":"env/ref","bot_secret":"first"},{"binding_id":"one","secret_ref":"env/other","bot_secret":"second"}]`} {
+		t.Setenv(envWeComAIBotConnections, value)
+		candidate := environmentConfig{tenantID: tenantID, apiIdentities: config.apiIdentities}
+		if err := candidate.loadWeComAIBots(); !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("connection configuration %s error = %v", value, err)
+		}
+	}
+}
+
+func TestEnvironmentOutboxWorkerFactoryRoutesAIBotBindings(t *testing.T) {
+	store := runtimestorageinmemory.New()
+	defer func() { _ = store.Close() }()
+	legacy := bootstrapStaticProvider{receipt: "legacy"}
+	aiBot := bootstrapStaticProvider{receipt: "aibot"}
+	router := environmentReplyProvider{legacy: legacy, aiBot: aiBot, aiBotBindingIDs: map[string]struct{}{"aibot-binding": {}}}
+	for _, test := range []struct {
+		binding string
+		want    string
+	}{{binding: "aibot-binding", want: "aibot"}, {binding: "wecom-binding", want: "legacy"}} {
+		receipt, err := router.Deliver(context.Background(), runtimestorage.ReplyOutbox{ReplyTarget: runtimestorage.ReplyTarget{BindingID: test.binding}})
+		if err != nil || receipt != test.want {
+			t.Fatalf("binding %s receipt = %q, %v", test.binding, receipt, err)
+		}
+	}
+	if status, receipt, err := router.Reconcile(context.Background(), runtimestorage.ReplyOutbox{ReplyTarget: runtimestorage.ReplyTarget{BindingID: "aibot-binding"}}); err != nil || status != outbox.DeliveryAccepted || receipt != "aibot" {
+		t.Fatalf("AI Bot reconcile = %q %q %v", status, receipt, err)
+	}
+
+	const tenantID = "t_00000000000000000000000000"
+	factory := environmentOutboxWorkerFactory(environmentConfig{tenantID: tenantID}, store, nil, nil, map[string]struct{}{"aibot-binding": {}})
+	manager := &wecom_aibot.Manager{}
+	if worker, err := factory([]channels.PollingAdapter{manager}); err == nil || worker != nil {
+		t.Fatal("manager without binding identity was accepted")
 	}
 }
 
@@ -1418,6 +1474,16 @@ type bootstrapBlockingProvider struct {
 	started  chan struct{}
 	canceled chan struct{}
 	once     sync.Once
+}
+
+type bootstrapStaticProvider struct{ receipt string }
+
+func (p bootstrapStaticProvider) Deliver(context.Context, runtimestorage.ReplyOutbox) (string, error) {
+	return p.receipt, nil
+}
+
+func (p bootstrapStaticProvider) Reconcile(context.Context, runtimestorage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
+	return outbox.DeliveryAccepted, p.receipt, nil
 }
 
 type candidateOnly struct{ channels.CandidateConsumer }

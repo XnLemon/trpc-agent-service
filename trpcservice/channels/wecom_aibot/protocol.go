@@ -17,14 +17,23 @@ const (
 )
 
 var (
-	ErrInvalid        = errors.New("invalid wecom ai bot configuration")
+	// ErrInvalid reports an invalid AI Bot configuration or constructor input.
+	ErrInvalid = errors.New("invalid wecom ai bot configuration")
+	// ErrMalformedFrame reports a frame that does not match the AI Bot protocol.
 	ErrMalformedFrame = errors.New("malformed wecom ai bot frame")
+	// ErrAuthentication reports a rejected AI Bot connection authentication.
 	ErrAuthentication = errors.New("wecom ai bot authentication failed")
-	ErrQueueFull      = errors.New("wecom ai bot reply queue is full")
-	ErrNotReady       = errors.New("wecom ai bot is not ready")
-	ErrClosed         = errors.New("wecom ai bot is closed")
+	// ErrQueueFull reports that an outbound frame cannot be buffered safely.
+	ErrQueueFull = errors.New("wecom ai bot reply queue is full")
+	// ErrNotReady reports that a connection has not completed authentication.
+	ErrNotReady = errors.New("wecom ai bot is not ready")
+	// ErrAcknowledgementTimeout reports an outbound reply that WeCom did not acknowledge in time.
+	ErrAcknowledgementTimeout = errors.New("wecom ai bot reply acknowledgement timed out")
+	// ErrClosed reports that the manager or its active connection has closed.
+	ErrClosed = errors.New("wecom ai bot is closed")
 )
 
+// Frame is one JSON envelope exchanged over the AI Bot WebSocket.
 type Frame struct {
 	Cmd     string          `json:"cmd,omitempty"`
 	Headers Headers         `json:"headers"`
@@ -33,10 +42,12 @@ type Frame struct {
 	ErrMsg  string          `json:"errmsg,omitempty"`
 }
 
+// Headers contains request-scoped protocol metadata.
 type Headers struct {
 	ReqID string `json:"req_id"`
 }
 
+// Message is the text message payload of an AI Bot callback.
 type Message struct {
 	MsgID    string `json:"msgid"`
 	AIBotID  string `json:"aibotid"`
@@ -51,6 +62,7 @@ type Message struct {
 	} `json:"text"`
 }
 
+// Event is the event callback payload reserved by the AI Bot protocol.
 type Event struct {
 	MsgID    string `json:"msgid"`
 	AIBotID  string `json:"aibotid"`
@@ -65,6 +77,7 @@ type Event struct {
 	} `json:"event"`
 }
 
+// StreamReply is an incremental or final text reply sent to WeCom.
 type StreamReply struct {
 	MsgType string `json:"msgtype"`
 	Stream  struct {

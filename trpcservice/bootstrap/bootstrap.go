@@ -101,8 +101,11 @@ type Config struct {
 	RuntimeTenantID string
 	// OutboxWorker is constructed from trusted provider routing configuration.
 	// Bootstrap owns its lifecycle but never derives a recipient from HTTP.
-	OutboxWorker       *outbox.Worker
-	OutboxPollInterval time.Duration
+	OutboxWorker *outbox.Worker
+	// OutboxWorkerFactory creates the owned worker after AI Bot factories have
+	// produced their managers. It is mutually exclusive with OutboxWorker.
+	OutboxWorkerFactory func([]channels.PollingAdapter) (*outbox.Worker, error)
+	OutboxPollInterval  time.Duration
 	// AuditWriter receives execution and configured channel delivery facts.
 	AuditWriter        audit.Writer
 	Authenticator      gateway.APIAuthenticator
@@ -386,6 +389,17 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 			return nil, ErrInvalidConfig
 		}
 		aiBots = append(aiBots, aiBot)
+	}
+	if config.OutboxWorker != nil && config.OutboxWorkerFactory != nil {
+		_ = registry.Close()
+		return nil, ErrInvalidConfig
+	}
+	if config.OutboxWorkerFactory != nil {
+		config.OutboxWorker, err = config.OutboxWorkerFactory(aiBots)
+		if err != nil || config.OutboxWorker == nil {
+			_ = registry.Close()
+			return nil, ErrInvalidConfig
+		}
 	}
 	readyGate := config.ReadyGate
 	if readyGate == nil {

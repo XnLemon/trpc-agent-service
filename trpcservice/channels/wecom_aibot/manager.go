@@ -2,9 +2,10 @@ package wecom_aibot
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
-	"math/rand"
-	"net"
+	"errors"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,7 +18,12 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const defaultWSURL = "wss://openws.work.weixin.qq.com"
+const (
+	defaultWSURL           = "wss://openws.work.weixin.qq.com"
+	defaultReplyACKTimeout = 30 * time.Second
+)
+
+var errConnectionReplaced = errors.New("wecom ai bot connection replaced")
 
 // Conn is the narrow WebSocket surface owned by Manager. It permits protocol
 // tests to inject a fake connection while keeping one writer per socket.
@@ -30,6 +36,7 @@ type Conn interface {
 	Close() error
 }
 
+// Dialer establishes the narrow WebSocket connection owned by a Manager.
 type Dialer interface {
 	DialContext(context.Context, string, http.Header) (Conn, error)
 }
@@ -65,6 +72,7 @@ type Manager struct {
 	dialer                                                   Dialer
 	queueSize                                                int
 	heartbeat, reconnectBase, reconnectMax, executionTimeout time.Duration
+	replyACKTimeout                                          time.Duration
 
 	mu        sync.Mutex
 	conn      Conn
@@ -79,6 +87,7 @@ type Manager struct {
 }
 
 type outboundFrame struct {
+	context    context.Context
 	data       []byte
 	replyReqID string
 	ack        chan error
@@ -92,18 +101,33 @@ type pendingReply struct {
 }
 
 func New(config Config) (*Manager, error) {
+	config, err := normalizeConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	return &Manager{botID: config.BotID, secret: config.Secret, wsURL: config.WSURL, target: config.Target, dispatcher: config.Dispatcher, dialer: config.Dialer, queueSize: config.QueueSize, heartbeat: config.HeartbeatInterval, reconnectBase: config.ReconnectBase, reconnectMax: config.ReconnectMax, executionTimeout: config.ExecutionTimeout, replyACKTimeout: defaultReplyACKTimeout}, nil
+}
+
+func normalizeConfig(config Config) (Config, error) {
 	if strings.TrimSpace(config.BotID) == "" || strings.TrimSpace(config.Secret) == "" || config.Dispatcher == nil {
-		return nil, ErrInvalid
+		return Config{}, ErrInvalid
 	}
 	if err := config.Target.Validate(); err != nil || config.Target.Channel != channels.ChannelWeComAIBot {
-		return nil, ErrInvalid
+		return Config{}, ErrInvalid
 	}
+	config = withDefaults(config)
+	wsURL, err := normalizeWebSocketURL(config.WSURL)
+	if err != nil {
+		return Config{}, ErrInvalid
+	}
+	config.BotID = strings.TrimSpace(config.BotID)
+	config.WSURL = wsURL
+	return config, nil
+}
+
+func withDefaults(config Config) Config {
 	if config.WSURL == "" {
 		config.WSURL = defaultWSURL
-	}
-	parsed, err := url.Parse(strings.TrimSpace(config.WSURL))
-	if err != nil || parsed.Scheme != "wss" || parsed.Host == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return nil, ErrInvalid
 	}
 	if config.QueueSize <= 0 {
 		config.QueueSize = 128
@@ -123,10 +147,22 @@ func New(config Config) (*Manager, error) {
 	if config.Dialer == nil {
 		config.Dialer = websocketDialer{dialer: websocket.Dialer{HandshakeTimeout: 10 * time.Second}}
 	}
-	return &Manager{botID: strings.TrimSpace(config.BotID), secret: config.Secret, wsURL: strings.TrimRight(config.WSURL, "/"), target: config.Target, dispatcher: config.Dispatcher, dialer: config.Dialer, queueSize: config.QueueSize, heartbeat: config.HeartbeatInterval, reconnectBase: config.ReconnectBase, reconnectMax: config.ReconnectMax, executionTimeout: config.ExecutionTimeout}, nil
+	return config
 }
 
+func normalizeWebSocketURL(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "wss" || parsed.Host == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", ErrInvalid
+	}
+	return strings.TrimRight(value, "/"), nil
+}
+
+// Channel returns the fixed channel type served by this manager.
 func (m *Manager) Channel() channels.Channel { return channels.ChannelWeComAIBot }
+
+// Ready reports whether the current connection has authenticated and remains open.
 func (m *Manager) Ready() bool {
 	if m == nil {
 		return false
@@ -136,6 +172,7 @@ func (m *Manager) Ready() bool {
 	return m.ready && !m.closing
 }
 
+// Run reconnects and serves the AI Bot connection until the context is canceled.
 func (m *Manager) Run(ctx context.Context) error {
 	if m == nil || ctx == nil {
 		return ErrInvalid
@@ -177,8 +214,14 @@ func (m *Manager) Run(ctx context.Context) error {
 			continue
 		}
 		attempt = 0
-		if err := m.serveConnection(runCtx, conn); err != nil && runCtx.Err() == nil {
+		if err := m.serveConnection(runCtx, conn); err != nil {
 			_ = conn.Close()
+			if errors.Is(err, errConnectionReplaced) {
+				return nil
+			}
+			if runCtx.Err() != nil {
+				return runCtx.Err()
+			}
 			if !sleepBackoff(runCtx, m.reconnectBase, m.reconnectMax, attempt) {
 				return runCtx.Err()
 			}
@@ -195,7 +238,7 @@ func sleepBackoff(ctx context.Context, base, max time.Duration, attempt int) boo
 	if d > max {
 		d = max
 	}
-	jitter := time.Duration(rand.Int63n(int64(d/4 + 1)))
+	jitter := randomizedJitter(d / 4)
 	timer := time.NewTimer(d - d/8 + jitter)
 	defer timer.Stop()
 	select {
@@ -204,6 +247,17 @@ func sleepBackoff(ctx context.Context, base, max time.Duration, attempt int) boo
 	case <-timer.C:
 		return true
 	}
+}
+
+func randomizedJitter(limit time.Duration) time.Duration {
+	if limit <= 0 {
+		return 0
+	}
+	value, err := rand.Int(rand.Reader, big.NewInt(int64(limit)+1))
+	if err != nil {
+		return 0
+	}
+	return time.Duration(value.Int64())
 }
 func min(a, b int) int {
 	if a < b {
@@ -246,10 +300,11 @@ func (m *Manager) serveConnection(ctx context.Context, conn Conn) error {
 	if err := m.enqueueAuth(connCtx, queue); err != nil {
 		return err
 	}
-	if err := m.readPump(connCtx, conn, queue); err != nil {
-		return err
-	}
+	readErr := make(chan error, 1)
+	go func() { readErr <- m.readPump(connCtx, conn, queue) }()
 	select {
+	case err := <-readErr:
+		return err
 	case err := <-writeErr:
 		return err
 	case <-connCtx.Done():
@@ -265,6 +320,8 @@ func (m *Manager) sendReply(ctx context.Context, reqID string, body StreamReply)
 	if err != nil {
 		return err
 	}
+	replyCtx, cancel := context.WithTimeout(ctx, m.replyAcknowledgementTimeout())
+	defer cancel()
 	m.mu.Lock()
 	queue, closing := m.queue, m.closing
 	if closing || queue == nil {
@@ -274,13 +331,17 @@ func (m *Manager) sendReply(ctx context.Context, reqID string, body StreamReply)
 	ack := make(chan error, 1)
 	done := make(chan struct{})
 	select {
-	case queue <- outboundFrame{data: data, replyReqID: reqID, ack: ack, done: done}:
+	case queue <- outboundFrame{context: replyCtx, data: data, replyReqID: reqID, ack: ack, done: done}:
 		m.mu.Unlock()
 		select {
 		case err := <-ack:
 			return err
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-replyCtx.Done():
+			m.clearPendingReplyFor(reqID, ErrAcknowledgementTimeout)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return ErrAcknowledgementTimeout
 		}
 	case <-ctx.Done():
 		m.mu.Unlock()
@@ -289,6 +350,13 @@ func (m *Manager) sendReply(ctx context.Context, reqID string, body StreamReply)
 		m.mu.Unlock()
 		return ErrQueueFull
 	}
+}
+
+func (m *Manager) replyAcknowledgementTimeout() time.Duration {
+	if m.replyACKTimeout <= 0 {
+		return defaultReplyACKTimeout
+	}
+	return m.replyACKTimeout
 }
 
 func (m *Manager) writePump(ctx context.Context, conn Conn, queue <-chan outboundFrame, errs chan<- error) {
@@ -306,11 +374,21 @@ func (m *Manager) writePump(ctx context.Context, conn Conn, queue <-chan outboun
 				errs <- nil
 				return
 			}
+			if outbound.context != nil && outbound.context.Err() != nil {
+				if outbound.ack != nil {
+					outbound.ack <- ErrAcknowledgementTimeout
+				}
+				continue
+			}
 			if outbound.replyReqID != "" {
 				if !m.setPendingReply(outbound.replyReqID, outbound.ack, outbound.done) {
 					outbound.ack <- ErrClosed
 					continue
 				}
+			}
+			if outbound.context != nil && outbound.context.Err() != nil {
+				m.clearPendingReplyFor(outbound.replyReqID, ErrAcknowledgementTimeout)
+				continue
 			}
 			if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 				m.clearPendingReply(ErrClosed)
@@ -370,70 +448,118 @@ func (m *Manager) enqueueAuth(ctx context.Context, queue chan<- outboundFrame) e
 }
 
 func (m *Manager) readPump(ctx context.Context, conn Conn, queue chan<- outboundFrame) error {
-	_ = conn.SetReadDeadline(time.Now().Add(2 * m.heartbeat))
-	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(2 * m.heartbeat)) })
-	missedHeartbeats := 0
+	reads := make(chan inboundReadResult, 1)
+	go readInboundFrames(ctx, conn, reads)
+	heartbeats := time.NewTicker(m.heartbeat)
+	defer heartbeats.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		default:
-		}
-		_ = conn.SetReadDeadline(time.Now().Add(m.heartbeat))
-		_, data, err := conn.ReadMessage()
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				missedHeartbeats++
-				if missedHeartbeats >= 3 {
-					return ErrClosed
-				}
-				ping, pingErr := encodeFrame(Frame{Cmd: cmdPing, Headers: Headers{ReqID: cmdPing + "-" + uuid.NewString()}})
-				if pingErr == nil {
-					select {
-					case queue <- outboundFrame{data: ping}:
-					default:
-						return ErrQueueFull
-					}
-				}
+		case <-heartbeats.C:
+			if err := sendHeartbeat(queue); err != nil {
+				return err
+			}
+		case result := <-reads:
+			if result.err != nil {
+				return ErrClosed
+			}
+			frame, err := decodeFrame(result.data)
+			if err != nil {
 				continue
 			}
-			return ErrClosed
-		}
-		frame, err := decodeFrame(data)
-		if err != nil {
-			continue
-		}
-		missedHeartbeats = 0
-		if frame.Cmd == "" && m.isAuthResponse(frame.Headers.ReqID) {
-			if frame.ErrCode == nil || *frame.ErrCode != 0 {
-				return ErrAuthentication
-			}
-			m.mu.Lock()
-			m.ready = true
-			m.mu.Unlock()
-			continue
-		}
-		if frame.Cmd == cmdCallback {
-			if !m.Ready() || !m.beginDrain() {
-				continue
-			}
-			go func() {
-				defer m.drains.Done()
-				m.handleCallback(ctx, frame)
-			}()
-			continue
-		}
-		if frame.Cmd == cmdEventCallback {
-			continue
-		}
-		if frame.Cmd == "" {
-			if frame.ErrCode != nil && *frame.ErrCode != 0 {
-				m.completeReplyAck(frame.Headers.ReqID, ErrClosed)
-			} else {
-				m.completeReplyAck(frame.Headers.ReqID, nil)
+			if err := m.handleInboundFrame(ctx, frame); err != nil {
+				return err
 			}
 		}
 	}
+}
+
+type inboundReadResult struct {
+	data []byte
+	err  error
+}
+
+func readInboundFrames(ctx context.Context, conn Conn, reads chan<- inboundReadResult) {
+	for {
+		_, data, err := conn.ReadMessage()
+		select {
+		case reads <- inboundReadResult{data: data, err: err}:
+		case <-ctx.Done():
+			return
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func sendHeartbeat(queue chan<- outboundFrame) error {
+	ping, err := encodeFrame(Frame{Cmd: cmdPing, Headers: Headers{ReqID: cmdPing + "-" + uuid.NewString()}})
+	if err != nil {
+		return err
+	}
+	select {
+	case queue <- outboundFrame{data: ping}:
+		return nil
+	default:
+		return ErrQueueFull
+	}
+}
+
+func (m *Manager) handleInboundFrame(ctx context.Context, frame Frame) error {
+	if frame.Cmd == "" && m.isAuthResponse(frame.Headers.ReqID) {
+		return m.acceptAuthentication(frame)
+	}
+	switch frame.Cmd {
+	case cmdCallback:
+		m.dispatchCallback(ctx, frame)
+	case cmdEventCallback:
+		return m.handleEventCallback(frame)
+	case "":
+		m.acknowledgeReply(frame)
+	}
+	return nil
+}
+
+func (m *Manager) handleEventCallback(frame Frame) error {
+	var event Event
+	if unmarshalBody(frame.Body, &event) != nil || event.AIBotID != m.botID || event.Event.EventType != "disconnected_event" {
+		return nil
+	}
+	m.mu.Lock()
+	m.ready = false
+	m.mu.Unlock()
+	m.clearPendingReply(ErrClosed)
+	return errConnectionReplaced
+}
+
+func (m *Manager) acceptAuthentication(frame Frame) error {
+	if frame.ErrCode == nil || *frame.ErrCode != 0 {
+		return ErrAuthentication
+	}
+	m.mu.Lock()
+	m.ready = true
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *Manager) dispatchCallback(ctx context.Context, frame Frame) {
+	if !m.Ready() || !m.beginDrain() {
+		return
+	}
+	go func() {
+		defer m.drains.Done()
+		m.handleCallback(ctx, frame)
+	}()
+}
+
+func (m *Manager) acknowledgeReply(frame Frame) {
+	if frame.ErrCode != nil && *frame.ErrCode != 0 {
+		m.completeReplyAck(frame.Headers.ReqID, ErrClosed)
+		return
+	}
+	m.completeReplyAck(frame.Headers.ReqID, nil)
 }
 
 func (m *Manager) isAuthResponse(reqID string) bool {
@@ -520,6 +646,19 @@ func (m *Manager) clearPendingReply(err error) {
 	}
 }
 
+func (m *Manager) clearPendingReplyFor(reqID string, err error) {
+	m.mu.Lock()
+	pending := m.pending
+	if pending == nil || pending.reqID != reqID {
+		m.mu.Unlock()
+		return
+	}
+	m.pending = nil
+	m.mu.Unlock()
+	pending.ack <- err
+	close(pending.done)
+}
+
 func mustJSON(v any) []byte { data, _ := json.Marshal(v); return data }
 func unmarshalBody(data []byte, out any) error {
 	if len(data) == 0 {
@@ -532,6 +671,7 @@ func mustPrincipal(target channels.RoutingTarget) gateway.Principal {
 	return p
 }
 
+// BeginShutdown prevents new callbacks and interrupts the active connection.
 func (m *Manager) BeginShutdown() {
 	if m == nil {
 		return
@@ -549,6 +689,8 @@ func (m *Manager) BeginShutdown() {
 	}
 	m.clearPendingReply(ErrClosed)
 }
+
+// Close waits for the serving connection and dispatched callbacks to finish.
 func (m *Manager) Close() error {
 	if m == nil {
 		return nil

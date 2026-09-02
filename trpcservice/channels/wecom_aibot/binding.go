@@ -1,3 +1,4 @@
+// Package wecom_aibot implements the WebSocket channel for WeCom AI Bots.
 package wecom_aibot
 
 import (
