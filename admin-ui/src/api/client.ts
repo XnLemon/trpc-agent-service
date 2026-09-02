@@ -1,0 +1,236 @@
+import type {
+  App,
+  AppEvent,
+  BackendProfile,
+  BindingEvent,
+  ChannelBinding,
+  DraftConfiguration,
+  LifecycleStatus,
+  ModelProfile,
+  ProfileEvent,
+  PublishResult,
+  Revision,
+  Tenant,
+  TenantEvent,
+} from './types';
+
+export type ErrorCategory =
+  | 'invalid_request'
+  | 'unauthorized'
+  | 'forbidden'
+  | 'not_found'
+  | 'conflict'
+  | 'storage_unavailable'
+  | 'audit_unavailable'
+  | 'internal_error';
+
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly category: ErrorCategory | string,
+    public readonly requestId?: string,
+  ) {
+    super(category);
+    this.name = 'ApiError';
+  }
+}
+
+export interface Connection {
+  baseUrl: string;
+  token: string;
+}
+
+interface RequestResult<T> {
+  data: T;
+  requestId: string;
+}
+
+/**
+ * AdminClient talks to the control-plane API (/admin/v1/*). The bearer token
+ * is supplied by the operator at runtime and is only kept in memory.
+ */
+export class AdminClient {
+  constructor(
+    private readonly connection: Connection,
+    private readonly onUnauthorized?: () => void,
+  ) {}
+
+  private async request<T>(method: string, path: string, body?: unknown): Promise<RequestResult<T>> {
+    let response: Response;
+    try {
+      response = await fetch(`${this.connection.baseUrl}${path}`, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.connection.token}`,
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    } catch {
+      throw new ApiError(0, 'network_error');
+    }
+    let payload: { request_id?: string; data?: T; error?: string } | null = null;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+    if (!response.ok) {
+      const category = payload?.error ?? 'internal_error';
+      if (response.status === 401) {
+        this.onUnauthorized?.();
+      }
+      throw new ApiError(response.status, category, payload?.request_id);
+    }
+    return { data: payload?.data as T, requestId: payload?.request_id ?? '' };
+  }
+
+  private get<T>(path: string) {
+    return this.request<T>('GET', path);
+  }
+
+  private post<T>(path: string, body: unknown) {
+    return this.request<T>('POST', path, body);
+  }
+
+  private patch<T>(path: string, body: unknown) {
+    return this.request<T>('PATCH', path, body);
+  }
+
+  // --- Tenant -------------------------------------------------------------
+
+  createTenant(body: Record<string, unknown>) {
+    return this.post<Tenant>('/admin/v1/tenants', body);
+  }
+
+  getTenant(tenantId: string) {
+    return this.get<Tenant>(`/admin/v1/tenants/${encodeURIComponent(tenantId)}`);
+  }
+
+  updateTenant(tenantId: string, body: Record<string, unknown>) {
+    return this.patch<Tenant>(`/admin/v1/tenants/${encodeURIComponent(tenantId)}`, body);
+  }
+
+  transitionTenantStatus(tenantId: string, body: Record<string, unknown>) {
+    return this.post<TenantEvent>(`/admin/v1/tenants/${encodeURIComponent(tenantId)}/status`, body);
+  }
+
+  // --- App & Revision -----------------------------------------------------
+
+  private tenantPath(tenantId: string, suffix: string) {
+    return `/admin/v1/tenants/${encodeURIComponent(tenantId)}/${suffix}`;
+  }
+
+  createApp(tenantId: string, body: Record<string, unknown>) {
+    return this.post<App>(this.tenantPath(tenantId, 'apps'), body);
+  }
+
+  getApp(tenantId: string, appId: string) {
+    return this.get<App>(this.tenantPath(tenantId, `apps/${encodeURIComponent(appId)}`));
+  }
+
+  updateApp(tenantId: string, appId: string, body: Record<string, unknown>) {
+    return this.patch<App>(this.tenantPath(tenantId, `apps/${encodeURIComponent(appId)}`), body);
+  }
+
+  transitionAppStatus(tenantId: string, appId: string, body: Record<string, unknown>) {
+    return this.post<AppEvent>(this.tenantPath(tenantId, `apps/${encodeURIComponent(appId)}/status`), body);
+  }
+
+  createDraft(tenantId: string, appId: string, body: Record<string, unknown>) {
+    return this.post<Revision>(this.tenantPath(tenantId, `apps/${encodeURIComponent(appId)}/revisions`), body);
+  }
+
+  updateDraft(tenantId: string, appId: string, revision: number, body: Record<string, unknown>) {
+    return this.patch<Revision>(
+      this.tenantPath(tenantId, `apps/${encodeURIComponent(appId)}/revisions/${revision}`),
+      body,
+    );
+  }
+
+  publishDraft(tenantId: string, appId: string, revision: number, body: Record<string, unknown>) {
+    return this.post<PublishResult>(
+      this.tenantPath(tenantId, `apps/${encodeURIComponent(appId)}/revisions/${revision}/publish`),
+      body,
+    );
+  }
+
+  rollbackApp(tenantId: string, appId: string, body: Record<string, unknown>) {
+    return this.post<AppEvent>(this.tenantPath(tenantId, `apps/${encodeURIComponent(appId)}/rollback`), body);
+  }
+
+  setCanary(tenantId: string, appId: string, body: Record<string, unknown>) {
+    return this.post<AppEvent>(this.tenantPath(tenantId, `apps/${encodeURIComponent(appId)}/canary`), body);
+  }
+
+  // --- Model Profile ------------------------------------------------------
+
+  createModel(tenantId: string, body: Record<string, unknown>) {
+    return this.post<ProfileEvent<ModelProfile>>(this.tenantPath(tenantId, 'models'), body);
+  }
+
+  getModel(tenantId: string, profileId: string) {
+    return this.get<ModelProfile>(this.tenantPath(tenantId, `models/${encodeURIComponent(profileId)}`));
+  }
+
+  updateModel(tenantId: string, profileId: string, body: Record<string, unknown>) {
+    return this.patch<ProfileEvent<ModelProfile>>(
+      this.tenantPath(tenantId, `models/${encodeURIComponent(profileId)}`),
+      body,
+    );
+  }
+
+  transitionModelStatus(tenantId: string, profileId: string, body: Record<string, unknown>) {
+    return this.post<ProfileEvent<ModelProfile>>(
+      this.tenantPath(tenantId, `models/${encodeURIComponent(profileId)}/status`),
+      body,
+    );
+  }
+
+  // --- Backend Profile ----------------------------------------------------
+
+  createBackend(tenantId: string, body: Record<string, unknown>) {
+    return this.post<ProfileEvent<BackendProfile>>(this.tenantPath(tenantId, 'backends'), body);
+  }
+
+  getBackend(tenantId: string, profileId: string) {
+    return this.get<BackendProfile>(this.tenantPath(tenantId, `backends/${encodeURIComponent(profileId)}`));
+  }
+
+  updateBackend(tenantId: string, profileId: string, body: Record<string, unknown>) {
+    return this.patch<ProfileEvent<BackendProfile>>(
+      this.tenantPath(tenantId, `backends/${encodeURIComponent(profileId)}`),
+      body,
+    );
+  }
+
+  transitionBackendStatus(tenantId: string, profileId: string, body: Record<string, unknown>) {
+    return this.post<ProfileEvent<BackendProfile>>(
+      this.tenantPath(tenantId, `backends/${encodeURIComponent(profileId)}/status`),
+      body,
+    );
+  }
+
+  // --- Channel Binding ----------------------------------------------------
+
+  createBinding(tenantId: string, body: Record<string, unknown>) {
+    return this.post<BindingEvent>(this.tenantPath(tenantId, 'bindings'), body);
+  }
+
+  getBinding(tenantId: string, bindingId: string) {
+    return this.get<ChannelBinding>(this.tenantPath(tenantId, `bindings/${encodeURIComponent(bindingId)}`));
+  }
+
+  updateBinding(tenantId: string, bindingId: string, body: Record<string, unknown>) {
+    return this.patch<BindingEvent>(this.tenantPath(tenantId, `bindings/${encodeURIComponent(bindingId)}`), body);
+  }
+
+  transitionBindingStatus(tenantId: string, bindingId: string, body: Record<string, unknown>) {
+    return this.post<BindingEvent>(
+      this.tenantPath(tenantId, `bindings/${encodeURIComponent(bindingId)}/status`),
+      body,
+    );
+  }
+}
+
+export type { DraftConfiguration, LifecycleStatus };
