@@ -13,8 +13,18 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
-// List returns a stable page of tenant roots visible to the caller.
-func (r *TenantRepository) List(ctx context.Context, query, status, cursor string, limit int) ([]*tenant.Tenant, string, error) {
+// List returns a stable page of only the requested tenant scopes. Scope
+// filtering is part of the database query and therefore precedes pagination.
+func (r *TenantRepository) List(ctx context.Context, scopes []string, query, status, cursor string, limit int) ([]*tenant.Tenant, string, error) {
+	visible := make(map[string]struct{}, len(scopes))
+	for _, scope := range scopes {
+		if scope != "" {
+			visible[scope] = struct{}{}
+		}
+	}
+	if len(visible) == 0 {
+		return []*tenant.Tenant{}, "", nil
+	}
 	if r == nil || r.db == nil {
 		return nil, "", ErrStorage
 	}
@@ -30,7 +40,18 @@ func (r *TenantRepository) List(ctx context.Context, query, status, cursor strin
 			return nil, "", fmt.Errorf("invalid cursor")
 		}
 	}
-	rows, err := r.db.QueryContext(ctx, tenantSelect+` ORDER BY tenant_id`)
+	scopeIDs := make([]string, 0, len(visible))
+	for scope := range visible {
+		scopeIDs = append(scopeIDs, scope)
+	}
+	sort.Strings(scopeIDs)
+	placeholders := make([]string, len(scopeIDs))
+	arguments := make([]any, len(scopeIDs))
+	for index, scope := range scopeIDs {
+		placeholders[index] = fmt.Sprintf("$%d", index+1)
+		arguments[index] = scope
+	}
+	rows, err := r.db.QueryContext(ctx, tenantSelect+` WHERE tenant_id IN (`+strings.Join(placeholders, ", ")+`) ORDER BY tenant_id`, arguments...)
 	if err != nil {
 		return nil, "", mapDBError(ctx, err, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid)
 	}

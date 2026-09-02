@@ -202,6 +202,10 @@ func TestAdminMeAndCollectionListsUseScopedStablePagination(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := secondValue.TenantID
+	hiddenValue, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "hidden", DisplayName: "hidden"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	auth, err := NewStaticAuthenticator("admin-token", []string{first, second})
 	if err != nil {
 		t.Fatal(err)
@@ -226,6 +230,31 @@ func TestAdminMeAndCollectionListsUseScopedStablePagination(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), first) && !strings.Contains(rec.Body.String(), second) {
 		t.Fatalf("tenant list missing scoped item: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), hiddenValue.TenantID) {
+		t.Fatalf("tenant list exposed out-of-scope tenant: %s", rec.Body.String())
+	}
+	// Filtering must happen before query matching and pagination. Otherwise a
+	// scoped administrator could discover an unauthorized tenant by searching
+	// for its known display name or key.
+	req = httptest.NewRequest(http.MethodGet, "/admin/v1/tenants?q=hidden&limit=1", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scoped tenant search = %d %s", rec.Code, rec.Body.String())
+	}
+	var searchEnvelope struct {
+		Data struct {
+			Items      []struct{ TenantID string }
+			NextCursor string
+		}
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &searchEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if len(searchEnvelope.Data.Items) != 0 || searchEnvelope.Data.NextCursor != "" {
+		t.Fatalf("scoped tenant search returned unauthorized result: %s", rec.Body.String())
 	}
 }
 

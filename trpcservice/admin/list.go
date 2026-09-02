@@ -26,9 +26,12 @@ type ListOptions struct {
 	Limit  int
 }
 
-// TenantLister lists tenant roots for the Admin collection endpoint.
+// TenantLister lists tenant roots that are visible through the Admin
+// collection endpoint. Implementations must apply tenant scopes before
+// pagination so an out-of-scope tenant can neither be returned nor inferred
+// from a page boundary.
 type TenantLister interface {
-	List(context.Context, string, string, string, int) ([]*tenant.Tenant, string, error)
+	List(context.Context, []string, string, string, string, int) ([]*tenant.Tenant, string, error)
 }
 
 // AppLister lists tenant-scoped Agent Apps.

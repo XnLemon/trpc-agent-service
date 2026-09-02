@@ -11,10 +11,20 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
-// List returns a stable, tenant-scoped page ordered by tenant ID.
-func (r *InMemoryRepository) List(ctx context.Context, query, status, cursor string, limit int) ([]*tenant.Tenant, string, error) {
+// List returns a stable page of only the requested tenant scopes, ordered by
+// tenant ID. Scope filtering happens before pagination.
+func (r *InMemoryRepository) List(ctx context.Context, scopes []string, query, status, cursor string, limit int) ([]*tenant.Tenant, string, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, "", err
+	}
+	visible := make(map[string]struct{}, len(scopes))
+	for _, scope := range scopes {
+		if scope != "" {
+			visible[scope] = struct{}{}
+		}
+	}
+	if len(visible) == 0 {
+		return []*tenant.Tenant{}, "", nil
 	}
 	if limit <= 0 {
 		limit = 50
@@ -34,6 +44,9 @@ func (r *InMemoryRepository) List(ctx context.Context, query, status, cursor str
 	query = strings.ToLower(strings.TrimSpace(query))
 	status = strings.TrimSpace(status)
 	for _, value := range r.byID {
+		if _, ok := visible[value.TenantID]; !ok {
+			continue
+		}
 		if status != "" && string(value.Status) != status {
 			continue
 		}

@@ -335,7 +335,7 @@ func (h *Handler) tenants(ctx context.Context, r *http.Request, p Principal) (in
 			return 0, nil, errListUnsupported
 		}
 		o := listOptions(r)
-		items, next, err := lister.List(ctx, o.Query, o.Status, o.Cursor, o.Limit)
+		items, next, err := lister.List(ctx, p.ScopeIDs(), o.Query, o.Status, o.Cursor, o.Limit)
 		return http.StatusOK, listEnvelope{Items: items, NextCursor: next}, err
 	}
 	if r.Method != http.MethodPost || !p.Allows("", true) {

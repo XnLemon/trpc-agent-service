@@ -89,6 +89,38 @@ func TestTenantRepositoryWritesCompleteReadback(t *testing.T) {
 	})
 }
 
+func TestTenantRepositoryListsOnlyRequestedTenantScopes(t *testing.T) {
+	visible, err := tenant.NewTenant(tenant.CreateInput{
+		TenantKey: "visible-list", DisplayName: "Visible List", Status: tenant.StatusActive,
+		AuditRetentionDays: 90, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`tenant_id IN \(\$1\)`).WithArgs(visible.TenantID).WillReturnRows(testTenantRows(visible))
+
+	items, next, err := NewRepository(db).List(context.Background(), []string{visible.TenantID}, "", "", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].TenantID != visible.TenantID || next != "" {
+		t.Fatalf("scoped tenant list = items=%+v next=%q", items, next)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	empty, next, err := NewRepository(nil).List(context.Background(), nil, "", "", "", 50)
+	if err != nil || len(empty) != 0 || next != "" {
+		t.Fatalf("empty scope list = items=%+v next=%q err=%v", empty, next, err)
+	}
+}
+
 func TestTenantRepositoryCreatesAndGetsTenant(t *testing.T) {
 	input := tenant.CreateInput{
 		TenantKey: "create-and-get", DisplayName: "Create and Get", Status: tenant.StatusActive,
