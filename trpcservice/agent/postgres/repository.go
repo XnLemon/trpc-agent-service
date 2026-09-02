@@ -12,6 +12,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 )
 
+// List returns a stable page of Apps belonging to one tenant.
 func (r *AgentRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*agent.App, string, error) {
 	if r == nil || r.db == nil {
 		return nil, "", ErrStorage
@@ -73,6 +74,7 @@ func (r *AgentRepository) List(ctx context.Context, tenantID, query, status, cur
 	return items[offset:end], next, nil
 }
 
+// ListRevisions returns a stable page of revisions belonging to one App.
 func (r *AgentRepository) ListRevisions(ctx context.Context, tenantID, appID, query, status, cursor string, limit int) ([]*agent.Revision, string, error) {
 	if r == nil || r.db == nil {
 		return nil, "", ErrStorage

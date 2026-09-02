@@ -26,21 +26,32 @@ type ListOptions struct {
 	Limit  int
 }
 
+// TenantLister lists tenant roots for the Admin collection endpoint.
 type TenantLister interface {
 	List(context.Context, string, string, string, int) ([]*tenant.Tenant, string, error)
 }
+
+// AppLister lists tenant-scoped Agent Apps.
 type AppLister interface {
 	List(context.Context, string, string, string, string, int) ([]*agent.App, string, error)
 }
+
+// RevisionLister lists revisions belonging to an Agent App.
 type RevisionLister interface {
 	ListRevisions(context.Context, string, string, string, string, string, int) ([]*agent.Revision, string, error)
 }
+
+// ModelLister lists tenant-scoped Model Profiles.
 type ModelLister interface {
 	List(context.Context, string, string, string, string, int) ([]*modelprofile.Profile, string, error)
 }
+
+// BackendLister lists tenant-scoped Backend Profiles.
 type BackendLister interface {
 	List(context.Context, string, string, string, string, int) ([]*backend.Profile, string, error)
 }
+
+// BindingLister lists tenant-scoped Channel Bindings.
 type BindingLister interface {
 	List(context.Context, string, string, string, string, int) ([]*channels.Binding, string, error)
 }

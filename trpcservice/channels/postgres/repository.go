@@ -15,6 +15,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 )
 
+// List returns a stable page of Channel Bindings belonging to one tenant.
 func (r *ChannelRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*channels.Binding, string, error) {
 	if r == nil || r.db == nil {
 		return nil, "", ErrStorage

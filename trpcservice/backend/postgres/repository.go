@@ -11,6 +11,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 )
 
+// List returns a stable page of Backend Profiles belonging to one tenant.
 func (r *BackendRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*backend.Profile, string, error) {
 	if r == nil || r.db == nil {
 		return nil, "", ErrStorage
