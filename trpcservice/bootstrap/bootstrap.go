@@ -362,44 +362,10 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 		_ = registry.Close()
 		return nil, ErrInvalidConfig
 	}
-	if config.WeComHandler != nil && config.WeComHandlerFactory != nil {
+	aiBots, err := configureRuntimeChannels(&config, dispatcher)
+	if err != nil {
 		_ = registry.Close()
 		return nil, ErrInvalidConfig
-	}
-	if config.WeComHandlerFactory != nil {
-		config.WeComHandler, err = config.WeComHandlerFactory(dispatcher)
-		if err != nil || config.WeComHandler == nil {
-			_ = registry.Close()
-			return nil, ErrInvalidConfig
-		}
-	}
-	aiBots := make([]channels.PollingAdapter, 0, len(config.WeComAIBotFactories))
-	for _, factory := range config.WeComAIBotFactories {
-		if factory == nil {
-			_ = registry.Close()
-			return nil, ErrInvalidConfig
-		}
-		aiBot, factoryErr := factory(dispatcher)
-		if factoryErr != nil || aiBot == nil || aiBot.Channel() != channels.ChannelWeComAIBot {
-			_ = registry.Close()
-			return nil, ErrInvalidConfig
-		}
-		if _, ok := aiBot.(pollingHealth); !ok {
-			_ = registry.Close()
-			return nil, ErrInvalidConfig
-		}
-		aiBots = append(aiBots, aiBot)
-	}
-	if config.OutboxWorker != nil && config.OutboxWorkerFactory != nil {
-		_ = registry.Close()
-		return nil, ErrInvalidConfig
-	}
-	if config.OutboxWorkerFactory != nil {
-		config.OutboxWorker, err = config.OutboxWorkerFactory(aiBots)
-		if err != nil || config.OutboxWorker == nil {
-			_ = registry.Close()
-			return nil, ErrInvalidConfig
-		}
 	}
 	readyGate := config.ReadyGate
 	if readyGate == nil {
@@ -422,6 +388,53 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 		runtimeGraph.wecomLifecycle = lifecycle
 	}
 	return runtimeGraph, nil
+}
+
+func configureRuntimeChannels(config *Config, dispatcher gateway.DispatchService) ([]channels.PollingAdapter, error) {
+	if config.WeComHandler != nil && config.WeComHandlerFactory != nil {
+		return nil, ErrInvalidConfig
+	}
+	if config.WeComHandlerFactory != nil {
+		handler, err := config.WeComHandlerFactory(dispatcher)
+		if err != nil || handler == nil {
+			return nil, ErrInvalidConfig
+		}
+		config.WeComHandler = handler
+	}
+	aiBots, err := newWeComAIBots(config.WeComAIBotFactories, dispatcher)
+	if err != nil {
+		return nil, err
+	}
+	if config.OutboxWorker != nil && config.OutboxWorkerFactory != nil {
+		return nil, ErrInvalidConfig
+	}
+	if config.OutboxWorkerFactory == nil {
+		return aiBots, nil
+	}
+	worker, err := config.OutboxWorkerFactory(aiBots)
+	if err != nil || worker == nil {
+		return nil, ErrInvalidConfig
+	}
+	config.OutboxWorker = worker
+	return aiBots, nil
+}
+
+func newWeComAIBots(factories []func(gateway.DispatchService) (channels.PollingAdapter, error), dispatcher gateway.DispatchService) ([]channels.PollingAdapter, error) {
+	aiBots := make([]channels.PollingAdapter, 0, len(factories))
+	for _, factory := range factories {
+		if factory == nil {
+			return nil, ErrInvalidConfig
+		}
+		aiBot, err := factory(dispatcher)
+		if err != nil || aiBot == nil || aiBot.Channel() != channels.ChannelWeComAIBot {
+			return nil, ErrInvalidConfig
+		}
+		if _, ok := aiBot.(pollingHealth); !ok {
+			return nil, ErrInvalidConfig
+		}
+		aiBots = append(aiBots, aiBot)
+	}
+	return aiBots, nil
 }
 
 func startAIBots(runtimeGraph *Runtime) error {

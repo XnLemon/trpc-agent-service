@@ -328,7 +328,21 @@ func openEnvironmentDatabaseForConfig(ctx context.Context, config environmentCon
 			}
 			return nil, nil, nil, fmt.Errorf("%w: %s control plane is unavailable", ErrInvalidConfig, config.driver)
 		}
-		return db, applyEnvironmentMigrations, verifyEnvironmentMigrations, nil
+		if err := applyEnvironmentMigrations(ctx, db); err != nil {
+			_ = db.Close()
+			if ctx.Err() != nil {
+				return nil, nil, nil, ctx.Err()
+			}
+			return nil, nil, nil, fmt.Errorf("%w: PostgreSQL migrations are not ready", ErrInvalidConfig)
+		}
+		if err := verifyEnvironmentMigrations(ctx, db); err != nil {
+			_ = db.Close()
+			if ctx.Err() != nil {
+				return nil, nil, nil, ctx.Err()
+			}
+			return nil, nil, nil, fmt.Errorf("%w: PostgreSQL migrations are not ready", ErrInvalidConfig)
+		}
+		return db, nil, nil, nil
 	}
 	migrationDB, migrationErr := openMySQLEnvironmentDatabase(ctx, config.migrationDSN, mysql.Options{MaxOpenConns: 4, MaxIdleConns: 4})
 	var migrationUser, migrationDatabase string

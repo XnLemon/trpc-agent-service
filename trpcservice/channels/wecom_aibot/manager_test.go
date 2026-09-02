@@ -300,7 +300,7 @@ func TestConfigurationAndProtocolHelpers(t *testing.T) {
 
 func TestHeartbeatAndInboundReadHelpers(t *testing.T) {
 	queue := make(chan outboundFrame, 1)
-	if err := sendHeartbeat(queue); err != nil {
+	if err := sendHeartbeat(queue, "heartbeat"); err != nil {
 		t.Fatal(err)
 	}
 	outbound := <-queue
@@ -312,7 +312,7 @@ func TestHeartbeatAndInboundReadHelpers(t *testing.T) {
 		t.Fatalf("heartbeat frame = %+v", frame)
 	}
 	queue <- outboundFrame{data: []byte("occupied")}
-	if err := sendHeartbeat(queue); !errors.Is(err, ErrQueueFull) {
+	if err := sendHeartbeat(queue, "heartbeat"); !errors.Is(err, ErrQueueFull) {
 		t.Fatalf("full queue error = %v", err)
 	}
 
@@ -330,6 +330,111 @@ func TestHeartbeatAndInboundReadHelpers(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("inbound read did not arrive")
 	}
+}
+
+func TestHeartbeatStateBoundaries(t *testing.T) {
+	connection := newTestConn()
+	manager := &Manager{conn: connection, ready: true}
+	queue := make(chan outboundFrame, 1)
+	if err := manager.scheduleHeartbeat(connection, queue); err != nil {
+		t.Fatal(err)
+	}
+	data := <-queue
+	ping, err := decodeFrame(data.data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := 0
+	if !manager.acknowledgeHeartbeat(Frame{Headers: Headers{ReqID: ping.Headers.ReqID}, ErrCode: &code}) {
+		t.Fatal("heartbeat acknowledgement was not consumed")
+	}
+	manager.mu.Lock()
+	if manager.heartbeatReqID != "" || manager.missedHeartbeats != 0 {
+		t.Fatalf("heartbeat state after acknowledgement = id:%q missed:%d", manager.heartbeatReqID, manager.missedHeartbeats)
+	}
+	manager.mu.Unlock()
+	if manager.acknowledgeHeartbeat(Frame{Headers: Headers{ReqID: "other"}}) {
+		t.Fatal("unrelated acknowledgement was consumed as a heartbeat")
+	}
+
+	if err := manager.scheduleHeartbeat(connection, queue); err != nil {
+		t.Fatal(err)
+	}
+	data = <-queue
+	failedPing, err := decodeFrame(data.data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code = 1
+	if !manager.acknowledgeHeartbeat(Frame{Headers: Headers{ReqID: failedPing.Headers.ReqID}, ErrCode: &code}) {
+		t.Fatal("failed heartbeat acknowledgement was not consumed")
+	}
+	if manager.Ready() {
+		t.Fatal("failed heartbeat acknowledgement left the manager ready")
+	}
+	select {
+	case <-connection.closed:
+	case <-time.After(time.Second):
+		t.Fatal("failed heartbeat acknowledgement did not close the connection")
+	}
+
+	fullConnection := newTestConn()
+	fullManager := &Manager{conn: fullConnection, ready: true}
+	fullQueue := make(chan outboundFrame, 1)
+	fullQueue <- outboundFrame{data: []byte("occupied")}
+	if err := fullManager.scheduleHeartbeat(fullConnection, fullQueue); !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("full heartbeat queue error = %v", err)
+	}
+	fullManager.mu.Lock()
+	if fullManager.heartbeatReqID != "" {
+		t.Fatalf("queue rejection left pending heartbeat %q", fullManager.heartbeatReqID)
+	}
+	fullManager.mu.Unlock()
+
+	if err := (&Manager{}).scheduleHeartbeat(newTestConn(), make(chan outboundFrame, 1)); err != nil {
+		t.Fatalf("unready heartbeat error = %v", err)
+	}
+}
+
+func TestHeartbeatMissesReconnectAndMarksManagerUnavailable(t *testing.T) {
+	first, second := newTestConn(), newTestConn()
+	dialer := &testDialer{connections: make(chan Conn, 2)}
+	dialer.connections <- first
+	dialer.connections <- second
+	manager := &Manager{botID: "bot-1", secret: "secret-1", wsURL: defaultWSURL, dialer: dialer, queueSize: 2, heartbeat: 5 * time.Millisecond, reconnectBase: time.Millisecond, reconnectMax: time.Millisecond, executionTimeout: time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	defer func() {
+		manager.BeginShutdown()
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("manager did not stop")
+		}
+	}()
+
+	auth := readFrame(t, first.writes)
+	first.reads <- ackFrame(t, auth.Headers.ReqID, 0)
+	waitReady(t, manager)
+	for attempt := 0; attempt < maxMissedHeartbeats; attempt++ {
+		if ping := readFrame(t, first.writes); ping.Cmd != cmdPing {
+			t.Fatalf("heartbeat command = %q", ping.Cmd)
+		}
+	}
+	select {
+	case <-first.closed:
+	case <-time.After(time.Second):
+		t.Fatal("unacknowledged heartbeats did not close the connection")
+	}
+
+	secondAuth := readFrame(t, second.writes)
+	if manager.Ready() {
+		t.Fatal("manager remained ready while the replacement connection was unauthenticated")
+	}
+	second.reads <- ackFrame(t, secondAuth.Headers.ReqID, 0)
+	waitReady(t, manager)
 }
 
 func TestManagerAuthenticationAndReplyStateBoundaries(t *testing.T) {

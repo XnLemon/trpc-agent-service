@@ -549,6 +549,69 @@ func TestEnvironmentWeComAIBotConnectionsAreScopedAndValidated(t *testing.T) {
 	}
 }
 
+func TestEnvironmentWeComAIBotComponentsUseTrustedBindings(t *testing.T) {
+	modelCatalog, err := modelprofile.NewProviderCatalog(modelprofile.ProviderSpec{
+		Provider: "fake", Models: []string{"test-model"}, EndpointPolicy: modelprofile.FieldForbidden, SecretRefPolicy: modelprofile.FieldOptional,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backendCatalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
+		Provider: "memory", Capabilities: []backend.Capability{backend.CapabilitySession}, EndpointPolicy: backend.FieldForbidden, SecretRefPolicy: backend.FieldForbidden, Options: map[string]backend.OptionSpec{"namespace": {Kind: backend.OptionString}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenants := tenantmemory.NewRepository()
+	apps := agentmemory.NewRepository()
+	models := modelmemory.NewRepository(modelCatalog)
+	backends := backendmemory.NewRepository(backendCatalog)
+	channelsRepo := channelmemory.NewRepository()
+	root, app := createBootstrapTenantExecutionState(t, tenants, apps, models, backends, "aibot-components", "aibot-components", "test-model", "secret/model")
+	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeComAIBot, "aibot-components")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, _, err := channelsRepo.Create(context.Background(), channels.CreateInput{
+		TenantID: root.TenantID, BindingKey: "aibot-components", Channel: channels.ChannelWeComAIBot,
+		ProviderAccountID: "aibot-components", PublicRouteKeyDigest: routeDigest, AppID: app.AppID,
+		SecretRef: "env/aibot-components", Status: channels.StatusActive,
+		Protocol: channels.ProtocolConfiguration{WeComAIBot: &channels.WeComAIBotProtocolConfiguration{BotID: "bot-components"}},
+		Metadata: channels.ChangeMetadata{ActorType: "test", ActorID: "bootstrap", Reason: "fixture", CorrelationID: "aibot-components"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := environmentConfig{
+		tenantID:    root.TenantID,
+		wecomAIBots: []environmentWeComAIBotConfig{{BindingID: binding.BindingID, SecretRef: binding.SecretRef, BotSecret: "bot-secret"}},
+	}
+	factories, bindingIDs, err := environmentWeComAIBotComponents(context.Background(), environment, channelsRepo, tenants, apps)
+	if err != nil || len(factories) != 1 || len(bindingIDs) != 1 {
+		t.Fatalf("AI Bot components = factories:%d bindings:%d err:%v", len(factories), len(bindingIDs), err)
+	}
+	manager, err := factories[0](bootstrapNoopDispatcher{})
+	if err != nil || manager.Channel() != channels.ChannelWeComAIBot {
+		t.Fatalf("AI Bot manager = %v, %v", manager, err)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if factories, bindingIDs, err := environmentWeComAIBotComponents(context.Background(), environmentConfig{tenantID: root.TenantID}, channelsRepo, tenants, apps); err != nil || factories != nil || bindingIDs != nil {
+		t.Fatalf("empty AI Bot components = %v %v %v", factories, bindingIDs, err)
+	}
+	duplicate := environment
+	duplicate.wecomAIBots = append(duplicate.wecomAIBots, environmentWeComAIBotConfig{BindingID: "other", SecretRef: binding.SecretRef, BotSecret: "other-secret"})
+	if _, _, err := environmentWeComAIBotComponents(context.Background(), duplicate, channelsRepo, tenants, apps); err == nil {
+		t.Fatal("duplicate AI Bot secret reference was accepted")
+	}
+	unavailable := environment
+	unavailable.wecomAIBots[0].BindingID = "missing-binding"
+	if _, _, err := environmentWeComAIBotComponents(context.Background(), unavailable, channelsRepo, tenants, apps); err == nil {
+		t.Fatal("unavailable AI Bot binding was accepted")
+	}
+}
+
 func TestEnvironmentOutboxWorkerFactoryRoutesAIBotBindings(t *testing.T) {
 	store := runtimestorageinmemory.New()
 	defer func() { _ = store.Close() }()
@@ -1220,7 +1283,7 @@ func TestNewFromEnvironmentBuildsRealGraphWhenDatabaseOpens(t *testing.T) {
 	}
 }
 
-func TestNewFromEnvironmentClosesDatabaseWhenGraphConstructionFails(t *testing.T) {
+func TestNewFromEnvironmentClosesDatabaseWhenMigrationFails(t *testing.T) {
 	setRequiredEnvironment(t)
 	registerBootstrapPingDriver.Do(func() {
 		sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{})
@@ -1231,26 +1294,18 @@ func TestNewFromEnvironmentClosesDatabaseWhenGraphConstructionFails(t *testing.T
 	}
 	previousOpen := openEnvironmentDatabase
 	previousApply := applyEnvironmentMigrations
-	previousStore := newEnvironmentRuntimeStore
-	tracker := &trackingRuntimeStore{RuntimeStore: runtimestorageinmemory.New()}
 	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
 	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return errors.New("migration failed") }
-	newEnvironmentRuntimeStore = func(string, *sql.DB) (runtimestorage.RuntimeStore, error) { return tracker, nil }
 	defer func() {
 		openEnvironmentDatabase = previousOpen
 		applyEnvironmentMigrations = previousApply
-		newEnvironmentRuntimeStore = previousStore
-		_ = tracker.RuntimeStore.Close()
 	}()
 
 	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
-		t.Fatalf("graph construction error = %v", err)
-	}
-	if !tracker.closed.Load() {
-		t.Fatal("runtime store remained open after graph construction failure")
+		t.Fatalf("migration error = %v", err)
 	}
 	if err := db.Ping(); err == nil {
-		t.Fatal("database remained open after graph construction failure")
+		t.Fatal("database remained open after migration failure")
 	}
 }
 
@@ -1468,6 +1523,14 @@ type testModelFactory struct{}
 
 func (testModelFactory) New(context.Context, modelprofile.ModelFactoryInput, modelprofile.SecretValue) (trpcmodel.Model, error) {
 	return nil, errors.New("test factory failure")
+}
+
+type bootstrapNoopDispatcher struct{}
+
+func (bootstrapNoopDispatcher) Dispatch(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+	events := make(chan gateway.DispatchEvent)
+	close(events)
+	return events, nil
 }
 
 type bootstrapBlockingProvider struct {

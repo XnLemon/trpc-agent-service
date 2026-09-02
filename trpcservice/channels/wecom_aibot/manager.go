@@ -21,6 +21,7 @@ import (
 const (
 	defaultWSURL           = "wss://openws.work.weixin.qq.com"
 	defaultReplyACKTimeout = 30 * time.Second
+	maxMissedHeartbeats    = 2
 )
 
 var errConnectionReplaced = errors.New("wecom ai bot connection replaced")
@@ -74,16 +75,18 @@ type Manager struct {
 	heartbeat, reconnectBase, reconnectMax, executionTimeout time.Duration
 	replyACKTimeout                                          time.Duration
 
-	mu        sync.Mutex
-	conn      Conn
-	queue     chan outboundFrame
-	pending   *pendingReply
-	authReqID string
-	closing   bool
-	runCancel context.CancelFunc
-	runDone   chan struct{}
-	ready     bool
-	drains    sync.WaitGroup
+	mu               sync.Mutex
+	conn             Conn
+	queue            chan outboundFrame
+	pending          *pendingReply
+	authReqID        string
+	heartbeatReqID   string
+	missedHeartbeats int
+	closing          bool
+	runCancel        context.CancelFunc
+	runDone          chan struct{}
+	ready            bool
+	drains           sync.WaitGroup
 }
 
 type outboundFrame struct {
@@ -100,6 +103,7 @@ type pendingReply struct {
 	done  chan struct{}
 }
 
+// New creates a connection manager from an already trusted routing target.
 func New(config Config) (*Manager, error) {
 	config, err := normalizeConfig(config)
 	if err != nil {
@@ -273,12 +277,16 @@ func (m *Manager) serveConnection(ctx context.Context, conn Conn) error {
 	m.mu.Lock()
 	m.conn = conn
 	m.ready = false
+	m.heartbeatReqID = ""
+	m.missedHeartbeats = 0
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
 		if m.conn == conn {
 			m.conn = nil
 			m.ready = false
+			m.heartbeatReqID = ""
+			m.missedHeartbeats = 0
 		}
 		m.mu.Unlock()
 	}()
@@ -457,7 +465,7 @@ func (m *Manager) readPump(ctx context.Context, conn Conn, queue chan<- outbound
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-heartbeats.C:
-			if err := sendHeartbeat(queue); err != nil {
+			if err := m.scheduleHeartbeat(conn, queue); err != nil {
 				return err
 			}
 		case result := <-reads:
@@ -494,8 +502,35 @@ func readInboundFrames(ctx context.Context, conn Conn, reads chan<- inboundReadR
 	}
 }
 
-func sendHeartbeat(queue chan<- outboundFrame) error {
-	ping, err := encodeFrame(Frame{Cmd: cmdPing, Headers: Headers{ReqID: cmdPing + "-" + uuid.NewString()}})
+func (m *Manager) scheduleHeartbeat(conn Conn, queue chan<- outboundFrame) error {
+	reqID := cmdPing + "-" + uuid.NewString()
+	m.mu.Lock()
+	if m.conn != conn || !m.ready {
+		m.mu.Unlock()
+		return nil
+	}
+	if m.heartbeatReqID != "" {
+		m.missedHeartbeats++
+		if m.missedHeartbeats >= maxMissedHeartbeats {
+			m.ready = false
+			m.heartbeatReqID = ""
+			m.missedHeartbeats = 0
+			m.mu.Unlock()
+			_ = conn.Close()
+			return ErrClosed
+		}
+	}
+	m.heartbeatReqID = reqID
+	m.mu.Unlock()
+	if err := sendHeartbeat(queue, reqID); err != nil {
+		m.clearHeartbeat(reqID)
+		return err
+	}
+	return nil
+}
+
+func sendHeartbeat(queue chan<- outboundFrame, reqID string) error {
+	ping, err := encodeFrame(Frame{Cmd: cmdPing, Headers: Headers{ReqID: reqID}})
 	if err != nil {
 		return err
 	}
@@ -510,6 +545,9 @@ func sendHeartbeat(queue chan<- outboundFrame) error {
 func (m *Manager) handleInboundFrame(ctx context.Context, frame Frame) error {
 	if frame.Cmd == "" && m.isAuthResponse(frame.Headers.ReqID) {
 		return m.acceptAuthentication(frame)
+	}
+	if frame.Cmd == "" && m.acknowledgeHeartbeat(frame) {
+		return nil
 	}
 	switch frame.Cmd {
 	case cmdCallback:
@@ -540,6 +578,8 @@ func (m *Manager) acceptAuthentication(frame Frame) error {
 	}
 	m.mu.Lock()
 	m.ready = true
+	m.heartbeatReqID = ""
+	m.missedHeartbeats = 0
 	m.mu.Unlock()
 	return nil
 }
@@ -560,6 +600,36 @@ func (m *Manager) acknowledgeReply(frame Frame) {
 		return
 	}
 	m.completeReplyAck(frame.Headers.ReqID, nil)
+}
+
+func (m *Manager) acknowledgeHeartbeat(frame Frame) bool {
+	m.mu.Lock()
+	if frame.Headers.ReqID == "" || frame.Headers.ReqID != m.heartbeatReqID {
+		m.mu.Unlock()
+		return false
+	}
+	m.heartbeatReqID = ""
+	if frame.ErrCode == nil || *frame.ErrCode == 0 {
+		m.missedHeartbeats = 0
+		m.mu.Unlock()
+		return true
+	}
+	m.ready = false
+	m.missedHeartbeats = 0
+	conn := m.conn
+	m.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+	return true
+}
+
+func (m *Manager) clearHeartbeat(reqID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.heartbeatReqID == reqID {
+		m.heartbeatReqID = ""
+	}
 }
 
 func (m *Manager) isAuthResponse(reqID string) bool {
