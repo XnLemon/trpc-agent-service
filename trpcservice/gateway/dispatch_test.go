@@ -1149,10 +1149,8 @@ func TestDispatcherCancellationDrainsRunnerEventsAndReleasesLease(t *testing.T) 
 		events := make(chan *trpcevent.Event)
 		go func() {
 			defer close(senderFinished)
-			select {
-			case events <- &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "late"}}}}}:
-			case <-ctx.Done():
-			}
+			<-ctx.Done()
+			events <- &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "late"}}}}}
 			close(events)
 		}()
 		return events, nil

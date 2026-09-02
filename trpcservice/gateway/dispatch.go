@@ -563,6 +563,15 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		}
 		select {
 		case event, ok := <-runnerEvents:
+			// A canceled context and a ready runner event can both win the
+			// select. Re-check cancellation after receiving so a late event
+			// cannot turn a canceled execution into a successful completion.
+			if ctx.Err() != nil {
+				terminalErr = ctx.Err()
+				terminalEventType, terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
+				terminalErr = dispatcher.handleForwardCancellation(ctx, requestID, traceID, runnerEvents, output, finalizeAudit, finalizeHandoff)
+				return
+			}
 			if !ok {
 				terminalEventType, terminalErrorType = audit.EventExecutionCompleted, ""
 				terminalErr = dispatcher.handleForwardStreamClosed(requestID, traceID, runnerEvents, output, finalizeAudit, finalizeHandoff)
