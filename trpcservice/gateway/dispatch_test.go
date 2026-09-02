@@ -1276,6 +1276,52 @@ func TestDispatcherClosedRunnerChannelCancellationDoesNotComplete(t *testing.T) 
 	}
 }
 
+func TestDispatcherPrepareForwardTerminalCancellationFallback(t *testing.T) {
+	dispatcher, _ := newTestDispatcher(t, &testRunner{})
+	ctx := context.Background()
+	output := make(chan DispatchEvent, 4)
+	var terminalErr error
+	var terminalEventType audit.EventType
+	var terminalErrorType string
+	terminalCommitted := false
+	var terminalState atomic.Uint32
+	terminalState.Store(forwardTerminalCanceled)
+	dispatcher.prepareForwardTerminal(ctx, "request-terminal-fallback", "trace", nil, output, &terminalErr, &terminalEventType, &terminalErrorType, &terminalCommitted, &terminalState,
+		func(audit.EventType, string) error { return nil },
+		func(audit.ExecutionResult, string) error { return nil })
+	if !errors.Is(terminalErr, context.Canceled) || terminalEventType != audit.EventExecutionCanceled || terminalErrorType != string(audit.ErrorCanceled) || !terminalCommitted {
+		t.Fatalf("err=%v event=%q error=%q committed=%v", terminalErr, terminalEventType, terminalErrorType, terminalCommitted)
+	}
+	events := []DispatchEvent{<-output, <-output}
+	if events[0].Error != ErrExecutionCanceled.Error() || !events[1].Done {
+		t.Fatalf("events=%+v", events)
+	}
+	terminalErr = nil
+	terminalEventType = ""
+	terminalErrorType = ""
+	terminalCommitted = false
+	terminalState.Store(forwardTerminalCanceled)
+	dispatcher.prepareForwardTerminal(ctx, "request-terminal-fallback-error", "trace", nil, output, &terminalErr, &terminalEventType, &terminalErrorType, &terminalCommitted, &terminalState,
+		func(audit.EventType, string) error { return errors.New("audit unavailable") },
+		func(audit.ExecutionResult, string) error { return nil })
+	if !errors.Is(terminalErr, ErrAuditWriteFailed) {
+		t.Fatalf("fallback error = %v", terminalErr)
+	}
+	_ = <-output
+	_ = <-output
+}
+
+func TestFinishForwardOutputCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	output := make(chan DispatchEvent, 4)
+	finishForwardOutput(ctx, output, "request-output-cancel", "trace", context.Canceled, false, false)
+	events := []DispatchEvent{<-output, <-output}
+	if events[0].Error != ErrExecutionCanceled.Error() || !events[1].Done || events[1].Status != "canceled" {
+		t.Fatalf("events=%+v", events)
+	}
+}
+
 func TestDispatcherForwardSelectCancellationBranch(t *testing.T) {
 	dispatcher, principal := newTestDispatcher(t, &testRunner{})
 	ctx := &stagedContext{Context: context.Background(), done: make(chan struct{}), firstErr: make(chan struct{}), errAfter: 1}

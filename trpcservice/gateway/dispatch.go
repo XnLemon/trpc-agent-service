@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
@@ -31,6 +32,12 @@ var (
 	// ErrAuditWriteFailed is the stable redacted failure when a mandatory audit
 	// lifecycle fact cannot be durably written.
 	ErrAuditWriteFailed = errors.New("audit_write_failed")
+)
+
+const (
+	forwardTerminalPending uint32 = iota
+	forwardTerminalCanceled
+	forwardTerminalCommitted
 )
 
 const defaultDispatchDrainTimeout = 250 * time.Millisecond
@@ -510,6 +517,17 @@ func (dispatcher *Dispatcher) observeStorage(ctx context.Context, operation func
 
 func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, finishRunner func(error), runnerStarted time.Time) {
 	defer close(output)
+	var terminalState atomic.Uint32
+	terminalState.Store(forwardTerminalPending)
+	cancelWatchDone := make(chan struct{})
+	defer close(cancelWatchDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			terminalState.CompareAndSwap(forwardTerminalPending, forwardTerminalCanceled)
+		case <-cancelWatchDone:
+		}
+	}()
 	defer func() {
 		_ = lease.Release()
 		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
@@ -539,10 +557,7 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		return err
 	}
 	defer func() {
-		if terminalErr == nil && !terminalCommitted && ctx.Err() != nil {
-			terminalErr = ctx.Err()
-			terminalEventType, terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
-		}
+		dispatcher.prepareForwardTerminal(ctx, requestID, traceID, runnerEvents, output, &terminalErr, &terminalEventType, &terminalErrorType, &terminalCommitted, &terminalState, finalizeAudit, finalizeHandoff)
 		if finishRunner != nil {
 			finishRunner(terminalErr)
 			_ = dispatcher.metrics.Operation(ctx, runnerStarted, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, terminalErr)
@@ -582,6 +597,10 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 				return
 			}
 			if !ok {
+				if dispatcher.cancelForwardIfNeeded(ctx, requestID, traceID, runnerEvents, output, &terminalErr, &terminalEventType, &terminalErrorType, &terminalCommitted, finalizeAudit, finalizeHandoff) {
+					terminalErrorEmitted = true
+					return
+				}
 				terminalEventType, terminalErrorType = audit.EventExecutionCompleted, ""
 				terminalErr = dispatcher.handleForwardStreamClosed(ctx, requestID, traceID, runnerEvents, output, &terminalCommitted, finalizeAudit, finalizeHandoff)
 				return
@@ -597,6 +616,25 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 			return
 		}
 	}
+}
+
+func (dispatcher *Dispatcher) prepareForwardTerminal(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent, terminalErr *error, terminalEventType *audit.EventType, terminalErrorType *string, terminalCommitted *bool, terminalState *atomic.Uint32, finalizeAudit func(audit.EventType, string) error, finalizeHandoff func(audit.ExecutionResult, string) error) {
+	if *terminalErr != nil || *terminalCommitted {
+		return
+	}
+	if ctx.Err() == nil && terminalState.CompareAndSwap(forwardTerminalPending, forwardTerminalCommitted) {
+		return
+	}
+	cancelErr := ctx.Err()
+	if cancelErr == nil {
+		cancelErr = context.Canceled
+	}
+	*terminalErr = cancelErr
+	*terminalEventType, *terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
+	if err := dispatcher.handleForwardCancellation(ctx, requestID, traceID, runnerEvents, output, finalizeAudit, finalizeHandoff); err != nil {
+		*terminalErr = err
+	}
+	*terminalCommitted = true
 }
 
 func finishForwardOutput(ctx context.Context, output chan<- DispatchEvent, requestID, traceID string, terminalErr error, terminalCommitted, terminalErrorEmitted bool) {
