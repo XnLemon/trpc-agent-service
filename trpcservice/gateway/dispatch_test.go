@@ -1388,7 +1388,22 @@ func TestDispatcherRunnerEventCancellationAfterReceiptDoesNotComplete(t *testing
 }
 
 func TestDispatcherRunnerEventCancellationDuringSendRecordsCanceledAudit(t *testing.T) {
-	dispatcher, _ := newTestDispatcher(t, &testRunner{})
+	dispatcher, principal := newTestDispatcher(t, &testRunner{})
+	writer, err := audit.NewInMemory(principal.TenantID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoffs := audit.NewInMemoryHandoffStore()
+	dispatcher.auditWriter, dispatcher.handoffStore = writer, handoffs
+	requestID := "request-cancel-during-send"
+	if _, err := handoffs.Reserve(context.Background(), audit.ExecutionHandoff{
+		TenantID:  principal.TenantID(),
+		HandoffID: audit.NewEventID(requestID, "handoff"),
+		RequestID: requestID,
+		State:     audit.HandoffPending,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	ctx := &stagedContext{Context: context.Background(), done: make(chan struct{}), firstErr: make(chan struct{}), errAfter: 2}
 	runnerEvents := make(chan *trpcevent.Event)
 	event := &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "terminal"}}}, Done: true}}
@@ -1399,22 +1414,36 @@ func TestDispatcherRunnerEventCancellationDuringSendRecordsCanceledAudit(t *test
 	var terminalCommitted bool
 	var terminalErrorEmitted bool
 	var reply strings.Builder
-	done := dispatcher.handleForwardRunnerEvent(ctx, "request-cancel-during-send", "", runnerEvents, output, event, &reply, &terminalErr, &terminalEventType, &terminalErrorType, &terminalCommitted, &terminalErrorEmitted,
+	done := dispatcher.handleForwardRunnerEvent(ctx, requestID, "", runnerEvents, output, event, &reply, &terminalErr, &terminalEventType, &terminalErrorType, &terminalCommitted, &terminalErrorEmitted,
 		func(audit.EventType, string) error { return nil },
 		func(audit.ExecutionResult, string) error { return nil })
 	if !done || !errors.Is(terminalErr, context.Canceled) || terminalEventType != audit.EventExecutionCanceled || terminalErrorType != string(audit.ErrorCanceled) {
 		t.Fatalf("cancellation state done=%v err=%v event=%q error=%q", done, terminalErr, terminalEventType, terminalErrorType)
 	}
 	var finalizedType audit.EventType
-	if err := dispatcher.finalizeForward(ctx, "request-cancel-during-send", "", nil, Principal{}, terminalErr, reply.String(), terminalEventType, terminalErrorType,
-		func(eventType audit.EventType, _ string) error {
+	if err := dispatcher.finalizeForward(ctx, requestID, "", nil, principal, terminalErr, reply.String(), terminalEventType, terminalErrorType,
+		func(eventType audit.EventType, errorType string) error {
 			finalizedType = eventType
-			return nil
+			return dispatcher.writeExecutionAudit(context.Background(), principal, InboundMessage{ExternalUserID: "user"}, tenant.RunnerIdentity{}, requestID, "", eventType, errorType)
 		}); err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("finalize error = %v", err)
 	}
 	if finalizedType != audit.EventExecutionCanceled {
 		t.Fatalf("finalized audit type = %q", finalizedType)
+	}
+	handoff, err := handoffs.Get(context.Background(), principal.TenantID(), audit.NewEventID(requestID, "handoff"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handoff.Result != audit.ResultCanceled || handoff.State != audit.HandoffFinalized {
+		t.Fatalf("handoff = %+v", handoff)
+	}
+	auditEvents, err := writer.List(context.Background(), audit.Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasAuditEventTypes(auditEvents, audit.EventExecutionCanceled) || hasAuditEventTypes(auditEvents, audit.EventExecutionCompleted, audit.EventExecutionFailed) {
+		t.Fatalf("audit events = %+v", auditEvents)
 	}
 }
 
