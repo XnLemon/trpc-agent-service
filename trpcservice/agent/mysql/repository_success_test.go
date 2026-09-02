@@ -65,6 +65,46 @@ func TestAgentRepositoryListsAppsAndRevisions(t *testing.T) {
 	}
 }
 
+func TestAgentRepositoryListBoundaries(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := NewRepository(nil).List(ctx, "tenant", "", "", "", 50); err == nil {
+		t.Fatal("canceled app list was accepted")
+	}
+	if _, _, err := NewRepository(nil).List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("nil app list error = %v", err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repository := NewRepository(db)
+	if _, _, err := repository.List(context.Background(), "tenant", "", "", "bad", 50); err == nil {
+		t.Fatal("invalid app cursor was accepted")
+	}
+	mock.ExpectQuery(`SELECT tenant_id, app_id, app_key, display_name, description, status, current_revision, canary_revision, version, created_at, updated_at FROM agent_app WHERE tenant_id = \? ORDER BY app_id`).WithArgs("tenant").WillReturnError(errors.New("query down"))
+	if _, _, err := repository.List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, agent.ErrNotFound) && !errors.Is(err, ErrStorage) {
+		t.Fatalf("app query error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := repository.ListRevisions(context.Background(), "tenant", "app", "", "", "bad", 50); err == nil {
+		t.Fatal("invalid revision cursor was accepted")
+	}
+	revisionDB, revisionMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = revisionDB.Close() })
+	revisionMock.ExpectQuery(`SELECT revision FROM agent_app_revision WHERE tenant_id = \? AND app_id = \? ORDER BY revision`).WithArgs("tenant", "app").WillReturnError(errors.New("query down"))
+	if _, _, err := NewRepository(revisionDB).ListRevisions(context.Background(), "tenant", "app", "", "", "", 50); !errors.Is(err, agent.ErrNotFound) && !errors.Is(err, ErrStorage) {
+		t.Fatalf("revision query error = %v", err)
+	}
+}
+
 func TestAgentRepositoryGetRevisionDecodesStoredDraft(t *testing.T) {
 	app := newStoredAgentApp(t)
 	draft := newStoredAgentRevision(t, app, 1, false)

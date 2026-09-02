@@ -167,6 +167,51 @@ func TestTenantRepositoryListsScopedTenants(t *testing.T) {
 	}
 }
 
+func TestTenantRepositoryListBoundaries(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := NewRepository(nil).List(ctx, []string{"tenant"}, "", "", "", 50); err == nil {
+		t.Fatal("canceled tenant list was accepted")
+	}
+	if _, _, err := NewRepository(nil).List(context.Background(), []string{"tenant"}, "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("nil tenant list error = %v", err)
+	}
+	emptyScopeDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = emptyScopeDB.Close() })
+	if items, next, err := NewRepository(emptyScopeDB).List(context.Background(), nil, "", "", "", 50); err != nil || len(items) != 0 || next != "" {
+		t.Fatalf("empty-scope tenant list = items=%+v next=%q err=%v", items, next, err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repository := NewRepository(db)
+	if _, _, err := repository.List(context.Background(), []string{"tenant"}, "", "", "bad", 50); err == nil {
+		t.Fatal("invalid tenant cursor was accepted")
+	}
+	mock.ExpectQuery(`SELECT tenant_id FROM tenant WHERE tenant_id IN \(\?\) ORDER BY tenant_id`).WithArgs("tenant").WillReturnError(errors.New("query down"))
+	if _, _, err := repository.List(context.Background(), []string{"tenant"}, "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("tenant query error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	scanDB, scanMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = scanDB.Close() })
+	scanMock.ExpectQuery(`SELECT tenant_id FROM tenant WHERE tenant_id IN \(\?\) ORDER BY tenant_id`).WithArgs("tenant").WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "extra"}).AddRow("tenant", "bad"))
+	if _, _, err := NewRepository(scanDB).List(context.Background(), []string{"tenant"}, "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("tenant scan error = %v", err)
+	}
+}
+
 func TestTenantRepositoryValidatesDefaultsAndErrors(t *testing.T) {
 	input := tenant.CreateInput{
 		TenantKey: "validation-paths", DisplayName: "Validation Paths", Status: tenant.StatusActive,

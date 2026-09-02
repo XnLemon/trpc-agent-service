@@ -53,6 +53,43 @@ func TestChannelRepositoryListsBindings(t *testing.T) {
 	}
 }
 
+func TestChannelRepositoryListBoundaries(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := NewRepository(nil).List(ctx, "tenant", "", "", "", 50); err == nil {
+		t.Fatal("canceled channel list was accepted")
+	}
+	if _, _, err := NewRepository(nil).List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("nil channel list error = %v", err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repository := NewRepository(db)
+	if _, _, err := repository.List(context.Background(), "tenant", "", "", "bad", 50); err == nil {
+		t.Fatal("invalid channel cursor was accepted")
+	}
+	mock.ExpectQuery(`SELECT binding_id FROM channel_binding WHERE tenant_id = \? ORDER BY binding_id`).WithArgs("tenant").WillReturnError(errors.New("query down"))
+	if _, _, err := repository.List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("channel query error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	scanDB, scanMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = scanDB.Close() })
+	scanMock.ExpectQuery(`SELECT binding_id FROM channel_binding WHERE tenant_id = \? ORDER BY binding_id`).WithArgs("tenant").WillReturnRows(sqlmock.NewRows([]string{"binding_id", "extra"}).AddRow("binding", "bad"))
+	if _, _, err := NewRepository(scanDB).List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("channel scan error = %v", err)
+	}
+}
+
 func TestChannelRepositoryRejectsInvalidCreationMetadata(t *testing.T) {
 	binding := newStoredChannelBinding(t)
 	db, mock, err := sqlmock.New()

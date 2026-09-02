@@ -92,6 +92,47 @@ func TestBackendRepositoryListsProfiles(t *testing.T) {
 	}
 }
 
+func TestBackendRepositoryListBoundaries(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := NewRepository(nil, nil).List(ctx, "tenant", "", "", "", 50); err == nil {
+		t.Fatal("canceled backend list was accepted")
+	}
+	if _, _, err := NewRepository(nil, nil).List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("nil backend list error = %v", err)
+	}
+	catalog, err := backend.NewProviderCatalog(backend.ProviderSpec{Provider: "inmemory", Capabilities: []backend.Capability{backend.CapabilitySession}, EndpointPolicy: backend.FieldForbidden, SecretRefPolicy: backend.FieldForbidden, Options: map[string]backend.OptionSpec{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repository := NewRepository(db, catalog)
+	if _, _, err := repository.List(context.Background(), "tenant", "", "", "bad", 50); err == nil {
+		t.Fatal("invalid backend cursor was accepted")
+	}
+	mock.ExpectQuery(`SELECT profile_id FROM backend_profile WHERE tenant_id = \? ORDER BY profile_id`).WithArgs("tenant").WillReturnError(errors.New("query down"))
+	if _, _, err := repository.List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("backend query error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	scanDB, scanMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = scanDB.Close() })
+	scanMock.ExpectQuery(`SELECT profile_id FROM backend_profile WHERE tenant_id = \? ORDER BY profile_id`).WithArgs("tenant").WillReturnRows(sqlmock.NewRows([]string{"profile_id", "extra"}).AddRow("profile", "bad"))
+	if _, _, err := NewRepository(scanDB, catalog).List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("backend scan error = %v", err)
+	}
+}
+
 func TestBackendRepositoryRejectsInvalidCreationMetadata(t *testing.T) {
 	catalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
 		Provider: "inmemory", Capabilities: []backend.Capability{backend.CapabilitySession}, EndpointPolicy: backend.FieldForbidden,

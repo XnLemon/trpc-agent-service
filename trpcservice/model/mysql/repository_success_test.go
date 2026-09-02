@@ -80,6 +80,47 @@ func TestModelRepositoryListsProfiles(t *testing.T) {
 	}
 }
 
+func TestModelRepositoryListBoundaries(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := NewRepository(nil, nil).List(ctx, "tenant", "", "", "", 50); err == nil {
+		t.Fatal("canceled model list was accepted")
+	}
+	if _, _, err := NewRepository(nil, nil).List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("nil model list error = %v", err)
+	}
+	catalog, err := model.NewProviderCatalog(model.ProviderSpec{Provider: "public", Models: []string{"chat"}, EndpointPolicy: model.FieldOptional, EndpointSchemes: []string{"https"}, EndpointHosts: []string{"example.test"}, SecretRefPolicy: model.FieldOptional})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repository := NewRepository(db, catalog)
+	if _, _, err := repository.List(context.Background(), "tenant", "", "", "bad", 50); err == nil {
+		t.Fatal("invalid model cursor was accepted")
+	}
+	mock.ExpectQuery(`FROM model_profile WHERE tenant_id = \?`).WithArgs("tenant").WillReturnError(errors.New("query down"))
+	if _, _, err := repository.List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("model query error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	scanDB, scanMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = scanDB.Close() })
+	scanMock.ExpectQuery(`FROM model_profile WHERE tenant_id = \?`).WithArgs("tenant").WillReturnRows(sqlmock.NewRows([]string{"profile_id", "extra"}).AddRow("profile", "bad"))
+	if _, _, err := NewRepository(scanDB, catalog).List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("model scan error = %v", err)
+	}
+}
+
 func TestModelRepositoryRejectsInvalidCreationMetadata(t *testing.T) {
 	catalog, err := model.NewProviderCatalog(model.ProviderSpec{
 		Provider: "public", Models: []string{"chat"}, EndpointPolicy: model.FieldOptional,
