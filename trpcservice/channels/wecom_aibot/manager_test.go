@@ -79,7 +79,7 @@ func TestProviderWaitsForCorrelatedFinalReplyAcknowledgement(t *testing.T) {
 	}
 	result := make(chan error, 1)
 	go func() {
-		_, deliverErr := provider.Deliver(context.Background(), storage.ReplyOutbox{TenantID: "tenant", EventID: "event", ReplyID: "reply", SegmentIndex: 0, Payload: "final"})
+		_, deliverErr := provider.Deliver(context.Background(), storage.ReplyOutbox{TenantID: "tenant", EventID: "event", ReplyID: "reply", SegmentIndex: 0, SegmentCount: 1, Payload: "final"})
 		result <- deliverErr
 	}()
 	final := readFrame(t, connection.writes)
@@ -98,6 +98,43 @@ func TestProviderWaitsForCorrelatedFinalReplyAcknowledgement(t *testing.T) {
 	connection.reads <- ackFrame(t, "req-final", 0)
 	if err := <-result; err != nil {
 		t.Fatalf("delivery error = %v", err)
+	}
+}
+
+func TestProviderFinishesOnlyFinalDurableSegment(t *testing.T) {
+	connection := newTestConn()
+	manager, stop := startTestManager(t, connection, &testDispatcher{}, 2)
+	defer stop()
+	auth := readFrame(t, connection.writes)
+	connection.reads <- ackFrame(t, auth.Headers.ReqID, 0)
+	waitReady(t, manager)
+
+	provider, err := NewProvider(manager, testCorrelations{requestID: "req-final"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []storage.ReplyOutbox{
+		{TenantID: "tenant", EventID: "event", ReplyID: "reply", SegmentIndex: 0, SegmentCount: 2, Payload: "first"},
+		{TenantID: "tenant", EventID: "event", ReplyID: "reply", SegmentIndex: 1, SegmentCount: 2, Payload: "second"},
+	} {
+		result := make(chan error, 1)
+		go func(value storage.ReplyOutbox) {
+			_, deliverErr := provider.Deliver(context.Background(), value)
+			result <- deliverErr
+		}(value)
+		frame := readFrame(t, connection.writes)
+		var body StreamReply
+		if err := json.Unmarshal(frame.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		wantFinish := value.SegmentIndex+1 == value.SegmentCount
+		if frame.Cmd != cmdRespond || frame.Headers.ReqID != "req-final" || body.Stream.ID != "req-final" || body.Stream.Finish != wantFinish || body.Stream.Content != value.Payload {
+			t.Fatalf("segment %d frame = %+v body = %+v", value.SegmentIndex, frame, body)
+		}
+		connection.reads <- ackFrame(t, "req-final", 0)
+		if err := <-result; err != nil {
+			t.Fatalf("segment %d delivery error = %v", value.SegmentIndex, err)
+		}
 	}
 }
 

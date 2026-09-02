@@ -6,6 +6,7 @@ import (
 	"errors"
 	"hash/fnv"
 	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -222,6 +223,13 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Storage adapters need not provide a candidate order, but stream segments do.
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].ReplyID == candidates[j].ReplyID {
+			return candidates[i].SegmentIndex < candidates[j].SegmentIndex
+		}
+		return candidates[i].ReplyID < candidates[j].ReplyID
+	})
 	processed := 0
 	for _, candidate := range candidates {
 		claimed, claimedOK, claimErr := w.claimCandidate(ctx, candidate)

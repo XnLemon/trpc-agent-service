@@ -54,7 +54,7 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 		ID      string `json:"id"`
 		Finish  bool   `json:"finish"`
 		Content string `json:"content,omitempty"`
-	}{ID: reqID, Finish: true, Content: value.Payload}}
+	}{ID: reqID, Finish: value.SegmentIndex+1 == value.SegmentCount, Content: value.Payload}}
 	if err := p.manager.sendReply(ctx, reqID, body); err != nil {
 		return "", &outbox.DeliveryError{Class: "unavailable", Retryable: true}
 	}

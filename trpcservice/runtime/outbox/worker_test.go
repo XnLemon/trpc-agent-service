@@ -3,6 +3,7 @@ package outbox_test
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 	"time"
 
@@ -19,10 +20,12 @@ type providerStub struct {
 	reconcileErr    error
 	deliveries      int
 	reconciliations int
+	segments        []int
 }
 
-func (p *providerStub) Deliver(context.Context, runtimestorage.ReplyOutbox) (string, error) {
+func (p *providerStub) Deliver(_ context.Context, value runtimestorage.ReplyOutbox) (string, error) {
 	p.deliveries++
+	p.segments = append(p.segments, value.SegmentIndex)
 	return p.deliverID, p.deliverErr
 }
 func (p *providerStub) Reconcile(context.Context, runtimestorage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
@@ -41,6 +44,22 @@ func seedReply(t *testing.T, store *inmemory.Store, tenant, event, reply string)
 	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: tenant, ReplyID: reply, EventID: event, SegmentIndex: 0, SegmentCount: 1, Payload: "payload"}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+type reverseCandidateStore struct{ *inmemory.Store }
+
+func (s reverseCandidateStore) ListReplyCandidates(ctx context.Context, tenantID string) ([]runtimestorage.ReplyOutbox, error) {
+	values, err := s.Store.ListReplyCandidates(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(values, func(i, j int) bool {
+		if values[i].ReplyID == values[j].ReplyID {
+			return values[i].SegmentIndex > values[j].SegmentIndex
+		}
+		return values[i].ReplyID > values[j].ReplyID
+	})
+	return values, nil
 }
 
 func TestWorkerDeliversAndFencesProviderReceipt(t *testing.T) {
@@ -73,6 +92,26 @@ func TestWorkerDeliversAndFencesProviderReceipt(t *testing.T) {
 	event, err = store.GetMessage(context.Background(), "tenant-a", "event-1")
 	if err != nil || event.Status != runtimestorage.EventReplied {
 		t.Fatalf("event lifecycle = %+v err=%v", event, err)
+	}
+}
+
+func TestWorkerDeliversReplySegmentsInOrder(t *testing.T) {
+	base := inmemory.New()
+	seedReply(t, base, "tenant-a", "event-segments", "reply-segments")
+	if _, err := base.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", EventID: "event-segments", ReplyID: "reply-segments", SegmentIndex: 1, SegmentCount: 2, Payload: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &providerStub{deliverID: "provider-segments"}
+	worker, err := outbox.New(outbox.Config{Store: reverseCandidateStore{Store: base}, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := worker.RunOnce(context.Background())
+	if err != nil || processed != 2 {
+		t.Fatalf("run = %d err=%v", processed, err)
+	}
+	if len(provider.segments) != 2 || provider.segments[0] != 0 || provider.segments[1] != 1 {
+		t.Fatalf("delivered segments = %v", provider.segments)
 	}
 }
 
