@@ -1176,6 +1176,70 @@ func TestDispatcherCancellationDrainsRunnerEventsAndReleasesLease(t *testing.T) 
 	}
 }
 
+func TestDispatcherCancellationWinsLateReadyRunnerEvent(t *testing.T) {
+	for attempt := 0; attempt < 64; attempt++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		events := make(chan *trpcevent.Event, 1)
+		dispatcher, principal := newTestDispatcher(t, &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+			return events, nil
+		}})
+		stream, err := dispatcher.Dispatch(ctx, DispatchRequest{
+			Principal: principal,
+			Message:   InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"},
+			RequestID: "request-cancel-late-event",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cancel()
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "late"}}}}}
+		close(events)
+		got := collectDispatchEvents(stream)
+		if len(got) != 2 || got[0].Error != ErrExecutionCanceled.Error() || !got[1].Done {
+			t.Fatalf("attempt %d cancellation events = %+v", attempt, got)
+		}
+	}
+}
+
+func TestDispatcherRunnerEventCancellationAfterReceiptDoesNotComplete(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dispatcher, _ := newTestDispatcher(t, &testRunner{})
+	runnerEvents := make(chan *trpcevent.Event, 1)
+	runnerEvents <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
+	event := <-runnerEvents
+	cancel()
+	output := make(chan DispatchEvent, 4)
+	var terminalErr error
+	var terminalEventType audit.EventType
+	var terminalErrorType string
+	var reply strings.Builder
+	var auditTypes []audit.EventType
+	var handoffResults []audit.ExecutionResult
+	done := dispatcher.handleForwardRunnerEvent(ctx, "request-cancel-after-receipt", "", runnerEvents, output, event, &reply, &terminalErr, &terminalEventType, &terminalErrorType,
+		func(eventType audit.EventType, _ string) error {
+			auditTypes = append(auditTypes, eventType)
+			return nil
+		},
+		func(result audit.ExecutionResult, _ string) error {
+			handoffResults = append(handoffResults, result)
+			return nil
+		})
+	if !done || !errors.Is(terminalErr, context.Canceled) || terminalEventType != audit.EventExecutionCanceled || terminalErrorType != string(audit.ErrorCanceled) {
+		t.Fatalf("cancellation state done=%v err=%v event=%q error=%q", done, terminalErr, terminalEventType, terminalErrorType)
+	}
+	got := []DispatchEvent{<-output, <-output}
+	if got[0].Error != ErrExecutionCanceled.Error() || !got[1].Done || got[1].Status != "canceled" || reply.Len() != 0 {
+		t.Fatalf("cancellation events=%+v reply=%q", got, reply.String())
+	}
+	if len(auditTypes) != 1 || auditTypes[0] != audit.EventExecutionCanceled {
+		t.Fatalf("audit types=%v", auditTypes)
+	}
+	if len(handoffResults) != 1 || handoffResults[0] != audit.ResultCanceled {
+		t.Fatalf("handoff results=%v", handoffResults)
+	}
+}
+
 func TestDispatcherRejectsInvalidBoundaryInputs(t *testing.T) {
 	dispatcher, principal := newTestDispatcher(t, &testRunner{})
 	if _, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Message: InboundMessage{Content: "hello"}}); !errors.Is(err, ErrUnauthenticated) {

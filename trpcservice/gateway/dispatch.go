@@ -603,6 +603,18 @@ func (dispatcher *Dispatcher) handleForwardStreamClosed(requestID, traceID strin
 }
 
 func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent, event *trpcevent.Event, reply *strings.Builder, terminalErr *error, terminalEventType *audit.EventType, terminalErrorType *string, finalizeAudit func(audit.EventType, string) error, finalizeHandoff func(audit.ExecutionResult, string) error) bool {
+	cancel := func() bool {
+		if ctx.Err() == nil {
+			return false
+		}
+		*terminalErr = ctx.Err()
+		*terminalEventType, *terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
+		*terminalErr = dispatcher.handleForwardCancellation(ctx, requestID, traceID, runnerEvents, output, finalizeAudit, finalizeHandoff)
+		return true
+	}
+	if cancel() {
+		return true
+	}
 	mapped, done := mapRunnerEvent(event, requestID, traceID)
 	if done {
 		*terminalErr = nil
@@ -616,6 +628,9 @@ func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requ
 			eventType, errorType = audit.EventExecutionFailed, string(audit.ErrorUnavailable)
 		}
 		*terminalEventType, *terminalErrorType = eventType, errorType
+		if cancel() {
+			return true
+		}
 		if err := finalizeAudit(eventType, errorType); err != nil {
 			*terminalErr = ErrExecution
 			dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
@@ -623,6 +638,9 @@ func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requ
 		}
 	}
 	for _, item := range mapped {
+		if cancel() {
+			return true
+		}
 		if done && item.Type == DispatchEventDone {
 			continue
 		}
@@ -645,6 +663,9 @@ func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requ
 	if *terminalErr != nil {
 		result = audit.ResultFailure
 	}
+	if cancel() {
+		return true
+	}
 	if err := finalizeHandoff(result, *terminalErrorType); err != nil {
 		*terminalErr = auditWriteFailure()
 		dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
@@ -652,6 +673,9 @@ func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requ
 	}
 	for _, item := range mapped {
 		if item.Type == DispatchEventDone {
+			if cancel() {
+				return true
+			}
 			_ = sendDispatchEvent(ctx, output, item)
 		}
 	}
