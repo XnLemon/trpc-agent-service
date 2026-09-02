@@ -678,7 +678,14 @@ func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requ
 			if dispatcher.cancelForwardIfNeeded(ctx, requestID, traceID, runnerEvents, output, terminalErr, terminalEventType, terminalErrorType, finalizeAudit, finalizeHandoff) {
 				return true
 			}
-			_ = sendDispatchEvent(ctx, output, item)
+			if !sendDispatchEvent(ctx, output, item) {
+				if dispatcher.cancelForwardIfNeeded(ctx, requestID, traceID, runnerEvents, output, terminalErr, terminalEventType, terminalErrorType, finalizeAudit, finalizeHandoff) {
+					return true
+				}
+				*terminalErr = ErrExecution
+				drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
+				return true
+			}
 		}
 	}
 	drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
@@ -832,6 +839,14 @@ func responseText(response *trpcmodel.Response) string {
 }
 
 func sendDispatchEvent(ctx context.Context, output chan<- DispatchEvent, event DispatchEvent) bool {
+	if ctx == nil || ctx.Err() != nil {
+		return false
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	default:
+	}
 	select {
 	case output <- event:
 		return true
