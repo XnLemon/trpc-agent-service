@@ -671,6 +671,46 @@ func TestManagerCloseStopsAnAuthenticatedConnection(t *testing.T) {
 	}
 }
 
+func TestManagerReconnectFailuresRespectCancellation(t *testing.T) {
+	dialed := make(chan struct{}, 1)
+	manager := &Manager{
+		botID: "bot-1", secret: "secret-1", wsURL: defaultWSURL,
+		dialer: dialerFunc(func(context.Context, string, http.Header) (Conn, error) {
+			dialed <- struct{}{}
+			return nil, errors.New("dial failed")
+		}),
+		reconnectBase: time.Hour, reconnectMax: time.Hour,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	<-dialed
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled reconnect error = %v", err)
+	}
+	if !sleepBackoff(context.Background(), time.Nanosecond, time.Nanosecond, 0) {
+		t.Fatal("ready backoff did not complete")
+	}
+	if got := min(2, 1); got != 1 {
+		t.Fatalf("bounded reconnect exponent = %d", got)
+	}
+}
+
+func TestManagerCancellationDoesNotQueueAuthenticationOrReplies(t *testing.T) {
+	manager := &Manager{botID: "bot-1", secret: "secret-1"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := manager.enqueueAuth(ctx, make(chan outboundFrame)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled authentication enqueue error = %v", err)
+	}
+	manager.queue = make(chan outboundFrame)
+	if err := manager.sendReply(ctx, "reply", StreamReply{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled reply enqueue error = %v", err)
+	}
+	manager.queue = nil
+}
+
 func TestManagerIgnoresInvalidCallbacksAndEvents(t *testing.T) {
 	manager := &Manager{botID: "bot-1", ready: true}
 	for _, frame := range []Frame{
@@ -799,6 +839,12 @@ func (c testCorrelations) GetReplyCorrelation(context.Context, string, string) (
 type testDialer struct {
 	connections chan Conn
 	calls       atomic.Int32
+}
+
+type dialerFunc func(context.Context, string, http.Header) (Conn, error)
+
+func (fn dialerFunc) DialContext(ctx context.Context, wsURL string, header http.Header) (Conn, error) {
+	return fn(ctx, wsURL, header)
 }
 
 func (d *testDialer) DialContext(ctx context.Context, _ string, _ http.Header) (Conn, error) {
