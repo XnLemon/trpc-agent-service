@@ -549,6 +549,35 @@ func TestWeComHandlerFactoryIsWiredAndOwnedByRuntime(t *testing.T) {
 	}
 }
 
+func TestRuntimeOwnsAllWeComAIBotConnectionsAndReadiness(t *testing.T) {
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	first, second := newBootstrapAIBot(), newBootstrapAIBot()
+	config.WeComAIBotFactories = []func(gateway.DispatchService) (channels.PollingAdapter, error){
+		func(gateway.DispatchService) (channels.PollingAdapter, error) { return first, nil },
+		func(gateway.DispatchService) (channels.PollingAdapter, error) { return second, nil },
+	}
+	graph, err := New(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-first.started
+	<-second.started
+	deadline := time.Now().Add(time.Second)
+	for !graph.Ready() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !graph.Ready() {
+		t.Fatal("runtime never became ready after AI Bot authentication")
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if first.beginShutdown.Load() != 1 || first.closed.Load() != 1 || second.beginShutdown.Load() != 1 || second.closed.Load() != 1 {
+		t.Fatalf("AI Bot lifecycle was not owned: first=%d/%d second=%d/%d", first.beginShutdown.Load(), first.closed.Load(), second.beginShutdown.Load(), second.closed.Load())
+	}
+}
+
 func TestBootstrapBuildsRuntimeRegistryFromStorageFactory(t *testing.T) {
 	config, closeDependencies := testConfig(t)
 	defer closeDependencies()
@@ -1505,6 +1534,27 @@ type bootstrapWeComLifecycle struct {
 	beginShutdown atomic.Int32
 	closed        atomic.Int32
 }
+
+type bootstrapAIBot struct {
+	started       chan struct{}
+	startOnce     sync.Once
+	ready         atomic.Bool
+	beginShutdown atomic.Int32
+	closed        atomic.Int32
+}
+
+func newBootstrapAIBot() *bootstrapAIBot          { return &bootstrapAIBot{started: make(chan struct{})} }
+func (*bootstrapAIBot) Channel() channels.Channel { return channels.ChannelWeComAIBot }
+func (bot *bootstrapAIBot) Ready() bool           { return bot.ready.Load() }
+func (bot *bootstrapAIBot) Run(ctx context.Context) error {
+	bot.ready.Store(true)
+	bot.startOnce.Do(func() { close(bot.started) })
+	<-ctx.Done()
+	bot.ready.Store(false)
+	return ctx.Err()
+}
+func (bot *bootstrapAIBot) BeginShutdown() { bot.beginShutdown.Add(1) }
+func (bot *bootstrapAIBot) Close() error   { bot.closed.Add(1); return nil }
 
 func (handler *bootstrapWeComLifecycle) ServeHTTP(writer http.ResponseWriter, _ *http.Request) {
 	handler.calls.Add(1)

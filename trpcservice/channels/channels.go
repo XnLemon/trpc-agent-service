@@ -57,6 +57,8 @@ type Channel string
 const (
 	// ChannelWeCom identifies an enterprise WeCom callback.
 	ChannelWeCom Channel = "wecom"
+	// ChannelWeComAIBot identifies a WeCom AI Bot WebSocket connection.
+	ChannelWeComAIBot Channel = "wecom_aibot"
 	// ChannelTelegram identifies a Telegram Bot callback.
 	ChannelTelegram Channel = "telegram"
 )
@@ -64,7 +66,7 @@ const (
 // Validate checks whether the Channel is explicitly supported.
 func (c Channel) Validate() error {
 	switch c {
-	case ChannelWeCom, ChannelTelegram:
+	case ChannelWeCom, ChannelWeComAIBot, ChannelTelegram:
 		return nil
 	default:
 		return fmt.Errorf("%w: unknown channel", ErrInvalid)
@@ -93,6 +95,13 @@ type WeComProtocolConfiguration struct {
 	ReceiveID string `json:"receive_id,omitempty"`
 }
 
+// WeComAIBotProtocolConfiguration contains non-secret AI Bot settings.
+// The Bot Secret is resolved from Binding.SecretRef at runtime.
+type WeComAIBotProtocolConfiguration struct {
+	BotID string `json:"bot_id,omitempty"`
+	WSURL string `json:"ws_url,omitempty"`
+}
+
 // TelegramProtocolConfiguration contains only non-secret Telegram schema
 // fields. Bot tokens are resolved from SecretRef and are never stored here.
 type TelegramProtocolConfiguration struct {
@@ -103,8 +112,9 @@ type TelegramProtocolConfiguration struct {
 // ProtocolConfiguration is the explicit, channel-specific non-secret schema.
 // Only the field matching Channel may be populated.
 type ProtocolConfiguration struct {
-	WeCom    *WeComProtocolConfiguration    `json:"wecom,omitempty"`
-	Telegram *TelegramProtocolConfiguration `json:"telegram,omitempty"`
+	WeCom      *WeComProtocolConfiguration      `json:"wecom,omitempty"`
+	WeComAIBot *WeComAIBotProtocolConfiguration `json:"wecom_aibot,omitempty"`
+	Telegram   *TelegramProtocolConfiguration   `json:"telegram,omitempty"`
 }
 
 // UnmarshalJSON rejects fields outside the explicit protocol schema. This is
@@ -144,6 +154,10 @@ func (c ProtocolConfiguration) Clone() ProtocolConfiguration {
 		value := *c.Telegram
 		clone.Telegram = &value
 	}
+	if c.WeComAIBot != nil {
+		value := *c.WeComAIBot
+		clone.WeComAIBot = &value
+	}
 	return clone
 }
 
@@ -151,11 +165,14 @@ func normalizeProtocolConfiguration(channel Channel, configuration ProtocolConfi
 	if err := channel.Validate(); err != nil {
 		return ProtocolConfiguration{}, err
 	}
-	if channel == ChannelWeCom && configuration.Telegram != nil {
+	if channel == ChannelWeCom && (configuration.Telegram != nil || configuration.WeComAIBot != nil) {
 		return ProtocolConfiguration{}, fmt.Errorf("%w: telegram configuration does not match channel", ErrInvalid)
 	}
-	if channel == ChannelTelegram && configuration.WeCom != nil {
+	if channel == ChannelTelegram && (configuration.WeCom != nil || configuration.WeComAIBot != nil) {
 		return ProtocolConfiguration{}, fmt.Errorf("%w: wecom configuration does not match channel", ErrInvalid)
+	}
+	if channel == ChannelWeComAIBot && (configuration.WeCom != nil || configuration.Telegram != nil) {
+		return ProtocolConfiguration{}, fmt.Errorf("%w: protocol configuration does not match channel", ErrInvalid)
 	}
 	normalized := configuration.Clone()
 	if normalized.WeCom != nil {
@@ -184,6 +201,23 @@ func normalizeProtocolConfiguration(channel Channel, configuration ProtocolConfi
 			return ProtocolConfiguration{}, err
 		}
 	}
+	if normalized.WeComAIBot != nil {
+		var err error
+		normalized.WeComAIBot.BotID, err = normalizeProtocolValue(normalized.WeComAIBot.BotID, "bot id")
+		if err != nil {
+			return ProtocolConfiguration{}, err
+		}
+		normalized.WeComAIBot.WSURL, err = normalizeWSURL(normalized.WeComAIBot.WSURL)
+		if err != nil {
+			return ProtocolConfiguration{}, err
+		}
+	}
+	if channel == ChannelWeComAIBot && normalized.WeComAIBot != nil && normalized.WeComAIBot.WSURL == "" {
+		normalized.WeComAIBot.WSURL = "wss://openws.work.weixin.qq.com"
+	}
+	if channel == ChannelWeComAIBot && (normalized.WeComAIBot == nil || normalized.WeComAIBot.BotID == "") {
+		return ProtocolConfiguration{}, fmt.Errorf("%w: wecom ai bot bot id is required", ErrInvalid)
+	}
 	return normalized, nil
 }
 
@@ -206,6 +240,21 @@ func normalizeAPIBaseURL(value string) (string, error) {
 	}
 	if len([]rune(value)) > maxProtocolValueLength || hasControl(value) {
 		return "", fmt.Errorf("%w: telegram API base URL is invalid", ErrInvalid)
+	}
+	return value, nil
+}
+
+func normalizeWSURL(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "wss" || parsed.Host == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("%w: wecom ai bot websocket URL must be a wss origin", ErrInvalid)
+	}
+	if len([]rune(value)) > maxProtocolValueLength || hasControl(value) {
+		return "", fmt.Errorf("%w: websocket URL is invalid", ErrInvalid)
 	}
 	return value, nil
 }
