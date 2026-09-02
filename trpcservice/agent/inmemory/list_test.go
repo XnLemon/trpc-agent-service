@@ -34,4 +34,8 @@ func TestListScopesFiltersAndPaginatesAppsAndRevisions(t *testing.T) {
 	if err != nil || len(revisions) != 1 || next != "" || revisions[0].Revision != secondDraft.Revision {
 		t.Fatalf("second revision page = items=%+v next=%q err=%v", revisions, next, err)
 	}
+	filteredRevisions, _, err := repository.ListRevisions(context.Background(), tenantOne, first.AppID, "second", "", "", 50)
+	if err != nil || len(filteredRevisions) != 1 || filteredRevisions[0].Revision != secondDraft.Revision {
+		t.Fatalf("filtered revisions = items=%+v err=%v", filteredRevisions, err)
+	}
 }

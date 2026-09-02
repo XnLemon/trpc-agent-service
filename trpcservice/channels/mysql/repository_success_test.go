@@ -33,6 +33,26 @@ func TestChannelRepositoryGetDecodesStoredBinding(t *testing.T) {
 	}
 }
 
+func TestChannelRepositoryListsBindings(t *testing.T) {
+	binding := newStoredChannelBinding(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`SELECT binding_id FROM channel_binding WHERE tenant_id = \? ORDER BY binding_id`).WithArgs(binding.TenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"binding_id"}).AddRow(binding.BindingID))
+	mock.ExpectQuery(".*").WithArgs(binding.TenantID, binding.BindingID).WillReturnRows(testChannelBindingRows(t, binding))
+
+	items, next, err := NewRepository(db).List(context.Background(), binding.TenantID, "primary", string(binding.Status), "", 50)
+	if err != nil || len(items) != 1 || items[0].BindingID != binding.BindingID || next != "" {
+		t.Fatalf("listed channel bindings = items=%+v next=%q err=%v", items, next, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestChannelRepositoryRejectsInvalidCreationMetadata(t *testing.T) {
 	binding := newStoredChannelBinding(t)
 	db, mock, err := sqlmock.New()

@@ -78,8 +78,12 @@ func (r *InMemoryRepository) ListRevisions(ctx context.Context, tenantID, appID,
 	values := r.revisions[appScope{tenantID: tenantID, appID: appID}]
 	items := make([]*agent.Revision, 0, len(values))
 	status = strings.TrimSpace(status)
+	query = strings.ToLower(strings.TrimSpace(query))
 	for _, value := range values {
 		if status != "" && string(value.State) != status {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(value.Description+" "+value.Instruction+" "+value.GlobalInstruction), query) {
 			continue
 		}
 		items = append(items, cloneRevision(value))

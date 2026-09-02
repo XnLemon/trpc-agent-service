@@ -41,6 +41,30 @@ func TestAgentRepositoryGetDecodesStoredApp(t *testing.T) {
 	}
 }
 
+func TestAgentRepositoryListsAppsAndRevisions(t *testing.T) {
+	app := newStoredAgentApp(t)
+	draft := newStoredAgentRevision(t, app, 1, false)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`SELECT tenant_id, app_id, app_key, display_name, description, status, current_revision, canary_revision, version, created_at, updated_at FROM agent_app WHERE tenant_id = \?`).WithArgs(app.TenantID).WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "canary_revision", "version", "created_at", "updated_at"}).AddRow(app.TenantID, app.AppID, app.AppKey, app.DisplayName, app.Description, string(app.Status), nil, nil, app.Version, app.CreatedAt, app.UpdatedAt))
+	items, next, err := NewRepository(db).List(context.Background(), app.TenantID, "workflow", string(app.Status), "", 50)
+	if err != nil || len(items) != 1 || items[0].AppID != app.AppID || next != "" {
+		t.Fatalf("listed apps = items=%+v next=%q err=%v", items, next, err)
+	}
+	mock.ExpectQuery(`SELECT revision FROM agent_app_revision WHERE tenant_id = \? AND app_id = \?`).WithArgs(app.TenantID, app.AppID).WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(draft.Revision))
+	expectAgentRevision(t, mock, draft)
+	revisions, next, err := NewRepository(db).ListRevisions(context.Background(), app.TenantID, app.AppID, "answer", string(draft.State), "", 50)
+	if err != nil || len(revisions) != 1 || revisions[0].Revision != draft.Revision || next != "" {
+		t.Fatalf("listed revisions = items=%+v next=%q err=%v", revisions, next, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAgentRepositoryGetRevisionDecodesStoredDraft(t *testing.T) {
 	app := newStoredAgentApp(t)
 	draft := newStoredAgentRevision(t, app, 1, false)
