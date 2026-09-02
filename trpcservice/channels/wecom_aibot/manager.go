@@ -21,6 +21,7 @@ import (
 const (
 	defaultWSURL           = "wss://openws.work.weixin.qq.com"
 	defaultReplyACKTimeout = 30 * time.Second
+	defaultAuthACKTimeout  = 30 * time.Second
 	maxMissedHeartbeats    = 2
 )
 
@@ -74,12 +75,14 @@ type Manager struct {
 	queueSize                                                int
 	heartbeat, reconnectBase, reconnectMax, executionTimeout time.Duration
 	replyACKTimeout                                          time.Duration
+	authACKTimeout                                           time.Duration
 
 	mu               sync.Mutex
 	conn             Conn
 	queue            chan outboundFrame
 	pending          *pendingReply
 	authReqID        string
+	authDone         chan struct{}
 	heartbeatReqID   string
 	missedHeartbeats int
 	closing          bool
@@ -277,14 +280,17 @@ func (m *Manager) serveConnection(ctx context.Context, conn Conn) error {
 	m.mu.Lock()
 	m.conn = conn
 	m.ready = false
+	m.authDone = make(chan struct{})
 	m.heartbeatReqID = ""
 	m.missedHeartbeats = 0
+	authDone := m.authDone
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
 		if m.conn == conn {
 			m.conn = nil
 			m.ready = false
+			m.authDone = nil
 			m.heartbeatReqID = ""
 			m.missedHeartbeats = 0
 		}
@@ -310,6 +316,19 @@ func (m *Manager) serveConnection(ctx context.Context, conn Conn) error {
 	}
 	readErr := make(chan error, 1)
 	go func() { readErr <- m.readPump(connCtx, conn, queue) }()
+	authTimer := time.NewTimer(m.authenticationTimeout())
+	defer authTimer.Stop()
+	select {
+	case <-authDone:
+	case err := <-readErr:
+		return err
+	case err := <-writeErr:
+		return err
+	case <-authTimer.C:
+		return ErrAuthentication
+	case <-connCtx.Done():
+		return connCtx.Err()
+	}
 	select {
 	case err := <-readErr:
 		return err
@@ -365,6 +384,13 @@ func (m *Manager) replyAcknowledgementTimeout() time.Duration {
 		return defaultReplyACKTimeout
 	}
 	return m.replyACKTimeout
+}
+
+func (m *Manager) authenticationTimeout() time.Duration {
+	if m.authACKTimeout <= 0 {
+		return defaultAuthACKTimeout
+	}
+	return m.authACKTimeout
 }
 
 func (m *Manager) writePump(ctx context.Context, conn Conn, queue <-chan outboundFrame, errs chan<- error) {
@@ -580,7 +606,12 @@ func (m *Manager) acceptAuthentication(frame Frame) error {
 	m.ready = true
 	m.heartbeatReqID = ""
 	m.missedHeartbeats = 0
+	done := m.authDone
+	m.authDone = nil
 	m.mu.Unlock()
+	if done != nil {
+		close(done)
+	}
 	return nil
 }
 

@@ -232,6 +232,14 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 	})
 	processed := 0
 	for _, candidate := range candidates {
+		// A later segment must not overtake a retrying or leased predecessor.
+		ready, readyErr := w.precedingSegmentsSent(ctx, candidate)
+		if readyErr != nil {
+			return processed, readyErr
+		}
+		if !ready {
+			continue
+		}
 		claimed, claimedOK, claimErr := w.claimCandidate(ctx, candidate)
 		if claimErr != nil {
 			return processed, claimErr
@@ -245,6 +253,24 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 		}
 	}
 	return processed, nil
+}
+
+func (w *Worker) precedingSegmentsSent(ctx context.Context, candidate runtimestorage.ReplyOutbox) (bool, error) {
+	for index := 0; index < candidate.SegmentIndex; index++ {
+		previous, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.ReplyOutbox, error) {
+			return w.store.GetReply(operationCtx, candidate.TenantID, candidate.ReplyID, index)
+		})
+		if errors.Is(err, runtimestorage.ErrNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if previous.Status != runtimestorage.ReplySent {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (w *Worker) claimCandidate(ctx context.Context, candidate runtimestorage.ReplyOutbox) (runtimestorage.ReplyOutbox, bool, error) {

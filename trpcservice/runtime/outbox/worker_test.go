@@ -21,11 +21,15 @@ type providerStub struct {
 	deliveries      int
 	reconciliations int
 	segments        []int
+	deliverFn       func(runtimestorage.ReplyOutbox) error
 }
 
 func (p *providerStub) Deliver(_ context.Context, value runtimestorage.ReplyOutbox) (string, error) {
 	p.deliveries++
 	p.segments = append(p.segments, value.SegmentIndex)
+	if p.deliverFn != nil {
+		return p.deliverID, p.deliverFn(value)
+	}
 	return p.deliverID, p.deliverErr
 }
 func (p *providerStub) Reconcile(context.Context, runtimestorage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
@@ -112,6 +116,53 @@ func TestWorkerDeliversReplySegmentsInOrder(t *testing.T) {
 	}
 	if len(provider.segments) != 2 || provider.segments[0] != 0 || provider.segments[1] != 1 {
 		t.Fatalf("delivered segments = %v", provider.segments)
+	}
+}
+
+func TestWorkerWaitsForRetryablePrecedingSegment(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-retry", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session-retry", BindingID: "binding-retry", ExternalMessageID: "external-retry", EventID: "event-retry"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []runtimestorage.ReplyOutbox{
+		{TenantID: "tenant-a", EventID: "event-retry", ReplyID: "reply-retry", SegmentIndex: 0, SegmentCount: 2, Payload: "first"},
+		{TenantID: "tenant-a", EventID: "event-retry", ReplyID: "reply-retry", SegmentIndex: 1, SegmentCount: 2, Payload: "second"},
+	} {
+		if _, err := store.EnqueueReply(context.Background(), value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := true
+	provider := &providerStub{deliverID: "provider-retry", deliverFn: func(value runtimestorage.ReplyOutbox) error {
+		if value.SegmentIndex == 0 && first {
+			first = false
+			return &outbox.DeliveryError{Class: "unavailable", Retryable: true}
+		}
+		return nil
+	}}
+	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, BackoffBase: time.Nanosecond, BackoffMax: time.Nanosecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := worker.RunOnce(context.Background())
+	if err != nil || processed != 1 || len(provider.segments) != 1 || provider.segments[0] != 0 {
+		t.Fatalf("first run = %d err=%v segments=%v", processed, err, provider.segments)
+	}
+	firstSegment, err := store.GetReply(context.Background(), "tenant-a", "reply-retry", 0)
+	if err != nil || firstSegment.Status != runtimestorage.ReplyRetryable {
+		t.Fatalf("first segment = %+v err=%v", firstSegment, err)
+	}
+	secondSegment, err := store.GetReply(context.Background(), "tenant-a", "reply-retry", 1)
+	if err != nil || secondSegment.Status != runtimestorage.ReplyPending {
+		t.Fatalf("second segment = %+v err=%v", secondSegment, err)
+	}
+	time.Sleep(time.Millisecond)
+	processed, err = worker.RunOnce(context.Background())
+	if err != nil || processed != 2 || len(provider.segments) != 3 || provider.segments[1] != 0 || provider.segments[2] != 1 {
+		t.Fatalf("second run = %d err=%v segments=%v", processed, err, provider.segments)
 	}
 }
 

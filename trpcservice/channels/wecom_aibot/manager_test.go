@@ -774,6 +774,36 @@ func TestManagerAuthenticationFailureClosesConnection(t *testing.T) {
 	}
 }
 
+func TestManagerReconnectsWhenAuthenticationAcknowledgementTimesOut(t *testing.T) {
+	first, second := newTestConn(), newTestConn()
+	dialer := &testDialer{connections: make(chan Conn, 2)}
+	dialer.connections <- first
+	dialer.connections <- second
+	manager := &Manager{botID: "bot-1", secret: "secret-1", wsURL: defaultWSURL, dialer: dialer, queueSize: 1, heartbeat: time.Hour, reconnectBase: time.Millisecond, reconnectMax: time.Millisecond, authACKTimeout: 10 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	defer func() {
+		manager.BeginShutdown()
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("manager did not stop")
+		}
+	}()
+
+	_ = readFrame(t, first.writes)
+	select {
+	case <-first.closed:
+	case <-time.After(time.Second):
+		t.Fatal("unauthenticated connection was not closed")
+	}
+	secondAuth := readFrame(t, second.writes)
+	second.reads <- ackFrame(t, secondAuth.Headers.ReqID, 0)
+	waitReady(t, manager)
+}
+
 func TestManagerCancellationDoesNotQueueAuthenticationOrReplies(t *testing.T) {
 	manager := &Manager{botID: "bot-1", secret: "secret-1"}
 	ctx, cancel := context.WithCancel(context.Background())
