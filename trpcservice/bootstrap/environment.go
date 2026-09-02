@@ -32,6 +32,7 @@ import (
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
+	runtimestorageredis "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -66,7 +67,18 @@ const (
 	// #nosec G101 -- environment variable name, not a secret.
 	envModelSecretRef = "TRPC_MODEL_SECRET_REF"
 	envSessionBackend = "TRPC_SESSION_BACKEND"
-	envDemoMode       = "TRPC_DEMO_MODE"
+	envRedisAddr      = "TRPC_REDIS_ADDR"
+	// #nosec G101 -- environment variable name, not a credential.
+	envRedisPassword  = "TRPC_REDIS_PASSWORD"
+	envRedisDB        = "TRPC_REDIS_DB"
+	envRedisKeyPrefix = "TRPC_REDIS_KEY_PREFIX"
+	// #nosec G101 -- environment variable name, not a secret.
+	envRedisSecretRef    = "TRPC_REDIS_SECRET_REF"
+	envRedisDialTimeout  = "TRPC_REDIS_DIAL_TIMEOUT"
+	envRedisReadTimeout  = "TRPC_REDIS_READ_TIMEOUT"
+	envRedisWriteTimeout = "TRPC_REDIS_WRITE_TIMEOUT"
+	envRedisPoolSize     = "TRPC_REDIS_POOL_SIZE"
+	envDemoMode          = "TRPC_DEMO_MODE"
 	// #nosec G101 -- environment variable name, not a secret.
 	envWeComCallbackToken  = "WECOM_CALLBACK_TOKEN"
 	envWeComEncodingAESKey = "WECOM_ENCODING_AES_KEY"
@@ -87,6 +99,7 @@ const (
 	// #nosec G101 -- symbolic secret reference, not secret material.
 	defaultModelSecretRef = "env/trpc-model-api-key"
 	defaultSubjectID      = "service"
+	maxRedisDB            = 1 << 15
 )
 
 var (
@@ -97,6 +110,8 @@ var (
 	verifyEnvironmentMigrations      = migrations.Verify
 	verifyMySQLEnvironmentMigrations = migrations.VerifyMySQL
 	newEnvironmentRuntimeStore       = environmentRuntimeStore
+	newEnvironmentRedisRuntimeStore  = environmentRedisRuntimeStore
+	newEnvironmentInMemoryFallback   = func() runtimestorage.RuntimeStore { return runtimestorageinmemory.New() }
 	environmentWeComOwnerFunc        = environmentWeComOwner
 	newEnvironmentWeComWorker        = outbox.New
 )
@@ -122,6 +137,9 @@ type environmentConfig struct {
 	endpointHosts  []string
 	secretRef      string
 	runtimeStorage string
+	redis          runtimestorageredis.Config
+	redisEndpoint  string
+	redisSecretRef string
 	demoMode       bool
 	wecom          *environmentWeComConfig
 	telemetry      observability.Provider
@@ -133,6 +151,25 @@ type environmentWeComConfig struct {
 	encodingAESKey string
 	appSecret      string
 	secretRef      string
+}
+
+// environmentRuntimeStores owns process-scoped runtime stores. The primary
+// store serves ingress and outbox processing; provider stores serve Backend
+// Profile capability materialization.
+type environmentRuntimeStores struct {
+	primary   runtimestorage.RuntimeStore
+	providers map[string]runtimestorage.RuntimeStore
+	owned     []runtimestorage.RuntimeStore
+}
+
+func (stores environmentRuntimeStores) Close() error {
+	var errs []error
+	for _, store := range stores.owned {
+		if store != nil {
+			errs = append(errs, store.Close())
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // NewFromEnvironment assembles the production bootstrap graph from explicit
@@ -176,16 +213,23 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, err
 	}
 	delegateSessions := inmemory.NewSessionService()
-	runtimeStore, err := newEnvironmentRuntimeStore(config.runtimeStorage, db)
+	runtimeStores, err := newEnvironmentRuntimeStoresForConfig(ctx, config, db)
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = db.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if config.runtimeStorage == "redis" {
+			return nil, fmt.Errorf("%w: Redis runtime storage is unavailable", ErrInvalidConfig)
+		}
 		return nil, err
 	}
+	runtimeStore := runtimeStores.primary
 	tenantRepo, appRepo, channelRepo, auditWriter, err := environmentRepositories(config, db)
 	if err != nil {
 		_ = delegateSessions.Close()
-		_ = runtimeStore.Close()
+		_ = runtimeStores.Close()
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: environment repositories: %v", ErrInvalidConfig, err)
 	}
@@ -193,21 +237,21 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	wecomFactory, wecomWorker, err := environmentWeComComponents(config, channelRepo, tenantRepo, appRepo, runtimeStore, auditWriter)
 	if err != nil {
 		_ = delegateSessions.Close()
-		_ = runtimeStore.Close()
+		_ = runtimeStores.Close()
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: wecom components: %v", ErrInvalidConfig, err)
 	}
-	secretRegistry, modelRegistry, backendRegistry, err := environmentRegistries(config, delegateSessions, runtimeStore)
+	secretRegistry, modelRegistry, backendRegistry, err := environmentRegistriesForStores(config, delegateSessions, runtimeStores)
 	if err != nil {
 		_ = delegateSessions.Close()
-		_ = runtimeStore.Close()
+		_ = runtimeStores.Close()
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: environment registries: %v", ErrInvalidConfig, err)
 	}
 	storageFactory, err := backend.NewRegistryStorageFactory(backendRegistry, secretRegistry)
 	if err != nil {
 		_ = delegateSessions.Close()
-		_ = runtimeStore.Close()
+		_ = runtimeStores.Close()
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: storage factory: %v", ErrInvalidConfig, err)
 	}
@@ -233,20 +277,17 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		OutboxPollInterval:  time.Second,
 		AuditWriter:         auditWriter,
 		Ping: func(pingContext context.Context) error {
-			if config.driver == ControlPlaneDriverMySQL {
-				return mysql.Ping(pingContext, db)
-			}
-			return postgres.Ping(pingContext, db)
+			return environmentPing(pingContext, config.driver, db, runtimeStore)
 		},
 		Migrate:          applyMigrations,
 		VerifyMigrations: verifyMigrations,
 		CloseDependencies: func() error {
-			return errors.Join(delegateSessions.Close(), runtimeStore.Close())
+			return errors.Join(delegateSessions.Close(), runtimeStores.Close())
 		},
 	})
 	if err != nil {
 		_ = delegateSessions.Close()
-		_ = runtimeStore.Close()
+		_ = runtimeStores.Close()
 		_ = db.Close()
 		return nil, err
 	}
@@ -345,19 +386,34 @@ func environmentWeComComponents(config environmentConfig, channelsRepo channels.
 }
 
 func environmentRegistries(config environmentConfig, delegateSessions session.Service, runtimeStore runtimestorage.RuntimeStore) (*modelprofile.SecretRegistry, *modelprofile.ModelProviderRegistry, *backend.ProviderRegistry, error) {
+	providerName := environmentRuntimeProviderName(config.runtimeStorage)
+	return environmentRegistriesForStores(config, delegateSessions, environmentRuntimeStores{
+		primary:   runtimeStore,
+		providers: map[string]runtimestorage.RuntimeStore{providerName: runtimeStore},
+	})
+}
+
+type environmentRuntimeProviderSpec struct {
+	name         string
+	capabilities []backend.Capability
+	store        runtimestorage.RuntimeStore
+}
+
+func environmentRegistriesForStores(config environmentConfig, delegateSessions session.Service, runtimeStores environmentRuntimeStores) (*modelprofile.SecretRegistry, *modelprofile.ModelProviderRegistry, *backend.ProviderRegistry, error) {
 	secretRegistry := modelprofile.NewSecretRegistry()
 	modelRegistry := modelprofile.NewModelProviderRegistry()
 	backendRegistry := backend.NewProviderRegistry()
+	runtimeProviders, err := environmentRuntimeProviders(config, runtimeStores)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	for _, identity := range config.apiIdentities {
 		if config.demoMode {
 			if err := modelRegistry.Register(identity.TenantID, demoModelProvider, environmentModelFactory{}); err != nil {
 				return nil, nil, nil, err
 			}
-			for _, capability := range []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit} {
-				provider := environmentRuntimeCapabilityProvider{capability: capability, delegate: delegateSessions, store: runtimeStore, telemetry: config.telemetry, backend: config.runtimeStorage}
-				if err := backendRegistry.Register(identity.TenantID, capability, "inmemory", provider); err != nil {
-					return nil, nil, nil, err
-				}
+			if err := registerEnvironmentRuntimeProviders(backendRegistry, identity.TenantID, delegateSessions, config, runtimeProviders); err != nil {
+				return nil, nil, nil, err
 			}
 			continue
 		}
@@ -374,14 +430,64 @@ func environmentRegistries(config environmentConfig, delegateSessions session.Se
 		if err := modelRegistry.Register(identity.TenantID, config.modelProvider, environmentModelFactory{}); err != nil {
 			return nil, nil, nil, err
 		}
-		for _, capability := range []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit} {
-			provider := environmentRuntimeCapabilityProvider{capability: capability, delegate: delegateSessions, store: runtimeStore, telemetry: config.telemetry, backend: config.runtimeStorage}
-			if err := backendRegistry.Register(identity.TenantID, capability, "inmemory", provider); err != nil {
+		if config.runtimeStorage == "redis" && config.redis.Password != "" {
+			if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.redisSecretRef}, config.redis.Password); err != nil {
 				return nil, nil, nil, err
 			}
 		}
+		if err := registerEnvironmentRuntimeProviders(backendRegistry, identity.TenantID, delegateSessions, config, runtimeProviders); err != nil {
+			return nil, nil, nil, err
+		}
 	}
 	return secretRegistry, modelRegistry, backendRegistry, nil
+}
+
+func environmentRuntimeProviders(config environmentConfig, stores environmentRuntimeStores) ([]environmentRuntimeProviderSpec, error) {
+	providerName := environmentRuntimeProviderName(config.runtimeStorage)
+	primary := stores.providers[providerName]
+	if primary == nil {
+		return nil, fmt.Errorf("%w: primary runtime provider is unavailable", ErrInvalidConfig)
+	}
+	providers := []environmentRuntimeProviderSpec{{name: providerName, capabilities: environmentRuntimeCapabilities(config.runtimeStorage), store: primary}}
+	if config.runtimeStorage != "redis" {
+		return providers, nil
+	}
+	fallback := stores.providers["inmemory"]
+	if fallback == nil {
+		return nil, fmt.Errorf("%w: in-memory runtime provider is unavailable", ErrInvalidConfig)
+	}
+	return append(providers, environmentRuntimeProviderSpec{name: "inmemory", capabilities: environmentRuntimeCapabilities("inmemory"), store: fallback}), nil
+}
+
+func registerEnvironmentRuntimeProviders(registry *backend.ProviderRegistry, tenantID string, delegateSessions session.Service, config environmentConfig, runtimeProviders []environmentRuntimeProviderSpec) error {
+	for _, runtimeProvider := range runtimeProviders {
+		for _, capability := range runtimeProvider.capabilities {
+			provider := environmentRuntimeCapabilityProvider{capability: capability, delegate: delegateSessions, store: runtimeProvider.store, telemetry: config.telemetry, backend: runtimeProvider.name}
+			if runtimeProvider.name == "redis" {
+				provider.redisEndpoint = config.redisEndpoint
+				provider.redisSecretRef = config.redisSecretRef
+				provider.redisPasswordRequired = config.redis.Password != ""
+			}
+			if err := registry.Register(tenantID, capability, runtimeProvider.name, provider); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func environmentRuntimeProviderName(runtimeStorage string) string {
+	if runtimeStorage == "redis" {
+		return "redis"
+	}
+	return "inmemory"
+}
+
+func environmentRuntimeCapabilities(runtimeStorage string) []backend.Capability {
+	if runtimeStorage == "redis" {
+		return []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory}
+	}
+	return []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit}
 }
 
 func loadEnvironment() (environmentConfig, error) {
@@ -598,8 +704,17 @@ func parseEnvironmentModelAPIKeys(value string) (map[string]string, error) {
 
 func (config *environmentConfig) loadRuntime() error {
 	config.subjectID = strings.TrimSpace(config.subjectID)
-	if config.runtimeStorage != "postgres" && config.runtimeStorage != "inmemory" {
-		return fmt.Errorf("%w: %s must be explicitly set to postgres or inmemory", ErrInvalidConfig, envSessionBackend)
+	switch config.runtimeStorage {
+	case "postgres", "inmemory":
+	case "redis":
+		if config.demoMode {
+			return fmt.Errorf("%w: %s cannot use redis in demo mode", ErrInvalidConfig, envSessionBackend)
+		}
+		if err := config.loadRedis(); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("%w: %s must be explicitly set to postgres, redis or inmemory", ErrInvalidConfig, envSessionBackend)
 	}
 	if config.demoMode && (config.driver != ControlPlaneDriverPostgres || config.runtimeStorage != "inmemory") {
 		return fmt.Errorf("%w: %s requires PostgreSQL control plane and inmemory session backend", ErrInvalidConfig, envDemoMode)
@@ -608,6 +723,76 @@ func (config *environmentConfig) loadRuntime() error {
 		return fmt.Errorf("%w: %s=postgres is not available with MySQL control plane; use inmemory until a MySQL runtime adapter is selected", ErrInvalidConfig, envSessionBackend)
 	}
 	return nil
+}
+
+func (config *environmentConfig) loadRedis() error {
+	addr, err := requiredEnvironment(envRedisAddr)
+	if err != nil {
+		return err
+	}
+	if strings.ContainsAny(addr, "\r\n") {
+		return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envRedisAddr)
+	}
+	db, err := environmentInteger(envRedisDB, environmentOrDefault(envRedisDB, "0"), 0, maxRedisDB)
+	if err != nil {
+		return err
+	}
+	dialTimeout, err := environmentDuration(envRedisDialTimeout)
+	if err != nil {
+		return err
+	}
+	readTimeout, err := environmentDuration(envRedisReadTimeout)
+	if err != nil {
+		return err
+	}
+	writeTimeout, err := environmentDuration(envRedisWriteTimeout)
+	if err != nil {
+		return err
+	}
+	poolSize, err := environmentInteger(envRedisPoolSize, environmentOrDefault(envRedisPoolSize, "0"), 0, 0)
+	if err != nil {
+		return err
+	}
+	keyPrefix := environmentOrDefault(envRedisKeyPrefix, "trpc:runtime:v1")
+	if strings.ContainsAny(keyPrefix, "\r\n") || strings.TrimSpace(keyPrefix) == "" {
+		return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envRedisKeyPrefix)
+	}
+	password := os.Getenv(envRedisPassword)
+	if strings.ContainsAny(password, "\r\n") {
+		return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envRedisPassword)
+	}
+	config.redis = runtimestorageredis.Config{Addr: addr, Password: password, DB: db, KeyPrefix: keyPrefix, DialTimeout: dialTimeout, ReadTimeout: readTimeout, WriteTimeout: writeTimeout, PoolSize: poolSize}
+	config.redisEndpoint = redisEndpoint(addr)
+	config.redisSecretRef = environmentOrDefault(envRedisSecretRef, "env/trpc-redis-password")
+	if _, err := modelprofile.NewSecretValue(config.redis.Password); err != nil && config.redis.Password != "" {
+		return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envRedisPassword)
+	}
+	for _, identity := range config.apiIdentities {
+		if err := (modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.redisSecretRef}).Validate(); err != nil {
+			return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envRedisSecretRef)
+		}
+	}
+	return nil
+}
+
+func environmentInteger(name, value string, min, max int) (int, error) {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || parsed < min || (max > 0 && parsed > max) {
+		return 0, fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, name)
+	}
+	return parsed, nil
+}
+
+func environmentDuration(name string) (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, name)
+	}
+	return parsed, nil
 }
 
 func (config *environmentConfig) loadWeCom() error {
@@ -647,6 +832,65 @@ func environmentRuntimeStore(kind string, db *sql.DB) (runtimestorage.RuntimeSto
 	}
 }
 
+func newEnvironmentRuntimeStoreForConfig(ctx context.Context, config environmentConfig, db *sql.DB) (runtimestorage.RuntimeStore, error) {
+	if config.runtimeStorage == "redis" {
+		return newEnvironmentRedisRuntimeStore(ctx, config)
+	}
+	return newEnvironmentRuntimeStore(config.runtimeStorage, db)
+}
+
+func newEnvironmentRuntimeStoresForConfig(ctx context.Context, config environmentConfig, db *sql.DB) (environmentRuntimeStores, error) {
+	primary, err := newEnvironmentRuntimeStoreForConfig(ctx, config, db)
+	if err != nil {
+		return environmentRuntimeStores{}, err
+	}
+	providerName := environmentRuntimeProviderName(config.runtimeStorage)
+	stores := environmentRuntimeStores{
+		primary:   primary,
+		providers: map[string]runtimestorage.RuntimeStore{providerName: primary},
+		owned:     []runtimestorage.RuntimeStore{primary},
+	}
+	if config.runtimeStorage != "redis" {
+		return stores, nil
+	}
+	fallback := newEnvironmentInMemoryFallback()
+	stores.providers["inmemory"] = fallback
+	stores.owned = append(stores.owned, fallback)
+	return stores, nil
+}
+
+func environmentRedisRuntimeStore(ctx context.Context, config environmentConfig) (runtimestorage.RuntimeStore, error) {
+	store, err := runtimestorageredis.NewFromConfig(ctx, config.redis)
+	if err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+func environmentPing(ctx context.Context, driver ControlPlaneDriver, db *sql.DB, runtimeStore runtimestorage.RuntimeStore) error {
+	if ctx == nil {
+		return ErrInvalidConfig
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if driver == ControlPlaneDriverMySQL {
+		if err := mysql.Ping(ctx, db); err != nil {
+			return err
+		}
+	} else if err := postgres.Ping(ctx, db); err != nil {
+		return err
+	}
+	if pinger, ok := runtimeStore.(interface{ Ping(context.Context) error }); ok {
+		return pinger.Ping(ctx)
+	}
+	return nil
+}
+
+func redisEndpoint(addr string) string {
+	return "redis://" + strings.TrimSpace(addr)
+}
+
 func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalog, *backend.ProviderCatalog, error) {
 	if config.demoMode {
 		if config.modelProvider != demoModelProvider {
@@ -661,7 +905,7 @@ func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalo
 		if err != nil {
 			return nil, nil, fmt.Errorf("%w: demo model catalog is invalid", ErrInvalidConfig)
 		}
-		backendCatalog, err := newEnvironmentBackendCatalog()
+		backendCatalog, err := newEnvironmentBackendCatalog(config.runtimeStorage)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -681,21 +925,36 @@ func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalo
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: model catalog is invalid", ErrInvalidConfig)
 	}
-	backendCatalog, err := newEnvironmentBackendCatalog()
+	backendCatalog, err := newEnvironmentBackendCatalog(config.runtimeStorage)
 	if err != nil {
 		return nil, nil, err
 	}
 	return modelCatalog, backendCatalog, nil
 }
 
-func newEnvironmentBackendCatalog() (*backend.ProviderCatalog, error) {
-	backendCatalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
+func newEnvironmentBackendCatalog(runtimeStorage string) (*backend.ProviderCatalog, error) {
+	inMemory := backend.ProviderSpec{
 		Provider:        "inmemory",
 		Capabilities:    []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit},
 		EndpointPolicy:  backend.FieldForbidden,
 		SecretRefPolicy: backend.FieldForbidden,
 		Options:         map[string]backend.OptionSpec{},
-	})
+	}
+	if runtimeStorage == "redis" {
+		backendCatalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
+			Provider:        "redis",
+			Capabilities:    []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory},
+			EndpointPolicy:  backend.FieldRequired,
+			EndpointSchemes: []string{"redis"},
+			SecretRefPolicy: backend.FieldOptional,
+			Options:         map[string]backend.OptionSpec{},
+		}, inMemory)
+		if err != nil {
+			return nil, fmt.Errorf("%w: backend catalog is invalid", ErrInvalidConfig)
+		}
+		return backendCatalog, nil
+	}
+	backendCatalog, err := backend.NewProviderCatalog(inMemory)
 	if err != nil {
 		return nil, fmt.Errorf("%w: backend catalog is invalid", ErrInvalidConfig)
 	}
@@ -827,17 +1086,46 @@ type environmentSessionCapabilityProvider struct {
 }
 
 type environmentRuntimeCapabilityProvider struct {
-	capability backend.Capability
-	delegate   session.Service
-	store      runtimestorage.RuntimeStore
-	telemetry  observability.Provider
-	backend    string
+	capability            backend.Capability
+	delegate              session.Service
+	store                 runtimestorage.RuntimeStore
+	telemetry             observability.Provider
+	backend               string
+	redisEndpoint         string
+	redisSecretRef        string
+	redisPasswordRequired bool
 }
 
-func (provider environmentRuntimeCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, _ backend.CapabilityBinding, _ modelprofile.SecretValue) (any, error) {
+func (provider environmentRuntimeCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
 	if ctx == nil {
 		return nil, context.Canceled
 	}
+	if err := provider.validateRedisBinding(binding, secret); err != nil {
+		return nil, err
+	}
+	return provider.newCapability(ctx, input)
+}
+
+func (provider environmentRuntimeCapabilityProvider) validateRedisBinding(binding backend.CapabilityBinding, secret modelprofile.SecretValue) error {
+	if provider.backend != "redis" {
+		return nil
+	}
+	if provider.capability != backend.CapabilitySession && provider.capability != backend.CapabilityMemory {
+		return backend.ErrStorageFactory
+	}
+	if provider.redisEndpoint != "" && binding.Endpoint != provider.redisEndpoint {
+		return backend.ErrStorageFactory
+	}
+	if provider.redisSecretRef != "" && binding.SecretRef != "" && binding.SecretRef != provider.redisSecretRef {
+		return backend.ErrStorageFactory
+	}
+	if provider.redisPasswordRequired && secret.Value() == "" {
+		return backend.ErrStorageFactory
+	}
+	return nil
+}
+
+func (provider environmentRuntimeCapabilityProvider) newCapability(ctx context.Context, input backend.StorageFactoryInput) (any, error) {
 	if provider.capability == backend.CapabilitySession {
 		return runtimesessionpostgres.NewWithObservability(input.TenantID, provider.delegate, provider.store, provider.telemetry, provider.backend)
 	}

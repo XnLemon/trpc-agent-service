@@ -1,19 +1,18 @@
 # Tenant 运行时持久化契约（Issue #48）
 
-> 本页是 Issue #48 的先行设计与实现 ledger。它把 Session、入站事件和回复
-> Outbox 的租户边界、顺序和错误契约固定下来，再由后续代码阶段逐项落地。
-> 在 ledger 全部完成前，PR 使用 `Updates #48`，不会把未实现的能力描述成已交付。
+> 本页记录 Issue #48 的通用 RuntimeStore 契约，以及 Issue #108 的 Redis 实现边界。
+> 代码、测试和部署示例只把已经验证的能力标为已实现；未覆盖的外部后端仍属于后续工作。
 
 ## 目标与非目标
 
-运行时持久化的事实源是 PostgreSQL。每个操作都必须显式带 `tenant_id`；
+PostgreSQL 仍是控制面和默认运行时事实源；Redis 是可选的共享运行时后端。每个操作都必须显式带 `tenant_id`；
 Session/Runner 使用的命名空间只用于防碰撞，不能替代数据库授权。第一阶段覆盖：
 
 - Session 元数据、状态版本和生命周期；
 - `message_event` 入站幂等事实、事件序号和执行状态；
 - `reply_outbox` 分段回复、租约/fencing、重试和供应商回执。
 
-本 Issue 不实现 Redis、Memory/Knowledge/Artifact 生产适配、AuditEvent/usage/cost、
+Issue #48 不实现 Memory/Knowledge/Artifact 的其他生产适配、AuditEvent/usage/cost、
 完整 IM webhook/media、分布式调度、KMS/Vault 或告警平台。API principal 继续由
 Gateway HTTP 层的进程内幂等存储保护；跨进程 durable inbound claim 只在已验证
 Channel principal 上启用，因为 `message_event.binding_id` 必须引用真实的控制面 Binding。
@@ -137,9 +136,53 @@ provider reconciliation，`accepted` 直接确认，`rejected` 重试，`unknown
 ## Bootstrap 与恢复
 
 Bootstrap 必须显式选择 Session capability。`TRPC_SESSION_BACKEND=postgres` 时，
-必须同时提供已迁移的 `TRPC_POSTGRES_DSN`；未知值、缺失 DSN 或 migration 验证失败
-均 fail-closed。`inmemory` 只用于开发和测试，并在 readiness/启动日志中明确显示
-非持久化。新进程连接同一 DSN 后应能读取已有 Session、事件和未发送 Outbox。
+必须同时提供已迁移的 `TRPC_POSTGRES_DSN`；`TRPC_SESSION_BACKEND=redis` 时，必须提供
+`TRPC_REDIS_ADDR` 并在启动和 readiness 阶段成功 PING。未知值、缺失地址、连接失败或
+migration 验证失败均 fail-closed，不会静默回退到 InMemory。`inmemory` 只用于开发和测试，
+并在 readiness/启动日志中明确显示非持久化。新进程连接同一后端后应能读取已有 Session、
+事件、Memory 和未发送 Outbox。
+
+### Redis 实现范围（Issue #108）
+
+Redis provider 通过 Backend Profile 的 `Provider: "redis"` 选择，只注册 `session` 和
+`memory` capability；`summary`、`knowledge`、`artifact`、`audit` 等 capability 在 Catalog
+校验阶段拒绝 Redis。每条 profile binding 必须使用 `redis://` endpoint；若
+设置 `SecretRef`，它只能解析到当前 tenant 的 Redis 密码，密码不会进入 profile、快照、日志
+或错误文本。Provider 构造时再次校验 endpoint/secret scope，避免不同 tenant 复用错误配置。
+
+每个 tenant 使用一个 Redis key：
+
+```text
+<TRPC_REDIS_KEY_PREFIX>:<hex(tenant_id)>
+```
+
+默认前缀为 `trpc:runtime:v1`。key 的 tenant 部分使用 UTF-8 字节 hex 编码，避免简单拼接造成
+边界碰撞。value 是版本化 JSON 状态文档，当前 `version` 为 `1`，包含 Session、Event、
+event history、Reply Outbox、correlation、Memory 和 index handoff 集合。写入使用
+`WATCH/MULTI` CAS；event 序号、重复消息 claim、lease/fencing 和完整 reply batch 在一次原子
+状态更新中提交。
+
+Redis key 没有隐式 TTL。Session、事件、历史、Memory 和 Outbox 不会因为连接池或重启自动过期；
+保留、归档和删除必须由显式业务操作或后续运维工具完成。当前没有 Redis/PostgreSQL 迁移、
+双写、shadow read 或自动 cutover 工具；迁移方案仍按 Backend Profile 版本切换另行设计。
+
+主要环境变量如下：
+
+| 变量 | 必需/默认 | 说明 |
+| --- | --- | --- |
+| `TRPC_REDIS_ADDR` | Redis 模式必需 | `host:port`，地址不写入错误或日志 |
+| `TRPC_REDIS_PASSWORD` | 否 | 通过 Secret 注入的 Redis 密码；不写入配置快照 |
+| `TRPC_REDIS_SECRET_REF` | 否，`env/trpc-redis-password` | Backend Profile 可使用的租户 SecretRef |
+| `TRPC_REDIS_DB` | 否，`0` | Redis logical database，范围 `0..32768` |
+| `TRPC_REDIS_KEY_PREFIX` | 否，`trpc:runtime:v1` | 共享实例的命名空间前缀 |
+| `TRPC_REDIS_DIAL_TIMEOUT` | 否 | Go duration，例如 `500ms` |
+| `TRPC_REDIS_READ_TIMEOUT` | 否 | Go duration，例如 `500ms` |
+| `TRPC_REDIS_WRITE_TIMEOUT` | 否 | Go duration，例如 `500ms` |
+| `TRPC_REDIS_POOL_SIZE` | 否 | 大于 `0` 时覆盖客户端连接池大小 |
+
+本地 Compose 已包含带 AOF 的 Redis 7 服务；生产/Kubernetes 仍应使用外部 Redis，并通过 Secret
+Manager 注入密码。可选 live conformance/reconnect 测试读取 `REDIS_RUNTIME_TEST_ADDR`；未设置
+时显式 skip，不把本地 miniredis 测试冒充生产 Redis 证据。
 真实验收测试使用可选的 `POSTGRES_RUNTIME_TEST_DSN`，并要求该 DSN 已有可写的
 `POSTGRES_RUNTIME_TEST_TENANT_ID` 与 `POSTGRES_RUNTIME_TEST_BINDING_ID`；测试会执行
 完整 RuntimeStore 操作、关闭连接、重新打开连接并验证 Session/Event/History/Outbox
@@ -156,12 +199,13 @@ Bootstrap 必须显式选择 Session capability。`TRPC_SESSION_BACKEND=postgres
 | Bootstrap 显式 Session capability 与 fail-closed | 3 | 环境配置、RuntimeStore-backed session.Service、重启恢复测试 | ✅ |
 | durable Event payload/history 与完整 Event 状态生命周期 | 4 | `runtime_event_history`、fresh delegate replay、状态迁移测试 | ✅ |
 | Outbox worker/reconciliation/provider delivery | 5 | fenced worker、重试/死信/过期 lease 与 provider 测试 | ✅ |
+| Redis RuntimeStore/MemoryStore 与 tenant-scoped bootstrap | Issue #108 | `runtime/storage/redis` miniredis conformance、配置/Catalog 边界、Compose 服务与可选 live reconnect 测试 | ✅* |
 | 真实 PostgreSQL/InMemory conformance 与 fresh-process restart | 6 | `POSTGRES_RUNTIME_TEST_DSN` 可选 live suite 与 reopen 证据 | ✅* |
 | verified Channel duplicate Runner suppression | 6 | RuntimeStore claim + 并发 Gateway Runner invocation-count 测试 | ✅ |
 | 租户越权、取消、脱敏和防御性返回 | 1–6 | 双租户 conformance 与错误边界测试 | ✅ |
 | `go test`、race、vet、build、MkDocs strict | 最终 | PR 验证记录与 CI | ✅ |
 
-`✅*` 表示测试代码和重启路径已交付；live PostgreSQL 证据只有在 CI/本地实际
-提供上述 DSN 时才可勾选，未设置 DSN 的默认测试运行会 skip。
+`✅*` 表示测试代码和重启路径已交付；live PostgreSQL/Redis 证据只有在 CI/本地实际
+提供对应 DSN/地址时才可勾选，未设置变量的默认测试运行会显式 skip。
 
 在代码阶段完成后，本表必须与 PR 描述同步；未完成项目保留为明确的后续阶段。

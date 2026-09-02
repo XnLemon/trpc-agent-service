@@ -48,7 +48,7 @@ IM / HTTP -> Channel Adapter -> Gateway -> Queue/Outbox -> Agent Worker
 - PostgreSQL 控制面、migration、显式 `init` 初始化和受认证的 Admin API；
 - Tenant/App/Revision 的草稿、发布、回滚、灰度候选和乐观锁；
 - OpenAI 模型 provider，以及不访问外部服务的 deterministic fake provider；
-- InMemory 与 PostgreSQL runtime storage、Session/Event、Reply Outbox 和租约恢复；
+- InMemory、PostgreSQL 与 tenant-scoped Redis runtime storage；Redis 当前覆盖 Session/Event、Memory、Reply Outbox 和租约恢复；
 - 普通及流式 HTTP Chat API，企业微信自建应用文本 webhook，Telegram 文本 long polling；
 - OpenTelemetry trace/metrics、Prometheus 导出路径、审计事件和脱敏错误；
 - Docker Compose 本地验证、Kubernetes Kustomize base，以及版本 tag 触发的 GHCR 镜像发布。
