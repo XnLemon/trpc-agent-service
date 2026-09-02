@@ -166,6 +166,45 @@ func TestWorkerWaitsForRetryablePrecedingSegment(t *testing.T) {
 	}
 }
 
+func TestWorkerDeadLettersSegmentsAfterADeadLetteredPredecessor(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-dead", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session-dead", BindingID: "binding-dead", ExternalMessageID: "external-dead", EventID: "event-dead"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []runtimestorage.ReplyOutbox{
+		{TenantID: "tenant-a", EventID: "event-dead", ReplyID: "reply-dead", SegmentIndex: 0, SegmentCount: 2, Payload: "first"},
+		{TenantID: "tenant-a", EventID: "event-dead", ReplyID: "reply-dead", SegmentIndex: 1, SegmentCount: 2, Payload: "second"},
+	} {
+		if _, err := store.EnqueueReply(context.Background(), value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	provider := &providerStub{deliverID: "provider-dead", deliverFn: func(value runtimestorage.ReplyOutbox) error {
+		if value.SegmentIndex == 0 {
+			return &outbox.DeliveryError{Class: "rejected", Retryable: false}
+		}
+		t.Fatal("worker delivered a segment after its predecessor dead-lettered")
+		return nil
+	}}
+	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := worker.RunOnce(context.Background())
+	if err != nil || processed != 2 || len(provider.segments) != 1 || provider.segments[0] != 0 {
+		t.Fatalf("run = %d err=%v segments=%v", processed, err, provider.segments)
+	}
+	for index := 0; index < 2; index++ {
+		value, err := store.GetReply(context.Background(), "tenant-a", "reply-dead", index)
+		if err != nil || value.Status != runtimestorage.ReplyDeadLetter {
+			t.Fatalf("segment %d = %+v err=%v", index, value, err)
+		}
+	}
+}
+
 func TestWorkerRetriesThenDeadLettersStableProviderErrors(t *testing.T) {
 	store := inmemory.New()
 	seedReply(t, store, "tenant-a", "event-2", "reply-2")
