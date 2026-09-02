@@ -52,6 +52,17 @@ func seedReply(t *testing.T, store *inmemory.Store, tenant, event, reply string)
 
 type reverseCandidateStore struct{ *inmemory.Store }
 
+func failFirstSegmentOnce() func(runtimestorage.ReplyOutbox) error {
+	first := true
+	return func(value runtimestorage.ReplyOutbox) error {
+		if value.SegmentIndex == 0 && first {
+			first = false
+			return &outbox.DeliveryError{Class: "unavailable", Retryable: true}
+		}
+		return nil
+	}
+}
+
 func (s reverseCandidateStore) ListReplyCandidates(ctx context.Context, tenantID string) ([]runtimestorage.ReplyOutbox, error) {
 	values, err := s.Store.ListReplyCandidates(ctx, tenantID)
 	if err != nil {
@@ -135,14 +146,7 @@ func TestWorkerWaitsForRetryablePrecedingSegment(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	first := true
-	provider := &providerStub{deliverID: "provider-retry", deliverFn: func(value runtimestorage.ReplyOutbox) error {
-		if value.SegmentIndex == 0 && first {
-			first = false
-			return &outbox.DeliveryError{Class: "unavailable", Retryable: true}
-		}
-		return nil
-	}}
+	provider := &providerStub{deliverID: "provider-retry", deliverFn: failFirstSegmentOnce()}
 	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, BackoffBase: time.Nanosecond, BackoffMax: time.Nanosecond})
 	if err != nil {
 		t.Fatal(err)
