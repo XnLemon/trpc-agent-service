@@ -24,6 +24,13 @@ func TestStoreObjectContractAndTenantIsolation(t *testing.T) {
 	store, client := newTestStore(t, "tenant-a", Options{})
 	other, _ := newTestStoreWithClient(t, client, "tenant-b", Options{})
 	ctx := context.Background()
+	testObjectPutAndRead(t, store, client, ctx)
+	testObjectKeyS3Limit(t, store, client, ctx)
+	testObjectTenantIsolation(t, store, other, ctx)
+}
+
+func testObjectPutAndRead(t *testing.T, store *Store, client *fakeS3, ctx context.Context) runtimestorage.ObjectInfo {
+	t.Helper()
 	info, err := store.PutObject(ctx, "tenant-a", "media/report.txt", strings.NewReader("first"), "text/plain")
 	if err != nil {
 		t.Fatal(err)
@@ -47,20 +54,11 @@ func TestStoreObjectContractAndTenantIsolation(t *testing.T) {
 	if closeErr := body.Close(); readErr != nil || closeErr != nil || string(data) != "second" || got != replacement {
 		t.Fatalf("GetObject() = %q, %#v, %v, %v", data, got, readErr, closeErr)
 	}
-	longKey := strings.Repeat("k", 1024)
-	longInfo, err := store.PutObject(ctx, "tenant-a", longKey, strings.NewReader("long"), "text/plain")
-	if err != nil || len([]byte(store.remoteKey("objects", longKey))) > 1024 {
-		t.Fatalf("long object key PutObject() = %#v, %v, remote key length=%d", longInfo, err, len([]byte(store.remoteKey("objects", longKey))))
-	}
-	longBody, _, err := store.GetObject(ctx, "tenant-a", longKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	longData, readErr := io.ReadAll(longBody)
-	_ = longBody.Close()
-	if readErr != nil || string(longData) != "long" {
-		t.Fatalf("long object key GetObject() = %q, %v", longData, readErr)
-	}
+	return info
+}
+
+func testObjectTenantIsolation(t *testing.T, store, other *Store, ctx context.Context) {
+	t.Helper()
 	if _, _, err := other.GetObject(ctx, "tenant-b", "media/report.txt"); !errors.Is(err, runtimestorage.ErrNotFound) {
 		t.Fatalf("cross-tenant GetObject() = %v", err)
 	}
@@ -86,24 +84,38 @@ func TestStoreArtifactContractAndDefensiveCopies(t *testing.T) {
 	testArtifactListingAndDeletion(t, store, ctx)
 }
 
-func TestStoreArtifactLongIDUsesStableS3Key(t *testing.T) {
-	store, _ := newTestStore(t, "tenant-a", Options{})
+func testObjectKeyS3Limit(t *testing.T, store *Store, client *fakeS3, ctx context.Context) {
+	t.Helper()
+	longKey := strings.Repeat("k", 1024)
+	if _, err := store.PutObject(ctx, "tenant-a", longKey, strings.NewReader("long"), "text/plain"); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("long object key PutObject() = %v", err)
+	}
+	if _, _, err := store.GetObject(ctx, "tenant-a", longKey); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("long object key GetObject() = %v", err)
+	}
+	if err := store.DeleteObject(ctx, "tenant-a", longKey); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("long object key DeleteObject() = %v", err)
+	}
+	if client.putCalls != 2 {
+		t.Fatalf("long object key made %d remote writes", client.putCalls)
+	}
+}
+
+func TestStoreArtifactRejectsIDAboveS3ByteLimit(t *testing.T) {
+	store, client := newTestStore(t, "tenant-a", Options{})
 	ctx := context.Background()
 	artifactID := strings.Repeat("界", 256)
-	stored, err := store.PutArtifact(ctx, testArtifact(artifactID, "session", "content"))
-	if err != nil || len([]byte(store.remoteKey("artifacts", artifactID))) > 1024 {
-		t.Fatalf("long artifact ID PutArtifact() = %#v, %v, remote key length=%d", stored, err, len([]byte(store.remoteKey("artifacts", artifactID))))
+	if _, err := store.PutArtifact(ctx, testArtifact(artifactID, "session", "content")); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("long artifact ID PutArtifact() = %v", err)
 	}
-	got, err := store.GetArtifact(ctx, "tenant-a", artifactID)
-	if err != nil || got.ArtifactID != artifactID || string(got.Content) != "content" {
-		t.Fatalf("long artifact ID GetArtifact() = %#v, %v", got, err)
+	if _, err := store.GetArtifact(ctx, "tenant-a", artifactID); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("long artifact ID GetArtifact() = %v", err)
 	}
-	values, err := store.ListArtifacts(ctx, "tenant-a", "")
-	if err != nil || len(values) != 1 || values[0].ArtifactID != artifactID {
-		t.Fatalf("long artifact ID ListArtifacts() = %#v, %v", values, err)
-	}
-	if err := store.DeleteArtifact(ctx, "tenant-a", artifactID); err != nil {
+	if err := store.DeleteArtifact(ctx, "tenant-a", artifactID); !errors.Is(err, runtimestorage.ErrInvalid) {
 		t.Fatalf("long artifact ID DeleteArtifact() = %v", err)
+	}
+	if client.count() != 0 {
+		t.Fatalf("long artifact ID made %d remote writes", client.count())
 	}
 }
 

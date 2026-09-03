@@ -42,8 +42,6 @@ const (
 	metadataCreated  = metadataPrefix + "created"
 	metadataUpdated  = metadataPrefix + "updated"
 	metadataDigest   = metadataPrefix + "sha256"
-	metadataObject   = metadataPrefix + "object-key"
-	metadataArtifact = metadataPrefix + "artifact-id"
 )
 
 // API is the subset of the AWS S3 client used by Store. It is consumer-owned
@@ -176,44 +174,11 @@ func (s *Store) remoteKey(kind, key string) string {
 	// Tenant is part of the key even though the Store is already tenant-bound;
 	// this protects against accidental bucket sharing by callers and makes
 	// cross-tenant IDs non-colliding at the storage boundary.
-	tenant := base64.RawURLEncoding.EncodeToString([]byte(s.tenant))
-	encoded := base64.RawURLEncoding.EncodeToString([]byte(key))
-	remote := path.Join("tenants", tenant, kind, encoded)
-	if (kind == "objects" || kind == "artifacts") && len([]byte(remote)) > 1024 {
-		digest := sha256.Sum256([]byte(key))
-		return path.Join("tenants", tenant, kind, "sha256-"+hex.EncodeToString(digest[:]))
-	}
-	return remote
+	return path.Join("tenants", base64.RawURLEncoding.EncodeToString([]byte(s.tenant)), kind, base64.RawURLEncoding.EncodeToString([]byte(key)))
 }
 
-func (s *Store) objectKeyMetadataRequired(objectKey string) bool {
-	tenant := base64.RawURLEncoding.EncodeToString([]byte(s.tenant))
-	encoded := base64.RawURLEncoding.EncodeToString([]byte(objectKey))
-	return len([]byte(path.Join("tenants", tenant, "objects", encoded))) > 1024
-}
-
-func (s *Store) artifactKeyMetadataRequired(artifactID string) bool {
-	tenant := base64.RawURLEncoding.EncodeToString([]byte(s.tenant))
-	encoded := base64.RawURLEncoding.EncodeToString([]byte(artifactID))
-	return len([]byte(path.Join("tenants", tenant, "artifacts", encoded))) > 1024
-}
-
-func (s *Store) validObjectKeyMetadata(metadata map[string]string, objectKey string) bool {
-	encoded, ok := metadata[metadataObject]
-	if !ok {
-		return !s.objectKeyMetadataRequired(objectKey)
-	}
-	decoded, valid := decodeMetadataValue(encoded)
-	return valid && string(decoded) == objectKey
-}
-
-func (s *Store) validArtifactKeyMetadata(metadata map[string]string, artifactID string) bool {
-	encoded, ok := metadata[metadataArtifact]
-	if !ok {
-		return !s.artifactKeyMetadataRequired(artifactID)
-	}
-	decoded, valid := decodeMetadataValue(encoded)
-	return valid && string(decoded) == artifactID
+func (s *Store) validRemoteKey(kind, key string) bool {
+	return len([]byte(s.remoteKey(kind, key))) <= 1024
 }
 
 func validateKey(key string) bool {
@@ -255,7 +220,7 @@ func validateBucket(bucket string) bool {
 // PutObject stores or replaces one object. Repeating the same content is
 // idempotent and returns the existing metadata.
 func (s *Store) PutObject(ctx context.Context, tenantID, objectKey string, content io.Reader, contentType string) (runtimestorage.ObjectInfo, error) {
-	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateKey(objectKey) || !runtimestorage.ValidateText(contentType, 256, false) || content == nil {
+	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateKey(objectKey) || !s.validRemoteKey("objects", objectKey) || !runtimestorage.ValidateText(contentType, 256, false) || content == nil {
 		return runtimestorage.ObjectInfo{}, runtimestorage.ErrInvalid
 	}
 	operation, cancel, err := s.operationContext(ctx, s.writeTimeout)
@@ -276,9 +241,6 @@ func (s *Store) PutObject(ctx context.Context, tenantID, objectKey string, conte
 	created := time.Now().UTC()
 	existing, headErr := s.head(operation, remote)
 	if headErr == nil {
-		if !s.validObjectKeyMetadata(existing.Metadata, objectKey) {
-			return runtimestorage.ObjectInfo{}, runtimestorage.ErrStorage
-		}
 		persistedCreated, valid := parseArtifactTime(existing.Metadata[metadataCreated])
 		if !valid {
 			return runtimestorage.ObjectInfo{}, runtimestorage.ErrStorage
@@ -290,11 +252,7 @@ func (s *Store) PutObject(ctx context.Context, tenantID, objectKey string, conte
 	} else if !errors.Is(headErr, runtimestorage.ErrNotFound) {
 		return runtimestorage.ObjectInfo{}, headErr
 	}
-	metadata := map[string]string{metadataDigest: etag, metadataCreated: created.Format(time.RFC3339Nano)}
-	if s.objectKeyMetadataRequired(objectKey) {
-		metadata[metadataObject] = encodeMetadata(objectKey)
-	}
-	out, err := s.client.PutObject(operation, &awss3.PutObjectInput{Bucket: awssdk.String(s.bucket), Key: awssdk.String(remote), Body: bytes.NewReader(data), ContentLength: awssdk.Int64(int64(len(data))), ContentType: awssdk.String(contentType), Metadata: metadata})
+	out, err := s.client.PutObject(operation, &awss3.PutObjectInput{Bucket: awssdk.String(s.bucket), Key: awssdk.String(remote), Body: bytes.NewReader(data), ContentLength: awssdk.Int64(int64(len(data))), ContentType: awssdk.String(contentType), Metadata: map[string]string{metadataDigest: etag, metadataCreated: created.Format(time.RFC3339Nano)}})
 	if err != nil {
 		return runtimestorage.ObjectInfo{}, translate(err)
 	}
@@ -304,7 +262,7 @@ func (s *Store) PutObject(ctx context.Context, tenantID, objectKey string, conte
 
 // GetObject returns a caller-owned reader; closing it does not close Store.
 func (s *Store) GetObject(ctx context.Context, tenantID, objectKey string) (io.ReadCloser, runtimestorage.ObjectInfo, error) {
-	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateKey(objectKey) {
+	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateKey(objectKey) || !s.validRemoteKey("objects", objectKey) {
 		return nil, runtimestorage.ObjectInfo{}, runtimestorage.ErrInvalid
 	}
 	operation, cancel, err := s.operationContext(ctx, s.readTimeout)
@@ -322,7 +280,7 @@ func (s *Store) GetObject(ctx context.Context, tenantID, objectKey string) (io.R
 	}
 	digest := sha256.Sum256(data)
 	etag := hex.EncodeToString(digest[:])
-	if out.Metadata == nil || out.Metadata[metadataDigest] != etag || !s.validObjectKeyMetadata(out.Metadata, objectKey) {
+	if out.Metadata == nil || out.Metadata[metadataDigest] != etag {
 		return nil, runtimestorage.ObjectInfo{}, runtimestorage.ErrStorage
 	}
 	contentType := ""
@@ -360,7 +318,7 @@ func readS3Body(ctx context.Context, out *awss3.GetObjectOutput, maxBytes int64)
 // DeleteObject removes one object. Missing objects are reported consistently
 // with the other runtime storage implementations.
 func (s *Store) DeleteObject(ctx context.Context, tenantID, objectKey string) error {
-	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateKey(objectKey) {
+	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateKey(objectKey) || !s.validRemoteKey("objects", objectKey) {
 		return runtimestorage.ErrInvalid
 	}
 	operation, cancel, err := s.operationContext(ctx, s.writeTimeout)
@@ -380,16 +338,11 @@ func (s *Store) DeleteObject(ctx context.Context, tenantID, objectKey string) er
 
 // PutArtifact stores or replaces one artifact and returns its committed metadata.
 func (s *Store) PutArtifact(ctx context.Context, value runtimestorage.ArtifactRecord) (runtimestorage.ArtifactRecord, error) {
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.TenantID != s.tenant || !validateArtifactID(value.ArtifactID) || !runtimestorage.ValidateText(value.SessionID, 256, false) || !runtimestorage.ValidateText(value.Name, 512, false) || !runtimestorage.ValidateText(value.MimeType, 256, false) || len(value.Content) == 0 || int64(len(value.Content)) > s.maxBytes {
+	if !s.validArtifactInput(value) {
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrInvalid
 	}
-	metadata := map[string]string{
-		metadataDigest:  hexDigest(value.Content),
-		metadataSession: encodeMetadata(value.SessionID),
-		metadataName:    encodeMetadata(value.Name),
-		metadataMime:    encodeMetadata(value.MimeType),
-	}
-	if !validS3MetadataSize(metadata) {
+	metadata, valid := artifactMetadataForWrite(value)
+	if !valid {
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrInvalid
 	}
 	operation, cancel, err := s.operationContext(ctx, s.writeTimeout)
@@ -400,23 +353,12 @@ func (s *Store) PutArtifact(ctx context.Context, value runtimestorage.ArtifactRe
 	now := time.Now().UTC()
 	digestHex := metadata[metadataDigest]
 	remote := s.remoteKey("artifacts", value.ArtifactID)
-	version := int64(1)
-	created := now
-	existing, headErr := s.head(operation, remote)
-	if headErr == nil {
-		if !validArtifactHead(existing.Metadata, existing.ContentType) {
-			return runtimestorage.ArtifactRecord{}, runtimestorage.ErrStorage
-		}
-		if !s.validArtifactKeyMetadata(existing.Metadata, value.ArtifactID) {
-			return runtimestorage.ArtifactRecord{}, runtimestorage.ErrStorage
-		}
-		version = artifactVersion(existing.Metadata) + 1
-		created = artifactTime(existing.Metadata[metadataCreated], existing.LastModified)
-		if existing.Metadata[metadataDigest] == digestHex && decodeMetadata(existing.Metadata[metadataSession]) == value.SessionID && decodeMetadata(existing.Metadata[metadataName]) == value.Name && decodeMetadata(existing.Metadata[metadataMime]) == value.MimeType {
-			return runtimestorage.ArtifactRecord{TenantID: value.TenantID, ArtifactID: value.ArtifactID, SessionID: value.SessionID, Name: value.Name, MimeType: value.MimeType, Content: append([]byte(nil), value.Content...), Version: artifactVersion(existing.Metadata), CreatedAt: created, UpdatedAt: artifactTime(existing.Metadata[metadataUpdated], existing.LastModified)}, nil
-		}
-	} else if !errors.Is(headErr, runtimestorage.ErrNotFound) {
-		return runtimestorage.ArtifactRecord{}, headErr
+	version, created, existing, err := s.artifactWriteState(operation, remote, value, digestHex, now)
+	if err != nil {
+		return runtimestorage.ArtifactRecord{}, err
+	}
+	if existing != nil {
+		return *existing, nil
 	}
 	if version > 1 && !now.After(created) {
 		now = created.Add(time.Nanosecond)
@@ -424,9 +366,6 @@ func (s *Store) PutArtifact(ctx context.Context, value runtimestorage.ArtifactRe
 	metadata[metadataVersion] = fmt.Sprint(version)
 	metadata[metadataCreated] = created.Format(time.RFC3339Nano)
 	metadata[metadataUpdated] = now.Format(time.RFC3339Nano)
-	if s.artifactKeyMetadataRequired(value.ArtifactID) {
-		metadata[metadataArtifact] = encodeMetadata(value.ArtifactID)
-	}
 	if !validS3MetadataSize(metadata) {
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrInvalid
 	}
@@ -442,9 +381,38 @@ func (s *Store) PutArtifact(ctx context.Context, value runtimestorage.ArtifactRe
 	return value, nil
 }
 
+func (s *Store) validArtifactInput(value runtimestorage.ArtifactRecord) bool {
+	return runtimestorage.ValidateTenant(value.TenantID) == nil && value.TenantID == s.tenant && validateArtifactID(value.ArtifactID) && s.validRemoteKey("artifacts", value.ArtifactID) &&
+		runtimestorage.ValidateText(value.SessionID, 256, false) && runtimestorage.ValidateText(value.Name, 512, false) && runtimestorage.ValidateText(value.MimeType, 256, false) && len(value.Content) > 0 && int64(len(value.Content)) <= s.maxBytes
+}
+
+func artifactMetadataForWrite(value runtimestorage.ArtifactRecord) (map[string]string, bool) {
+	metadata := map[string]string{metadataDigest: hexDigest(value.Content), metadataSession: encodeMetadata(value.SessionID), metadataName: encodeMetadata(value.Name), metadataMime: encodeMetadata(value.MimeType)}
+	return metadata, validS3MetadataSize(metadata)
+}
+
+func (s *Store) artifactWriteState(ctx context.Context, remote string, value runtimestorage.ArtifactRecord, digest string, now time.Time) (int64, time.Time, *runtimestorage.ArtifactRecord, error) {
+	existing, headErr := s.head(ctx, remote)
+	if errors.Is(headErr, runtimestorage.ErrNotFound) {
+		return 1, now, nil, nil
+	}
+	if headErr != nil {
+		return 0, time.Time{}, nil, headErr
+	}
+	if !validArtifactHead(existing.Metadata, existing.ContentType) {
+		return 0, time.Time{}, nil, runtimestorage.ErrStorage
+	}
+	created := artifactTime(existing.Metadata[metadataCreated], existing.LastModified)
+	if existing.Metadata[metadataDigest] == digest && decodeMetadata(existing.Metadata[metadataSession]) == value.SessionID && decodeMetadata(existing.Metadata[metadataName]) == value.Name && decodeMetadata(existing.Metadata[metadataMime]) == value.MimeType {
+		record := runtimestorage.ArtifactRecord{TenantID: value.TenantID, ArtifactID: value.ArtifactID, SessionID: value.SessionID, Name: value.Name, MimeType: value.MimeType, Content: append([]byte(nil), value.Content...), Version: artifactVersion(existing.Metadata), CreatedAt: created, UpdatedAt: artifactTime(existing.Metadata[metadataUpdated], existing.LastModified)}
+		return 0, time.Time{}, &record, nil
+	}
+	return artifactVersion(existing.Metadata) + 1, created, nil, nil
+}
+
 // GetArtifact loads one validated artifact and returns a defensive content copy.
 func (s *Store) GetArtifact(ctx context.Context, tenantID, artifactID string) (runtimestorage.ArtifactRecord, error) {
-	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateArtifactID(artifactID) {
+	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateArtifactID(artifactID) || !s.validRemoteKey("artifacts", artifactID) {
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrInvalid
 	}
 	operation, cancel, err := s.operationContext(ctx, s.readTimeout)
@@ -468,7 +436,7 @@ func (s *Store) getArtifact(ctx context.Context, tenantID, artifactID string) (r
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrStorage
 	}
 	metadata := out.Metadata
-	if !validArtifactMetadata(metadata, content, out.ContentType) || !s.validArtifactKeyMetadata(metadata, artifactID) {
+	if !validArtifactMetadata(metadata, content, out.ContentType) {
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrStorage
 	}
 	created, updated, version, sessionID, name, mimeType := artifactMetadata(metadata, out.LastModified)
@@ -519,7 +487,7 @@ func (s *Store) listArtifactKeys(ctx context.Context, prefix string) ([]string, 
 		if out == nil {
 			return nil, runtimestorage.ErrStorage
 		}
-		pageKeys, pageErr := s.parseArtifactKeys(ctx, out.Contents, prefix)
+		pageKeys, pageErr := s.parseArtifactKeys(out.Contents, prefix)
 		if pageErr != nil {
 			return nil, pageErr
 		}
@@ -539,7 +507,7 @@ func (s *Store) listArtifactKeys(ctx context.Context, prefix string) ([]string, 
 	return keys, nil
 }
 
-func (s *Store) parseArtifactKeys(ctx context.Context, items []awss3types.Object, prefix string) ([]string, error) {
+func (s *Store) parseArtifactKeys(items []awss3types.Object, prefix string) ([]string, error) {
 	keys := make([]string, 0, len(items))
 	for _, item := range items {
 		if item.Key == nil || !strings.HasPrefix(*item.Key, prefix) {
@@ -547,18 +515,6 @@ func (s *Store) parseArtifactKeys(ctx context.Context, items []awss3types.Object
 		}
 		encoded := path.Base(*item.Key)
 		artifactID, err := base64.RawURLEncoding.DecodeString(encoded)
-		if isHashedRemoteKey(encoded) {
-			header, headErr := s.head(ctx, *item.Key)
-			if headErr != nil || header.Metadata == nil {
-				return nil, runtimestorage.ErrStorage
-			}
-			decoded, valid := decodeMetadataValue(header.Metadata[metadataArtifact])
-			if !valid {
-				return nil, runtimestorage.ErrStorage
-			}
-			artifactID = []byte(decoded)
-			err = nil
-		}
 		if err != nil || !validateArtifactID(string(artifactID)) || *item.Key != s.remoteKey("artifacts", string(artifactID)) {
 			return nil, runtimestorage.ErrStorage
 		}
@@ -567,17 +523,9 @@ func (s *Store) parseArtifactKeys(ctx context.Context, items []awss3types.Object
 	return keys, nil
 }
 
-func isHashedRemoteKey(value string) bool {
-	if !strings.HasPrefix(value, "sha256-") || len(value) != len("sha256-")+sha256.Size*2 {
-		return false
-	}
-	_, err := hex.DecodeString(strings.TrimPrefix(value, "sha256-"))
-	return err == nil
-}
-
 // DeleteArtifact removes one artifact.
 func (s *Store) DeleteArtifact(ctx context.Context, tenantID, artifactID string) error {
-	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateArtifactID(artifactID) {
+	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateArtifactID(artifactID) || !s.validRemoteKey("artifacts", artifactID) {
 		return runtimestorage.ErrInvalid
 	}
 	operation, cancel, err := s.operationContext(ctx, s.writeTimeout)

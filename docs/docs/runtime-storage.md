@@ -180,9 +180,8 @@ Resolver 到 provider 的短路径中使用，推荐格式为 `access-key-id:sec
 Profile、Execution Plan、日志、审计 payload 或错误文本。
 
 S3 用户 metadata 受远端 header 大小限制；Artifact 的 metadata 在写入前会按保守的 1.8 KiB
-预算校验，超限请求返回 `ErrInvalid`，不会产生远端写入。对象业务 key 保留 1,024 rune 输入
-契约，超过 S3 1,024-byte 路径限制时使用 tenant 内稳定摘要路径，并通过 metadata 校验防止
-摘要冲突导致错误读取。
+预算校验，超限请求返回 `ErrInvalid`，不会产生远端写入。所有业务 ID 也会在 S3 编码后的
+1,024-byte key 上限处 fail closed，避免把本地合法输入延迟为远端存储错误。
 
 `PutObject`/`GetObject` 受 `max_bytes` 和读写 deadline 限制，使用 SHA-256 元数据校验并返回
 防御性 reader；重复写入相同内容幂等，删除缺失对象返回 `ErrNotFound`。Artifact 元数据（名称、
