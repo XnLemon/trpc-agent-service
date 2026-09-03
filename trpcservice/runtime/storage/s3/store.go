@@ -42,6 +42,7 @@ const (
 	metadataCreated  = metadataPrefix + "created"
 	metadataUpdated  = metadataPrefix + "updated"
 	metadataDigest   = metadataPrefix + "sha256"
+	metadataObject   = metadataPrefix + "object-key"
 	metadataArtifact = metadataPrefix + "artifact-id"
 )
 
@@ -197,6 +198,15 @@ func (s *Store) artifactKeyMetadataRequired(artifactID string) bool {
 	return len([]byte(path.Join("tenants", tenant, "artifacts", encoded))) > 1024
 }
 
+func (s *Store) validObjectKeyMetadata(metadata map[string]string, objectKey string) bool {
+	encoded, ok := metadata[metadataObject]
+	if !ok {
+		return !s.objectKeyMetadataRequired(objectKey)
+	}
+	decoded, valid := decodeMetadataValue(encoded)
+	return valid && string(decoded) == objectKey
+}
+
 func (s *Store) validArtifactKeyMetadata(metadata map[string]string, artifactID string) bool {
 	encoded, ok := metadata[metadataArtifact]
 	if !ok {
@@ -266,6 +276,9 @@ func (s *Store) PutObject(ctx context.Context, tenantID, objectKey string, conte
 	created := time.Now().UTC()
 	existing, headErr := s.head(operation, remote)
 	if headErr == nil {
+		if !s.validObjectKeyMetadata(existing.Metadata, objectKey) {
+			return runtimestorage.ObjectInfo{}, runtimestorage.ErrStorage
+		}
 		persistedCreated, valid := parseArtifactTime(existing.Metadata[metadataCreated])
 		if !valid {
 			return runtimestorage.ObjectInfo{}, runtimestorage.ErrStorage
@@ -277,7 +290,11 @@ func (s *Store) PutObject(ctx context.Context, tenantID, objectKey string, conte
 	} else if !errors.Is(headErr, runtimestorage.ErrNotFound) {
 		return runtimestorage.ObjectInfo{}, headErr
 	}
-	out, err := s.client.PutObject(operation, &awss3.PutObjectInput{Bucket: awssdk.String(s.bucket), Key: awssdk.String(remote), Body: bytes.NewReader(data), ContentLength: awssdk.Int64(int64(len(data))), ContentType: awssdk.String(contentType), Metadata: map[string]string{metadataDigest: etag, metadataCreated: created.Format(time.RFC3339Nano)}})
+	metadata := map[string]string{metadataDigest: etag, metadataCreated: created.Format(time.RFC3339Nano)}
+	if s.objectKeyMetadataRequired(objectKey) {
+		metadata[metadataObject] = encodeMetadata(objectKey)
+	}
+	out, err := s.client.PutObject(operation, &awss3.PutObjectInput{Bucket: awssdk.String(s.bucket), Key: awssdk.String(remote), Body: bytes.NewReader(data), ContentLength: awssdk.Int64(int64(len(data))), ContentType: awssdk.String(contentType), Metadata: metadata})
 	if err != nil {
 		return runtimestorage.ObjectInfo{}, translate(err)
 	}
@@ -305,7 +322,7 @@ func (s *Store) GetObject(ctx context.Context, tenantID, objectKey string) (io.R
 	}
 	digest := sha256.Sum256(data)
 	etag := hex.EncodeToString(digest[:])
-	if out.Metadata == nil || out.Metadata[metadataDigest] != etag {
+	if out.Metadata == nil || out.Metadata[metadataDigest] != etag || !s.validObjectKeyMetadata(out.Metadata, objectKey) {
 		return nil, runtimestorage.ObjectInfo{}, runtimestorage.ErrStorage
 	}
 	contentType := ""
