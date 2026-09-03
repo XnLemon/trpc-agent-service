@@ -209,6 +209,30 @@ func TestRedisReplyBatchRetryAndDeadLetter(t *testing.T) {
 	}
 }
 
+func TestRedisRecordsReplyReceiptWithinCurrentLease(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	event := seedEvent(t, store, "tenant-a", "session-receipt", "event-receipt")
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-receipt", EventID: event.EventID, SegmentIndex: 0, SegmentCount: 1, Payload: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimReply(context.Background(), "tenant-a", "reply-receipt", 0, "worker-a", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, Owner: claimed.LeaseOwner, FencingToken: claimed.FencingToken, ProviderID: "provider-1"})
+	if err != nil || recorded.Status != runtimestorage.ReplySending || recorded.ProviderMessageID != "provider-1" || recorded.FencingToken != claimed.FencingToken || recorded.LeaseOwner != claimed.LeaseOwner {
+		t.Fatalf("recorded receipt = %+v, %v", recorded, err)
+	}
+	if _, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, Owner: claimed.LeaseOwner, FencingToken: claimed.FencingToken, ProviderID: "other-provider"}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("conflicting receipt = %v", err)
+	}
+	retry, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: runtimestorage.ReplyRetryable, Owner: claimed.LeaseOwner, FencingToken: claimed.FencingToken})
+	if err != nil || retry.ProviderMessageID != "provider-1" {
+		t.Fatalf("retry preserves receipt = %+v, %v", retry, err)
+	}
+}
+
 func TestRedisMemoryDurabilityAndIndexHandoff(t *testing.T) {
 	server := miniredis.RunT(t)
 	store := newStore(t, server)

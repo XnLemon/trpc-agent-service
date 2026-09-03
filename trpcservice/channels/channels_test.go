@@ -68,6 +68,33 @@ func TestBindingDomainInvariantsAndDefensiveConfiguration(t *testing.T) {
 	}
 }
 
+func TestWeComAIBotBindingSeparatesCredentialsAndNormalizesEndpoint(t *testing.T) {
+	routeDigest, err := DigestPublicRouteKey(ChannelWeComAIBot, "bot-route")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := NewBinding(CreateInput{TenantID: testTenantID, BindingKey: "aibot", Channel: ChannelWeComAIBot, ProviderAccountID: "bot-account", PublicRouteKeyDigest: routeDigest, AppID: testAppID, SecretRef: "secret/aibot", Protocol: ProtocolConfiguration{WeComAIBot: &WeComAIBotProtocolConfiguration{BotID: "bot-1"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.Protocol.WeComAIBot == nil || binding.Protocol.WeComAIBot.WSURL != "wss://openws.work.weixin.qq.com" {
+		t.Fatalf("AI Bot endpoint = %+v", binding.Protocol.WeComAIBot)
+	}
+	invalid := binding.Clone()
+	invalid.Protocol.WeComAIBot.WSURL = "ws://insecure.example.com"
+	if err := invalid.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("insecure AI Bot URL accepted: %v", err)
+	}
+	missingBot := binding.Clone()
+	missingBot.Protocol.WeComAIBot.BotID = ""
+	if err := missingBot.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing AI Bot ID accepted: %v", err)
+	}
+	if err := json.Unmarshal([]byte(`{"wecom_aibot":{"bot_id":"bot-1","secret":"must-not-be-stored"}}`), &ProtocolConfiguration{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("credential-shaped protocol JSON accepted: %v", err)
+	}
+}
+
 func TestBindingRejectsUnknownChannelAndProtocolCrossing(t *testing.T) {
 	routeDigest, err := DigestPublicRouteKey(ChannelTelegram, "telegram-route")
 	if err != nil {

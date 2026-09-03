@@ -51,7 +51,7 @@ Gateway 的 `InboundMessage` 是共享入站契约，`runtime/outbox.Provider` �
 | --- | --- |
 | `tenant_id`、`binding_id` | 不可变稳定身份；所有 Admin 操作显式携带二者 |
 | `binding_key` | 租户内唯一、规范化的小写机器键；不可变，不参与跨租户路由 |
-| `channel` | 只接受 `wecom`、`telegram`；协议类型不能由入站 payload 覆盖 |
+| `channel` | 只接受 `wecom`、`wecom_aibot`、`telegram`；协议类型不能由入站 payload 覆盖 |
 | `provider_account_id` | 外部 corp/bot/account 的稳定规范身份；不使用昵称 |
 | `public_route_key_digest` | route key 的 SHA-256 摘要；只用于候选发现，不保存明文 |
 | `app_id` | 同租户 Agent App 引用；可信路由固定它，payload/header 不能覆盖 |
@@ -76,7 +76,7 @@ CREATE TABLE channel_binding (
     binding_id                TEXT NOT NULL,
     binding_key               TEXT NOT NULL,
     channel                   TEXT NOT NULL
-                              CHECK (channel IN ('wecom', 'telegram')),
+                              CHECK (channel IN ('wecom', 'wecom_aibot', 'telegram')),
     provider_account_id       TEXT NOT NULL
                               CHECK (length(btrim(provider_account_id)) BETWEEN 1 AND 256),
     public_route_key_digest   TEXT NOT NULL
