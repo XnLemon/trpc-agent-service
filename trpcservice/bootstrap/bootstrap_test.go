@@ -594,6 +594,25 @@ func TestEnvironmentWeComAIBotComponentsUseTrustedBindings(t *testing.T) {
 	if err != nil || manager.Channel() != channels.ChannelWeComAIBot {
 		t.Fatalf("AI Bot manager = %v, %v", manager, err)
 	}
+	runtimeStore := runtimestorageinmemory.New()
+	defer func() { _ = runtimeStore.Close() }()
+	previousOwner := environmentWeComOwnerFunc
+	previousWorker := newEnvironmentWeComWorker
+	defer func() { environmentWeComOwnerFunc = previousOwner }()
+	defer func() { newEnvironmentWeComWorker = previousWorker }()
+	environmentWeComOwnerFunc = func() (string, error) { return "test-owner", nil }
+	var workerConfig outbox.Config
+	newEnvironmentWeComWorker = func(config outbox.Config) (*outbox.Worker, error) {
+		workerConfig = config
+		return outbox.New(config)
+	}
+	workerFactory := environmentOutboxWorkerFactory(environment, runtimeStore, nil, nil, bindingIDs)
+	if _, err := workerFactory([]channels.PollingAdapter{manager}); err != nil {
+		t.Fatalf("AI Bot outbox worker = %v", err)
+	}
+	if workerConfig.LeaseDuration != wecom_aibot.OutboxLeaseDuration {
+		t.Fatalf("AI Bot outbox lease duration = %s, want %s", workerConfig.LeaseDuration, wecom_aibot.OutboxLeaseDuration)
+	}
 	if err := manager.Close(); err != nil {
 		t.Fatal(err)
 	}

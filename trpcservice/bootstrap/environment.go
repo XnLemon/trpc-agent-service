@@ -463,7 +463,9 @@ func environmentOutboxWorkerFactory(config environmentConfig, runtimeStore runti
 	return func(adapters []channels.PollingAdapter) (*outbox.Worker, error) {
 		provider := legacy
 		channel, providerName := "wecom", "wecom"
+		leaseDuration := 30 * time.Second
 		if len(aiBotBindingIDs) > 0 {
+			leaseDuration = wecom_aibot.OutboxLeaseDuration
 			deliveryStore, ok := runtimeStore.(wecom_aibot.DeliveryStore)
 			if !ok {
 				return nil, errors.New("runtime store does not support durable reply acknowledgements")
@@ -493,7 +495,7 @@ func environmentOutboxWorkerFactory(config environmentConfig, runtimeStore runti
 		if err != nil {
 			return nil, err
 		}
-		return newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: provider, Channel: channel, ProviderName: providerName, TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second, AuditWriter: auditWriter, Observability: config.telemetry})
+		return newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: provider, Channel: channel, ProviderName: providerName, TenantID: config.tenantID, Owner: owner, LeaseDuration: leaseDuration, AuditWriter: auditWriter, Observability: config.telemetry})
 	}
 }
 

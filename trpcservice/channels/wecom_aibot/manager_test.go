@@ -102,6 +102,12 @@ func TestProviderWaitsForCorrelatedFinalReplyAcknowledgement(t *testing.T) {
 	}
 }
 
+func TestOutboxLeaseDurationCoversReplyAcknowledgement(t *testing.T) {
+	if OutboxLeaseDuration <= defaultReplyACKTimeout {
+		t.Fatalf("outbox lease duration = %s, reply acknowledgement timeout = %s", OutboxLeaseDuration, defaultReplyACKTimeout)
+	}
+}
+
 func TestProviderReturnsRetryableFailureWhenAcknowledgedReceiptCannotPersist(t *testing.T) {
 	connection := newTestConn()
 	manager, stop := startTestManager(t, connection, &testDispatcher{}, 2)

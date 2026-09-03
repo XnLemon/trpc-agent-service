@@ -25,6 +25,10 @@ const (
 	maxMissedHeartbeats    = 2
 )
 
+// OutboxLeaseDuration reserves the acknowledgement deadline and a separate
+// fenced receipt-commit window for durable final replies.
+const OutboxLeaseDuration = 2 * defaultReplyACKTimeout
+
 var errConnectionReplaced = errors.New("wecom ai bot connection replaced")
 
 // Conn is the narrow WebSocket surface owned by Manager. It permits protocol
