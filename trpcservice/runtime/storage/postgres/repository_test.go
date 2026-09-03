@@ -414,6 +414,18 @@ func TestRuntimeStoreRecordsReplyReceiptWithinCurrentLease(t *testing.T) {
 	if err != nil || recorded.Status != runtimestorage.ReplySending || recorded.ProviderMessageID != "provider-1" || recorded.FencingToken != 7 || recorded.LeaseOwner != "worker-a" {
 		t.Fatalf("recorded receipt = %+v, %v", recorded, err)
 	}
+	if _, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid receipt = %v", err)
+	}
+	mock.ExpectQuery("UPDATE public.reply_outbox SET provider_message_id=\\$6").WithArgs("tenant-a", "reply-error", 0, "worker-a", int64(7), "provider-1").WillReturnError(errors.New("database unavailable"))
+	if _, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: "tenant-a", ReplyID: "reply-error", Owner: "worker-a", FencingToken: 7, ProviderID: "provider-1"}); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("receipt storage error = %v", err)
+	}
+	mock.ExpectQuery("UPDATE public.reply_outbox SET provider_message_id=\\$6").WithArgs("tenant-a", "reply-stale", 0, "worker-a", int64(7), "provider-1").WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT tenant_id,reply_id,event_id,segment_index").WithArgs("tenant-a", "reply-stale", 0).WillReturnRows(replyRow(when))
+	if _, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: "tenant-a", ReplyID: "reply-stale", Owner: "worker-a", FencingToken: 7, ProviderID: "provider-1"}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("stale receipt = %v", err)
+	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}

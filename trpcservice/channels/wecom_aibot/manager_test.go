@@ -102,6 +102,30 @@ func TestProviderWaitsForCorrelatedFinalReplyAcknowledgement(t *testing.T) {
 	}
 }
 
+func TestProviderReturnsRetryableFailureWhenAcknowledgedReceiptCannotPersist(t *testing.T) {
+	connection := newTestConn()
+	manager, stop := startTestManager(t, connection, &testDispatcher{}, 2)
+	defer stop()
+	auth := readFrame(t, connection.writes)
+	connection.reads <- ackFrame(t, auth.Headers.ReqID, 0)
+	waitReady(t, manager)
+
+	provider, err := NewProvider(manager, testCorrelations{requestID: "req-final", receiptErr: errors.New("storage unavailable")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, deliverErr := provider.Deliver(context.Background(), storage.ReplyOutbox{TenantID: "tenant", EventID: "event", ReplyID: "reply", SegmentIndex: 0, SegmentCount: 1, Payload: "final", LeaseOwner: "worker", FencingToken: 1})
+		result <- deliverErr
+	}()
+	final := readFrame(t, connection.writes)
+	connection.reads <- ackFrame(t, final.Headers.ReqID, 0)
+	if err := <-result; !isDeliveryError(err, "unavailable", true) {
+		t.Fatalf("receipt persistence error = %v", err)
+	}
+}
+
 func TestProviderFinishesOnlyFinalDurableSegment(t *testing.T) {
 	connection := newTestConn()
 	manager, stop := startTestManager(t, connection, &testDispatcher{}, 2)
@@ -1001,8 +1025,9 @@ func (fn dispatchFunc) Dispatch(ctx context.Context, request gateway.DispatchReq
 }
 
 type testCorrelations struct {
-	requestID string
-	err       error
+	requestID  string
+	err        error
+	receiptErr error
 }
 
 func (c testCorrelations) GetReplyCorrelation(context.Context, string, string) (storage.ReplyCorrelation, error) {
@@ -1010,7 +1035,7 @@ func (c testCorrelations) GetReplyCorrelation(context.Context, string, string) (
 }
 
 func (c testCorrelations) RecordReplyReceipt(_ context.Context, receipt storage.ReplyReceipt) (storage.ReplyOutbox, error) {
-	return storage.ReplyOutbox{TenantID: receipt.TenantID, ReplyID: receipt.ReplyID, SegmentIndex: receipt.SegmentIndex, ProviderMessageID: receipt.ProviderID}, c.err
+	return storage.ReplyOutbox{TenantID: receipt.TenantID, ReplyID: receipt.ReplyID, SegmentIndex: receipt.SegmentIndex, ProviderMessageID: receipt.ProviderID}, c.receiptErr
 }
 
 type testDialer struct {
