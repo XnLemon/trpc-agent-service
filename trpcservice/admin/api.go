@@ -19,6 +19,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	storagemysql "github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	"github.com/google/uuid"
@@ -920,7 +921,7 @@ func mapError(err error) (int, string) {
 		return http.StatusNotFound, "not_found"
 	case matchesAny(err, tenant.ErrConflict, agent.ErrConflict, modelprofile.ErrConflict, backend.ErrConflict, channels.ErrConflict, tenant.ErrDuplicateKey, agent.ErrDuplicateKey, modelprofile.ErrDuplicateKey, backend.ErrDuplicateKey, channels.ErrDuplicateKey):
 		return http.StatusConflict, "conflict"
-	case errors.Is(err, postgres.ErrStorage):
+	case errors.Is(err, postgres.ErrStorage), errors.Is(err, storagemysql.ErrStorage):
 		return http.StatusServiceUnavailable, "storage_unavailable"
 	case matchesAny(err, tenant.ErrInvalid, agent.ErrInvalid, modelprofile.ErrInvalid, backend.ErrInvalid, channels.ErrInvalid):
 		return http.StatusBadRequest, "invalid_request"

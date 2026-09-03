@@ -21,6 +21,7 @@ import (
 	channelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	storagemysql "github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
@@ -102,6 +103,13 @@ func TestRecordMutationReflectionAndFailureBranches(t *testing.T) {
 func TestAdminMapsAuditFailureToServiceUnavailable(t *testing.T) {
 	status, code := mapError(audit.ErrWriteFailed)
 	if status != http.StatusServiceUnavailable || code != "audit_unavailable" {
+		t.Fatalf("status=%d code=%q", status, code)
+	}
+}
+
+func TestAdminMapsMySQLStorageFailureToServiceUnavailable(t *testing.T) {
+	status, code := mapError(storagemysql.ErrStorage)
+	if status != http.StatusServiceUnavailable || code != "storage_unavailable" {
 		t.Fatalf("status=%d code=%q", status, code)
 	}
 }
