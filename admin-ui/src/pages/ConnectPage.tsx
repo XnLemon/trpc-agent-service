@@ -2,28 +2,34 @@ import { useState } from 'react';
 import { Alert, Button, Card, Form, Input } from 'tdesign-react';
 import { LayersIcon } from 'tdesign-icons-react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { readStoredBaseUrl, useConnection } from '@/lib/connection';
+import { useConnection } from '@/lib/connection';
 
 /**
- * Credential entry point. The admin token is only kept in memory for the
- * duration of this tab (never localStorage / cookies / bundled config), per
- * the security boundary in docs/docs/admin-web-ui.md. Production deployments
- * should front this UI with a BFF that holds the token server-side.
+ * Same-origin administrator login. The server owns the HttpOnly session cookie;
+ * the browser never handles a bearer token.
  */
 export function ConnectPage() {
-  const { connect } = useConnection();
+  const { client, connect } = useConnection();
   const navigate = useNavigate();
   const location = useLocation();
-  const [baseUrl, setBaseUrl] = useState(readStoredBaseUrl());
-  const [token, setToken] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
   const from = (location.state as { from?: string } | null)?.from ?? '/tenants';
 
-  const submit = () => {
-    if (!token.trim()) {
-      return;
+  const submit = async () => {
+    if (!client || !username.trim() || !password || loading) return;
+    setLoading(true); setError('');
+    try {
+      const { data } = await client.login(username.trim(), password);
+      connect(data);
+      navigate(from, { replace: true });
+    } catch {
+      setError('账号或密码错误，请重试。');
+    } finally {
+      setLoading(false);
     }
-    connect({ baseUrl: baseUrl.trim().replace(/\/+$/, ''), token: token.trim() });
-    navigate(from, { replace: true });
   };
 
   return (
@@ -34,32 +40,28 @@ export function ConnectPage() {
         <h1>管理控制台</h1>
         <p>集中管理租户、Agent 应用、模型、存储后端与渠道绑定。</p>
       </div>
-      <Card className="admin-connect-card" title="连接 Admin API" bordered>
+      <Card className="admin-connect-card" title="管理员登录" bordered>
         <div className="admin-connect-stack">
-          <Alert
-            theme="warning"
-            message="凭证仅保存在内存中"
-            description="Admin token 不会写入 localStorage、Cookie 或前端构建产物；刷新页面后需重新输入。请勿在不可信的设备上使用高权限凭证。"
-          />
+          {error ? <Alert theme="error" message={error} /> : null}
           <Form layout="vertical" labelAlign="top" colon>
-            <Form.FormItem label="API 地址" help="留空表示同源 /admin（开发环境走 Vite 代理，生产环境由 BFF/反代转发）。">
+            <Form.FormItem label="管理员账号">
               <Input
-                value={baseUrl}
-                placeholder="例如 https://gateway.internal.example.com"
-                onChange={(value) => setBaseUrl(String(value))}
+                value={username}
+                placeholder="输入账号"
+                onChange={(value) => setUsername(String(value))}
               />
             </Form.FormItem>
-            <Form.FormItem label="Admin Token" help="即服务端 TRPC_ADMIN_TOKEN；其租户范围由 TRPC_ADMIN_TENANTS 决定。">
+            <Form.FormItem label="密码">
               <Input
                 type="password"
-                value={token}
-                placeholder="输入受控 Bearer 凭证"
-                onChange={(value) => setToken(String(value))}
+                value={password}
+                placeholder="输入密码"
+                onChange={(value) => setPassword(String(value))}
                 onEnter={submit}
               />
             </Form.FormItem>
-            <Button theme="primary" block disabled={!token.trim()} onClick={submit}>
-              连接
+            <Button theme="primary" block loading={loading} disabled={!username.trim() || !password} onClick={submit}>
+              登录
             </Button>
           </Form>
         </div>

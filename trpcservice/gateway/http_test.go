@@ -47,6 +47,26 @@ func TestHTTPHandlerAdminRouteBoundary(t *testing.T) {
 	}
 }
 
+func TestHTTPHandlerAdminAuthRouteBoundary(t *testing.T) {
+	auth := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler, err := NewHTTPHandler(HTTPConfig{AdminAuth: auth, Ready: func() bool { return true }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/admin/auth/login", "/admin/auth/session", "/admin/auth/logout"} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusNoContent {
+			t.Fatalf("admin auth path %s status = %d", path, recorder.Code)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/admin/authentic", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("near-miss admin auth path status = %d", recorder.Code)
+	}
+}
+
 type nilDispatchService struct{}
 
 func (nilDispatchService) Dispatch(context.Context, DispatchRequest) (<-chan DispatchEvent, error) {

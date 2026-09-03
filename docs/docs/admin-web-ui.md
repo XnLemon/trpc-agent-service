@@ -139,7 +139,7 @@ sequenceDiagram
 - 密码只保存 Argon2id 或等价强度的哈希，不进入日志、审计 payload 或前端状态。
 - 可在同一会话模型上接入 OIDC/SSO，不改变前端资源权限模型。
 
-当前 `StaticAuthenticator` 仍是服务进程级 Bearer Token 边界，只适合作为迁移期或内部 BFF 的上游凭证，不能作为最终浏览器登录体验。详见“迁移策略”。
+当前 `StaticAuthenticator` 仍是服务进程级 Bearer Token 边界，只适合作为迁移期或内部 BFF 的上游凭证，不能作为最终浏览器登录体验。配置 `TRPC_ADMIN_USERNAME` 与 `TRPC_ADMIN_PASSWORD` 后，服务会在保留静态 Bearer 兼容性的同时启用同源账号密码登录；浏览器只接收 `HttpOnly` 会话 Cookie，不需要填写 API 地址或 Token。
 
 ## 4. 信息架构与路由
 

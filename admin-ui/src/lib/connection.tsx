@@ -1,62 +1,54 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
-import { AdminClient, type Connection } from '@/api/client';
-
-const BASE_URL_STORAGE_KEY = 'trpc.admin.baseUrl';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { AdminClient, type AdminPrincipal, type Connection } from '@/api/client';
 
 interface ConnectionContextValue {
   connection: Connection | null;
   client: AdminClient | null;
-  connect: (connection: Connection) => void;
+  principal: AdminPrincipal | null;
+  status: 'loading' | 'authenticated' | 'unauthenticated';
+  connect: (principal: AdminPrincipal) => void;
   disconnect: () => void;
 }
 
 const ConnectionContext = createContext<ConnectionContextValue>({
   connection: null,
   client: null,
+  principal: null,
+  status: 'loading',
   connect: () => undefined,
   disconnect: () => undefined,
 });
 
-export function readStoredBaseUrl(): string {
-  try {
-    return sessionStorage.getItem(BASE_URL_STORAGE_KEY) ?? '';
-  } catch {
-    return '';
-  }
-}
-
-/**
- * Holds the operator-supplied credentials in memory only. The token is never
- * persisted (docs/docs/admin-web-ui.md security boundary); only the API base
- * URL is kept in sessionStorage for convenience. A browser refresh therefore
- * always returns to the connect page.
- */
 export function ConnectionProvider({ children }: { children: ReactNode }) {
-  const [connection, setConnection] = useState<Connection | null>(null);
+  const connection = useMemo<Connection>(() => ({ baseUrl: '' }), []);
+  const [principal, setPrincipal] = useState<AdminPrincipal | null>(null);
+  const [status, setStatus] = useState<'loading' | 'authenticated' | 'unauthenticated'>('loading');
+
+  const client = useMemo(() => new AdminClient(connection, () => {
+    setPrincipal(null);
+    setStatus('unauthenticated');
+  }), [connection]);
+
+  useEffect(() => {
+    client.getSession()
+      .then(({ data }) => { setPrincipal(data); setStatus('authenticated'); })
+      .catch(() => { setPrincipal(null); setStatus('unauthenticated'); });
+  }, [client]);
 
   const disconnect = useCallback(() => {
-    setConnection(null);
-  }, []);
+    void client.logout().catch(() => undefined);
+    setPrincipal(null);
+    setStatus('unauthenticated');
+  }, [client]);
 
-  const connect = useCallback((next: Connection) => {
-    try {
-      sessionStorage.setItem(BASE_URL_STORAGE_KEY, next.baseUrl);
-    } catch {
-      // ignore storage failures
-    }
-    setConnection(next);
+  const connect = useCallback((next: AdminPrincipal) => {
+    setPrincipal(next);
+    setStatus('authenticated');
   }, []);
-
-  const client = useMemo(() => {
-    if (!connection) {
-      return null;
-    }
-    return new AdminClient(connection, disconnect);
-  }, [connection, disconnect]);
 
   const value = useMemo(
-    () => ({ connection, client, connect, disconnect }),
-    [connection, client, connect, disconnect],
+    () => ({ connection, client, principal, status, connect, disconnect }),
+    [connection, client, connect, disconnect, principal, status],
   );
 
   return <ConnectionContext.Provider value={value}>{children}</ConnectionContext.Provider>;

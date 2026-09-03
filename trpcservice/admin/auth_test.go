@@ -1,12 +1,147 @@
 package admin
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
+
+func TestSessionAuthenticatorLoginSessionLogoutAndExpiry(t *testing.T) {
+	static, err := NewStaticAuthenticator("service-token", []string{"tenant-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewSessionAuthenticator("operator", "secret", static)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	auth.now = func() time.Time { return now }
+	login := httptest.NewRequest(http.MethodPost, "http://admin.test/admin/auth/login", bytes.NewBufferString(`{"username":"operator","password":"secret"}`))
+	login.Header.Set("Content-Type", "application/json")
+	login.Header.Set("Origin", "http://admin.test")
+	recorder := httptest.NewRecorder()
+	auth.ServeHTTP(recorder, login)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	cookie := recorder.Result().Cookies()[0]
+	if cookie.Name != AdminSessionCookie || !cookie.HttpOnly || cookie.Value == "" {
+		t.Fatalf("session cookie=%+v", cookie)
+	}
+	var envelope struct {
+		Data struct {
+			SubjectID    string   `json:"subject_id"`
+			TenantScopes []string `json:"tenant_scopes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.SubjectID != "admin" || len(envelope.Data.TenantScopes) != 1 || envelope.Data.TenantScopes[0] != "tenant-a" {
+		t.Fatalf("principal envelope=%+v", envelope.Data)
+	}
+
+	session := httptest.NewRequest(http.MethodGet, "http://admin.test/admin/auth/session", nil)
+	session.AddCookie(cookie)
+	recorder = httptest.NewRecorder()
+	auth.ServeHTTP(recorder, session)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("session status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	logout := httptest.NewRequest(http.MethodPost, "http://admin.test/admin/auth/logout", nil)
+	logout.AddCookie(cookie)
+	logout.Header.Set("Origin", "http://admin.test")
+	recorder = httptest.NewRecorder()
+	auth.ServeHTTP(recorder, logout)
+	if recorder.Code != http.StatusOK || recorder.Result().Cookies()[0].MaxAge != -1 {
+		t.Fatalf("logout status=%d cookies=%v", recorder.Code, recorder.Result().Cookies())
+	}
+	unauthorized := httptest.NewRequest(http.MethodGet, "http://admin.test/admin/auth/session", nil)
+	unauthorized.AddCookie(cookie)
+	recorder = httptest.NewRecorder()
+	auth.ServeHTTP(recorder, unauthorized)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked session status=%d", recorder.Code)
+	}
+
+	login = httptest.NewRequest(http.MethodPost, "http://admin.test/admin/auth/login", bytes.NewBufferString(`{"username":"operator","password":"secret"}`))
+	login.Header.Set("Content-Type", "application/json")
+	recorder = httptest.NewRecorder()
+	auth.ServeHTTP(recorder, login)
+	cookie = recorder.Result().Cookies()[0]
+	now = now.Add(defaultSessionTTL + time.Second)
+	expired := httptest.NewRequest(http.MethodGet, "http://admin.test/admin/auth/session", nil)
+	expired.AddCookie(cookie)
+	recorder = httptest.NewRecorder()
+	auth.ServeHTTP(recorder, expired)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expired session status=%d", recorder.Code)
+	}
+}
+
+func TestSessionAuthenticatorRejectsInvalidCredentialsAndCrossOriginWrites(t *testing.T) {
+	static, _ := NewStaticAuthenticator("service-token", []string{"tenant-a"})
+	auth, err := NewSessionAuthenticator("operator", "secret", static)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := httptest.NewRequest(http.MethodPost, "http://admin.test/admin/auth/login", bytes.NewBufferString(`{"username":"operator","password":"wrong"}`))
+	bad.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	auth.ServeHTTP(recorder, bad)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid credentials status=%d", recorder.Code)
+	}
+	login := httptest.NewRequest(http.MethodPost, "http://admin.test/admin/auth/login", bytes.NewBufferString(`{"username":"operator","password":"secret"}`))
+	login.Header.Set("Content-Type", "application/json")
+	login.Header.Set("Origin", "http://admin.test")
+	recorder = httptest.NewRecorder()
+	auth.ServeHTTP(recorder, login)
+	cookie := recorder.Result().Cookies()[0]
+	for _, method := range []string{http.MethodPost} {
+		request := httptest.NewRequest(method, "http://admin.test/admin/auth/logout", nil)
+		request.AddCookie(cookie)
+		request.Header.Set("Origin", "http://evil.test")
+		recorder = httptest.NewRecorder()
+		auth.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("cross-origin status=%d", recorder.Code)
+		}
+	}
+	staticRequest := httptest.NewRequest(http.MethodGet, "http://admin.test/admin/auth/session", nil)
+	staticRequest.Header.Set("Authorization", "Bearer service-token")
+	recorder = httptest.NewRecorder()
+	auth.ServeHTTP(recorder, staticRequest)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("static compatibility status=%d", recorder.Code)
+	}
+	var nilAuth *SessionAuthenticator
+	if _, err := nilAuth.Authenticate(context.Background(), nil); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("nil auth error=%v", err)
+	}
+}
+
+func TestSessionAuthenticatorNilRequestDoesNotPanic(t *testing.T) {
+	auth, err := NewSessionAuthenticator("operator", "secret", func() *StaticAuthenticator {
+		static, _ := NewStaticAuthenticator("service-token", []string{"tenant-a"})
+		return static
+	}())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	auth.ServeHTTP(recorder, nil)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("nil request status = %d", recorder.Code)
+	}
+}
 
 func TestStaticAuthenticatorConfigurationAndBoundary(t *testing.T) {
 	for _, token := range []string{"", "bad\n-token"} {

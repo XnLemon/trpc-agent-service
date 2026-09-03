@@ -16,10 +16,13 @@ import { BindingsPage } from '@/pages/tenant/BindingsPage';
 import { BindingDetailPage } from '@/pages/tenant/BindingDetailPage';
 
 function RequireConnection({ children }: { children: ReactElement }) {
-  const { connection } = useConnection();
+  const { status } = useConnection();
   const location = useLocation();
-  if (!connection) {
-    return <Navigate to="/connect" state={{ from: location.pathname }} replace />;
+  if (status === 'loading') {
+    return <div className="admin-load-state" />;
+  }
+  if (status !== 'authenticated') {
+    return <Navigate to="/admin/login" state={{ from: location.pathname }} replace />;
   }
   return children;
 }
@@ -28,7 +31,16 @@ export default function App() {
   return (
     <ConnectionProvider>
       <Routes>
-        <Route path="/connect" element={<ConnectPage />} />
+        <Route path="/admin/login" element={<ConnectPage />} />
+        <Route path="/connect" element={<Navigate to="/admin/login" replace />} />
+        <Route
+          path="/admin"
+          element={
+            <RequireConnection>
+              <Navigate to="/tenants" replace />
+            </RequireConnection>
+          }
+        />
         <Route
           element={
             <RequireConnection>
@@ -50,7 +62,7 @@ export default function App() {
             <Route path="bindings/:bindingId" element={<BindingDetailPage />} />
           </Route>
         </Route>
-        <Route path="*" element={<Navigate to="/tenants" replace />} />
+        <Route path="*" element={<Navigate to="/admin/login" replace />} />
       </Routes>
     </ConnectionProvider>
   );

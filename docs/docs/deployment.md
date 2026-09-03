@@ -83,6 +83,7 @@ Deployment 和 ClusterIP Service。Deployment 默认两副本，滚动更新策�
 TRPC_POSTGRES_DSN
 TRPC_API_TOKEN + TRPC_TENANT_ID + TRPC_APP_ID
 TRPC_ADMIN_TOKEN + TRPC_ADMIN_TENANTS
+TRPC_ADMIN_USERNAME + TRPC_ADMIN_PASSWORD（启用同源 Admin Web 登录时）
 TRPC_MODEL_API_KEY
 ```
 
@@ -171,6 +172,8 @@ curl --fail http://127.0.0.1:8080/readyz
 | `TRPC_SUBJECT_ID` | 否，`service` | 旧兼容路径的主体 ID |
 | `TRPC_ADMIN_TOKEN` | 必需 | Admin API bearer token |
 | `TRPC_ADMIN_TENANTS` | 必需 | 逗号分隔的可管理 tenant；`*` 仅适合本地演示 |
+| `TRPC_ADMIN_USERNAME` | 否 | Admin Web 登录账号；必须与 `TRPC_ADMIN_PASSWORD` 一起配置 |
+| `TRPC_ADMIN_PASSWORD` | 否 | Admin Web 登录密码；仅用于创建 HttpOnly 会话，不会返回到浏览器脚本 |
 
 `TRPC_API_IDENTITIES` 与 `TRPC_API_TOKEN`/`TRPC_TENANT_ID`/`TRPC_APP_ID` 互斥。Token
 只作为认证 map key 使用，不会写入错误信息或运行时快照。

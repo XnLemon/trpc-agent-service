@@ -37,7 +37,13 @@ export class ApiError extends Error {
 
 export interface Connection {
   baseUrl: string;
-  token: string;
+}
+
+export interface AdminPrincipal {
+  subject_id: string;
+  global: boolean;
+  tenant_scopes: string[];
+  can_create_tenant: boolean;
 }
 
 export interface ListResponse<T> {
@@ -52,8 +58,8 @@ interface RequestResult<T> {
 }
 
 /**
- * AdminClient talks to the control-plane API (/admin/v1/*). The bearer token
- * is supplied by the operator at runtime and is only kept in memory.
+ * AdminClient talks to the same-origin control-plane API using the HttpOnly
+ * session cookie issued by /admin/auth/login.
  */
 export class AdminClient {
   constructor(
@@ -66,9 +72,9 @@ export class AdminClient {
     try {
       response = await fetch(`${this.connection.baseUrl}${path}`, {
         method,
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.connection.token}`,
         },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
@@ -109,7 +115,19 @@ export class AdminClient {
     return this.get<ListResponse<T>>(`${path}${query.toString() ? `?${query}` : ''}`);
   }
 
-  getMe() { return this.get<{ subject_id: string; global: boolean; tenant_scopes: string[]; can_create_tenant: boolean }>('/admin/v1/me'); }
+  login(username: string, password: string) {
+    return this.post<AdminPrincipal>('/admin/auth/login', { username, password });
+  }
+
+  getSession() {
+    return this.get<AdminPrincipal>('/admin/auth/session');
+  }
+
+  logout() {
+    return this.post<{ logged_out: boolean }>('/admin/auth/logout', {});
+  }
+
+  getMe() { return this.get<AdminPrincipal>('/admin/v1/me'); }
   listTenants(params: Record<string, string | number | undefined> = {}) { return this.list<Tenant>('/admin/v1/tenants', params); }
   listApps(tenantId: string, params: Record<string, string | number | undefined> = {}) { return this.list<App>(this.tenantPath(tenantId, 'apps'), params); }
   listRevisions(tenantId: string, appId: string, params: Record<string, string | number | undefined> = {}) { return this.list<Revision>(this.tenantPath(tenantId, `apps/${encodeURIComponent(appId)}/revisions`), params); }

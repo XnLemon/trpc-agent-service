@@ -382,6 +382,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 
 func configureAdmin(config *Config, registry *gateway.RunnerRegistry) error {
 	if config.AdminAuthenticator == nil {
+		config.HTTP.AdminAuth = nil
 		return nil
 	}
 	bindingRepository, ok := config.Channels.(channels.Repository)
@@ -403,6 +404,9 @@ func configureAdmin(config *Config, registry *gateway.RunnerRegistry) error {
 		return ErrInvalidConfig
 	}
 	config.AdminHandler = adminHandler
+	if sessionAuthenticator, ok := config.AdminAuthenticator.(*admin.SessionAuthenticator); ok {
+		config.HTTP.AdminAuth = sessionAuthenticator
+	}
 	return nil
 }
 
@@ -426,8 +430,12 @@ func invalidateRuntimeCache(registry *gateway.RunnerRegistry, change admin.Cache
 }
 
 func configureHandler(runtimeGraph *Runtime, config Config) error {
+	adminHandler := config.AdminHandler
+	if adminHandler == nil {
+		adminHandler = config.HTTP.Admin
+	}
 	handler, err := gateway.NewHTTPHandler(gateway.HTTPConfig{
-		Dispatcher: runtimeGraph.Dispatcher, Authenticator: config.Authenticator, Admin: config.AdminHandler, WeCom: runtimeGraph.wecomHandler,
+		Dispatcher: runtimeGraph.Dispatcher, Authenticator: config.Authenticator, Admin: adminHandler, AdminAuth: config.HTTP.AdminAuth, WeCom: runtimeGraph.wecomHandler,
 		Ready: runtimeGraph.Ready, Limiter: config.HTTP.Limiter, Idempotency: config.HTTP.Idempotency,
 		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout, Observability: config.Observability,
 	})

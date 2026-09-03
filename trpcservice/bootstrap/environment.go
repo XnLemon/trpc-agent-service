@@ -55,7 +55,11 @@ const (
 	// #nosec G101 -- environment variable name, not a credential.
 	envAdminToken   = "TRPC_ADMIN_TOKEN"
 	envAdminTenants = "TRPC_ADMIN_TENANTS"
-	envSubjectID    = "TRPC_SUBJECT_ID"
+	// #nosec G101 -- environment variable name, not a credential.
+	envAdminUsername = "TRPC_ADMIN_USERNAME"
+	// #nosec G101 -- environment variable name, not a credential.
+	envAdminPassword = "TRPC_ADMIN_PASSWORD"
+	envSubjectID     = "TRPC_SUBJECT_ID"
 	// #nosec G101 -- environment variable name, not a credential.
 	envModelAPIKey = "TRPC_MODEL_API_KEY"
 	// #nosec G101 -- environment variable name, not a credential.
@@ -112,6 +116,8 @@ type environmentConfig struct {
 	apiIdentities  map[string]gateway.APIIdentity
 	adminToken     string
 	adminTenants   []string
+	adminUsername  string
+	adminPassword  string
 	tenantID       string
 	appID          string
 	subjectID      string
@@ -167,9 +173,17 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: API authenticator configuration is invalid", ErrInvalidConfig)
 	}
-	adminAuthenticator, err := admin.NewStaticAuthenticator(config.adminToken, config.adminTenants)
+	staticAdmin, err := admin.NewStaticAuthenticator(config.adminToken, config.adminTenants)
 	if err != nil {
 		return nil, fmt.Errorf("%w: Admin authenticator configuration is invalid", ErrInvalidConfig)
+	}
+	var adminAuthenticator admin.Authenticator = staticAdmin
+	if config.adminUsername != "" {
+		sessionAuthenticator, sessionErr := admin.NewSessionAuthenticator(config.adminUsername, config.adminPassword, staticAdmin)
+		if sessionErr != nil {
+			return nil, fmt.Errorf("%w: Admin session configuration is invalid", ErrInvalidConfig)
+		}
+		adminAuthenticator = sessionAuthenticator
 	}
 	db, applyMigrations, verifyMigrations, err := openEnvironmentDatabaseForConfig(ctx, config)
 	if err != nil {
@@ -519,7 +533,16 @@ func (config *environmentConfig) loadAdmin() error {
 		return err
 	}
 	config.adminTenants, err = environmentList(envAdminTenants, adminTenantValue, false)
-	return err
+	if err != nil {
+		return err
+	}
+	username := strings.TrimSpace(os.Getenv(envAdminUsername))
+	password := strings.TrimSpace(os.Getenv(envAdminPassword))
+	if (username == "") != (password == "") {
+		return fmt.Errorf("%w: %s and %s must be configured together", ErrInvalidConfig, envAdminUsername, envAdminPassword)
+	}
+	config.adminUsername, config.adminPassword = username, password
+	return nil
 }
 
 func (config *environmentConfig) loadModel() error {

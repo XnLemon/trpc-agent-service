@@ -15,7 +15,7 @@ interface NavItem {
 export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { connection, disconnect } = useConnection();
+  const { principal, disconnect } = useConnection();
 
   const tenantMatch = location.pathname.match(/^\/tenants\/([^/]+)/);
   const tenantId = tenantMatch?.[1];
@@ -66,8 +66,8 @@ export function AppShell() {
         ) : null}
         <span className="admin-shell-header-spacer" />
         <div className="admin-shell-endpoint">
-          <span className="admin-shell-endpoint-label">API endpoint</span>
-          <span>{connection?.baseUrl || '同源 /admin'}</span>
+          <span className="admin-shell-endpoint-label">管理员</span>
+          <span>{principal?.subject_id || 'admin'}</span>
         </div>
         <Tag theme="primary" variant="light">Admin</Tag>
         <Button
@@ -76,10 +76,10 @@ export function AppShell() {
           icon={<LogoutIcon />}
           onClick={() => {
             disconnect();
-            navigate('/connect');
+            navigate('/admin/login');
           }}
         >
-          断开连接
+          退出登录
         </Button>
       </Header>
       <Layout className="admin-shell-body">
