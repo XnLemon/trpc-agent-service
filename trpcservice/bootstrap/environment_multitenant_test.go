@@ -350,6 +350,102 @@ func TestEnvironmentRuntimeCapabilityProviderNew(t *testing.T) {
 	}
 }
 
+func TestEnvironmentBackendCatalogIncludesTenantScopedS3ArtifactOnly(t *testing.T) {
+	catalog, err := newEnvironmentBackendCatalog("postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bucket := "tenant-artifacts"
+	bindings, err := catalog.NormalizeBindings([]backend.CapabilityBinding{{
+		Capability: backend.CapabilityArtifact,
+		Provider:   "s3",
+		Endpoint:   "https://s3.example.test",
+		SecretRef:  "env/s3",
+		Options:    map[string]string{"bucket": bucket},
+	}})
+	if err != nil || len(bindings) != 1 {
+		t.Fatalf("S3 artifact binding = %#v, %v", bindings, err)
+	}
+	if bindings[0].Options["region"] != "us-east-1" || bindings[0].Options["path_style"] != "false" || bindings[0].Options["max_bytes"] != "33554432" {
+		t.Fatalf("S3 defaults = %#v", bindings[0].Options)
+	}
+	if _, err := catalog.NormalizeBindings([]backend.CapabilityBinding{{Capability: backend.CapabilityMemory, Provider: "s3", Endpoint: "https://s3.example.test", SecretRef: "env/s3", Options: map[string]string{"bucket": bucket}}}); !errors.Is(err, backend.ErrInvalid) {
+		t.Fatalf("S3 memory binding = %v", err)
+	}
+	for _, options := range []map[string]string{{"bucket": bucket, "secret": "leak"}, {"bucket": bucket, "max_bytes": "0"}} {
+		if _, err := catalog.NormalizeBindings([]backend.CapabilityBinding{{Capability: backend.CapabilityArtifact, Provider: "s3", Endpoint: "https://s3.example.test", SecretRef: "env/s3", Options: options}}); !errors.Is(err, backend.ErrInvalid) {
+			t.Fatalf("invalid S3 options %#v = %v", options, err)
+		}
+	}
+	for _, options := range []map[string]string{{"bucket": "BAD"}, {"bucket": "a..b"}} {
+		if _, err := parseEnvironmentS3Options(options); !errors.Is(err, backend.ErrStorageFactory) {
+			t.Fatalf("invalid S3 bucket %#v = %v", options, err)
+		}
+	}
+}
+
+func TestLoadEnvironmentS3CredentialsAreOptionalAndTenantScoped(t *testing.T) {
+	setRequiredEnvironment(t)
+	for _, name := range []string{envS3AccessKeyID, envS3SecretKey, envS3SecretRef} {
+		t.Setenv(name, "")
+	}
+	config, err := loadEnvironment()
+	if err != nil {
+		t.Fatalf("S3-disabled environment = %v", err)
+	}
+	if config.s3AccessKeyID != "" || config.s3SecretKey != "" || config.s3SecretRef != "" {
+		t.Fatalf("S3-disabled config = %+v", config)
+	}
+	t.Setenv(envS3AccessKeyID, "access")
+	t.Setenv(envS3SecretKey, "secret")
+	t.Setenv(envS3SecretRef, "env/custom-s3")
+	config, err = loadEnvironment()
+	if err != nil || config.s3AccessKeyID != "access" || config.s3SecretKey != "secret" || config.s3SecretRef != "env/custom-s3" {
+		t.Fatalf("S3-enabled config = %+v, %v", config, err)
+	}
+}
+
+func TestEnvironmentS3CapabilityProviderValidatesScopeAndProbe(t *testing.T) {
+	original := newEnvironmentS3Store
+	t.Cleanup(func() { newEnvironmentS3Store = original })
+	store := &testS3CapabilityStore{}
+	newEnvironmentS3Store = func(context.Context, string, backend.CapabilityBinding, modelprofile.SecretValue) (environmentS3Store, error) {
+		return store, nil
+	}
+	secret, err := modelprofile.NewSecretValue("access:secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := environmentS3CapabilityProvider{tenantID: "t_00000000000000000000000000", secretRef: "env/s3"}
+	input := backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000"}
+	binding := backend.CapabilityBinding{Capability: backend.CapabilityArtifact, Provider: "s3", Endpoint: "https://s3.example.test", SecretRef: "env/s3", Options: map[string]string{"bucket": "tenant-artifacts"}}
+	value, err := provider.New(context.Background(), input, binding, secret)
+	if err != nil || value != store || store.probes != 1 {
+		t.Fatalf("S3 provider = %T, %v, probes=%d", value, err, store.probes)
+	}
+	if _, err := provider.New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000001"}, binding, secret); !errors.Is(err, backend.ErrStorageFactory) {
+		t.Fatalf("foreign S3 tenant = %v", err)
+	}
+	store.probeErr = errors.New("unavailable")
+	if _, err := provider.New(context.Background(), input, binding, secret); !errors.Is(err, backend.ErrStorageFactory) || store.closes != 1 {
+		t.Fatalf("S3 probe failure = %v, closes=%d", err, store.closes)
+	}
+}
+
+type testS3CapabilityStore struct {
+	runtimestorage.ArtifactStore
+	runtimestorage.ObjectStore
+	probes   int
+	closes   int
+	probeErr error
+}
+
+func (store *testS3CapabilityStore) Probe(context.Context) error {
+	store.probes++
+	return store.probeErr
+}
+func (store *testS3CapabilityStore) Close() error { store.closes++; return nil }
+
 type environmentKnowledgeOnlyStore struct {
 	runtimestorage.RuntimeStore
 	knowledge runtimestorage.KnowledgeStore

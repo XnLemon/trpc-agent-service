@@ -166,6 +166,47 @@ Redis key 没有隐式 TTL。Session、事件、历史、Memory 和 Outbox 不�
 保留、归档和删除必须由显式业务操作或后续运维工具完成。当前没有 Redis/PostgreSQL 迁移、
 双写、shadow read 或自动 cutover 工具；迁移方案仍按 Backend Profile 版本切换另行设计。
 
+### S3 Artifact provider（Issue #113）
+
+S3 provider 只注册 `artifact` capability，不替换 Session、Memory、Summary、Knowledge 或
+Audit provider。Backend Profile 的 binding 形状为：`Provider: "s3"`、HTTPS（本地 MinIO
+可显式允许 HTTP）endpoint、`bucket` option 和 tenant-scoped `SecretRef`。支持 AWS S3、MinIO
+以及暴露 S3-compatible endpoint 的 OSS；原生 OSS API 差异不在本 issue 范围内。
+
+对象 key 使用稳定且不透明的 tenant 与业务 ID 编码，并按 `objects`/`artifacts` 分隔，等价 ID 在不同
+tenant 间不会碰撞。Provider 在每次 materialize 时固定 tenant、校验 endpoint/bucket/SecretRef，
+创建后以 bounded `HeadBucket` probe 作为 readiness；失败不会回退到 InMemory。Secret 值只在
+Resolver 到 provider 的短路径中使用，推荐格式为 `access-key-id:secret-access-key`，不会进入
+Profile、Execution Plan、日志、审计 payload 或错误文本。
+
+`PutObject`/`GetObject` 受 `max_bytes` 和读写 deadline 限制，使用 SHA-256 元数据校验并返回
+防御性 reader；重复写入相同内容幂等，删除缺失对象返回 `ErrNotFound`。Artifact 元数据（名称、
+MIME、session、版本、创建/更新时间和 digest）与内容一起校验；损坏或不完整元数据 fail closed。
+`CapabilitySet.Close` 拥有并关闭 materialized S3 Store，关闭后不再接受操作。
+
+本地可用 Compose 的 `s3` profile 启动 MinIO：
+
+```bash
+docker compose --profile s3 --env-file deploy/example.env -f deploy/docker-compose.yml up -d minio
+```
+
+然后把 Artifact binding 的 endpoint 设为 `http://minio:9000`，`path_style=true`、
+`allow_insecure=true`，bucket 设为已创建的 bucket，并让 `SecretRef` 匹配
+`TRPC_S3_SECRET_REF`。默认 Compose 和默认 CI 不启动 MinIO，也不要求 S3 凭据。
+
+首次启动后可用 MinIO 客户端创建与 binding 相同的 bucket（下面示例使用宿主机端口和示例凭据）：
+
+```bash
+docker run --rm --network host --env-file deploy/example.env minio/mc:RELEASE.2024-12-13T22-19-12Z \
+  sh -c 'mc alias set local "http://127.0.0.1:${TRPC_MINIO_PORT:-9000}" \
+    "${TRPC_S3_ACCESS_KEY_ID:-minio-local-access}" "${TRPC_S3_SECRET_KEY:-minio-local-secret}" \
+    && mc mb --ignore-existing local/artifact-bucket'
+```
+
+可选 live conformance 测试读取 `S3_RUNTIME_TEST_ENDPOINT`、`S3_RUNTIME_TEST_BUCKET`、
+`S3_RUNTIME_TEST_ACCESS_KEY`、`S3_RUNTIME_TEST_SECRET_KEY` 和 `S3_RUNTIME_TEST_REGION`；未配置
+时显式 skip。测试会关闭并重建 provider，验证 Artifact/Object 以及附件 reader 在重启后仍可恢复。
+
 主要环境变量如下：
 
 | 变量 | 必需/默认 | 说明 |
@@ -179,6 +220,9 @@ Redis key 没有隐式 TTL。Session、事件、历史、Memory 和 Outbox 不�
 | `TRPC_REDIS_READ_TIMEOUT` | 否 | Go duration，例如 `500ms` |
 | `TRPC_REDIS_WRITE_TIMEOUT` | 否 | Go duration，例如 `500ms` |
 | `TRPC_REDIS_POOL_SIZE` | 否 | 大于 `0` 时覆盖客户端连接池大小 |
+| `TRPC_S3_ACCESS_KEY_ID` | 否 | 本地 Compose/Secret 示例使用的 S3 access key |
+| `TRPC_S3_SECRET_KEY` | 否 | 本地 Compose/Secret 示例使用的 S3 secret key |
+| `TRPC_S3_SECRET_REF` | 否，`env/trpc-s3-credentials` | S3 Backend Profile 必须匹配的 tenant SecretRef |
 
 本地 Compose 已包含带 AOF 的 Redis 7 服务；生产/Kubernetes 仍应使用外部 Redis，并通过 Secret
 Manager 注入密码。可选 live conformance/reconnect 测试读取 `REDIS_RUNTIME_TEST_ADDR`；未设置
@@ -200,6 +244,7 @@ Manager 注入密码。可选 live conformance/reconnect 测试读取 `REDIS_RUN
 | durable Event payload/history 与完整 Event 状态生命周期 | 4 | `runtime_event_history`、fresh delegate replay、状态迁移测试 | ✅ |
 | Outbox worker/reconciliation/provider delivery | 5 | fenced worker、重试/死信/过期 lease 与 provider 测试 | ✅ |
 | Redis RuntimeStore/MemoryStore 与 tenant-scoped bootstrap | Issue #108 | `runtime/storage/redis` miniredis conformance、配置/Catalog 边界、Compose 服务与可选 live reconnect 测试 | ✅* |
+| S3 Artifact/Object provider 与 tenant-scoped bootstrap | Issue #113 | `runtime/storage/s3` contract tests、S3 Catalog/Secret/Probe 边界、可选 MinIO live conformance | ✅* |
 | 真实 PostgreSQL/InMemory conformance 与 fresh-process restart | 6 | `POSTGRES_RUNTIME_TEST_DSN` 可选 live suite 与 reopen 证据 | ✅* |
 | verified Channel duplicate Runner suppression | 6 | RuntimeStore claim + 并发 Gateway Runner invocation-count 测试 | ✅ |
 | 租户越权、取消、脱敏和防御性返回 | 1–6 | 双租户 conformance 与错误边界测试 | ✅ |
