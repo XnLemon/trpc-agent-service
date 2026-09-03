@@ -69,6 +69,12 @@ IM / HTTP -> Channel Adapter -> Gateway -> Queue/Outbox -> Agent Worker
   <img src="docs/docs/assets/channel-integrations/wecom-live-integration.jpg" alt="企业微信中与 LovElyNeneko 的实际对话截图" width="360">
 </p>
 
+**图 3：企业微信 AI Bot 实际接入（WebSocket 长连接）**
+
+<p align="center">
+  <img src="docs/docs/assets/channel-integrations/wecom-aibot-live-integration.gif" alt="企业微信 AI Bot 真实对话收发验证" width="720">
+</p>
+
 以下能力仍不是当前默认生产路径：Redis 或独立向量/对象存储 provider 的完整装配、IM 媒体与 rich update、完整 Plugin/Guardrail 治理链、容量压测、备份恢复和故障演练。它们的设计边界和后续路线记录在专项文档中。
 
 ## 快速开始：离线 Golden Path

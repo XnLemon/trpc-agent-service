@@ -338,6 +338,36 @@ func ResolveCandidateRoutingTarget(
 		}
 		return RoutingTarget{}, ErrVerificationFailed
 	}
+	return routingTargetForBinding(ctx, tenants, apps, binding)
+}
+
+// ResolveConfiguredRoutingTarget seals a target for a process-configured
+// Binding after reading the current trusted control-plane state. BindingID is
+// an operator-owned startup setting, never an inbound routing hint.
+func ResolveConfiguredRoutingTarget(ctx context.Context, consumer CandidateConsumer, tenants tenant.Repository, apps agent.Repository, tenantID, bindingID string) (RoutingTarget, error) {
+	if ctx == nil {
+		return RoutingTarget{}, ErrVerificationFailed
+	}
+	if err := ctx.Err(); err != nil {
+		return RoutingTarget{}, err
+	}
+	if consumer == nil || tenants == nil || apps == nil || tenantID == "" || bindingID == "" {
+		return RoutingTarget{}, ErrVerificationFailed
+	}
+	binding, err := consumer.Get(ctx, tenantID, bindingID)
+	if err != nil {
+		if IsContextCancellation(err) {
+			return RoutingTarget{}, err
+		}
+		return RoutingTarget{}, ErrVerificationFailed
+	}
+	return routingTargetForBinding(ctx, tenants, apps, binding)
+}
+
+func routingTargetForBinding(ctx context.Context, tenants tenant.Repository, apps agent.Repository, binding *Binding) (RoutingTarget, error) {
+	if binding == nil {
+		return RoutingTarget{}, ErrVerificationFailed
+	}
 	verified, err := newVerifiedBinding(*binding)
 	if err != nil {
 		return RoutingTarget{}, ErrVerificationFailed

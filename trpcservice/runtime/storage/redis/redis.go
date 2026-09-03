@@ -881,6 +881,37 @@ func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segmen
 	return result, err
 }
 
+// RecordReplyReceipt persists a provider acknowledgement without releasing
+// the current sending lease. The worker later owns the sent transition.
+func (s *Store) RecordReplyReceipt(ctx context.Context, receipt runtimestorage.ReplyReceipt) (runtimestorage.ReplyOutbox, error) {
+	if err := s.check(ctx); err != nil {
+		return runtimestorage.ReplyOutbox{}, err
+	}
+	if runtimestorage.ValidateTenant(receipt.TenantID) != nil || receipt.ReplyID == "" || receipt.SegmentIndex < 0 || receipt.Owner == "" || receipt.FencingToken <= 0 || strings.TrimSpace(receipt.ProviderID) == "" {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
+	}
+	var result runtimestorage.ReplyOutbox
+	err := s.mutate(ctx, receipt.TenantID, func(value *state) error {
+		key := replyKey(receipt.ReplyID, receipt.SegmentIndex)
+		current, ok := value.Replies[key]
+		if !ok {
+			return runtimestorage.ErrNotFound
+		}
+		now := time.Now().UTC()
+		if current.Status != runtimestorage.ReplySending || current.LeaseOwner != receipt.Owner || current.FencingToken != receipt.FencingToken || current.LeaseExpiresAt == nil || !current.LeaseExpiresAt.After(now) || current.ProviderMessageID != "" && current.ProviderMessageID != receipt.ProviderID {
+			return runtimestorage.ErrConflict
+		}
+		if current.ProviderMessageID == "" {
+			current.ProviderMessageID = receipt.ProviderID
+			current.UpdatedAt = now
+			value.Replies[key] = current
+		}
+		result = cloneReply(current)
+		return nil
+	})
+	return result, err
+}
+
 // TransitionReply advances a reply segment through its fenced lifecycle.
 func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.ReplyTransition) (runtimestorage.ReplyOutbox, error) {
 	if err := s.check(ctx); err != nil {
@@ -916,7 +947,10 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 			current.LeaseOwner = ""
 			current.LeaseExpiresAt = nil
 		}
-		current.ProviderMessageID, current.LastErrorClass, current.UpdatedAt = transition.ProviderID, transition.ErrorClass, now
+		if transition.ProviderID != "" {
+			current.ProviderMessageID = transition.ProviderID
+		}
+		current.LastErrorClass, current.UpdatedAt = transition.ErrorClass, now
 		value.Replies[key] = current
 		result = cloneReply(current)
 		return nil
@@ -1137,3 +1171,4 @@ var _ runtimestorage.MemoryStore = (*Store)(nil)
 var _ runtimestorage.ReplyBatchEnqueuer = (*Store)(nil)
 var _ runtimestorage.ReplyBatchCorrelationEnqueuer = (*Store)(nil)
 var _ runtimestorage.ReplyCorrelationStore = (*Store)(nil)
+var _ runtimestorage.ReplyReceiptRecorder = (*Store)(nil)

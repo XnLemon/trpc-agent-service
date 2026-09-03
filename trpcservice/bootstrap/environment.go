@@ -1,10 +1,13 @@
 package bootstrap
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -28,6 +31,7 @@ import (
 	channelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/channels/mysql"
 	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom_aibot"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -96,11 +100,13 @@ const (
 	// #nosec G101 -- environment variable name, not a secret.
 	envWeComAppSecret = "WECOM_APP_SECRET"
 	// #nosec G101 -- environment variable name, not a secret.
-	envWeComSecretRef  = "WECOM_SECRET_REF"
-	envOTLPEndpoint    = "OTEL_EXPORTER_OTLP_ENDPOINT"
-	envOTLPHeaders     = "OTEL_EXPORTER_OTLP_HEADERS"
-	envOTLPInsecure    = "OTEL_EXPORTER_OTLP_INSECURE"
-	envOTELServiceName = "OTEL_SERVICE_NAME"
+	envWeComSecretRef = "WECOM_SECRET_REF"
+	// #nosec G101 -- environment variable name, not a credential.
+	envWeComAIBotConnections = "WECOM_AIBOT_CONNECTIONS"
+	envOTLPEndpoint          = "OTEL_EXPORTER_OTLP_ENDPOINT"
+	envOTLPHeaders           = "OTEL_EXPORTER_OTLP_HEADERS"
+	envOTLPInsecure          = "OTEL_EXPORTER_OTLP_INSECURE"
+	envOTELServiceName       = "OTEL_SERVICE_NAME"
 
 	defaultModelProvider = "openai"
 	defaultModelNames    = "gpt-4o-mini"
@@ -165,6 +171,7 @@ type environmentConfig struct {
 	s3SecretRef    string
 	demoMode       bool
 	wecom          *environmentWeComConfig
+	wecomAIBots    []environmentWeComAIBotConfig
 	telemetry      observability.Provider
 	otlp           observability.OTLPConfig
 }
@@ -174,6 +181,14 @@ type environmentWeComConfig struct {
 	encodingAESKey string
 	appSecret      string
 	secretRef      string
+}
+
+// environmentWeComAIBotConfig is one operator-owned startup connection. Its
+// SecretRef must match the immutable Binding before the secret is released.
+type environmentWeComAIBotConfig struct {
+	BindingID string `json:"binding_id"`
+	SecretRef string `json:"secret_ref"`
+	BotSecret string `json:"bot_secret"`
 }
 
 // environmentRuntimeStores owns process-scoped runtime stores. The primary
@@ -257,7 +272,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, fmt.Errorf("%w: environment repositories: %v", ErrInvalidConfig, err)
 	}
 	auditWriter = metrics.WrapAuditWriter(auditWriter, config.telemetry)
-	wecomFactory, wecomWorker, err := environmentWeComComponents(config, channelRepo, tenantRepo, appRepo, runtimeStore, auditWriter)
+	wecomFactory, wecomProvider, err := environmentWeComComponents(config, channelRepo, tenantRepo, appRepo, auditWriter)
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = runtimeStores.Close()
@@ -271,6 +286,14 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: environment registries: %v", ErrInvalidConfig, err)
 	}
+	aiBotFactories, aiBotBindingIDs, err := environmentWeComAIBotComponents(ctx, config, channelRepo, tenantRepo, appRepo)
+	if err != nil {
+		_ = delegateSessions.Close()
+		_ = runtimeStores.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("%w: wecom ai bot components: %v", ErrInvalidConfig, err)
+	}
+	workerFactory := environmentOutboxWorkerFactory(config, runtimeStore, auditWriter, wecomProvider, aiBotBindingIDs)
 	storageFactory, err := backend.NewRegistryStorageFactory(backendRegistry, secretRegistry)
 	if err != nil {
 		_ = delegateSessions.Close()
@@ -296,7 +319,8 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		Authenticator:       authenticator,
 		AdminAuthenticator:  adminAuthenticator,
 		WeComHandlerFactory: wecomFactory,
-		OutboxWorker:        wecomWorker,
+		WeComAIBotFactories: aiBotFactories,
+		OutboxWorkerFactory: workerFactory,
 		OutboxPollInterval:  time.Second,
 		AuditWriter:         auditWriter,
 		Ping: func(pingContext context.Context) error {
@@ -320,14 +344,11 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 
 func openEnvironmentDatabaseForConfig(ctx context.Context, config environmentConfig) (*sql.DB, func(context.Context, *sql.DB) error, func(context.Context, *sql.DB) error, error) {
 	if config.driver != ControlPlaneDriverMySQL {
-		db, err := openEnvironmentDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+		db, err := openPostgresEnvironmentDatabaseForConfig(ctx, config)
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil, nil, nil, ctx.Err()
-			}
-			return nil, nil, nil, fmt.Errorf("%w: %s control plane is unavailable", ErrInvalidConfig, config.driver)
+			return nil, nil, nil, err
 		}
-		return db, applyEnvironmentMigrations, verifyEnvironmentMigrations, nil
+		return db, nil, nil, nil
 	}
 	migrationDB, migrationErr := openMySQLEnvironmentDatabase(ctx, config.migrationDSN, mysql.Options{MaxOpenConns: 4, MaxIdleConns: 4})
 	var migrationUser, migrationDatabase string
@@ -375,6 +396,31 @@ func openEnvironmentDatabaseForConfig(ctx context.Context, config environmentCon
 	return db, nil, nil, nil
 }
 
+func openPostgresEnvironmentDatabaseForConfig(ctx context.Context, config environmentConfig) (*sql.DB, error) {
+	db, err := openEnvironmentDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("%w: %s control plane is unavailable", ErrInvalidConfig, config.driver)
+	}
+	if err := applyEnvironmentMigrations(ctx, db); err != nil {
+		_ = db.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("%w: PostgreSQL migrations are not ready", ErrInvalidConfig)
+	}
+	if err := verifyEnvironmentMigrations(ctx, db); err != nil {
+		_ = db.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("%w: PostgreSQL migrations are not ready", ErrInvalidConfig)
+	}
+	return db, nil
+}
+
 func environmentRepositories(config environmentConfig, db *sql.DB) (tenant.Repository, agent.Repository, channels.CandidateConsumer, audit.Writer, error) {
 	if config.driver == ControlPlaneDriverMySQL {
 		return tenantmysql.NewRepository(db), agentmysql.NewRepository(db), channelmysql.NewRepository(db), nil, nil
@@ -392,7 +438,7 @@ func environmentRepositories(config environmentConfig, db *sql.DB) (tenant.Repos
 	return tenantRepo, appRepo, channelRepo, auditWriter, err
 }
 
-func environmentWeComComponents(config environmentConfig, channelsRepo channels.CandidateConsumer, tenantsRepo tenant.Repository, appsRepo agent.Repository, runtimeStore runtimestorage.RuntimeStore, auditWriter audit.Writer) (func(gateway.DispatchService) (http.Handler, error), *outbox.Worker, error) {
+func environmentWeComComponents(config environmentConfig, channelsRepo channels.CandidateConsumer, tenantsRepo tenant.Repository, appsRepo agent.Repository, auditWriter audit.Writer) (func(gateway.DispatchService) (http.Handler, error), outbox.Provider, error) {
 	if config.wecom == nil {
 		return nil, nil, nil
 	}
@@ -400,12 +446,100 @@ func environmentWeComComponents(config environmentConfig, channelsRepo channels.
 	factory := func(dispatcher gateway.DispatchService) (http.Handler, error) {
 		return wecom.New(wecom.Config{Candidates: channelsRepo, Tenants: tenantsRepo, Apps: appsRepo, Credentials: credentials, Dispatcher: dispatcher, AuditWriter: auditWriter, Observability: config.telemetry})
 	}
-	owner, err := environmentWeComOwnerFunc()
-	if err != nil {
-		return nil, nil, err
+	return factory, &wecom.BindingProvider{Bindings: channelsRepo, Credentials: credentials}, nil
+}
+
+func environmentWeComAIBotComponents(ctx context.Context, config environmentConfig, channelsRepo channels.CandidateConsumer, tenantsRepo tenant.Repository, appsRepo agent.Repository) ([]func(gateway.DispatchService) (channels.PollingAdapter, error), map[string]struct{}, error) {
+	if len(config.wecomAIBots) == 0 {
+		return nil, nil, nil
 	}
-	worker, err := newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: &wecom.BindingProvider{Bindings: channelsRepo, Credentials: credentials}, Channel: "wecom", ProviderName: "wecom", TenantID: config.tenantID, Owner: owner, LeaseDuration: 30 * time.Second, AuditWriter: auditWriter, Observability: config.telemetry})
-	return factory, worker, err
+	secrets := make(map[string]string, len(config.wecomAIBots))
+	targets := make([]channels.RoutingTarget, 0, len(config.wecomAIBots))
+	for _, value := range config.wecomAIBots {
+		if _, exists := secrets[value.SecretRef]; exists {
+			return nil, nil, errors.New("wecom ai bot secret reference is duplicated")
+		}
+		secrets[value.SecretRef] = value.BotSecret
+		target, err := channels.ResolveConfiguredRoutingTarget(ctx, channelsRepo, tenantsRepo, appsRepo, config.tenantID, value.BindingID)
+		if err != nil || target.Channel != channels.ChannelWeComAIBot {
+			return nil, nil, errors.New("wecom ai bot binding is unavailable")
+		}
+		targets = append(targets, target)
+	}
+	credentials := environmentWeComAIBotCredentialResolver{tenantID: config.tenantID, secrets: secrets}
+	factories := make([]func(gateway.DispatchService) (channels.PollingAdapter, error), 0, len(targets))
+	bindingIDs := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		target := target
+		bindingIDs[target.BindingID] = struct{}{}
+		factories = append(factories, func(dispatcher gateway.DispatchService) (channels.PollingAdapter, error) {
+			return wecom_aibot.NewForBinding(ctx, wecom_aibot.BindingConfig{Target: target, Bindings: channelsRepo, Credentials: credentials, Dispatcher: dispatcher})
+		})
+	}
+	return factories, bindingIDs, nil
+}
+
+func environmentOutboxWorkerFactory(config environmentConfig, runtimeStore runtimestorage.RuntimeStore, auditWriter audit.Writer, legacy outbox.Provider, aiBotBindingIDs map[string]struct{}) func([]channels.PollingAdapter) (*outbox.Worker, error) {
+	if legacy == nil && len(aiBotBindingIDs) == 0 {
+		return nil
+	}
+	return func(adapters []channels.PollingAdapter) (*outbox.Worker, error) {
+		provider := legacy
+		channel, providerName := "wecom", "wecom"
+		leaseDuration := 30 * time.Second
+		if len(aiBotBindingIDs) > 0 {
+			leaseDuration = wecom_aibot.OutboxLeaseDuration
+			deliveryStore, ok := runtimeStore.(wecom_aibot.DeliveryStore)
+			if !ok {
+				return nil, errors.New("runtime store does not support durable reply acknowledgements")
+			}
+			managers := make([]*wecom_aibot.Manager, 0, len(aiBotBindingIDs))
+			for _, adapter := range adapters {
+				manager, ok := adapter.(*wecom_aibot.Manager)
+				if !ok {
+					return nil, errors.New("wecom ai bot adapter has an invalid type")
+				}
+				managers = append(managers, manager)
+			}
+			if len(managers) != len(aiBotBindingIDs) {
+				return nil, errors.New("wecom ai bot manager count is invalid")
+			}
+			aiBotProvider, err := wecom_aibot.NewBindingProvider(deliveryStore, managers...)
+			if err != nil {
+				return nil, err
+			}
+			if provider == nil {
+				provider, channel, providerName = aiBotProvider, "wecom_aibot", "wecom_aibot"
+			} else {
+				provider = environmentReplyProvider{legacy: provider, aiBot: aiBotProvider, aiBotBindingIDs: aiBotBindingIDs}
+			}
+		}
+		owner, err := environmentWeComOwnerFunc()
+		if err != nil {
+			return nil, err
+		}
+		return newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: provider, Channel: channel, ProviderName: providerName, TenantID: config.tenantID, Owner: owner, LeaseDuration: leaseDuration, AuditWriter: auditWriter, Observability: config.telemetry})
+	}
+}
+
+type environmentReplyProvider struct {
+	legacy          outbox.Provider
+	aiBot           outbox.Provider
+	aiBotBindingIDs map[string]struct{}
+}
+
+func (p environmentReplyProvider) Deliver(ctx context.Context, value runtimestorage.ReplyOutbox) (string, error) {
+	if _, ok := p.aiBotBindingIDs[value.ReplyTarget.BindingID]; ok {
+		return p.aiBot.Deliver(ctx, value)
+	}
+	return p.legacy.Deliver(ctx, value)
+}
+
+func (p environmentReplyProvider) Reconcile(ctx context.Context, value runtimestorage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
+	if _, ok := p.aiBotBindingIDs[value.ReplyTarget.BindingID]; ok {
+		return p.aiBot.Reconcile(ctx, value)
+	}
+	return p.legacy.Reconcile(ctx, value)
 }
 
 func environmentRegistries(config environmentConfig, delegateSessions session.Service, runtimeStore runtimestorage.RuntimeStore) (*modelprofile.SecretRegistry, *modelprofile.ModelProviderRegistry, *backend.ProviderRegistry, error) {
@@ -535,7 +669,7 @@ func loadEnvironment() (environmentConfig, error) {
 		demoMode:       demoMode,
 		telemetry:      observability.NewNoopProvider(),
 	}
-	loaders := []func() error{config.loadDatabase, config.loadIdentities, config.loadAdmin, config.loadModel, config.loadRuntime, config.loadS3, config.loadWeCom}
+	loaders := []func() error{config.loadDatabase, config.loadIdentities, config.loadAdmin, config.loadModel, config.loadRuntime, config.loadS3, config.loadWeCom, config.loadWeComAIBots}
 	for _, load := range loaders {
 		if err := load(); err != nil {
 			return environmentConfig{}, err
@@ -872,6 +1006,48 @@ func (config *environmentConfig) loadWeCom() error {
 	return nil
 }
 
+func (config *environmentConfig) loadWeComAIBots() error {
+	raw := strings.TrimSpace(os.Getenv(envWeComAIBotConnections))
+	if raw == "" {
+		return nil
+	}
+	if config.demoMode || len(config.apiIdentities) != 1 {
+		return fmt.Errorf("%w: %s requires one non-demo API identity", ErrInvalidConfig, envWeComAIBotConnections)
+	}
+	decoder := json.NewDecoder(bytes.NewBufferString(raw))
+	decoder.DisallowUnknownFields()
+	var values []environmentWeComAIBotConfig
+	if err := decoder.Decode(&values); err != nil || len(values) == 0 {
+		return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envWeComAIBotConnections)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envWeComAIBotConnections)
+	}
+	seenBindings := make(map[string]struct{}, len(values))
+	seenSecretRefs := make(map[string]struct{}, len(values))
+	for index := range values {
+		values[index].BindingID = strings.TrimSpace(values[index].BindingID)
+		values[index].SecretRef = strings.TrimSpace(values[index].SecretRef)
+		if values[index].BindingID == "" || values[index].BotSecret == "" || strings.ContainsAny(values[index].BindingID, "\r\n") || strings.ContainsAny(values[index].BotSecret, "\r\n") {
+			return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envWeComAIBotConnections)
+		}
+		if err := (channels.SecretScope{TenantID: config.tenantID, SecretRef: values[index].SecretRef}).Validate(); err != nil {
+			return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envWeComAIBotConnections)
+		}
+		if _, exists := seenBindings[values[index].BindingID]; exists {
+			return fmt.Errorf("%w: %s contains duplicate binding IDs", ErrInvalidConfig, envWeComAIBotConnections)
+		}
+		if _, exists := seenSecretRefs[values[index].SecretRef]; exists {
+			return fmt.Errorf("%w: %s contains duplicate secret references", ErrInvalidConfig, envWeComAIBotConnections)
+		}
+		seenBindings[values[index].BindingID] = struct{}{}
+		seenSecretRefs[values[index].SecretRef] = struct{}{}
+	}
+	config.wecomAIBots = values
+	return nil
+}
+
 func environmentRuntimeStore(kind string, db *sql.DB) (runtimestorage.RuntimeStore, error) {
 	switch kind {
 	case "postgres":
@@ -1132,6 +1308,28 @@ func (resolver environmentWeComCredentialResolver) Resolve(ctx context.Context, 
 		return wecom.Credentials{}, errors.New("configured WeCom secret reference is unavailable")
 	}
 	return wecom.Credentials{CallbackToken: resolver.config.callbackToken, EncodingAESKey: resolver.config.encodingAESKey, AppSecret: resolver.config.appSecret}, nil
+}
+
+type environmentWeComAIBotCredentialResolver struct {
+	tenantID string
+	secrets  map[string]string
+}
+
+func (resolver environmentWeComAIBotCredentialResolver) Resolve(ctx context.Context, scope channels.SecretScope) (wecom_aibot.Credentials, error) {
+	if ctx == nil {
+		return wecom_aibot.Credentials{}, errors.New("wecom ai bot credential resolver context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return wecom_aibot.Credentials{}, err
+	}
+	if err := scope.Validate(); err != nil || scope.TenantID != resolver.tenantID {
+		return wecom_aibot.Credentials{}, errors.New("configured wecom ai bot secret reference is unavailable")
+	}
+	secret := resolver.secrets[scope.SecretRef]
+	if secret == "" {
+		return wecom_aibot.Credentials{}, errors.New("configured wecom ai bot secret reference is unavailable")
+	}
+	return wecom_aibot.Credentials{BotSecret: secret}, nil
 }
 
 func environmentWeComOwner() (string, error) {

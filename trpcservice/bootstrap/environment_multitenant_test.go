@@ -657,17 +657,43 @@ func TestNewFromEnvironmentMigrationAndReadinessFailures(t *testing.T) {
 	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
 	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
 	verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return errors.New("verification failed") }
-	graph, err := NewFromEnvironment(context.Background())
-	if err != nil {
+	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
 		_ = db.Close()
+		t.Fatalf("migration verification error = %v", err)
+	}
+}
+
+func TestNewFromEnvironmentMigratesBeforeResolvingWeComAIBotBindings(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envWeComAIBotConnections, `[{"binding_id":"cb_00000000000000000000000000","secret_ref":"env/wecom-aibot","bot_secret":"test-secret"}]`)
+	registerBootstrapPingDriver.Do(func() {
+		sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{})
+	})
+	db, err := sql.Open("trpc-service-bootstrap-ping", "")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if graph.Ready() {
-		_ = graph.Close()
-		t.Fatal("graph reported ready with failed migration verification")
+	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousVerify := verifyEnvironmentMigrations
+	t.Cleanup(func() {
+		openEnvironmentDatabase = previousOpen
+		applyEnvironmentMigrations = previousApply
+		verifyEnvironmentMigrations = previousVerify
+		_ = db.Close()
+	})
+	migrated := false
+	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+	applyEnvironmentMigrations = func(context.Context, *sql.DB) error {
+		migrated = true
+		return nil
 	}
-	if err := graph.Close(); err != nil {
-		t.Fatal(err)
+	verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("environment assembly error = %v", err)
+	}
+	if !migrated {
+		t.Fatal("AI Bot binding lookup ran before PostgreSQL migrations")
 	}
 }
 
@@ -1060,15 +1086,21 @@ func TestNewFromEnvironmentRuntimeStoreFailureBoundaries(t *testing.T) {
 				t.Fatal(err)
 			}
 			previousOpen := openEnvironmentDatabase
+			previousApply := applyEnvironmentMigrations
+			previousVerify := verifyEnvironmentMigrations
 			previousRedis := newEnvironmentRedisRuntimeStore
 			previousStore := newEnvironmentRuntimeStore
 			t.Cleanup(func() {
 				openEnvironmentDatabase = previousOpen
+				applyEnvironmentMigrations = previousApply
+				verifyEnvironmentMigrations = previousVerify
 				newEnvironmentRedisRuntimeStore = previousRedis
 				newEnvironmentRuntimeStore = previousStore
 				_ = db.Close()
 			})
 			openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+			applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+			verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
 			tt.configureStore(cancel)
@@ -1084,7 +1116,7 @@ func TestNewFromEnvironmentRuntimeStoreFailureBoundaries(t *testing.T) {
 	}
 }
 
-func TestNewFromEnvironmentRedisClosesPrimaryAndFallbackAfterBootstrapFailure(t *testing.T) {
+func TestNewFromEnvironmentDoesNotInitializeRedisStoresBeforeMigrationSucceeds(t *testing.T) {
 	setRequiredEnvironment(t)
 	t.Setenv(envSessionBackend, "redis")
 	t.Setenv(envRedisAddr, "redis.internal:6379")
@@ -1095,6 +1127,7 @@ func TestNewFromEnvironmentRedisClosesPrimaryAndFallbackAfterBootstrapFailure(t 
 	}
 	primary := &environmentRuntimeStoreSpy{}
 	fallback := &environmentRuntimeStoreSpy{}
+	primaryCreated, fallbackCreated := 0, 0
 	previousOpen := openEnvironmentDatabase
 	previousApply := applyEnvironmentMigrations
 	previousRedis := newEnvironmentRedisRuntimeStore
@@ -1108,14 +1141,20 @@ func TestNewFromEnvironmentRedisClosesPrimaryAndFallbackAfterBootstrapFailure(t 
 	})
 	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
 	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return errors.New("migration failed") }
-	newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (runtimestorage.RuntimeStore, error) { return primary, nil }
-	newEnvironmentInMemoryFallback = func() runtimestorage.RuntimeStore { return fallback }
+	newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (runtimestorage.RuntimeStore, error) {
+		primaryCreated++
+		return primary, nil
+	}
+	newEnvironmentInMemoryFallback = func() runtimestorage.RuntimeStore {
+		fallbackCreated++
+		return fallback
+	}
 
 	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("bootstrap failure = %v", err)
 	}
-	if primary.closed != 1 || fallback.closed != 1 {
-		t.Fatalf("runtime store closes: primary=%d fallback=%d", primary.closed, fallback.closed)
+	if primaryCreated != 0 || fallbackCreated != 0 {
+		t.Fatalf("runtime stores initialized before migration success: primary=%d fallback=%d", primaryCreated, fallbackCreated)
 	}
 	if pingErr := db.Ping(); pingErr == nil {
 		t.Fatal("database remained open after bootstrap failure")

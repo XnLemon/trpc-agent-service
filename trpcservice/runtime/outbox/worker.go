@@ -6,6 +6,7 @@ import (
 	"errors"
 	"hash/fnv"
 	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -71,6 +72,14 @@ type Worker struct {
 	runCancel     context.CancelFunc
 	runDone       chan struct{}
 }
+
+type precedingSegmentState uint8
+
+const (
+	precedingSegmentsSent precedingSegmentState = iota
+	precedingSegmentsPending
+	precedingSegmentsDeadLettered
+)
 
 // Config controls a durable reply worker.
 type Config struct {
@@ -222,8 +231,23 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Storage adapters need not provide a candidate order, but stream segments do.
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].ReplyID == candidates[j].ReplyID {
+			return candidates[i].SegmentIndex < candidates[j].SegmentIndex
+		}
+		return candidates[i].ReplyID < candidates[j].ReplyID
+	})
 	processed := 0
 	for _, candidate := range candidates {
+		// A later segment must not overtake a retrying or leased predecessor.
+		state, readyErr := w.precedingSegmentsState(ctx, candidate)
+		if readyErr != nil {
+			return processed, readyErr
+		}
+		if state == precedingSegmentsPending {
+			continue
+		}
 		claimed, claimedOK, claimErr := w.claimCandidate(ctx, candidate)
 		if claimErr != nil {
 			return processed, claimErr
@@ -232,11 +256,33 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 			continue
 		}
 		processed++
-		if err := w.processClaimed(ctx, candidate, claimed); err != nil && !errors.Is(err, runtimestorage.ErrConflict) {
+		if err := w.processClaimed(ctx, candidate, claimed, state == precedingSegmentsDeadLettered); err != nil && !errors.Is(err, runtimestorage.ErrConflict) {
 			return processed, err
 		}
 	}
 	return processed, nil
+}
+
+func (w *Worker) precedingSegmentsState(ctx context.Context, candidate runtimestorage.ReplyOutbox) (precedingSegmentState, error) {
+	for index := 0; index < candidate.SegmentIndex; index++ {
+		previous, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.ReplyOutbox, error) {
+			return w.store.GetReply(operationCtx, candidate.TenantID, candidate.ReplyID, index)
+		})
+		if errors.Is(err, runtimestorage.ErrNotFound) {
+			return precedingSegmentsPending, nil
+		}
+		if err != nil {
+			return precedingSegmentsPending, err
+		}
+		switch previous.Status {
+		case runtimestorage.ReplySent:
+		case runtimestorage.ReplyDeadLetter:
+			return precedingSegmentsDeadLettered, nil
+		default:
+			return precedingSegmentsPending, nil
+		}
+	}
+	return precedingSegmentsSent, nil
 }
 
 func (w *Worker) claimCandidate(ctx context.Context, candidate runtimestorage.ReplyOutbox) (runtimestorage.ReplyOutbox, bool, error) {
@@ -255,7 +301,7 @@ func (w *Worker) claimCandidate(ctx context.Context, candidate runtimestorage.Re
 	return claimed, true, nil
 }
 
-func (w *Worker) processClaimed(ctx context.Context, candidate, claimed runtimestorage.ReplyOutbox) (err error) {
+func (w *Worker) processClaimed(ctx context.Context, candidate, claimed runtimestorage.ReplyOutbox, predecessorDeadLettered bool) (err error) {
 	ctx = restoreCorrelationContext(ctx, w.store, claimed)
 	started := time.Now()
 	operationCtx, _, finishOperation := observability.StartOperation(ctx, w.telemetry, observability.OperationChannelSend, "channel")
@@ -269,6 +315,11 @@ func (w *Worker) processClaimed(ctx context.Context, candidate, claimed runtimes
 		finishOperation(operationErr)
 		_ = w.metrics.Operation(operationCtx, started, labels, operationErr)
 	}()
+	if predecessorDeadLettered {
+		deliveryErr := &DeliveryError{Class: "preceding_segment_dead_lettered", Retryable: false}
+		operationErr = deliveryErr
+		return w.rejectDelivery(ctx, operationCtx, claimed, deliveryErr)
+	}
 	if candidate.Status == runtimestorage.ReplySending {
 		// A sending lease means the previous worker may have reached the
 		// provider before losing its lease. Reconcile is the only safe
