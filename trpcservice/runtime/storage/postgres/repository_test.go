@@ -463,7 +463,7 @@ func TestRuntimeStoreRecordsReplyReceiptWithinCurrentLease(t *testing.T) {
 	store := runtimepostgres.New(db)
 	when := time.Now().UTC()
 	lease := when.Add(time.Minute)
-	mock.ExpectQuery("UPDATE public.reply_outbox SET provider_message_id=\\$6").WithArgs("tenant-a", "reply-1", 0, "worker-a", int64(7), "provider-1").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow("tenant-a", "reply-1", "event-1", 0, 1, "payload", "", "", "", "", "sending", 1, int64(7), "worker-a", lease, "provider-1", "", when, when))
+	mock.ExpectQuery("UPDATE public.reply_outbox SET provider_message_id=\\$6").WithArgs("tenant-a", "reply-1", 0, "worker-a", int64(7), "provider-1").WillReturnRows(sqlmock.NewRows(replyColumns).AddRow(replyValues("reply-1", "event-1", 0, 1, "payload", "sending", 1, int64(7), "worker-a", lease, "provider-1", "", when)...))
 	recorded, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: "tenant-a", ReplyID: "reply-1", SegmentIndex: 0, Owner: "worker-a", FencingToken: 7, ProviderID: "provider-1"})
 	if err != nil || recorded.Status != runtimestorage.ReplySending || recorded.ProviderMessageID != "provider-1" || recorded.FencingToken != 7 || recorded.LeaseOwner != "worker-a" {
 		t.Fatalf("recorded receipt = %+v, %v", recorded, err)
