@@ -1,12 +1,15 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Button, Form, Input, MessagePlugin, Select } from 'tdesign-react';
 import { useNavigate } from 'react-router-dom';
+import type { ChannelBinding } from '@/api/types';
 import { AuditFields } from '@/components/AuditFields';
 import { emptyProtocolForm, ProtocolFields, serializeProtocol, type ProtocolFormState } from '@/components/ProtocolFields';
+import { ResourceListPanel } from '@/components/ResourceListPanel';
 import { ResourceLobby } from '@/components/ResourceLobby';
+import { StatusTag } from '@/components/StatusTag';
 import type { ChannelKind } from '@/api/types';
 import { useAdminClient } from '@/lib/connection';
-import { newCorrelationId } from '@/lib/format';
+import { formatDateTime, newCorrelationId } from '@/lib/format';
 import { runMutation } from '@/lib/mutation';
 import { addRecent, listRecents, removeRecent } from '@/lib/recents';
 import { useTenantOutlet } from './TenantLayout';
@@ -15,6 +18,7 @@ export function BindingsPage() {
   const { tenant } = useTenantOutlet();
   const client = useAdminClient();
   const navigate = useNavigate();
+  const loadBindings = useCallback((params: Parameters<typeof client.listBindings>[1]) => client.listBindings(tenant.TenantID, params), [client, tenant.TenantID]);
   const [recents, setRecents] = useState(() => listRecents('binding', tenant.TenantID));
   const [bindingKey, setBindingKey] = useState('');
   const [channel, setChannel] = useState<ChannelKind>('wecom');
@@ -65,10 +69,36 @@ export function BindingsPage() {
   return (
     <ResourceLobby
       title="渠道绑定"
-      subtitle="控制面暂无列表接口（P0 缺口），请通过已知 Binding ID 打开。"
+      subtitle="浏览当前租户的渠道绑定，进入详情页查看路由、协议配置和状态。"
       idLabel="Binding ID"
       idPlaceholder="Channel Binding ID"
       onOpen={(id) => openBinding(id)}
+      hideOpenPanel
+      resourceList={
+        <ResourceListPanel<ChannelBinding>
+          title="渠道绑定列表"
+          loader={loadBindings}
+          rowKey="BindingID"
+          columns={[
+            {
+              colKey: 'BindingKey',
+              title: '绑定名称',
+              cell: ({ row }) => (
+                <Button variant="text" theme="primary" onClick={() => openBinding(row.BindingID, row.BindingKey)}>
+                  {row.BindingKey}
+                </Button>
+              ),
+            },
+            { colKey: 'Channel', title: '渠道', cell: ({ row }) => row.Channel === 'wecom' ? '企业微信' : 'Telegram' },
+            { colKey: 'AppID', title: '目标应用 ID', ellipsis: true },
+            { colKey: 'ProviderAccountID', title: 'Provider 账号', ellipsis: true },
+            { colKey: 'Status', title: '状态', cell: ({ row }) => <StatusTag status={row.Status} /> },
+            { colKey: 'Version', title: '版本', cell: ({ row }) => `v${row.Version}` },
+            { colKey: 'UpdatedAt', title: '更新时间', cell: ({ row }) => formatDateTime(row.UpdatedAt) },
+          ]}
+          createLabel="创建渠道绑定"
+        />
+      }
       createTitle="创建渠道绑定"
       createDescription="将企业微信 / Telegram 入站流量路由到指定 Agent App。服务端只保存路由摘要与 Secret 引用，不保存路由原文与渠道凭据。"
       createForm={

@@ -17,12 +17,14 @@ interface ResourceLobbyProps {
   recents: RecentItem[];
   onOpenRecent: (id: string) => void;
   onRemoveRecent: (id: string) => void;
+  resourceList?: ReactNode;
+  hideOpenPanel?: boolean;
 }
 
 /**
- * Landing page for one resource kind. The control plane has no list APIs yet
- * (P0 gap in docs/docs/admin-web-ui.md), so navigation is by known ID plus a
- * session-scoped "recently opened" list.
+ * Shared workspace shell for one tenant resource kind. Resource pages provide
+ * a server-backed list while this component keeps the create form and known-ID
+ * compatibility entry point together.
  */
 export function ResourceLobby({
   title,
@@ -38,6 +40,8 @@ export function ResourceLobby({
   recents,
   onOpenRecent,
   onRemoveRecent,
+  resourceList,
+  hideOpenPanel = false,
 }: ResourceLobbyProps) {
   const [id, setId] = useState('');
 
@@ -49,8 +53,9 @@ export function ResourceLobby({
         {subtitle ? <div className="admin-page-subtitle">{subtitle}</div> : null}
       </div>
       {alert}
+      {resourceList}
       <div className="admin-lobby-grid">
-        <Card className="admin-panel admin-open-panel" title="打开已有资源" bordered>
+        {!hideOpenPanel ? <Card className="admin-panel admin-open-panel" title="打开已有资源" bordered>
           <Form layout="vertical" labelAlign="top" colon>
             <Form.FormItem label={idLabel}>
               <Input
@@ -64,7 +69,7 @@ export function ResourceLobby({
               {openLabel}
             </Button>
           </Form>
-        </Card>
+        </Card> : null}
         {createForm ? (
           <Card className="admin-panel admin-create-panel" title={createTitle ?? '新建'} bordered>
             {createDescription ? <div className="admin-page-subtitle admin-panel-description">{createDescription}</div> : null}
@@ -75,7 +80,7 @@ export function ResourceLobby({
       <Card className="admin-panel admin-recent-panel" title="最近打开" bordered>
         <div className="admin-panel-description">仅保存在当前浏览器会话中，不会写入服务端。</div>
         {recents.length === 0 ? (
-          <Empty description="暂无记录。服务端暂无列表接口，请通过已知 ID 打开资源。" />
+          <Empty description="暂无最近打开记录。" />
         ) : (
           <Table
             rowKey="id"

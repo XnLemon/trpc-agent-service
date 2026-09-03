@@ -1,11 +1,14 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Button, Form, Input, MessagePlugin } from 'tdesign-react';
 import { useNavigate } from 'react-router-dom';
+import type { BackendProfile } from '@/api/types';
 import { AuditFields } from '@/components/AuditFields';
 import { BindingsEditor, emptyCapabilityBinding, serializeBindings, type CapabilityBindingForm } from '@/components/BindingsEditor';
+import { ResourceListPanel } from '@/components/ResourceListPanel';
 import { ResourceLobby } from '@/components/ResourceLobby';
+import { StatusTag } from '@/components/StatusTag';
 import { useAdminClient } from '@/lib/connection';
-import { newCorrelationId } from '@/lib/format';
+import { formatDateTime, newCorrelationId } from '@/lib/format';
 import { runMutation } from '@/lib/mutation';
 import { addRecent, listRecents, removeRecent } from '@/lib/recents';
 import { useTenantOutlet } from './TenantLayout';
@@ -14,6 +17,7 @@ export function BackendsPage() {
   const { tenant } = useTenantOutlet();
   const client = useAdminClient();
   const navigate = useNavigate();
+  const loadBackends = useCallback((params: Parameters<typeof client.listBackends>[1]) => client.listBackends(tenant.TenantID, params), [client, tenant.TenantID]);
   const [recents, setRecents] = useState(() => listRecents('backend', tenant.TenantID));
   const [profileKey, setProfileKey] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -57,10 +61,35 @@ export function BackendsPage() {
   return (
     <ResourceLobby
       title="存储后端"
-      subtitle="控制面暂无列表接口（P0 缺口），请通过已知 Profile ID 打开。"
+      subtitle="浏览当前租户的存储后端 Profile，进入详情页查看能力绑定、编辑和状态。"
       idLabel="Profile ID"
       idPlaceholder="Backend Profile ID"
       onOpen={(id) => openBackend(id)}
+      hideOpenPanel
+      resourceList={
+        <ResourceListPanel<BackendProfile>
+          title="存储后端列表"
+          loader={loadBackends}
+          rowKey="ProfileID"
+          columns={[
+            {
+              colKey: 'DisplayName',
+              title: '配置名称',
+              cell: ({ row }) => (
+                <Button variant="text" theme="primary" onClick={() => openBackend(row.ProfileID, row.DisplayName)}>
+                  {row.DisplayName}
+                </Button>
+              ),
+            },
+            { colKey: 'ProfileKey', title: 'Profile Key' },
+            { colKey: 'Bindings', title: '能力绑定', cell: ({ row }) => `${row.Bindings?.length ?? 0} 项` },
+            { colKey: 'Status', title: '状态', cell: ({ row }) => <StatusTag status={row.Status} /> },
+            { colKey: 'Version', title: '版本', cell: ({ row }) => `v${row.Version}` },
+            { colKey: 'UpdatedAt', title: '更新时间', cell: ({ row }) => formatDateTime(row.UpdatedAt) },
+          ]}
+          createLabel="创建存储后端"
+        />
+      }
       createTitle="创建存储后端配置"
       createDescription="绑定 session / memory / summary / knowledge / artifact / audit 能力的 Provider；active 状态至少需要一条 session 绑定。"
       createForm={

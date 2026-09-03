@@ -3,6 +3,7 @@ import { Alert, Button, Card, Descriptions, Form, Input, InputNumber, MessagePlu
 import { useParams } from 'react-router-dom';
 import { DraftEditor, draftFormFromRevision, draftFormToConfiguration, emptyDraftForm, type DraftFormState } from '@/components/DraftEditor';
 import { LoadState } from '@/components/LoadState';
+import { ResourceListPanel } from '@/components/ResourceListPanel';
 import { ReasonDialog, type ReasonSubmit } from '@/components/ReasonDialog';
 import { StatusActions } from '@/components/StatusActions';
 import { StatusTag } from '@/components/StatusTag';
@@ -19,6 +20,10 @@ export function AppDetailPage() {
   const { tenant } = useTenantOutlet();
   const { appId = '' } = useParams();
   const client = useAdminClient();
+  const loadRevisions = useCallback(
+    (params: Parameters<typeof client.listRevisions>[2]) => client.listRevisions(tenant.TenantID, appId, params),
+    [client, tenant.TenantID, appId],
+  );
 
   const [app, setApp] = useState<App | null>(null);
   const [loading, setLoading] = useState(true);
@@ -318,7 +323,7 @@ export function AppDetailPage() {
                   <Alert
                     theme="info"
                     message={`正在编辑草稿 r${draft.Revision}（DraftVersion v${draft.DraftVersion}）`}
-                    description="服务端暂无 Revision 读取接口：草稿快照保存在本次浏览器会话中。若他处修改过该草稿，提交时会收到版本冲突提示，重新创建草稿即可。"
+                    description="草稿快照保存在本次浏览器会话中；版本列表会显示服务端已保存的草稿和发布历史。若他处修改过该草稿，提交时会收到版本冲突提示。"
                   />
                 ) : (
                   <Alert theme="info" message="新草稿尚未创建" description="填写配置后点击“创建草稿”；kind 固定为 llm，schema_version 固定为 1。" />
@@ -347,6 +352,22 @@ export function AppDetailPage() {
               <div className="admin-page-subtitle">点击右上角“创建草稿”开始编辑下一个版本。</div>
             )}
           </Card>
+
+          <ResourceListPanel<Revision>
+            title="版本列表"
+            loader={loadRevisions}
+            rowKey="Revision"
+            statusOptions={[{ label: '草稿', value: 'draft' }, { label: '已发布', value: 'published' }]}
+            columns={[
+              { colKey: 'Revision', title: 'Revision', cell: ({ row }) => `r${row.Revision}` },
+              { colKey: 'State', title: '状态', cell: ({ row }) => <StatusTag status={row.State} /> },
+              { colKey: 'DraftVersion', title: 'Draft Version', cell: ({ row }) => `v${row.DraftVersion}` },
+              { colKey: 'Kind', title: '类型' },
+              { colKey: 'ContentDigest', title: '内容摘要', ellipsis: true },
+              { colKey: 'CreatedAt', title: '创建时间', cell: ({ row }) => formatDateTime(row.CreatedAt) },
+              { colKey: 'PublishedAt', title: '发布时间', cell: ({ row }) => row.PublishedAt ? formatDateTime(row.PublishedAt) : '-' },
+            ]}
+          />
 
           <Card title="发布控制" bordered>
             <div className="admin-form-grid">

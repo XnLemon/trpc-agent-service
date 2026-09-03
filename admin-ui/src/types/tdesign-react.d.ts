@@ -167,6 +167,16 @@ declare module 'tdesign-react' {
     columns?: TableColumn<T>[];
   }
 
+  interface PaginationProps extends BaseProps {
+    current?: number;
+    pageSize?: number;
+    total?: number;
+    totalContent?: boolean | React.ReactNode;
+    showPageSize?: boolean;
+    disabled?: boolean;
+    onChange?: (pageInfo: { current: number; previous: number; pageSize: number }) => void;
+  }
+
   interface DialogButtonConfig {
     content?: React.ReactNode;
     theme?: 'default' | 'primary' | 'warning' | 'danger';
@@ -214,6 +224,7 @@ declare module 'tdesign-react' {
   export const Link: (props: LinkProps) => React.ReactElement | null;
   export const Loading: (props: LoadingProps) => React.ReactElement | null;
   export const Menu: MenuComponent;
+  export const Pagination: (props: PaginationProps) => React.ReactElement | null;
   export const Select: (props: SelectProps) => React.ReactElement | null;
   export const Space: (props: SpaceProps) => React.ReactElement | null;
   export const Switch: (props: SwitchProps) => React.ReactElement | null;
