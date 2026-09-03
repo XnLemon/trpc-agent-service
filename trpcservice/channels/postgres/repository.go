@@ -36,20 +36,8 @@ func (r *ChannelRepository) List(ctx context.Context, tenantID, query, status, c
 	if err != nil {
 		return nil, "", ErrStorage
 	}
-	var bindingIDs []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return nil, "", ErrStorage
-		}
-		bindingIDs = append(bindingIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, "", ErrStorage
-	}
-	if err := rows.Close(); err != nil {
+	bindingIDs, err := scanBindingIDs(rows)
+	if err != nil {
 		return nil, "", ErrStorage
 	}
 	items := make([]*channels.Binding, 0)
@@ -79,6 +67,23 @@ func (r *ChannelRepository) List(ctx context.Context, tenantID, query, status, c
 		next = fmt.Sprintf("%d", end)
 	}
 	return items[offset:end], next, nil
+}
+
+func scanBindingIDs(rows *sql.Rows) ([]string, error) {
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	return ids, rows.Close()
 }
 
 const (

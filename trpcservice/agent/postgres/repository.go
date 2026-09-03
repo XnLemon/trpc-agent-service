@@ -98,20 +98,8 @@ func (r *AgentRepository) ListRevisions(ctx context.Context, tenantID, appID, qu
 	if err != nil {
 		return nil, "", mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
 	}
-	var revisions []int64
-	for rows.Next() {
-		var number int64
-		if err := rows.Scan(&number); err != nil {
-			_ = rows.Close()
-			return nil, "", ErrStorage
-		}
-		revisions = append(revisions, number)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, "", ErrStorage
-	}
-	if err := rows.Close(); err != nil {
+	revisions, err := scanRevisionNumbers(rows)
+	if err != nil {
 		return nil, "", ErrStorage
 	}
 	items := make([]*agent.Revision, 0)
@@ -141,6 +129,23 @@ func (r *AgentRepository) ListRevisions(ctx context.Context, tenantID, appID, qu
 		next = fmt.Sprintf("%d", end)
 	}
 	return items[offset:end], next, nil
+}
+
+func scanRevisionNumbers(rows *sql.Rows) ([]int64, error) {
+	var revisions []int64
+	for rows.Next() {
+		var number int64
+		if err := rows.Scan(&number); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		revisions = append(revisions, number)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	return revisions, rows.Close()
 }
 
 // AgentRepository persists Agent App roots, mutable drafts and immutable

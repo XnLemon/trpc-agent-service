@@ -32,20 +32,8 @@ func (r *BackendRepository) List(ctx context.Context, tenantID, query, status, c
 	if err != nil {
 		return nil, "", ErrStorage
 	}
-	var profileIDs []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return nil, "", ErrStorage
-		}
-		profileIDs = append(profileIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, "", ErrStorage
-	}
-	if err := rows.Close(); err != nil {
+	profileIDs, err := scanProfileIDs(rows)
+	if err != nil {
 		return nil, "", ErrStorage
 	}
 	items := make([]*backend.Profile, 0)
@@ -75,6 +63,23 @@ func (r *BackendRepository) List(ctx context.Context, tenantID, query, status, c
 		next = fmt.Sprintf("%d", end)
 	}
 	return items[offset:end], next, nil
+}
+
+func scanProfileIDs(rows *sql.Rows) ([]string, error) {
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	return ids, rows.Close()
 }
 
 // BackendRepository persists Backend Profiles and their capability bindings.
