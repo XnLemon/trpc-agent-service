@@ -13,6 +13,8 @@ import (
 
 // List returns a stable page of only the requested tenant scopes, ordered by
 // tenant ID. Scope filtering happens before pagination.
+//
+//nolint:gocyclo // Collection listing coordinates scope, filter, and paging boundaries.
 func (r *InMemoryRepository) List(ctx context.Context, scopes []string, query, status, cursor string, limit int) ([]*tenant.Tenant, string, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, "", err
