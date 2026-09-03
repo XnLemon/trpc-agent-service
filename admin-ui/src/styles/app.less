@@ -54,6 +54,10 @@ body {
   border-bottom: 1px solid var(--admin-border);
 }
 
+.admin-mobile-nav-button {
+  display: none;
+}
+
 .admin-shell-brand,
 .admin-shell-context,
 .admin-shell-endpoint,
@@ -67,36 +71,21 @@ body {
   min-width: 196px;
 }
 
-.admin-shell-brand-mark,
-.admin-connect-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--td-text-color-anti);
-  background: var(--admin-brand);
-}
-
-.admin-shell-brand-mark {
-  width: 30px;
-  height: 30px;
-  border-radius: 6px;
-  font-size: 18px;
-}
-
 .admin-shell-brand-copy {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
   color: var(--admin-muted);
   font-size: 11px;
   line-height: 1.2;
 }
 
 .admin-shell-logo {
-  color: var(--admin-text);
-  font-size: 16px;
-  line-height: 1.2;
-  white-space: nowrap;
+  display: block;
+  width: 116px;
+  height: auto;
+  max-width: 100%;
+  object-fit: contain;
 }
 
 .admin-shell-context {
@@ -217,7 +206,7 @@ body {
 
 .admin-shell-content {
   min-width: 0;
-  padding: 30px 32px 48px;
+  padding: 28px 32px 48px;
   overflow-y: auto;
   overflow-x: hidden;
   background: var(--admin-page-background);
@@ -237,6 +226,21 @@ body {
   flex-direction: column;
   gap: 5px;
   padding-bottom: 2px;
+}
+
+.admin-page-heading-row {
+  flex-direction: row;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.admin-page-heading-row > div:first-child {
+  min-width: 0;
+}
+
+.admin-page-heading-row > .t-button {
+  flex: 0 0 auto;
 }
 
 .admin-page-eyebrow {
@@ -276,6 +280,10 @@ body {
   align-items: start;
 }
 
+.admin-lobby-page {
+  gap: 16px;
+}
+
 .admin-panel,
 .admin-context-card {
   border-color: var(--admin-border);
@@ -293,6 +301,110 @@ body {
 .admin-panel .t-card__body,
 .admin-context-card .t-card__body {
   padding: 20px;
+}
+
+.admin-resource-list-panel .t-card__body {
+  padding: 0 20px 16px;
+}
+
+.admin-resource-list-panel .t-card__header {
+  min-height: 58px;
+}
+
+.admin-resource-list {
+  min-width: 0;
+}
+
+.admin-list-toolbar {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(170px, 220px) auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--admin-border);
+}
+
+.admin-list-toolbar > .t-input,
+.admin-list-toolbar > .t-select,
+.admin-list-toolbar > .t-button,
+.admin-list-toolbar-actions {
+  min-width: 0;
+}
+
+.admin-list-toolbar > .t-input,
+.admin-list-toolbar > .t-select {
+  width: 100%;
+}
+
+.admin-list-toolbar-spacer {
+  min-width: 0;
+}
+
+.admin-list-toolbar-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.admin-resource-list .t-table {
+  min-width: 0;
+}
+
+.admin-resource-list .t-table__content {
+  overflow-x: auto;
+}
+
+.admin-resource-list .t-table th {
+  color: var(--admin-muted);
+  font-size: 12px;
+  font-weight: 600;
+  background: transparent;
+}
+
+.admin-resource-list .t-table td {
+  height: 58px;
+  color: var(--admin-text);
+  font-size: 13px;
+}
+
+.admin-resource-list .t-table tbody tr:hover td {
+  background: var(--admin-brand-soft);
+}
+
+.admin-resource-list .t-pagination {
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+.admin-create-drawer .t-drawer__body {
+  padding: 24px;
+}
+
+.admin-create-form {
+  width: 100%;
+  max-width: 460px;
+}
+
+.admin-create-form .t-form,
+.admin-create-form .t-input,
+.admin-create-form .t-select,
+.admin-create-form .t-textarea,
+.admin-create-form .t-input-number {
+  width: 100%;
+  max-width: 100%;
+}
+
+.admin-create-form .admin-panel-description {
+  margin: 0 0 24px;
+}
+
+.admin-mobile-nav-drawer .t-drawer__body {
+  padding: 12px;
+}
+
+.admin-mobile-nav-drawer .t-menu {
+  border-right: 0;
 }
 
 .admin-recent-panel .t-card__body {
@@ -376,6 +488,14 @@ body {
   padding: 20px;
 }
 
+.admin-page > .admin-resource-list-panel .t-card__body {
+  padding: 0 20px 16px;
+}
+
+.admin-page > .admin-recent-panel .t-card__body {
+  padding-top: 12px;
+}
+
 .admin-page > .t-card .t-card__body > .t-form:last-child,
 .admin-page > .t-card .t-card__body > .t-space:last-child {
   margin-bottom: 0;
@@ -401,13 +521,15 @@ body {
 .admin-connect-page {
   display: grid;
   grid-template-columns: minmax(0, 320px) minmax(0, 460px);
-  gap: 48px;
+  gap: clamp(48px, 7vw, 92px);
   align-items: center;
   justify-content: center;
   width: 100%;
+  max-width: 1080px;
   min-width: 0;
   min-height: 100dvh;
-  padding: 32px;
+  margin: 0 auto;
+  padding: 48px 32px;
   background: var(--admin-page-background);
 }
 
@@ -419,12 +541,12 @@ body {
   max-width: 300px;
 }
 
-.admin-connect-mark {
-  width: 46px;
-  height: 46px;
+.admin-connect-logo {
+  display: block;
+  width: min(220px, 100%);
+  height: auto;
   margin-bottom: 22px;
-  border-radius: 8px;
-  font-size: 26px;
+  object-fit: contain;
 }
 
 .admin-connect-kicker {
@@ -458,13 +580,14 @@ body {
 }
 
 .admin-connect-card .t-card__header {
-  min-height: 60px;
-  padding: 0 24px;
+  min-height: 0;
+  padding: 26px 28px 14px;
+  border-bottom: 0;
 }
 
 .admin-connect-card .t-card__body {
   min-width: 0;
-  padding: 24px;
+  padding: 0 28px 28px;
   overflow: hidden;
 }
 
@@ -503,8 +626,32 @@ body {
 .admin-connect-stack {
   display: flex;
   flex-direction: column;
-  gap: var(--td-size-6);
+  gap: 0;
   width: 100%;
+}
+
+.admin-connect-stack .t-alert {
+  margin-bottom: 18px;
+}
+
+.admin-login-form .t-form__item {
+  margin-bottom: 18px;
+}
+
+.admin-login-form .t-form__item:last-child {
+  margin-bottom: 0;
+}
+
+.admin-login-form .t-form__label {
+  margin-bottom: 6px;
+}
+
+.admin-login-form .t-input {
+  min-height: 40px;
+}
+
+.admin-login-submit {
+  margin-top: 4px;
 }
 
 .admin-description-meta {
@@ -562,24 +709,39 @@ body {
     padding: 24px 20px 40px;
   }
 
+  .admin-list-toolbar {
+    grid-template-columns: minmax(0, 1fr) minmax(150px, 0.7fr) auto auto;
+  }
+
+  .admin-list-toolbar-spacer {
+    display: none;
+  }
+
+  .admin-list-create { grid-column: 4; }
+
   .admin-lobby-grid,
   .admin-connect-page {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .admin-connect-page {
-    gap: 24px;
-    width: min(100%, 560px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    width: min(100%, 520px);
     max-width: calc(100vw - 32px);
-    margin: 0 auto;
+    padding: 32px 0;
   }
 
   .admin-connect-intro {
-    max-width: none;
+    display: none;
   }
 
-  .admin-connect-mark {
-    display: none;
+  .admin-connect-card {
+    width: 100%;
+    max-width: 460px;
   }
 }
 
@@ -592,28 +754,61 @@ body {
     min-width: 0;
   }
 
+  .admin-mobile-nav-button {
+    display: inline-flex;
+    flex: 0 0 auto;
+  }
+
   .admin-shell-context {
     display: none;
   }
 
   .admin-shell-aside {
-    width: 64px !important;
-    padding: 18px 8px;
-  }
-
-  .admin-shell-aside .admin-nav-caption,
-  .admin-shell-aside .admin-aside-footer,
-  .admin-shell-aside .t-menu__content {
     display: none;
-  }
-
-  .admin-shell-aside .t-menu__item {
-    justify-content: center;
-    padding: 0;
   }
 
   .admin-shell-content {
     padding: 20px 14px 32px;
+  }
+
+  .admin-page-heading-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .admin-page-heading-row > .t-button {
+    align-self: flex-start;
+  }
+
+  .admin-list-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 12px 0;
+  }
+
+  .admin-list-toolbar > .t-input {
+    grid-column: 1 / -1;
+  }
+
+  .admin-list-toolbar > .t-select {
+    grid-column: 1;
+  }
+
+  .admin-list-create { grid-column: 1 / -1; }
+
+  .admin-page > .admin-resource-list-panel .t-card__body {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  .admin-resource-list .t-table th,
+  .admin-resource-list .t-table td {
+    white-space: nowrap;
+  }
+
+  .admin-create-drawer .t-drawer__body {
+    padding: 18px 16px;
   }
 
   .admin-page-title {
@@ -625,10 +820,18 @@ body {
   }
 
   .admin-connect-page {
-    padding: 22px 16px;
+    padding: 22px 0;
     width: 100%;
     max-width: calc(100vw - 32px);
     overflow-x: hidden;
+  }
+
+  .admin-connect-card .t-card__header {
+    padding: 22px 20px 12px;
+  }
+
+  .admin-connect-card .t-card__body {
+    padding: 0 20px 22px;
   }
 
   .admin-page > .t-card .t-card__header,

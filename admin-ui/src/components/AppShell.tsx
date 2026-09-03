@@ -1,8 +1,9 @@
-import { useMemo } from 'react';
-import { Button, Layout, Menu, Tag } from 'tdesign-react';
-import { AppIcon, DataBaseIcon, HomeIcon, LayersIcon, LinkIcon, LogoutIcon, ViewListIcon } from 'tdesign-icons-react';
+import { useMemo, useState } from 'react';
+import { Button, Drawer, Layout, Menu, Tag } from 'tdesign-react';
+import { AppIcon, DataBaseIcon, HomeIcon, LayersIcon, LinkIcon, LogoutIcon, MenuUnfoldIcon, ViewListIcon } from 'tdesign-icons-react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useConnection } from '@/lib/connection';
+import { TRPC_AGENT_LOGO_URL } from '@/lib/branding';
 
 const { Header, Aside, Content } = Layout;
 
@@ -16,6 +17,7 @@ export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const { principal, disconnect } = useConnection();
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const tenantMatch = location.pathname.match(/^\/tenants\/([^/]+)/);
   const tenantId = tenantMatch?.[1];
@@ -46,15 +48,31 @@ export function AppShell() {
     return best || '/tenants';
   }, [items, location.pathname]);
 
+  const renderNavigation = () => (
+    <Menu theme="light" width="100%" value={activeValue} onChange={(value) => { navigate(String(value)); setMobileNavOpen(false); }}>
+      {items.map((item) => (
+        <Menu.MenuItem key={item.value} value={item.value} icon={item.icon}>
+          {item.label}
+        </Menu.MenuItem>
+      ))}
+    </Menu>
+  );
+
   return (
     <Layout className="admin-shell">
       <Header className="admin-shell-header">
+        <Button
+          className="admin-mobile-nav-button"
+          variant="text"
+          shape="square"
+          icon={<MenuUnfoldIcon />}
+          aria-label="打开导航"
+          title="打开导航"
+          onClick={() => setMobileNavOpen(true)}
+        />
         <div className="admin-shell-brand">
-          <span className="admin-shell-brand-mark" aria-hidden="true">
-            <LayersIcon />
-          </span>
           <div className="admin-shell-brand-copy">
-            <strong className="admin-shell-logo">tRPC Agent</strong>
+            <img className="admin-shell-logo" src={TRPC_AGENT_LOGO_URL} alt="tRPC Agent" />
             <span>管理控制台</span>
           </div>
         </div>
@@ -85,19 +103,24 @@ export function AppShell() {
       <Layout className="admin-shell-body">
         <Aside width="220px" className="admin-shell-aside">
           <div className="admin-nav-caption">工作区</div>
-          <Menu theme="light" width="100%" value={activeValue} onChange={(value) => navigate(String(value))}>
-            {items.map((item) => (
-              <Menu.MenuItem key={item.value} value={item.value} icon={item.icon}>
-                {item.label}
-              </Menu.MenuItem>
-            ))}
-          </Menu>
+          {renderNavigation()}
           <div className="admin-aside-footer">
             <span className="admin-aside-footer-dot" aria-hidden="true" />
             <span>控制面配置</span>
             <span className="admin-mono">v1</span>
           </div>
         </Aside>
+        <Drawer
+          className="admin-mobile-nav-drawer"
+          header="工作区"
+          placement="left"
+          visible={mobileNavOpen}
+          footer={false}
+          size="280px"
+          onClose={() => setMobileNavOpen(false)}
+        >
+          {renderNavigation()}
+        </Drawer>
         <Layout>
           <Content className="admin-shell-content">
             <Outlet />

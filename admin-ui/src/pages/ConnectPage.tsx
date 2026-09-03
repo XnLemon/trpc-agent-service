@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { Alert, Button, Card, Form, Input } from 'tdesign-react';
-import { LayersIcon } from 'tdesign-icons-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useConnection } from '@/lib/connection';
+import { TRPC_AGENT_LOGO_URL } from '@/lib/branding';
 
 /**
  * Same-origin administrator login. The server owns the HttpOnly session cookie;
@@ -35,7 +35,7 @@ export function ConnectPage() {
   return (
     <div className="admin-connect-page">
       <div className="admin-connect-intro">
-        <div className="admin-connect-mark" aria-hidden="true"><LayersIcon /></div>
+        <img className="admin-connect-logo" src={TRPC_AGENT_LOGO_URL} alt="tRPC Agent" />
         <div className="admin-connect-kicker">tRPC Agent / CONTROL PLANE</div>
         <h1>管理控制台</h1>
         <p>集中管理租户、Agent 应用、模型、存储后端与渠道绑定。</p>
@@ -43,7 +43,7 @@ export function ConnectPage() {
       <Card className="admin-connect-card" title="管理员登录" bordered>
         <div className="admin-connect-stack">
           {error ? <Alert theme="error" message={error} /> : null}
-          <Form layout="vertical" labelAlign="top" colon>
+          <Form className="admin-login-form" layout="vertical" labelAlign="top" colon>
             <Form.FormItem label="管理员账号">
               <Input
                 value={username}
@@ -60,7 +60,7 @@ export function ConnectPage() {
                 onEnter={submit}
               />
             </Form.FormItem>
-            <Button theme="primary" block loading={loading} disabled={!username.trim() || !password} onClick={submit}>
+            <Button className="admin-login-submit" size="large" theme="primary" block loading={loading} disabled={!username.trim() || !password} onClick={submit}>
               登录
             </Button>
           </Form>

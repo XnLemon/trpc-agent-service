@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react';
-import { Button, Card, Empty, Form, Input, Link, Table } from 'tdesign-react';
+import { Button, Card, Drawer, Empty, Form, Input, Link, Table } from 'tdesign-react';
+import { AddIcon } from 'tdesign-icons-react';
 import type { RecentItem } from '@/lib/recents';
 import { formatDateTime } from '@/lib/format';
 
@@ -44,18 +45,25 @@ export function ResourceLobby({
   hideOpenPanel = false,
 }: ResourceLobbyProps) {
   const [id, setId] = useState('');
+  const [createOpen, setCreateOpen] = useState(false);
 
   return (
     <div className="admin-page admin-lobby-page">
-      <div className="admin-page-heading">
-        <div className="admin-page-eyebrow">控制面资源</div>
-        <h1 className="admin-page-title">{title}</h1>
-        {subtitle ? <div className="admin-page-subtitle">{subtitle}</div> : null}
+      <div className="admin-page-heading admin-page-heading-row">
+        <div>
+          <div className="admin-page-eyebrow">控制面资源</div>
+          <h1 className="admin-page-title">{title}</h1>
+          {subtitle ? <div className="admin-page-subtitle">{subtitle}</div> : null}
+        </div>
+        {createForm ? (
+          <Button theme="primary" icon={<AddIcon />} onClick={() => setCreateOpen(true)}>
+            {createTitle ?? '新建'}
+          </Button>
+        ) : null}
       </div>
       {alert}
       {resourceList}
-      <div className="admin-lobby-grid">
-        {!hideOpenPanel ? <Card className="admin-panel admin-open-panel" title="打开已有资源" bordered>
+      {!hideOpenPanel ? <Card className="admin-panel admin-open-panel" title="打开已有资源" bordered>
           <Form layout="vertical" labelAlign="top" colon>
             <Form.FormItem label={idLabel}>
               <Input
@@ -70,13 +78,21 @@ export function ResourceLobby({
             </Button>
           </Form>
         </Card> : null}
-        {createForm ? (
-          <Card className="admin-panel admin-create-panel" title={createTitle ?? '新建'} bordered>
-            {createDescription ? <div className="admin-page-subtitle admin-panel-description">{createDescription}</div> : null}
-            {createForm}
-          </Card>
-        ) : null}
-      </div>
+      <Drawer
+        className="admin-create-drawer"
+        header={createTitle ?? '新建'}
+        visible={createOpen}
+        placement="right"
+        size="min(520px, 100vw)"
+        footer={false}
+        destroyOnClose
+        onClose={() => setCreateOpen(false)}
+      >
+        <div className="admin-create-form">
+          {createDescription ? <div className="admin-page-subtitle admin-panel-description">{createDescription}</div> : null}
+          {createForm}
+        </div>
+      </Drawer>
       <Card className="admin-panel admin-recent-panel" title="最近打开" bordered>
         <div className="admin-panel-description">仅保存在当前浏览器会话中，不会写入服务端。</div>
         {recents.length === 0 ? (

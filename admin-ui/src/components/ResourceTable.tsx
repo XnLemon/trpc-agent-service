@@ -39,15 +39,17 @@ export function ResourceTable<T extends object>({ data, loading, columns, rowKey
 
   return <div className="admin-resource-list">
     <div className="admin-list-toolbar">
-      <Input value={query} clearable placeholder="搜索名称、Key 或 ID" onChange={(value) => onQueryChange(String(value))} onEnter={onSearch} />
-      <Select value={status} clearable placeholder="全部状态" options={statusOptions ?? [{ label: '运行中', value: 'active' }, { label: '已暂停', value: 'suspended' }, { label: '草稿', value: 'draft' }, { label: '已禁用', value: 'disabled' }]} onChange={(value) => onStatusChange(String(value ?? ''))} />
-      <Button theme="primary" onClick={onSearch}>搜索</Button>
-      <Button variant="text" onClick={onReset}>重置</Button>
+      <Input className="admin-list-search" value={query} clearable placeholder="搜索名称、Key 或 ID" onChange={(value) => onQueryChange(String(value))} onEnter={onSearch} />
+      <Select className="admin-list-status" value={status} clearable placeholder="全部状态" options={statusOptions ?? [{ label: '运行中', value: 'active' }, { label: '已暂停', value: 'suspended' }, { label: '草稿', value: 'draft' }, { label: '已禁用', value: 'disabled' }]} onChange={(value) => onStatusChange(String(value ?? ''))} />
+      <div className="admin-list-toolbar-actions">
+        <Button theme="primary" onClick={onSearch}>搜索</Button>
+        <Button variant="text" onClick={onReset}>重置</Button>
+      </div>
       <span className="admin-list-toolbar-spacer" />
-      {onCreate ? <Button theme="primary" variant="outline" onClick={onCreate}>{createLabel ?? '新建'}</Button> : null}
+      {onCreate ? <Button className="admin-list-create" theme="primary" variant="outline" onClick={onCreate}>{createLabel ?? '新建'}</Button> : null}
     </div>
     {error ? <Alert theme="error" message="列表加载失败" description={error} operation={onRetry ? <Button size="small" variant="text" theme="primary" onClick={onRetry}>重试</Button> : undefined} /> : null}
-    <Table rowKey={rowKey} bordered={false} stripe hover loading={loading} data={data} columns={columns} empty={<Empty description="暂无匹配资源" />} />
+    <Table rowKey={rowKey} bordered={false} hover loading={loading} data={data} columns={columns} empty={<Empty description="暂无匹配资源" />} />
     {page !== undefined && onPageChange ? (
       <Pagination
         current={page}
