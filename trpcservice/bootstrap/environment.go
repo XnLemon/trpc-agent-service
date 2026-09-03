@@ -1036,7 +1036,7 @@ func s3BackendProviderSpec() backend.ProviderSpec {
 }
 
 func validEnvironmentS3Binding(binding backend.CapabilityBinding) bool {
-	return validEnvironmentS3Endpoint(binding.Endpoint, binding.Options["allow_insecure"] == "true")
+	return validEnvironmentS3Endpoint(binding.Endpoint, binding.Options["allow_insecure"] == "true") && validS3Bucket(binding.Options["bucket"])
 }
 
 func stringOption(value string) *string { return &value }

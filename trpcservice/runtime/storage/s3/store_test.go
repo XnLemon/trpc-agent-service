@@ -304,6 +304,83 @@ func TestStoreProbeCloseAndConstructionBoundaries(t *testing.T) {
 	}
 }
 
+func TestStoreNewFromConfigAndTransferHelpers(t *testing.T) {
+	if maxDuration(time.Second, 2*time.Second) != 2*time.Second || maxDuration(2*time.Second, time.Second) != 2*time.Second {
+		t.Fatal("maxDuration() did not select the longer duration")
+	}
+	for _, test := range []struct {
+		name          string
+		endpoint      string
+		allowInsecure bool
+		wantStore     bool
+	}{
+		{name: "https", endpoint: "https://s3.example.test", wantStore: true},
+		{name: "http opt-in", endpoint: "http://minio:9000", allowInsecure: true, wantStore: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, err := NewFromConfig(awssdk.Config{}, "artifact-bucket", "tenant-a", test.endpoint, true, test.allowInsecure, Options{ConnectTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second})
+			if (store != nil) != test.wantStore || err != nil {
+				t.Fatalf("NewFromConfig() = %v, %v", store, err)
+			}
+			if store != nil {
+				t.Cleanup(func() { _ = store.Close() })
+			}
+		})
+	}
+}
+
+func TestStoreReadS3BodyRejectsMalformedResponses(t *testing.T) {
+	ctx := context.Background()
+	for _, test := range []struct {
+		name string
+		out  *awss3.GetObjectOutput
+	}{
+		{name: "nil output"},
+		{name: "nil body", out: &awss3.GetObjectOutput{ContentLength: awssdk.Int64(1)}},
+		{name: "nil length", out: &awss3.GetObjectOutput{Body: io.NopCloser(strings.NewReader("x"))}},
+		{name: "negative length", out: &awss3.GetObjectOutput{Body: io.NopCloser(strings.NewReader("x")), ContentLength: awssdk.Int64(-1)}},
+		{name: "oversized length", out: &awss3.GetObjectOutput{Body: io.NopCloser(strings.NewReader("x")), ContentLength: awssdk.Int64(2)}},
+		{name: "read error", out: &awss3.GetObjectOutput{Body: errorReadCloser{}, ContentLength: awssdk.Int64(1)}},
+		{name: "close error", out: &awss3.GetObjectOutput{Body: closeErrorReader{Reader: strings.NewReader("x")}, ContentLength: awssdk.Int64(1)}},
+		{name: "length mismatch", out: &awss3.GetObjectOutput{Body: io.NopCloser(strings.NewReader("xy")), ContentLength: awssdk.Int64(1)}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if data, err := readS3Body(ctx, test.out, 1); data != nil || !errors.Is(err, runtimestorage.ErrStorage) {
+				t.Fatalf("readS3Body() = %q, %v", data, err)
+			}
+		})
+	}
+	valid, err := readS3Body(ctx, &awss3.GetObjectOutput{Body: io.NopCloser(strings.NewReader("x")), ContentLength: awssdk.Int64(1)}, 1)
+	if err != nil || string(valid) != "x" {
+		t.Fatalf("valid readS3Body() = %q, %v", valid, err)
+	}
+}
+
+func TestStoreMetadataHelpersFailClosed(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Nanosecond)
+	if artifactVersion(map[string]string{metadataVersion: "0"}) != 0 || artifactVersion(map[string]string{metadataVersion: "01"}) != 0 || artifactVersion(map[string]string{metadataVersion: "bad"}) != 0 {
+		t.Fatal("invalid artifact versions were accepted")
+	}
+	if decodeMetadata("%") != "" {
+		t.Fatal("invalid metadata decoded")
+	}
+	if _, ok := decodeMetadataValue("%"); ok {
+		t.Fatal("invalid metadata value decoded")
+	}
+	if got := artifactTime("invalid", nil); got.IsZero() {
+		t.Fatal("artifactTime() returned zero fallback")
+	}
+	if got := artifactTime("invalid", &now); !got.Equal(now) {
+		t.Fatalf("artifactTime() fallback = %v, want %v", got, now)
+	}
+	if _, ok := parseArtifactTime("invalid"); ok {
+		t.Fatal("invalid artifact time parsed")
+	}
+	if validDigest("bad") || validDigest(strings.Repeat("g", 64)) || !validDigest(strings.Repeat("a", 64)) {
+		t.Fatal("validDigest() boundary mismatch")
+	}
+}
+
 func TestTranslateClassifiesOnlySafeStorageErrors(t *testing.T) {
 	if !errors.Is(translate(&fakeAPIError{code: "NoSuchKey"}), runtimestorage.ErrNotFound) {
 		t.Fatal("NoSuchKey was not classified as not found")
@@ -482,6 +559,15 @@ func validArtifactMetadataFor(sessionID, name, mimeType string, content []byte, 
 type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) { return 0, errors.New("reader failure") }
+
+type errorReadCloser struct{}
+
+func (errorReadCloser) Read([]byte) (int, error) { return 0, errors.New("reader failure") }
+func (errorReadCloser) Close() error             { return nil }
+
+type closeErrorReader struct{ io.Reader }
+
+func (closeErrorReader) Close() error { return errors.New("close failure") }
 
 type cancelOnFirstRead struct {
 	io.Reader
