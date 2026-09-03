@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/argon2"
 )
 
 var (
@@ -87,7 +88,7 @@ type sessionPayload struct {
 // service-to-service compatibility path; browsers never receive its token.
 type SessionAuthenticator struct {
 	username          string
-	passwordDigest    [sha256.Size]byte
+	passwordVerifier  [sha256.Size]byte
 	signingKey        [sha256.Size]byte
 	credentialVersion [sha256.Size]byte
 	static            *StaticAuthenticator
@@ -108,12 +109,12 @@ func NewSessionAuthenticator(username, password string, static *StaticAuthentica
 	if static == nil {
 		return nil, ErrUnauthenticated
 	}
-	passwordDigest := sha256.Sum256([]byte(password))
+	passwordVerifier := derivePasswordVerifier(password, static.token)
 	return &SessionAuthenticator{
 		username:          username,
-		passwordDigest:    passwordDigest,
+		passwordVerifier:  passwordVerifier,
 		signingKey:        deriveSessionSigningKey(static.token),
-		credentialVersion: deriveCredentialVersion(static.token, passwordDigest),
+		credentialVersion: deriveCredentialVersion(static.token, passwordVerifier),
 		static:            static,
 		ttl:               defaultSessionTTL,
 		now:               time.Now,
@@ -198,7 +199,7 @@ func (a *SessionAuthenticator) login(writer http.ResponseWriter, request *http.R
 		writeError(writer, requestID, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if !constantTimeEqual(input.Username, a.username) || !constantTimeDigestEqual(input.Password, a.passwordDigest) {
+	if !constantTimeEqual(input.Username, a.username) || !constantTimeDigestEqual(input.Password, a.passwordVerifier, a.static.token) {
 		writeError(writer, requestID, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -221,8 +222,8 @@ func constantTimeEqual(left, right string) bool {
 	return subtle.ConstantTimeCompare(leftDigest[:], rightDigest[:]) == 1
 }
 
-func constantTimeDigestEqual(value string, expected [sha256.Size]byte) bool {
-	digest := sha256.Sum256([]byte(value))
+func constantTimeDigestEqual(value string, expected [sha256.Size]byte, staticToken string) bool {
+	digest := derivePasswordVerifier(value, staticToken)
 	return subtle.ConstantTimeCompare(digest[:], expected[:]) == 1
 }
 
@@ -304,10 +305,18 @@ func deriveSessionSigningKey(staticToken string) [sha256.Size]byte {
 	return sha256.Sum256([]byte("trpc-admin-session-signing-key\x00" + staticToken))
 }
 
-func deriveCredentialVersion(staticToken string, passwordDigest [sha256.Size]byte) [sha256.Size]byte {
+func derivePasswordVerifier(password, staticToken string) [sha256.Size]byte {
+	salt := sha256.Sum256([]byte("trpc-admin-password-salt\x00" + staticToken))
+	derived := argon2.IDKey([]byte(password), salt[:], 3, 64*1024, 2, sha256.Size)
+	var verifier [sha256.Size]byte
+	copy(verifier[:], derived)
+	return verifier
+}
+
+func deriveCredentialVersion(staticToken string, passwordVerifier [sha256.Size]byte) [sha256.Size]byte {
 	mac := hmac.New(sha256.New, []byte(staticToken))
 	_, _ = mac.Write([]byte("trpc-admin-credential-version\x00"))
-	_, _ = mac.Write(passwordDigest[:])
+	_, _ = mac.Write(passwordVerifier[:])
 	var version [sha256.Size]byte
 	copy(version[:], mac.Sum(nil))
 	return version
