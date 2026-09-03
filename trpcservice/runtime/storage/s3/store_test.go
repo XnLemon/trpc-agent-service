@@ -35,13 +35,31 @@ func TestStoreObjectContractAndTenantIsolation(t *testing.T) {
 	if err != nil || !retry.CreatedAt.Equal(info.CreatedAt) || client.putCalls != 1 {
 		t.Fatalf("idempotent PutObject() = %#v, %v, writes=%d", retry, err, client.putCalls)
 	}
+	replacement, err := store.PutObject(ctx, "tenant-a", "media/report.txt", strings.NewReader("second"), "text/plain")
+	if err != nil || !replacement.CreatedAt.Equal(info.CreatedAt) || replacement.ETag != hexDigest([]byte("second")) || client.putCalls != 2 {
+		t.Fatalf("replacement PutObject() = %#v, %v, writes=%d", replacement, err, client.putCalls)
+	}
 	body, got, err := store.GetObject(ctx, "tenant-a", "media/report.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
 	data, readErr := io.ReadAll(body)
-	if closeErr := body.Close(); readErr != nil || closeErr != nil || string(data) != "first" || got != info {
+	if closeErr := body.Close(); readErr != nil || closeErr != nil || string(data) != "second" || got != replacement {
 		t.Fatalf("GetObject() = %q, %#v, %v, %v", data, got, readErr, closeErr)
+	}
+	longKey := strings.Repeat("k", 1024)
+	longInfo, err := store.PutObject(ctx, "tenant-a", longKey, strings.NewReader("long"), "text/plain")
+	if err != nil || len([]byte(store.remoteKey("objects", longKey))) > 1024 {
+		t.Fatalf("long object key PutObject() = %#v, %v, remote key length=%d", longInfo, err, len([]byte(store.remoteKey("objects", longKey))))
+	}
+	longBody, _, err := store.GetObject(ctx, "tenant-a", longKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	longData, readErr := io.ReadAll(longBody)
+	_ = longBody.Close()
+	if readErr != nil || string(longData) != "long" {
+		t.Fatalf("long object key GetObject() = %q, %v", longData, readErr)
 	}
 	if _, _, err := other.GetObject(ctx, "tenant-b", "media/report.txt"); !errors.Is(err, runtimestorage.ErrNotFound) {
 		t.Fatalf("cross-tenant GetObject() = %v", err)
@@ -66,6 +84,27 @@ func TestStoreArtifactContractAndDefensiveCopies(t *testing.T) {
 	stored := testArtifactVersioning(t, store, ctx)
 	testArtifactReads(t, store, ctx, stored)
 	testArtifactListingAndDeletion(t, store, ctx)
+}
+
+func TestStoreArtifactLongIDUsesStableS3Key(t *testing.T) {
+	store, _ := newTestStore(t, "tenant-a", Options{})
+	ctx := context.Background()
+	artifactID := strings.Repeat("界", 256)
+	stored, err := store.PutArtifact(ctx, testArtifact(artifactID, "session", "content"))
+	if err != nil || len([]byte(store.remoteKey("artifacts", artifactID))) > 1024 {
+		t.Fatalf("long artifact ID PutArtifact() = %#v, %v, remote key length=%d", stored, err, len([]byte(store.remoteKey("artifacts", artifactID))))
+	}
+	got, err := store.GetArtifact(ctx, "tenant-a", artifactID)
+	if err != nil || got.ArtifactID != artifactID || string(got.Content) != "content" {
+		t.Fatalf("long artifact ID GetArtifact() = %#v, %v", got, err)
+	}
+	values, err := store.ListArtifacts(ctx, "tenant-a", "")
+	if err != nil || len(values) != 1 || values[0].ArtifactID != artifactID {
+		t.Fatalf("long artifact ID ListArtifacts() = %#v, %v", values, err)
+	}
+	if err := store.DeleteArtifact(ctx, "tenant-a", artifactID); err != nil {
+		t.Fatalf("long artifact ID DeleteArtifact() = %v", err)
+	}
 }
 
 func testArtifactVersioning(t *testing.T, store *Store, ctx context.Context) runtimestorage.ArtifactRecord {
@@ -174,6 +213,12 @@ func TestStoreRejectsInvalidAndOversizedTransfersWithoutWrites(t *testing.T) {
 	}
 	if client.count() != 0 {
 		t.Fatalf("invalid transfer made %d remote writes", client.count())
+	}
+	largeMetadata := testArtifact("metadata", "session", "content")
+	largeMetadata.Name = strings.Repeat("名", 512)
+	largeMetadata.Content = []byte("x")
+	if _, err := store.PutArtifact(ctx, largeMetadata); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("oversized S3 metadata PutArtifact() = %v", err)
 	}
 	if _, err := store.PutObject(ctx, "tenant-a", "object", failingReader{}, "text/plain"); !errors.Is(err, runtimestorage.ErrStorage) {
 		t.Fatalf("failed reader error = %v", err)
@@ -387,6 +432,51 @@ func TestStoreRemoteErrorsAreRedactedAndFailClosed(t *testing.T) {
 	}
 }
 
+func TestStoreGetObjectRejectsInvalidRemoteResponses(t *testing.T) {
+	store, client := newTestStore(t, "tenant-a", Options{})
+	ctx := context.Background()
+	digest := hexDigest([]byte("x"))
+	created := time.Now().UTC().Format(time.RFC3339Nano)
+	tests := []struct {
+		name string
+		out  *awss3.GetObjectOutput
+	}{
+		{name: "nil output"},
+		{name: "digest mismatch", out: &awss3.GetObjectOutput{Body: io.NopCloser(strings.NewReader("x")), ContentLength: awssdk.Int64(1), ContentType: awssdk.String("text/plain"), Metadata: map[string]string{metadataDigest: "bad", metadataCreated: created}}},
+		{name: "invalid content type", out: &awss3.GetObjectOutput{Body: io.NopCloser(strings.NewReader("x")), ContentLength: awssdk.Int64(1), ContentType: awssdk.String("\n"), Metadata: map[string]string{metadataDigest: digest, metadataCreated: created}}},
+		{name: "invalid created time", out: &awss3.GetObjectOutput{Body: io.NopCloser(strings.NewReader("x")), ContentLength: awssdk.Int64(1), ContentType: awssdk.String("text/plain"), Metadata: map[string]string{metadataDigest: digest, metadataCreated: "invalid"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client.getOutput = test.out
+			client.getOutputSet = true
+			defer func() {
+				client.getOutput = nil
+				client.getOutputSet = false
+			}()
+			if _, _, err := store.GetObject(ctx, "tenant-a", "object"); !errors.Is(err, runtimestorage.ErrStorage) {
+				t.Fatalf("GetObject() = %v", err)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name     string
+		tenantID string
+		object   string
+		ctx      context.Context
+	}{
+		{name: "foreign tenant", tenantID: "tenant-b", object: "object", ctx: ctx},
+		{name: "invalid key", tenantID: "tenant-a", object: "../object", ctx: ctx},
+		{name: "nil context", tenantID: "tenant-a", object: "object"},
+	} {
+		t.Run("invalid/"+test.name, func(t *testing.T) {
+			if _, _, err := store.GetObject(test.ctx, test.tenantID, test.object); !errors.Is(err, runtimestorage.ErrInvalid) {
+				t.Fatalf("GetObject() = %v", err)
+			}
+		})
+	}
+}
+
 func TestStoreReadS3BodyRejectsMalformedResponses(t *testing.T) {
 	ctx := context.Background()
 	for _, test := range []struct {
@@ -471,19 +561,21 @@ func newTestStoreWithClient(t *testing.T, client *fakeS3, tenantID string, optio
 }
 
 type fakeS3 struct {
-	mu        sync.Mutex
-	objects   map[string]fakeObject
-	putCalls  int
-	probeErr  error
-	putErr    error
-	getErr    error
-	headErr   error
-	deleteErr error
-	listErr   error
-	headNil   bool
-	listNil   bool
-	getHook   func(context.Context) error
-	listHook  func(context.Context, *awss3.ListObjectsV2Input) (*awss3.ListObjectsV2Output, error)
+	mu           sync.Mutex
+	objects      map[string]fakeObject
+	putCalls     int
+	probeErr     error
+	putErr       error
+	getErr       error
+	headErr      error
+	deleteErr    error
+	listErr      error
+	headNil      bool
+	listNil      bool
+	getHook      func(context.Context) error
+	listHook     func(context.Context, *awss3.ListObjectsV2Input) (*awss3.ListObjectsV2Output, error)
+	getOutput    *awss3.GetObjectOutput
+	getOutputSet bool
 }
 
 type fakeObject struct {
@@ -516,6 +608,9 @@ func (client *fakeS3) PutObject(ctx context.Context, input *awss3.PutObjectInput
 func (client *fakeS3) GetObject(ctx context.Context, input *awss3.GetObjectInput, _ ...func(*awss3.Options)) (*awss3.GetObjectOutput, error) {
 	if client.getErr != nil {
 		return nil, client.getErr
+	}
+	if client.getOutputSet {
+		return client.getOutput, nil
 	}
 	if client.getHook != nil {
 		if err := client.getHook(ctx); err != nil {

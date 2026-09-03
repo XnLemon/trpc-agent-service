@@ -31,16 +31,18 @@ import (
 )
 
 const (
-	defaultMaxBytes = 32 << 20
-	defaultTimeout  = 15 * time.Second
-	metadataPrefix  = "trpc-artifact-"
-	metadataVersion = metadataPrefix + "version"
-	metadataSession = metadataPrefix + "session"
-	metadataName    = metadataPrefix + "name"
-	metadataMime    = metadataPrefix + "mime"
-	metadataCreated = metadataPrefix + "created"
-	metadataUpdated = metadataPrefix + "updated"
-	metadataDigest  = metadataPrefix + "sha256"
+	defaultMaxBytes  = 32 << 20
+	defaultTimeout   = 15 * time.Second
+	maxMetadataBytes = 1800
+	metadataPrefix   = "trpc-artifact-"
+	metadataVersion  = metadataPrefix + "version"
+	metadataSession  = metadataPrefix + "session"
+	metadataName     = metadataPrefix + "name"
+	metadataMime     = metadataPrefix + "mime"
+	metadataCreated  = metadataPrefix + "created"
+	metadataUpdated  = metadataPrefix + "updated"
+	metadataDigest   = metadataPrefix + "sha256"
+	metadataArtifact = metadataPrefix + "artifact-id"
 )
 
 // API is the subset of the AWS S3 client used by Store. It is consumer-owned
@@ -173,7 +175,35 @@ func (s *Store) remoteKey(kind, key string) string {
 	// Tenant is part of the key even though the Store is already tenant-bound;
 	// this protects against accidental bucket sharing by callers and makes
 	// cross-tenant IDs non-colliding at the storage boundary.
-	return path.Join("tenants", base64.RawURLEncoding.EncodeToString([]byte(s.tenant)), kind, base64.RawURLEncoding.EncodeToString([]byte(key)))
+	tenant := base64.RawURLEncoding.EncodeToString([]byte(s.tenant))
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(key))
+	remote := path.Join("tenants", tenant, kind, encoded)
+	if (kind == "objects" || kind == "artifacts") && len([]byte(remote)) > 1024 {
+		digest := sha256.Sum256([]byte(key))
+		return path.Join("tenants", tenant, kind, "sha256-"+hex.EncodeToString(digest[:]))
+	}
+	return remote
+}
+
+func (s *Store) objectKeyMetadataRequired(objectKey string) bool {
+	tenant := base64.RawURLEncoding.EncodeToString([]byte(s.tenant))
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(objectKey))
+	return len([]byte(path.Join("tenants", tenant, "objects", encoded))) > 1024
+}
+
+func (s *Store) artifactKeyMetadataRequired(artifactID string) bool {
+	tenant := base64.RawURLEncoding.EncodeToString([]byte(s.tenant))
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(artifactID))
+	return len([]byte(path.Join("tenants", tenant, "artifacts", encoded))) > 1024
+}
+
+func (s *Store) validArtifactKeyMetadata(metadata map[string]string, artifactID string) bool {
+	encoded, ok := metadata[metadataArtifact]
+	if !ok {
+		return !s.artifactKeyMetadataRequired(artifactID)
+	}
+	decoded, valid := decodeMetadataValue(encoded)
+	return valid && string(decoded) == artifactID
 }
 
 func validateKey(key string) bool {
@@ -236,12 +266,12 @@ func (s *Store) PutObject(ctx context.Context, tenantID, objectKey string, conte
 	created := time.Now().UTC()
 	existing, headErr := s.head(operation, remote)
 	if headErr == nil {
+		persistedCreated, valid := parseArtifactTime(existing.Metadata[metadataCreated])
+		if !valid {
+			return runtimestorage.ObjectInfo{}, runtimestorage.ErrStorage
+		}
+		created = persistedCreated
 		if existing.Metadata[metadataDigest] == etag && awssdk.ToInt64(existing.ContentLength) == int64(len(data)) && awssdk.ToString(existing.ContentType) == contentType {
-			var valid bool
-			created, valid = parseArtifactTime(existing.Metadata[metadataCreated])
-			if !valid {
-				return runtimestorage.ObjectInfo{}, runtimestorage.ErrStorage
-			}
 			return runtimestorage.ObjectInfo{TenantID: tenantID, ObjectKey: objectKey, ContentType: contentType, Size: int64(len(data)), ETag: etag, CreatedAt: created}, nil
 		}
 	} else if !errors.Is(headErr, runtimestorage.ErrNotFound) {
@@ -336,20 +366,31 @@ func (s *Store) PutArtifact(ctx context.Context, value runtimestorage.ArtifactRe
 	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.TenantID != s.tenant || !validateArtifactID(value.ArtifactID) || !runtimestorage.ValidateText(value.SessionID, 256, false) || !runtimestorage.ValidateText(value.Name, 512, false) || !runtimestorage.ValidateText(value.MimeType, 256, false) || len(value.Content) == 0 || int64(len(value.Content)) > s.maxBytes {
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrInvalid
 	}
+	metadata := map[string]string{
+		metadataDigest:  hexDigest(value.Content),
+		metadataSession: encodeMetadata(value.SessionID),
+		metadataName:    encodeMetadata(value.Name),
+		metadataMime:    encodeMetadata(value.MimeType),
+	}
+	if !validS3MetadataSize(metadata) {
+		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrInvalid
+	}
 	operation, cancel, err := s.operationContext(ctx, s.writeTimeout)
 	if err != nil {
 		return runtimestorage.ArtifactRecord{}, err
 	}
 	defer cancel()
 	now := time.Now().UTC()
-	digest := sha256.Sum256(value.Content)
-	digestHex := hex.EncodeToString(digest[:])
+	digestHex := metadata[metadataDigest]
 	remote := s.remoteKey("artifacts", value.ArtifactID)
 	version := int64(1)
 	created := now
 	existing, headErr := s.head(operation, remote)
 	if headErr == nil {
 		if !validArtifactHead(existing.Metadata, existing.ContentType) {
+			return runtimestorage.ArtifactRecord{}, runtimestorage.ErrStorage
+		}
+		if !s.validArtifactKeyMetadata(existing.Metadata, value.ArtifactID) {
 			return runtimestorage.ArtifactRecord{}, runtimestorage.ErrStorage
 		}
 		version = artifactVersion(existing.Metadata) + 1
@@ -363,7 +404,16 @@ func (s *Store) PutArtifact(ctx context.Context, value runtimestorage.ArtifactRe
 	if version > 1 && !now.After(created) {
 		now = created.Add(time.Nanosecond)
 	}
-	out, err := s.client.PutObject(operation, &awss3.PutObjectInput{Bucket: awssdk.String(s.bucket), Key: awssdk.String(remote), Body: bytes.NewReader(value.Content), ContentLength: awssdk.Int64(int64(len(value.Content))), ContentType: awssdk.String(value.MimeType), Metadata: map[string]string{metadataDigest: digestHex, metadataSession: encodeMetadata(value.SessionID), metadataName: encodeMetadata(value.Name), metadataMime: encodeMetadata(value.MimeType), metadataVersion: fmt.Sprint(version), metadataCreated: created.Format(time.RFC3339Nano), metadataUpdated: now.Format(time.RFC3339Nano)}})
+	metadata[metadataVersion] = fmt.Sprint(version)
+	metadata[metadataCreated] = created.Format(time.RFC3339Nano)
+	metadata[metadataUpdated] = now.Format(time.RFC3339Nano)
+	if s.artifactKeyMetadataRequired(value.ArtifactID) {
+		metadata[metadataArtifact] = encodeMetadata(value.ArtifactID)
+	}
+	if !validS3MetadataSize(metadata) {
+		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrInvalid
+	}
+	out, err := s.client.PutObject(operation, &awss3.PutObjectInput{Bucket: awssdk.String(s.bucket), Key: awssdk.String(remote), Body: bytes.NewReader(value.Content), ContentLength: awssdk.Int64(int64(len(value.Content))), ContentType: awssdk.String(value.MimeType), Metadata: metadata})
 	if err != nil {
 		return runtimestorage.ArtifactRecord{}, translate(err)
 	}
@@ -401,7 +451,7 @@ func (s *Store) getArtifact(ctx context.Context, tenantID, artifactID string) (r
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrStorage
 	}
 	metadata := out.Metadata
-	if !validArtifactMetadata(metadata, content, out.ContentType) {
+	if !validArtifactMetadata(metadata, content, out.ContentType) || !s.validArtifactKeyMetadata(metadata, artifactID) {
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrStorage
 	}
 	created, updated, version, sessionID, name, mimeType := artifactMetadata(metadata, out.LastModified)
@@ -452,7 +502,7 @@ func (s *Store) listArtifactKeys(ctx context.Context, prefix string) ([]string, 
 		if out == nil {
 			return nil, runtimestorage.ErrStorage
 		}
-		pageKeys, pageErr := s.parseArtifactKeys(out.Contents, prefix)
+		pageKeys, pageErr := s.parseArtifactKeys(ctx, out.Contents, prefix)
 		if pageErr != nil {
 			return nil, pageErr
 		}
@@ -472,7 +522,7 @@ func (s *Store) listArtifactKeys(ctx context.Context, prefix string) ([]string, 
 	return keys, nil
 }
 
-func (s *Store) parseArtifactKeys(items []awss3types.Object, prefix string) ([]string, error) {
+func (s *Store) parseArtifactKeys(ctx context.Context, items []awss3types.Object, prefix string) ([]string, error) {
 	keys := make([]string, 0, len(items))
 	for _, item := range items {
 		if item.Key == nil || !strings.HasPrefix(*item.Key, prefix) {
@@ -480,12 +530,32 @@ func (s *Store) parseArtifactKeys(items []awss3types.Object, prefix string) ([]s
 		}
 		encoded := path.Base(*item.Key)
 		artifactID, err := base64.RawURLEncoding.DecodeString(encoded)
+		if isHashedRemoteKey(encoded) {
+			header, headErr := s.head(ctx, *item.Key)
+			if headErr != nil || header.Metadata == nil {
+				return nil, runtimestorage.ErrStorage
+			}
+			decoded, valid := decodeMetadataValue(header.Metadata[metadataArtifact])
+			if !valid {
+				return nil, runtimestorage.ErrStorage
+			}
+			artifactID = []byte(decoded)
+			err = nil
+		}
 		if err != nil || !validateArtifactID(string(artifactID)) || *item.Key != s.remoteKey("artifacts", string(artifactID)) {
 			return nil, runtimestorage.ErrStorage
 		}
 		keys = append(keys, string(artifactID))
 	}
 	return keys, nil
+}
+
+func isHashedRemoteKey(value string) bool {
+	if !strings.HasPrefix(value, "sha256-") || len(value) != len("sha256-")+sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimPrefix(value, "sha256-"))
+	return err == nil
 }
 
 // DeleteArtifact removes one artifact.
@@ -653,6 +723,17 @@ func validDigest(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
+}
+
+func validS3MetadataSize(metadata map[string]string) bool {
+	total := 0
+	for key, value := range metadata {
+		total += len("x-amz-meta-") + len(key) + len(value)
+		if total > maxMetadataBytes {
+			return false
+		}
+	}
+	return true
 }
 
 func artifactMetadata(metadata map[string]string, fallback *time.Time) (time.Time, time.Time, int64, string, string, string) {

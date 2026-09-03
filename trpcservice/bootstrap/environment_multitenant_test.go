@@ -406,7 +406,7 @@ func TestEnvironmentBackendCatalogIncludesTenantScopedS3ArtifactOnly(t *testing.
 			t.Fatalf("invalid S3 options %#v = %v", options, err)
 		}
 	}
-	for _, options := range []map[string]string{{"bucket": "BAD"}, {"bucket": "a..b"}} {
+	for _, options := range []map[string]string{{"bucket": "BAD"}, {"bucket": "a..b"}, {"bucket": bucket, "unknown": "value"}, {"bucket": bucket, "path_style": "maybe"}, {"bucket": bucket, "allow_insecure": "maybe"}, {"bucket": bucket, "max_bytes": "0"}, {"bucket": bucket, "connect_timeout_ms": "0"}} {
 		if _, err := parseEnvironmentS3Options(options); !errors.Is(err, backend.ErrStorageFactory) {
 			t.Fatalf("invalid S3 bucket %#v = %v", options, err)
 		}
@@ -448,6 +448,12 @@ func TestEnvironmentS3CapabilityProviderValidatesScopeAndProbe(t *testing.T) {
 	provider := environmentS3CapabilityProvider{tenantID: "t_00000000000000000000000000", secretRef: "env/s3"}
 	input := backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000"}
 	binding := backend.CapabilityBinding{Capability: backend.CapabilityArtifact, Provider: "s3", Endpoint: "https://s3.example.test", SecretRef: "env/s3", Options: map[string]string{"bucket": "tenant-artifacts"}}
+	if _, err := provider.New(nil, input, binding, secret); !errors.Is(err, context.Canceled) {
+		t.Fatalf("nil S3 provider context = %v", err)
+	}
+	if _, err := provider.New(canceledContext(), input, binding, secret); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled S3 provider context = %v", err)
+	}
 	value, err := provider.New(context.Background(), input, binding, secret)
 	if err != nil || value != store || store.probes != 1 {
 		t.Fatalf("S3 provider = %T, %v, probes=%d", value, err, store.probes)
@@ -458,6 +464,19 @@ func TestEnvironmentS3CapabilityProviderValidatesScopeAndProbe(t *testing.T) {
 	store.probeErr = errors.New("unavailable")
 	if _, err := provider.New(context.Background(), input, binding, secret); !errors.Is(err, backend.ErrStorageFactory) || store.closes != 1 {
 		t.Fatalf("S3 probe failure = %v, closes=%d", err, store.closes)
+	}
+	store.probeErr = nil
+	newEnvironmentS3Store = func(context.Context, string, backend.CapabilityBinding, modelprofile.SecretValue) (environmentS3Store, error) {
+		return nil, errors.New("factory unavailable")
+	}
+	if _, err := provider.New(context.Background(), input, binding, secret); !errors.Is(err, backend.ErrStorageFactory) {
+		t.Fatalf("S3 factory failure = %v", err)
+	}
+	newEnvironmentS3Store = func(context.Context, string, backend.CapabilityBinding, modelprofile.SecretValue) (environmentS3Store, error) {
+		return nil, nil
+	}
+	if _, err := provider.New(context.Background(), input, binding, secret); !errors.Is(err, backend.ErrStorageFactory) {
+		t.Fatalf("nil S3 store = %v", err)
 	}
 }
 
