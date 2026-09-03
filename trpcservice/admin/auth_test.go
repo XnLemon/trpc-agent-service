@@ -34,6 +34,9 @@ func TestSessionAuthenticatorLoginSessionLogoutAndExpiry(t *testing.T) {
 	if cookie.Name != AdminSessionCookie || !cookie.HttpOnly || cookie.Value == "" {
 		t.Fatalf("session cookie=%+v", cookie)
 	}
+	if cookie.Secure {
+		t.Fatalf("plain HTTP login unexpectedly created a secure cookie=%+v", cookie)
+	}
 	var envelope struct {
 		Data struct {
 			SubjectID    string   `json:"subject_id"`
@@ -64,11 +67,10 @@ func TestSessionAuthenticatorLoginSessionLogoutAndExpiry(t *testing.T) {
 		t.Fatalf("logout status=%d cookies=%v", recorder.Code, recorder.Result().Cookies())
 	}
 	unauthorized := httptest.NewRequest(http.MethodGet, "http://admin.test/admin/auth/session", nil)
-	unauthorized.AddCookie(cookie)
 	recorder = httptest.NewRecorder()
 	auth.ServeHTTP(recorder, unauthorized)
 	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("revoked session status=%d", recorder.Code)
+		t.Fatalf("session without cleared cookie status=%d", recorder.Code)
 	}
 
 	login = httptest.NewRequest(http.MethodPost, "http://admin.test/admin/auth/login", bytes.NewBufferString(`{"username":"operator","password":"secret"}`))
@@ -83,6 +85,83 @@ func TestSessionAuthenticatorLoginSessionLogoutAndExpiry(t *testing.T) {
 	auth.ServeHTTP(recorder, expired)
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("expired session status=%d", recorder.Code)
+	}
+}
+
+func TestSessionAuthenticatorCookieWorksAcrossReplicasAndRejectsTampering(t *testing.T) {
+	firstStatic, _ := NewStaticAuthenticator("service-token", []string{"tenant-a"})
+	secondStatic, _ := NewStaticAuthenticator("service-token", []string{"tenant-a"})
+	first, err := NewSessionAuthenticator("operator", "secret", firstStatic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewSessionAuthenticator("operator", "secret", secondStatic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := httptest.NewRequest(http.MethodPost, "http://admin.test/admin/auth/login", bytes.NewBufferString(`{"username":"operator","password":"secret"}`))
+	login.Header.Set("Origin", "http://admin.test")
+	recorder := httptest.NewRecorder()
+	first.ServeHTTP(recorder, login)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("login status=%d", recorder.Code)
+	}
+	cookie := recorder.Result().Cookies()[0]
+	session := httptest.NewRequest(http.MethodGet, "http://admin.test/admin/auth/session", nil)
+	session.AddCookie(cookie)
+	recorder = httptest.NewRecorder()
+	second.ServeHTTP(recorder, session)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("cross-replica session status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	differentStatic, _ := NewStaticAuthenticator("different-service-token", []string{"tenant-a"})
+	differentReplica, err := NewSessionAuthenticator("operator", "secret", differentStatic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session = httptest.NewRequest(http.MethodGet, "http://admin.test/admin/auth/session", nil)
+	session.AddCookie(cookie)
+	recorder = httptest.NewRecorder()
+	differentReplica.ServeHTTP(recorder, session)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("different secret session status=%d", recorder.Code)
+	}
+	differentPasswordReplica, err := NewSessionAuthenticator("operator", "changed-secret", secondStatic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session = httptest.NewRequest(http.MethodGet, "http://admin.test/admin/auth/session", nil)
+	session.AddCookie(cookie)
+	recorder = httptest.NewRecorder()
+	differentPasswordReplica.ServeHTTP(recorder, session)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("changed password session status=%d", recorder.Code)
+	}
+
+	tampered := *cookie
+	tampered.Value += "x"
+	session = httptest.NewRequest(http.MethodGet, "http://admin.test/admin/auth/session", nil)
+	session.AddCookie(&tampered)
+	recorder = httptest.NewRecorder()
+	second.ServeHTTP(recorder, session)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("tampered session status=%d", recorder.Code)
+	}
+}
+
+func TestSessionAuthenticatorHonorsTLSProxyScheme(t *testing.T) {
+	static, _ := NewStaticAuthenticator("service-token", []string{"tenant-a"})
+	auth, err := NewSessionAuthenticator("operator", "secret", static)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://admin.test/admin/auth/login", bytes.NewBufferString(`{"username":"operator","password":"secret"}`))
+	request.Header.Set("X-Forwarded-Proto", "https")
+	request.Header.Set("Origin", "https://admin.test")
+	recorder := httptest.NewRecorder()
+	auth.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !recorder.Result().Cookies()[0].Secure {
+		t.Fatalf("TLS proxy login status=%d cookies=%v", recorder.Code, recorder.Result().Cookies())
 	}
 }
 

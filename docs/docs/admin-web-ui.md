@@ -111,6 +111,7 @@ http://localhost:5173/admin/* -> 代理到 http://127.0.0.1:8080/admin/*
 ```
 
 前端不再提供“API 地址”输入框。反向代理或 Vite proxy 负责把同源路径转发到 Gateway。
+生产反向代理必须保留公共 `Host`，并覆盖客户端传入的 `X-Forwarded-Proto` 为实际的公共协议；服务仅应信任由该受控代理写入的该 Header。
 
 ### 3.2 登录流程
 
@@ -118,15 +119,12 @@ http://localhost:5173/admin/* -> 代理到 http://127.0.0.1:8080/admin/*
 sequenceDiagram
   participant B as 浏览器
   participant A as Admin BFF/Gateway
-  participant S as Session Store
   B->>A: POST /admin/auth/login (username,password)
   A->>A: 校验密码哈希、账号状态、登录限流
-  A->>S: 创建短期会话
-  S-->>A: session_id
-  A-->>B: Set-Cookie: admin_session=...
+  A->>A: 创建带过期时间和随机 nonce 的签名会话
+  A-->>B: Set-Cookie: trpc_admin_session=payload.signature
   B->>A: GET /admin/auth/session
-  A->>S: 读取 principal 与 tenant scopes
-  S-->>A: principal
+  A->>A: 验签并检查过期时间
   A-->>B: 当前账号、角色、租户范围
 ```
 
@@ -135,8 +133,8 @@ sequenceDiagram
 - Cookie 使用 `HttpOnly`、`Secure`、`SameSite=Lax/Strict`，生产环境禁止通过 JavaScript 读取。
 - 写请求校验 CSRF Token 或同等的 Origin/Referer 策略。
 - 登录失败、验证码/锁定策略和会话过期由服务端控制。
-- 登出应立即使当前会话失效；修改密码、移除权限和管理员禁用也应能吊销会话。
-- 密码只保存 Argon2id 或等价强度的哈希，不进入日志、审计 payload 或前端状态。
+- 内置会话是无状态签名 Cookie：同一组管理员凭据的多个副本均可验证，无需 sticky session 或共享 session store。登出会清除浏览器 Cookie；管理员密码摘要变化或轮换 `TRPC_ADMIN_TOKEN` 并滚动重启后，旧 Cookie 会失效。需要单会话即时吊销、账号禁用或权限动态变更时，应接入具备服务端会话存储的 OIDC/SSO。
+- 管理员密码仅作为启动时 Secret 输入；进程只保留用于恒定时间比较的摘要和派生的会话签名密钥，二者均不进入日志、审计 payload 或前端状态。
 - 可在同一会话模型上接入 OIDC/SSO，不改变前端资源权限模型。
 
 当前 `StaticAuthenticator` 仍是服务进程级 Bearer Token 边界，只适合作为迁移期或内部 BFF 的上游凭证，不能作为最终浏览器登录体验。配置 `TRPC_ADMIN_USERNAME` 与 `TRPC_ADMIN_PASSWORD` 后，服务会在保留静态 Bearer 兼容性的同时启用同源账号密码登录；浏览器只接收 `HttpOnly` 会话 Cookie，不需要填写 API 地址或 Token。

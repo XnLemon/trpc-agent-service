@@ -77,7 +77,9 @@ export default defineConfig({
       // browser never needs CORS. Override with VITE_API_TARGET.
       '/admin': {
         target: process.env.VITE_API_TARGET || 'http://127.0.0.1:8080',
-        changeOrigin: true,
+        // Keep the browser Host for local same-origin CSRF checks. Production
+        // proxies should forward the public Host and protocol as well.
+        changeOrigin: false,
       },
     },
   },

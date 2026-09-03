@@ -2,7 +2,9 @@ package admin
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -12,7 +14,6 @@ import (
 	"net/url"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -75,30 +76,30 @@ const AdminSessionCookie = "trpc_admin_session"
 
 const defaultSessionTTL = 8 * time.Hour
 
-type adminSession struct {
-	principal Principal
-	expiresAt time.Time
+type sessionPayload struct {
+	ExpiresAtUnix     int64  `json:"e"`
+	Nonce             string `json:"n"`
+	CredentialVersion string `json:"v"`
 }
 
 // SessionAuthenticator provides the browser authentication boundary for the
 // admin console. The optional static authenticator is retained as a private
 // service-to-service compatibility path; browsers never receive its token.
 type SessionAuthenticator struct {
-	username string
-	password string
-	static   *StaticAuthenticator
-	ttl      time.Duration
+	username          string
+	passwordDigest    [sha256.Size]byte
+	signingKey        [sha256.Size]byte
+	credentialVersion [sha256.Size]byte
+	static            *StaticAuthenticator
+	ttl               time.Duration
 
-	mu       sync.Mutex
-	sessions map[string]adminSession
-	now      func() time.Time
-	rand     func([]byte) error
+	now  func() time.Time
+	rand func([]byte) error
 }
 
-// NewSessionAuthenticator creates an account/password authenticator backed by
-// process-local opaque sessions. Deployments with multiple replicas should
-// put a sticky/session-aware BFF in front or replace this implementation with
-// a shared identity provider.
+// NewSessionAuthenticator creates an account/password authenticator that
+// signs self-contained browser sessions. Every replica with the same configured
+// credentials can verify a session without a shared process-local session map.
 func NewSessionAuthenticator(username, password string, static *StaticAuthenticator) (*SessionAuthenticator, error) {
 	username = strings.TrimSpace(username)
 	if username == "" || password == "" || strings.ContainsAny(username, "\r\n") || strings.ContainsAny(password, "\r\n") {
@@ -107,14 +108,16 @@ func NewSessionAuthenticator(username, password string, static *StaticAuthentica
 	if static == nil {
 		return nil, ErrUnauthenticated
 	}
+	passwordDigest := sha256.Sum256([]byte(password))
 	return &SessionAuthenticator{
-		username: username,
-		password: password,
-		static:   static,
-		ttl:      defaultSessionTTL,
-		sessions: make(map[string]adminSession),
-		now:      time.Now,
-		rand:     secureRandom,
+		username:          username,
+		passwordDigest:    passwordDigest,
+		signingKey:        deriveSessionSigningKey(static.token),
+		credentialVersion: deriveCredentialVersion(static.token, passwordDigest),
+		static:            static,
+		ttl:               defaultSessionTTL,
+		now:               time.Now,
+		rand:              secureRandom,
 	}, nil
 }
 
@@ -195,7 +198,7 @@ func (a *SessionAuthenticator) login(writer http.ResponseWriter, request *http.R
 		writeError(writer, requestID, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if !constantTimeEqual(input.Username, a.username) || !constantTimeEqual(input.Password, a.password) {
+	if !constantTimeEqual(input.Username, a.username) || !constantTimeDigestEqual(input.Password, a.passwordDigest) {
 		writeError(writer, requestID, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -206,17 +209,21 @@ func (a *SessionAuthenticator) login(writer http.ResponseWriter, request *http.R
 	}
 	http.SetCookie(writer, &http.Cookie{
 		Name: AdminSessionCookie, Value: token, Path: "/", HttpOnly: true,
-		Secure: request.TLS != nil, SameSite: http.SameSiteLaxMode,
+		Secure: requestIsHTTPS(request), SameSite: http.SameSiteLaxMode,
 		MaxAge: int(a.ttl.Seconds()), Expires: a.now().Add(a.ttl),
 	})
 	writeJSON(writer, requestID, http.StatusOK, principalResponse(a.static.principal))
 }
 
 func constantTimeEqual(left, right string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
+	leftDigest := sha256.Sum256([]byte(left))
+	rightDigest := sha256.Sum256([]byte(right))
+	return subtle.ConstantTimeCompare(leftDigest[:], rightDigest[:]) == 1
+}
+
+func constantTimeDigestEqual(value string, expected [sha256.Size]byte) bool {
+	digest := sha256.Sum256([]byte(value))
+	return subtle.ConstantTimeCompare(digest[:], expected[:]) == 1
 }
 
 func (a *SessionAuthenticator) session(writer http.ResponseWriter, request *http.Request, requestID string) {
@@ -233,48 +240,77 @@ func (a *SessionAuthenticator) logout(writer http.ResponseWriter, request *http.
 		writeError(writer, requestID, http.StatusForbidden, "forbidden")
 		return
 	}
-	if cookie, err := request.Cookie(AdminSessionCookie); err == nil {
-		a.mu.Lock()
-		delete(a.sessions, cookie.Value)
-		a.mu.Unlock()
-	}
-	http.SetCookie(writer, &http.Cookie{Name: AdminSessionCookie, Value: "", Path: "/", HttpOnly: true, Secure: request.TLS != nil, SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(1, 0).UTC()})
+	http.SetCookie(writer, &http.Cookie{Name: AdminSessionCookie, Value: "", Path: "/", HttpOnly: true, Secure: requestIsHTTPS(request), SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(1, 0).UTC()})
 	writeJSON(writer, requestID, http.StatusOK, map[string]any{"logged_out": true})
 }
 
 func (a *SessionAuthenticator) newSession() (string, error) {
-	bytes := make([]byte, 32)
-	if a.rand == nil {
-		a.rand = secureRandom
+	nonce := make([]byte, 32)
+	random := a.rand
+	if random == nil {
+		random = secureRandom
 	}
-	if err := a.rand(bytes); err != nil {
+	if err := random(nonce); err != nil {
 		return "", err
 	}
-	token := base64.RawURLEncoding.EncodeToString(bytes)
-	now := a.now()
-	a.mu.Lock()
-	for key, session := range a.sessions {
-		if !now.Before(session.expiresAt) {
-			delete(a.sessions, key)
-		}
+	payload, err := json.Marshal(sessionPayload{
+		ExpiresAtUnix:     a.now().Add(a.ttl).Unix(),
+		Nonce:             base64.RawURLEncoding.EncodeToString(nonce),
+		CredentialVersion: base64.RawURLEncoding.EncodeToString(a.credentialVersion[:]),
+	})
+	if err != nil {
+		return "", err
 	}
-	a.sessions[token] = adminSession{principal: a.static.principal, expiresAt: now.Add(a.ttl)}
-	a.mu.Unlock()
-	return token, nil
+	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
+	return encodedPayload + "." + a.signSessionPayload(encodedPayload), nil
 }
 
 func (a *SessionAuthenticator) sessionPrincipal(token string) (Principal, bool) {
-	now := a.now()
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	session, ok := a.sessions[token]
-	if !ok || !now.Before(session.expiresAt) {
-		if ok {
-			delete(a.sessions, token)
-		}
+	encodedPayload, signature, ok := strings.Cut(token, ".")
+	if !ok || encodedPayload == "" || signature == "" || strings.Contains(signature, ".") ||
+		!hmac.Equal([]byte(signature), []byte(a.signSessionPayload(encodedPayload))) {
 		return Principal{}, false
 	}
-	return session.principal, true
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(encodedPayload)
+	if err != nil {
+		return Principal{}, false
+	}
+	var payload sessionPayload
+	decoder := json.NewDecoder(strings.NewReader(string(payloadBytes)))
+	if err := decoder.Decode(&payload); err != nil || decoder.Decode(&struct{}{}) != io.EOF || payload.ExpiresAtUnix <= 0 || payload.Nonce == "" || payload.CredentialVersion == "" {
+		return Principal{}, false
+	}
+	nonce, err := base64.RawURLEncoding.DecodeString(payload.Nonce)
+	if err != nil || len(nonce) != 32 {
+		return Principal{}, false
+	}
+	credentialVersion, err := base64.RawURLEncoding.DecodeString(payload.CredentialVersion)
+	if err != nil || subtle.ConstantTimeCompare(credentialVersion, a.credentialVersion[:]) != 1 {
+		return Principal{}, false
+	}
+	if !a.now().Before(time.Unix(payload.ExpiresAtUnix, 0)) {
+		return Principal{}, false
+	}
+	return a.static.principal, true
+}
+
+func (a *SessionAuthenticator) signSessionPayload(payload string) string {
+	mac := hmac.New(sha256.New, a.signingKey[:])
+	_, _ = mac.Write([]byte(payload))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func deriveSessionSigningKey(staticToken string) [sha256.Size]byte {
+	return sha256.Sum256([]byte("trpc-admin-session-signing-key\x00" + staticToken))
+}
+
+func deriveCredentialVersion(staticToken string, passwordDigest [sha256.Size]byte) [sha256.Size]byte {
+	mac := hmac.New(sha256.New, []byte(staticToken))
+	_, _ = mac.Write([]byte("trpc-admin-credential-version\x00"))
+	_, _ = mac.Write(passwordDigest[:])
+	var version [sha256.Size]byte
+	copy(version[:], mac.Sum(nil))
+	return version
 }
 
 func decodeAuthBody(request *http.Request, target any) error {
@@ -324,11 +360,22 @@ func sameOrigin(request *http.Request) bool {
 	if host == "" {
 		host = request.URL.Host
 	}
-	scheme := "http"
-	if request.TLS != nil {
-		scheme = "https"
-	}
+	scheme := requestScheme(request)
 	return strings.EqualFold(parsed.Host, host) && strings.EqualFold(parsed.Scheme, scheme)
+}
+
+func requestIsHTTPS(request *http.Request) bool { return requestScheme(request) == "https" }
+
+func requestScheme(request *http.Request) string {
+	if request != nil && request.TLS != nil {
+		return "https"
+	}
+	if request != nil {
+		if forwarded := strings.TrimSpace(strings.Split(request.Header.Get("X-Forwarded-Proto"), ",")[0]); strings.EqualFold(forwarded, "https") {
+			return "https"
+		}
+	}
+	return "http"
 }
 
 func secureRandom(buffer []byte) error {
