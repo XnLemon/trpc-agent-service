@@ -33,6 +33,7 @@ export function ResourceListPanel<T extends object>({ title, loader, rowKey, col
         onReset={list.reset}
         page={list.page}
         pageSize={list.pageSize}
+        hasMore={list.hasMore}
         onPageChange={list.changePage}
         createLabel={createLabel}
         onCreate={onCreate}
