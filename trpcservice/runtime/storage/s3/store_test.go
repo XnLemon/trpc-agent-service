@@ -316,9 +316,14 @@ func TestStoreNewFromConfigAndTransferHelpers(t *testing.T) {
 	}{
 		{name: "https", endpoint: "https://s3.example.test", wantStore: true},
 		{name: "http opt-in", endpoint: "http://minio:9000", allowInsecure: true, wantStore: true},
+		{name: "empty endpoint defaults", wantStore: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			store, err := NewFromConfig(awssdk.Config{}, "artifact-bucket", "tenant-a", test.endpoint, true, test.allowInsecure, Options{ConnectTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second})
+			options := Options{ConnectTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second}
+			if test.name == "empty endpoint defaults" {
+				options = Options{}
+			}
+			store, err := NewFromConfig(awssdk.Config{}, "artifact-bucket", "tenant-a", test.endpoint, true, test.allowInsecure, options)
 			if (store != nil) != test.wantStore || err != nil {
 				t.Fatalf("NewFromConfig() = %v, %v", store, err)
 			}
@@ -326,6 +331,59 @@ func TestStoreNewFromConfigAndTransferHelpers(t *testing.T) {
 				t.Cleanup(func() { _ = store.Close() })
 			}
 		})
+	}
+	if store, err := NewFromConfig(awssdk.Config{}, "BAD_BUCKET", "tenant-a", "https://s3.example.test", true, false, Options{}); store != nil || !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid bucket NewFromConfig() = %v, %v", store, err)
+	}
+
+	store, _ := newTestStore(t, "tenant-a", Options{})
+	if _, _, err := store.operationContext(nil, time.Second); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("nil operation context = %v", err)
+	}
+}
+
+func TestStoreRemoteErrorsAreRedactedAndFailClosed(t *testing.T) {
+	store, client := newTestStore(t, "tenant-a", Options{})
+	ctx := context.Background()
+	client.headErr = errors.New("remote access-key=secret")
+	if _, err := store.PutObject(ctx, "tenant-a", "object", strings.NewReader("x"), "text/plain"); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("head error PutObject() = %v", err)
+	}
+	client.headErr = nil
+	client.putErr = errors.New("remote bucket=secret")
+	if _, err := store.PutObject(ctx, "tenant-a", "object", strings.NewReader("x"), "text/plain"); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("put error PutObject() = %v", err)
+	}
+	client.putErr = nil
+	client.headNil = true
+	if _, err := store.PutObject(ctx, "tenant-a", "other", strings.NewReader("x"), "text/plain"); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("nil head PutObject() = %v", err)
+	}
+	client.headNil = false
+	if _, err := store.PutObject(ctx, "tenant-a", "object", strings.NewReader("x"), "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	client.getErr = errors.New("remote object secret")
+	if _, _, err := store.GetObject(ctx, "tenant-a", "object"); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("get error GetObject() = %v", err)
+	}
+	client.getErr = nil
+	client.deleteErr = errors.New("remote delete secret")
+	if err := store.DeleteObject(ctx, "tenant-a", "object"); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("delete error DeleteObject() = %v", err)
+	}
+	client.deleteErr = nil
+	client.listErr = errors.New("remote list secret")
+	if _, err := store.ListArtifacts(ctx, "tenant-a", ""); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("list error ListArtifacts() = %v", err)
+	}
+	client.listErr = nil
+	client.listNil = true
+	if _, err := store.ListArtifacts(ctx, "tenant-a", ""); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("nil list ListArtifacts() = %v", err)
+	}
+	if err := store.Probe(nil); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("nil Probe() = %v", err)
 	}
 }
 
@@ -413,12 +471,19 @@ func newTestStoreWithClient(t *testing.T, client *fakeS3, tenantID string, optio
 }
 
 type fakeS3 struct {
-	mu       sync.Mutex
-	objects  map[string]fakeObject
-	putCalls int
-	probeErr error
-	getHook  func(context.Context) error
-	listHook func(context.Context, *awss3.ListObjectsV2Input) (*awss3.ListObjectsV2Output, error)
+	mu        sync.Mutex
+	objects   map[string]fakeObject
+	putCalls  int
+	probeErr  error
+	putErr    error
+	getErr    error
+	headErr   error
+	deleteErr error
+	listErr   error
+	headNil   bool
+	listNil   bool
+	getHook   func(context.Context) error
+	listHook  func(context.Context, *awss3.ListObjectsV2Input) (*awss3.ListObjectsV2Output, error)
 }
 
 type fakeObject struct {
@@ -434,6 +499,9 @@ func (client *fakeS3) PutObject(ctx context.Context, input *awss3.PutObjectInput
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if client.putErr != nil {
+		return nil, client.putErr
+	}
 	data, err := io.ReadAll(input.Body)
 	if err != nil {
 		return nil, err
@@ -446,6 +514,9 @@ func (client *fakeS3) PutObject(ctx context.Context, input *awss3.PutObjectInput
 }
 
 func (client *fakeS3) GetObject(ctx context.Context, input *awss3.GetObjectInput, _ ...func(*awss3.Options)) (*awss3.GetObjectOutput, error) {
+	if client.getErr != nil {
+		return nil, client.getErr
+	}
 	if client.getHook != nil {
 		if err := client.getHook(ctx); err != nil {
 			return nil, err
@@ -468,6 +539,12 @@ func (client *fakeS3) HeadObject(ctx context.Context, input *awss3.HeadObjectInp
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if client.headErr != nil {
+		return nil, client.headErr
+	}
+	if client.headNil {
+		return nil, nil
+	}
 	client.mu.Lock()
 	value, ok := client.objects[awssdk.ToString(input.Key)]
 	client.mu.Unlock()
@@ -482,6 +559,9 @@ func (client *fakeS3) DeleteObject(ctx context.Context, input *awss3.DeleteObjec
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if client.deleteErr != nil {
+		return nil, client.deleteErr
+	}
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	delete(client.objects, awssdk.ToString(input.Key))
@@ -491,6 +571,12 @@ func (client *fakeS3) DeleteObject(ctx context.Context, input *awss3.DeleteObjec
 func (client *fakeS3) ListObjectsV2(ctx context.Context, input *awss3.ListObjectsV2Input, _ ...func(*awss3.Options)) (*awss3.ListObjectsV2Output, error) {
 	if client.listHook != nil {
 		return client.listHook(ctx, input)
+	}
+	if client.listErr != nil {
+		return nil, client.listErr
+	}
+	if client.listNil {
+		return nil, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -1305,7 +1306,7 @@ func parseEnvironmentS3Options(raw map[string]string) (environmentS3Options, err
 }
 
 func validS3Bucket(bucket string) bool {
-	if len(bucket) < 3 || len(bucket) > 63 || strings.ToLower(bucket) != bucket || strings.Contains(bucket, "..") {
+	if len(bucket) < 3 || len(bucket) > 63 || strings.ToLower(bucket) != bucket || net.ParseIP(bucket) != nil || strings.Contains(bucket, "..") {
 		return false
 	}
 	for _, label := range strings.Split(bucket, ".") {

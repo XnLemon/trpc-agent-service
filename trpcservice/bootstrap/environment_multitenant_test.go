@@ -387,7 +387,7 @@ func TestEnvironmentBackendCatalogIncludesTenantScopedS3ArtifactOnly(t *testing.
 	}}); err != nil {
 		t.Fatalf("insecure S3 endpoint with opt-in = %v", err)
 	}
-	for _, unsafeBucket := range []string{"BAD_BUCKET", "foo..bar"} {
+	for _, unsafeBucket := range []string{"BAD_BUCKET", "foo..bar", "192.168.1.1"} {
 		if _, err := catalog.NormalizeBindings([]backend.CapabilityBinding{{
 			Capability: backend.CapabilityArtifact,
 			Provider:   "s3",
