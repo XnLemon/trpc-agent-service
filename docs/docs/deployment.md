@@ -196,10 +196,19 @@ curl --fail http://127.0.0.1:8080/readyz
 | `TRPC_REDIS_KEY_PREFIX` | 否，`trpc:runtime:v1` | tenant-scoped key 前缀 |
 | `TRPC_REDIS_DIAL_TIMEOUT` / `TRPC_REDIS_READ_TIMEOUT` / `TRPC_REDIS_WRITE_TIMEOUT` | 否 | Go duration，限制 Redis 客户端 I/O |
 | `TRPC_REDIS_POOL_SIZE` | 否 | 大于 `0` 时覆盖连接池大小 |
+| `TRPC_S3_ACCESS_KEY_ID` | 否 | S3-compatible Artifact provider 的 access key；仅在 materialize S3 binding 时使用 |
+| `TRPC_S3_SECRET_KEY` | 否 | S3-compatible Artifact provider 的 secret key；通过 Secret 注入，不写入日志或快照 |
+| `TRPC_S3_SECRET_REF` | 否，`env/trpc-s3-credentials` | S3 Backend Profile 必须匹配的 tenant SecretRef |
 | `TRPC_DEMO_MODE` | 否，`false` | 仅由 `quickstart.sh --demo` 显式启用；要求 `TRPC_MODEL_PROVIDER=fake`，不读取模型凭据 |
 
 模型 API key 只在受信任的 Secret Resolver/Factory 路径中使用，不进入 Execution Plan、缓存、
 日志或数据库。
+
+S3 Artifact provider 是按 Profile 选择的可选能力，不会因为设置上述凭据就改变默认后端。Binding
+需要 `Provider: "s3"`、`artifact` capability、`bucket` option 和匹配的 `SecretRef`；本地 MinIO
+可通过 `docker compose --profile s3` 启动，HTTP endpoint 必须同时设置 `allow_insecure=true`。
+真实部署应使用 HTTPS S3/OSS-compatible endpoint，并将凭据交给 Secret Manager。[runtime-storage.md](runtime-storage.md)
+中的 live conformance 测试只在显式提供测试环境变量时运行。
 
 ### 企业微信与 OpenTelemetry
 

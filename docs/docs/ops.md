@@ -220,7 +220,8 @@ backpressure。高峰保护使用租户级 token bucket、全局队列上限、�
 | Redis RuntimeStore | 已实现（Issue #108） | `TRPC_SESSION_BACKEND=redis`，Redis Session/Memory、WATCH/MULTI CAS、租户隔离和 readiness PING；可选 live reconnect 测试 |
 | Redis capability 范围 | 明确限制 | 仅 `session`、`memory`；`summary`、`knowledge`、`artifact`、`audit` 和独立向量库 provider 会被拒绝 |
 | Redis/PostgreSQL 迁移、双写、shadow read、自动 cutover | 未实现 | 迁移方案仍需后续工具和演练，不能把切换当作 Redis provider 自带能力 |
-| 对象存储（S3/OSS）和生产向量库（Qdrant/Milvus/pgvector） | 未实现 | 当前只有接口/能力边界，未提供真实外部 adapter 或检索闭环 |
+| S3/OSS-compatible Artifact/Object provider | 已实现（Issue #113） | `runtime/storage/s3`、tenant-scoped `artifact` binding、bounded transfer、metadata 校验、Probe/Close；默认不启用，需显式 S3 Profile 和凭据；MinIO live conformance 为可选 |
+| 生产向量库（Qdrant/Milvus/pgvector） | 未实现 | 当前只有接口/能力边界，未提供真实外部 adapter 或检索闭环 |
 | 真实 IM 验签、多媒体、Dashboard 和生产告警平台 | 未实现或部分实现 | WeCom/Telegram 的已交付范围以各自 adapter 文档为准；本页不宣称生产运营集成 |
 
 后续每落地一个 Adapter 或运维组件，都必须补充：双租户隔离测试、重复/乱序/验签失败测试、
