@@ -76,7 +76,7 @@ export function AppShell() {
           icon={<LogoutIcon />}
           onClick={() => {
             disconnect();
-            navigate('/admin/login');
+            navigate('/login');
           }}
         >
           退出登录

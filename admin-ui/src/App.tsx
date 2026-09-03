@@ -22,7 +22,7 @@ function RequireConnection({ children }: { children: ReactElement }) {
     return <div className="admin-load-state" />;
   }
   if (status !== 'authenticated') {
-    return <Navigate to="/admin/login" state={{ from: location.pathname }} replace />;
+    return <Navigate to="/login" state={{ from: location.pathname }} replace />;
   }
   return children;
 }
@@ -31,10 +31,10 @@ export default function App() {
   return (
     <ConnectionProvider>
       <Routes>
-        <Route path="/admin/login" element={<ConnectPage />} />
-        <Route path="/connect" element={<Navigate to="/admin/login" replace />} />
+        <Route path="/login" element={<ConnectPage />} />
+        <Route path="/connect" element={<Navigate to="/login" replace />} />
         <Route
-          path="/admin"
+          path="/"
           element={
             <RequireConnection>
               <Navigate to="/tenants" replace />
@@ -48,7 +48,6 @@ export default function App() {
             </RequireConnection>
           }
         >
-          <Route path="/" element={<Navigate to="/tenants" replace />} />
           <Route path="/tenants" element={<TenantsPage />} />
           <Route path="/tenants/:tenantId" element={<TenantLayout />}>
             <Route index element={<TenantOverview />} />
@@ -62,7 +61,7 @@ export default function App() {
             <Route path="bindings/:bindingId" element={<BindingDetailPage />} />
           </Route>
         </Route>
-        <Route path="*" element={<Navigate to="/admin/login" replace />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     </ConnectionProvider>
   );
