@@ -84,7 +84,8 @@ const (
 	envRedisWriteTimeout = "TRPC_REDIS_WRITE_TIMEOUT"
 	envRedisPoolSize     = "TRPC_REDIS_POOL_SIZE"
 	envS3AccessKeyID     = "TRPC_S3_ACCESS_KEY_ID"
-	envS3SecretKey       = "TRPC_S3_SECRET_KEY"
+	// #nosec G101 -- environment variable name, not a secret.
+	envS3SecretKey = "TRPC_S3_SECRET_KEY"
 	// #nosec G101 -- environment variable name, not a secret.
 	envS3SecretRef = "TRPC_S3_SECRET_REF"
 	envDemoMode    = "TRPC_DEMO_MODE"
@@ -1207,20 +1208,13 @@ func newEnvironmentS3StoreFromConfig(ctx context.Context, tenantID string, bindi
 	if ctx == nil || ctx.Err() != nil || tenantID == "" {
 		return nil, backend.ErrStorageFactory
 	}
-	if binding.SecretRef == "" || secret.Value() == "" {
-		return nil, backend.ErrStorageFactory
-	}
-	accessKey, secretKey, ok := strings.Cut(secret.Value(), ":")
-	if !ok || strings.TrimSpace(accessKey) == "" || secretKey == "" || strings.ContainsAny(accessKey, "\r\n") || strings.ContainsAny(secretKey, "\r\n") {
+	accessKey, secretKey, err := parseEnvironmentS3Credentials(binding.SecretRef, secret)
+	if err != nil {
 		return nil, backend.ErrStorageFactory
 	}
 	endpoint := strings.TrimSpace(binding.Endpoint)
-	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
-		return nil, backend.ErrStorageFactory
-	}
 	options, err := parseEnvironmentS3Options(binding.Options)
-	if err != nil || (parsed.Scheme == "http" && !options.allowInsecure) || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+	if err != nil || !validEnvironmentS3Endpoint(endpoint, options.allowInsecure) {
 		return nil, backend.ErrStorageFactory
 	}
 	cfg := awssdk.Config{
@@ -1230,6 +1224,25 @@ func newEnvironmentS3StoreFromConfig(ctx context.Context, tenantID string, bindi
 	return runtimestorages3.NewFromConfig(cfg, options.bucket, tenantID, endpoint, options.pathStyle, options.allowInsecure, runtimestorages3.Options{
 		MaxBytes: options.maxBytes, ConnectTimeout: options.connectTimeout, ReadTimeout: options.readTimeout, WriteTimeout: options.writeTimeout,
 	})
+}
+
+func parseEnvironmentS3Credentials(secretRef string, secret modelprofile.SecretValue) (string, string, error) {
+	if secretRef == "" || secret.Value() == "" {
+		return "", "", backend.ErrStorageFactory
+	}
+	accessKey, secretKey, ok := strings.Cut(secret.Value(), ":")
+	if !ok || strings.TrimSpace(accessKey) == "" || secretKey == "" || strings.ContainsAny(accessKey, "\r\n") || strings.ContainsAny(secretKey, "\r\n") {
+		return "", "", backend.ErrStorageFactory
+	}
+	return accessKey, secretKey, nil
+}
+
+func validEnvironmentS3Endpoint(endpoint string, allowInsecure bool) bool {
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return false
+	}
+	return parsed.Scheme == "https" || (parsed.Scheme == "http" && allowInsecure)
 }
 
 type environmentS3Options struct {

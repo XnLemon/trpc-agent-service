@@ -63,23 +63,30 @@ func TestStoreObjectContractAndTenantIsolation(t *testing.T) {
 func TestStoreArtifactContractAndDefensiveCopies(t *testing.T) {
 	store, _ := newTestStore(t, "tenant-a", Options{})
 	ctx := context.Background()
-	input := testArtifact("b", "session-a", "first")
-	stored, err := store.PutArtifact(ctx, input)
-	if err != nil || stored.Version != 1 || stored.CreatedAt.IsZero() || stored.UpdatedAt.IsZero() {
-		t.Fatalf("first PutArtifact() = %#v, %v", stored, err)
+	stored := testArtifactVersioning(t, store, ctx)
+	testArtifactReads(t, store, ctx, stored)
+	testArtifactListingAndDeletion(t, store, ctx)
+}
+
+func testArtifactVersioning(t *testing.T, store *Store, ctx context.Context) runtimestorage.ArtifactRecord {
+	t.Helper()
+	stored := putArtifact(t, store, ctx, testArtifact("b", "session-a", "first"))
+	if stored.Version != 1 || stored.CreatedAt.IsZero() || stored.UpdatedAt.IsZero() {
+		t.Fatalf("first PutArtifact() = %#v", stored)
 	}
-	input.Content[0] = 'X'
-	retry, err := store.PutArtifact(ctx, testArtifact("b", "session-a", "first"))
-	if err != nil || retry.Version != 1 || !retry.UpdatedAt.Equal(stored.UpdatedAt) {
-		t.Fatalf("idempotent PutArtifact() = %#v, %v", retry, err)
+	if retry := putArtifact(t, store, ctx, testArtifact("b", "session-a", "first")); retry.Version != 1 || !retry.UpdatedAt.Equal(stored.UpdatedAt) {
+		t.Fatalf("idempotent PutArtifact() = %#v", retry)
 	}
-	updated, err := store.PutArtifact(ctx, testArtifact("b", "session-a", "second"))
-	if err != nil || updated.Version != 2 || !updated.CreatedAt.Equal(stored.CreatedAt) || !updated.UpdatedAt.After(stored.UpdatedAt) {
-		t.Fatalf("replacement PutArtifact() = %#v, %v", updated, err)
+	updated := putArtifact(t, store, ctx, testArtifact("b", "session-a", "second"))
+	if updated.Version != 2 || !updated.CreatedAt.Equal(stored.CreatedAt) || !updated.UpdatedAt.After(stored.UpdatedAt) {
+		t.Fatalf("replacement PutArtifact() = %#v", updated)
 	}
-	if _, err := store.PutArtifact(ctx, testArtifact("a", "session-a", "other")); err != nil {
-		t.Fatal(err)
-	}
+	putArtifact(t, store, ctx, testArtifact("a", "session-a", "other"))
+	return stored
+}
+
+func testArtifactReads(t *testing.T, store *Store, ctx context.Context, stored runtimestorage.ArtifactRecord) {
+	t.Helper()
 	got, err := store.GetArtifact(ctx, "tenant-a", "b")
 	if err != nil || string(got.Content) != "second" || got.Version != 2 {
 		t.Fatalf("GetArtifact() = %#v, %v", got, err)
@@ -89,6 +96,13 @@ func TestStoreArtifactContractAndDefensiveCopies(t *testing.T) {
 	if err != nil || string(again.Content) != "second" {
 		t.Fatalf("GetArtifact() defensive copy = %#v, %v", again, err)
 	}
+	if !stored.CreatedAt.Before(again.UpdatedAt) {
+		t.Fatalf("artifact timestamps = %#v", again)
+	}
+}
+
+func testArtifactListingAndDeletion(t *testing.T, store *Store, ctx context.Context) {
+	t.Helper()
 	values, err := store.ListArtifacts(ctx, "tenant-a", "session-a")
 	if err != nil || len(values) != 2 || values[0].ArtifactID != "a" || values[1].ArtifactID != "b" {
 		t.Fatalf("ListArtifacts() = %#v, %v", values, err)
@@ -103,6 +117,15 @@ func TestStoreArtifactContractAndDefensiveCopies(t *testing.T) {
 	if err := store.DeleteArtifact(ctx, "tenant-a", "a"); !errors.Is(err, runtimestorage.ErrNotFound) {
 		t.Fatalf("missing DeleteArtifact() = %v", err)
 	}
+}
+
+func putArtifact(t *testing.T, store *Store, ctx context.Context, value runtimestorage.ArtifactRecord) runtimestorage.ArtifactRecord {
+	t.Helper()
+	result, err := store.PutArtifact(ctx, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func TestStoreArtifactFailsClosedForCorruptMetadata(t *testing.T) {

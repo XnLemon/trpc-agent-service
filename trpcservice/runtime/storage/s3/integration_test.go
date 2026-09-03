@@ -21,9 +21,7 @@ func TestS3ArtifactLiveConformance(t *testing.T) {
 	bucket := strings.TrimSpace(os.Getenv("S3_RUNTIME_TEST_BUCKET"))
 	accessKey := os.Getenv("S3_RUNTIME_TEST_ACCESS_KEY")
 	secretKey := os.Getenv("S3_RUNTIME_TEST_SECRET_KEY")
-	if endpoint == "" || bucket == "" || accessKey == "" || secretKey == "" {
-		t.Skip("S3_RUNTIME_TEST_ENDPOINT, S3_RUNTIME_TEST_BUCKET, S3_RUNTIME_TEST_ACCESS_KEY, and S3_RUNTIME_TEST_SECRET_KEY are required")
-	}
+	requireLiveS3Config(t, endpoint, bucket, accessKey, secretKey)
 	region := strings.TrimSpace(os.Getenv("S3_RUNTIME_TEST_REGION"))
 	if region == "" {
 		region = "us-east-1"
@@ -85,6 +83,13 @@ func TestS3ArtifactLiveConformance(t *testing.T) {
 	closeErr := reader.Close()
 	if readErr != nil || closeErr != nil || string(data) != "media" || info.Size != int64(len(data)) {
 		t.Fatalf("attachment reader = %q, %#v, %v, %v", data, info, readErr, closeErr)
+	}
+}
+
+func requireLiveS3Config(t *testing.T, endpoint, bucket, accessKey, secretKey string) {
+	t.Helper()
+	if endpoint == "" || bucket == "" || accessKey == "" || secretKey == "" {
+		t.Skip("S3_RUNTIME_TEST_ENDPOINT, S3_RUNTIME_TEST_BUCKET, S3_RUNTIME_TEST_ACCESS_KEY, and S3_RUNTIME_TEST_SECRET_KEY are required")
 	}
 }
 

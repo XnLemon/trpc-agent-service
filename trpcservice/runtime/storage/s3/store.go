@@ -24,6 +24,7 @@ import (
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	awss3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -262,22 +263,9 @@ func (s *Store) GetObject(ctx context.Context, tenantID, objectKey string) (io.R
 	if err != nil {
 		return nil, runtimestorage.ObjectInfo{}, translate(err)
 	}
-	if out == nil || out.Body == nil || out.ContentLength == nil || *out.ContentLength < 0 || *out.ContentLength > s.maxBytes {
-		if out != nil && out.Body != nil {
-			_ = out.Body.Close()
-		}
-		return nil, runtimestorage.ObjectInfo{}, runtimestorage.ErrStorage
-	}
-	data, readErr := readBounded(operation, out.Body, s.maxBytes)
-	closeErr := out.Body.Close()
-	if readErr != nil {
-		return nil, runtimestorage.ObjectInfo{}, transferError(operation, readErr)
-	}
-	if closeErr != nil {
-		return nil, runtimestorage.ObjectInfo{}, runtimestorage.ErrStorage
-	}
-	if int64(len(data)) != *out.ContentLength || int64(len(data)) > s.maxBytes {
-		return nil, runtimestorage.ObjectInfo{}, runtimestorage.ErrStorage
+	data, bodyErr := readS3Body(operation, out, s.maxBytes)
+	if bodyErr != nil {
+		return nil, runtimestorage.ObjectInfo{}, bodyErr
 	}
 	digest := sha256.Sum256(data)
 	etag := hex.EncodeToString(digest[:])
@@ -296,6 +284,24 @@ func (s *Store) GetObject(ctx context.Context, tenantID, objectKey string) (io.R
 		return nil, runtimestorage.ObjectInfo{}, runtimestorage.ErrStorage
 	}
 	return io.NopCloser(bytes.NewReader(data)), runtimestorage.ObjectInfo{TenantID: tenantID, ObjectKey: objectKey, ContentType: contentType, Size: int64(len(data)), ETag: etag, CreatedAt: created}, nil
+}
+
+func readS3Body(ctx context.Context, out *awss3.GetObjectOutput, maxBytes int64) ([]byte, error) {
+	if out == nil || out.Body == nil || out.ContentLength == nil || *out.ContentLength < 0 || *out.ContentLength > maxBytes {
+		if out != nil && out.Body != nil {
+			_ = out.Body.Close()
+		}
+		return nil, runtimestorage.ErrStorage
+	}
+	data, readErr := readBounded(ctx, out.Body, maxBytes)
+	closeErr := out.Body.Close()
+	if readErr != nil {
+		return nil, transferError(ctx, readErr)
+	}
+	if closeErr != nil || int64(len(data)) != *out.ContentLength || int64(len(data)) > maxBytes {
+		return nil, runtimestorage.ErrStorage
+	}
+	return data, nil
 }
 
 // DeleteObject removes one object. Missing objects are reported consistently
@@ -319,6 +325,7 @@ func (s *Store) DeleteObject(ctx context.Context, tenantID, objectKey string) er
 	return nil
 }
 
+// PutArtifact stores or replaces one artifact and returns its committed metadata.
 func (s *Store) PutArtifact(ctx context.Context, value runtimestorage.ArtifactRecord) (runtimestorage.ArtifactRecord, error) {
 	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.TenantID != s.tenant || !validateKey(value.ArtifactID) || !runtimestorage.ValidateText(value.SessionID, 256, false) || !runtimestorage.ValidateText(value.Name, 512, false) || !runtimestorage.ValidateText(value.MimeType, 256, false) || len(value.Content) == 0 || int64(len(value.Content)) > s.maxBytes {
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrInvalid
@@ -362,6 +369,7 @@ func (s *Store) PutArtifact(ctx context.Context, value runtimestorage.ArtifactRe
 	return value, nil
 }
 
+// GetArtifact loads one validated artifact and returns a defensive content copy.
 func (s *Store) GetArtifact(ctx context.Context, tenantID, artifactID string) (runtimestorage.ArtifactRecord, error) {
 	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateKey(artifactID) {
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrInvalid
@@ -379,18 +387,11 @@ func (s *Store) getArtifact(ctx context.Context, tenantID, artifactID string) (r
 	if err != nil {
 		return runtimestorage.ArtifactRecord{}, translate(err)
 	}
-	if out == nil || out.Body == nil || out.ContentLength == nil || *out.ContentLength <= 0 || *out.ContentLength > s.maxBytes {
-		if out != nil && out.Body != nil {
-			_ = out.Body.Close()
-		}
-		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrStorage
+	content, bodyErr := readS3Body(ctx, out, s.maxBytes)
+	if bodyErr != nil {
+		return runtimestorage.ArtifactRecord{}, bodyErr
 	}
-	content, readErr := readBounded(ctx, out.Body, s.maxBytes)
-	closeErr := out.Body.Close()
-	if readErr != nil {
-		return runtimestorage.ArtifactRecord{}, transferError(ctx, readErr)
-	}
-	if closeErr != nil || int64(len(content)) != *out.ContentLength || int64(len(content)) > s.maxBytes {
+	if len(content) == 0 {
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrStorage
 	}
 	metadata := out.Metadata
@@ -401,6 +402,7 @@ func (s *Store) getArtifact(ctx context.Context, tenantID, artifactID string) (r
 	return runtimestorage.ArtifactRecord{TenantID: tenantID, ArtifactID: artifactID, SessionID: sessionID, Name: name, MimeType: mimeType, Content: append([]byte(nil), content...), Version: version, CreatedAt: created, UpdatedAt: updated}, nil
 }
 
+// ListArtifacts lists validated artifacts for a tenant, optionally filtered by session.
 func (s *Store) ListArtifacts(ctx context.Context, tenantID, sessionID string) ([]runtimestorage.ArtifactRecord, error) {
 	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !runtimestorage.ValidateText(sessionID, 256, false) {
 		return nil, runtimestorage.ErrInvalid
@@ -414,40 +416,41 @@ func (s *Store) ListArtifacts(ctx context.Context, tenantID, sessionID string) (
 	if !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
-	var values []runtimestorage.ArtifactRecord
+	keys, err := s.listArtifactKeys(operation, prefix)
+	if err != nil {
+		return nil, err
+	}
+	values := make([]runtimestorage.ArtifactRecord, 0, len(keys))
+	for _, artifactID := range keys {
+		artifact, getErr := s.getArtifact(operation, tenantID, artifactID)
+		if getErr != nil {
+			return nil, getErr
+		}
+		if sessionID == "" || artifact.SessionID == sessionID {
+			values = append(values, artifact)
+		}
+	}
+	sort.Slice(values, func(i, j int) bool { return values[i].ArtifactID < values[j].ArtifactID })
+	return values, nil
+}
+
+func (s *Store) listArtifactKeys(ctx context.Context, prefix string) ([]string, error) {
 	seenTokens := make(map[string]struct{})
 	var token *string
+	var keys []string
 	for {
-		out, listErr := s.client.ListObjectsV2(operation, &awss3.ListObjectsV2Input{Bucket: awssdk.String(s.bucket), Prefix: awssdk.String(prefix), ContinuationToken: token})
+		out, listErr := s.client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{Bucket: awssdk.String(s.bucket), Prefix: awssdk.String(prefix), ContinuationToken: token})
 		if listErr != nil {
 			return nil, translate(listErr)
 		}
 		if out == nil {
 			return nil, runtimestorage.ErrStorage
 		}
-		for _, item := range out.Contents {
-			if item.Key == nil {
-				return nil, runtimestorage.ErrStorage
-			}
-			if !strings.HasPrefix(*item.Key, prefix) {
-				return nil, runtimestorage.ErrStorage
-			}
-			encoded := path.Base(*item.Key)
-			artifactID, decodeErr := base64.RawURLEncoding.DecodeString(encoded)
-			if decodeErr != nil || !validateKey(string(artifactID)) {
-				return nil, runtimestorage.ErrStorage
-			}
-			if *item.Key != s.remoteKey("artifacts", string(artifactID)) {
-				return nil, runtimestorage.ErrStorage
-			}
-			artifact, getErr := s.getArtifact(operation, tenantID, string(artifactID))
-			if getErr != nil {
-				return nil, getErr
-			}
-			if sessionID == "" || artifact.SessionID == sessionID {
-				values = append(values, artifact)
-			}
+		pageKeys, pageErr := s.parseArtifactKeys(out.Contents, prefix)
+		if pageErr != nil {
+			return nil, pageErr
 		}
+		keys = append(keys, pageKeys...)
 		if !awssdk.ToBool(out.IsTruncated) {
 			break
 		}
@@ -460,10 +463,26 @@ func (s *Store) ListArtifacts(ctx context.Context, tenantID, sessionID string) (
 		seenTokens[*out.NextContinuationToken] = struct{}{}
 		token = out.NextContinuationToken
 	}
-	sort.Slice(values, func(i, j int) bool { return values[i].ArtifactID < values[j].ArtifactID })
-	return values, nil
+	return keys, nil
 }
 
+func (s *Store) parseArtifactKeys(items []awss3types.Object, prefix string) ([]string, error) {
+	keys := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Key == nil || !strings.HasPrefix(*item.Key, prefix) {
+			return nil, runtimestorage.ErrStorage
+		}
+		encoded := path.Base(*item.Key)
+		artifactID, err := base64.RawURLEncoding.DecodeString(encoded)
+		if err != nil || !validateKey(string(artifactID)) || *item.Key != s.remoteKey("artifacts", string(artifactID)) {
+			return nil, runtimestorage.ErrStorage
+		}
+		keys = append(keys, string(artifactID))
+	}
+	return keys, nil
+}
+
+// DeleteArtifact removes one artifact.
 func (s *Store) DeleteArtifact(ctx context.Context, tenantID, artifactID string) error {
 	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateKey(artifactID) {
 		return runtimestorage.ErrInvalid

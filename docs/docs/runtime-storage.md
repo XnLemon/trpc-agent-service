@@ -182,6 +182,8 @@ Profile、Execution Plan、日志、审计 payload 或错误文本。
 `PutObject`/`GetObject` 受 `max_bytes` 和读写 deadline 限制，使用 SHA-256 元数据校验并返回
 防御性 reader；重复写入相同内容幂等，删除缺失对象返回 `ErrNotFound`。Artifact 元数据（名称、
 MIME、session、版本、创建/更新时间和 digest）与内容一起校验；损坏或不完整元数据 fail closed。
+写入会先在本地 bounded buffer 中完成，再发起单请求 S3 PUT；取消、超时或 PUT 失败不会向调用方提交
+元数据，provider 不执行盲目删除，依赖 S3 单请求 PUT 的原子提交语义避免留下可见的部分对象。
 `CapabilitySet.Close` 拥有并关闭 materialized S3 Store，关闭后不再接受操作。
 
 本地可用 Compose 的 `s3` profile 启动 MinIO：
