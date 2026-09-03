@@ -78,10 +78,14 @@ export default defineConfig({
     proxy: {
       // Dev convenience: same-origin proxy to a locally running gateway so the
       // browser never needs CORS. Override with VITE_API_TARGET.
-      '/admin': {
+      '/admin/auth': {
         target: process.env.VITE_API_TARGET || 'http://127.0.0.1:8080',
         // Keep the browser Host for local same-origin CSRF checks. Production
         // proxies should forward the public Host and protocol as well.
+        changeOrigin: false,
+      },
+      '/admin/v1': {
+        target: process.env.VITE_API_TARGET || 'http://127.0.0.1:8080',
         changeOrigin: false,
       },
     },

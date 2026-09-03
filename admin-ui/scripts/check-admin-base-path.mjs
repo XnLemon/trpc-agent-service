@@ -18,5 +18,7 @@ assert.match(appSource, /<Route path="\/login"/);
 assert.doesNotMatch(appSource, /path="\/admin\/login"/);
 assert.doesNotMatch(shellSource, /navigate\('\/admin\/login'\)/);
 assert.match(viteSource, /base: process\.env\.NODE_ENV === 'production' \? '\/admin\/' : '\/'/);
+assert.match(viteSource, /['"]\/admin\/auth['"][\s\S]*['"]\/admin\/v1['"]/);
+assert.doesNotMatch(viteSource, /proxy:\s*\{\s*['"]\/admin['"]\s*:/);
 
 console.log('Admin base-path routing contract: ok');
