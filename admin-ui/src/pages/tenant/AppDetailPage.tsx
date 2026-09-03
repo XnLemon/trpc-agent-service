@@ -311,7 +311,19 @@ export function AppDetailPage() {
                   </Button>
                 </Space>
               ) : (
-                <Button theme="primary" size="small" loading={draftBusy} disabled={app.Status === 'disabled'} onClick={createDraft}>
+                <Button
+                  theme="primary"
+                  size="small"
+                  loading={draftBusy}
+                  disabled={app.Status === 'disabled'}
+                  onClick={() => {
+                    if (draftForm) {
+                      void createDraft();
+                    } else {
+                      setDraftForm(emptyDraftForm());
+                    }
+                  }}
+                >
                   创建草稿
                 </Button>
               )
