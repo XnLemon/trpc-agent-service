@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
@@ -562,6 +563,29 @@ func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segmen
 	return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
 }
 
+// RecordReplyReceipt persists a provider acknowledgement without releasing
+// the current sending lease. The worker later owns the sent transition.
+func (s *Store) RecordReplyReceipt(ctx context.Context, receipt runtimestorage.ReplyReceipt) (runtimestorage.ReplyOutbox, error) {
+	if err := check(ctx); err != nil {
+		return runtimestorage.ReplyOutbox{}, err
+	}
+	if runtimestorage.ValidateTenant(receipt.TenantID) != nil || receipt.ReplyID == "" || receipt.SegmentIndex < 0 || receipt.Owner == "" || receipt.FencingToken <= 0 || strings.TrimSpace(receipt.ProviderID) == "" {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
+	}
+	var value runtimestorage.ReplyOutbox
+	err := s.db.QueryRowContext(ctx, "UPDATE public.reply_outbox SET provider_message_id=$6, updated_at=now() WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3 AND status='sending' AND lease_owner=$4 AND fencing_token=$5 AND lease_expires_at IS NOT NULL AND lease_expires_at > now() AND (provider_message_id='' OR provider_message_id=$6) RETURNING "+replyColumns, receipt.TenantID, receipt.ReplyID, receipt.SegmentIndex, receipt.Owner, receipt.FencingToken, receipt.ProviderID).Scan(replyArgs(&value)...)
+	if err == nil {
+		return cloneReply(value), nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return runtimestorage.ReplyOutbox{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	if _, lookupErr := s.GetReply(ctx, receipt.TenantID, receipt.ReplyID, receipt.SegmentIndex); lookupErr != nil {
+		return runtimestorage.ReplyOutbox{}, lookupErr
+	}
+	return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
+}
+
 // TransitionReply applies a fenced reply delivery transition.
 func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.ReplyTransition) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
@@ -647,3 +671,4 @@ func cloneReply(value runtimestorage.ReplyOutbox) runtimestorage.ReplyOutbox {
 }
 
 var _ runtimestorage.RuntimeStore = (*Store)(nil)
+var _ runtimestorage.ReplyReceiptRecorder = (*Store)(nil)

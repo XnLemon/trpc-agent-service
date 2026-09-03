@@ -464,9 +464,9 @@ func environmentOutboxWorkerFactory(config environmentConfig, runtimeStore runti
 		provider := legacy
 		channel, providerName := "wecom", "wecom"
 		if len(aiBotBindingIDs) > 0 {
-			correlations, ok := runtimeStore.(runtimestorage.ReplyCorrelationStore)
+			deliveryStore, ok := runtimeStore.(wecom_aibot.DeliveryStore)
 			if !ok {
-				return nil, errors.New("runtime store does not support reply correlation")
+				return nil, errors.New("runtime store does not support durable reply acknowledgements")
 			}
 			managers := make([]*wecom_aibot.Manager, 0, len(aiBotBindingIDs))
 			for _, adapter := range adapters {
@@ -479,7 +479,7 @@ func environmentOutboxWorkerFactory(config environmentConfig, runtimeStore runti
 			if len(managers) != len(aiBotBindingIDs) {
 				return nil, errors.New("wecom ai bot manager count is invalid")
 			}
-			aiBotProvider, err := wecom_aibot.NewBindingProvider(correlations, managers...)
+			aiBotProvider, err := wecom_aibot.NewBindingProvider(deliveryStore, managers...)
 			if err != nil {
 				return nil, err
 			}

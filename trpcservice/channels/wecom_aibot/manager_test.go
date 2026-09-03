@@ -16,6 +16,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	storage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -79,7 +80,7 @@ func TestProviderWaitsForCorrelatedFinalReplyAcknowledgement(t *testing.T) {
 	}
 	result := make(chan error, 1)
 	go func() {
-		_, deliverErr := provider.Deliver(context.Background(), storage.ReplyOutbox{TenantID: "tenant", EventID: "event", ReplyID: "reply", SegmentIndex: 0, SegmentCount: 1, Payload: "final"})
+		_, deliverErr := provider.Deliver(context.Background(), storage.ReplyOutbox{TenantID: "tenant", EventID: "event", ReplyID: "reply", SegmentIndex: 0, SegmentCount: 1, Payload: "final", LeaseOwner: "worker", FencingToken: 1})
 		result <- deliverErr
 	}()
 	final := readFrame(t, connection.writes)
@@ -114,8 +115,8 @@ func TestProviderFinishesOnlyFinalDurableSegment(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, value := range []storage.ReplyOutbox{
-		{TenantID: "tenant", EventID: "event", ReplyID: "reply", SegmentIndex: 0, SegmentCount: 2, Payload: "first"},
-		{TenantID: "tenant", EventID: "event", ReplyID: "reply", SegmentIndex: 1, SegmentCount: 2, Payload: "second"},
+		{TenantID: "tenant", EventID: "event", ReplyID: "reply", SegmentIndex: 0, SegmentCount: 2, Payload: "first", LeaseOwner: "worker", FencingToken: 1},
+		{TenantID: "tenant", EventID: "event", ReplyID: "reply", SegmentIndex: 1, SegmentCount: 2, Payload: "second", LeaseOwner: "worker", FencingToken: 1},
 	} {
 		result := make(chan error, 1)
 		go func(value storage.ReplyOutbox) {
@@ -135,6 +136,70 @@ func TestProviderFinishesOnlyFinalDurableSegment(t *testing.T) {
 		if err := <-result; err != nil {
 			t.Fatalf("segment %d delivery error = %v", value.SegmentIndex, err)
 		}
+	}
+}
+
+func TestProviderReconcilesDurableAcknowledgementAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	store := inmemory.New()
+	if _, err := store.CreateSession(ctx, "tenant", "session", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(ctx, storage.MessageEventInput{TenantID: "tenant", SessionID: "session", BindingID: "binding", ExternalMessageID: "external", EventID: "event"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueRepliesWithCorrelation(ctx, storage.ReplyCorrelation{TenantID: "tenant", EventID: "event", RequestID: "req-final"}, []storage.ReplyOutbox{{TenantID: "tenant", EventID: "event", ReplyID: "reply", SegmentIndex: 0, SegmentCount: 1, Payload: "final"}}); err != nil {
+		t.Fatal(err)
+	}
+	connection := newTestConn()
+	manager, stop := startTestManager(t, connection, &testDispatcher{}, 2)
+	defer stop()
+	auth := readFrame(t, connection.writes)
+	connection.reads <- ackFrame(t, auth.Headers.ReqID, 0)
+	waitReady(t, manager)
+	claimed, err := store.ClaimReply(ctx, "tenant", "reply", 0, "worker-before-restart", 100*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := NewProvider(manager, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, deliverErr := provider.Deliver(ctx, claimed)
+		result <- deliverErr
+	}()
+	final := readFrame(t, connection.writes)
+	connection.reads <- ackFrame(t, final.Headers.ReqID, 0)
+	if err := <-result; err != nil {
+		t.Fatalf("delivery error = %v", err)
+	}
+	persisted, err := store.GetReply(ctx, "tenant", "reply", 0)
+	if err != nil || persisted.Status != storage.ReplySending || persisted.ProviderMessageID != "req-final:0" {
+		t.Fatalf("persisted acknowledgement = %+v, %v", persisted, err)
+	}
+
+	time.Sleep(110 * time.Millisecond)
+	restartedProvider, err := NewProvider(manager, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := outbox.New(outbox.Config{Store: store, Provider: restartedProvider, TenantID: "tenant", Owner: "worker-after-restart", LeaseDuration: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := worker.RunOnce(ctx); err != nil || processed != 1 {
+		t.Fatalf("restart recovery = %d, %v", processed, err)
+	}
+	recovered, err := store.GetReply(ctx, "tenant", "reply", 0)
+	if err != nil || recovered.Status != storage.ReplySent || recovered.ProviderMessageID != "req-final:0" {
+		t.Fatalf("recovered reply = %+v, %v", recovered, err)
+	}
+	select {
+	case duplicate := <-connection.writes:
+		t.Fatalf("restart resent acknowledged frame: %s", string(duplicate))
+	default:
 	}
 }
 
@@ -529,11 +594,11 @@ func TestProviderAndBindingProviderBoundaries(t *testing.T) {
 	if _, err := provider.Deliver(context.Background(), storage.ReplyOutbox{}); err == nil {
 		t.Fatal("invalid durable reply was accepted")
 	}
-	value := storage.ReplyOutbox{TenantID: "tenant", EventID: "event", ReplyID: "reply", Payload: "payload"}
+	value := storage.ReplyOutbox{TenantID: "tenant", EventID: "event", ReplyID: "reply", Payload: "payload", LeaseOwner: "worker", FencingToken: 1}
 	if _, err := provider.Deliver(context.Background(), value); err == nil {
 		t.Fatal("unready durable reply was accepted")
 	}
-	provider.receipts["tenant\x00reply\x000"] = "request:0"
+	value.ProviderMessageID = "request:0"
 	if receipt, err := provider.Deliver(context.Background(), value); err != nil || receipt != "request:0" {
 		t.Fatalf("cached receipt = %q, %v", receipt, err)
 	}
@@ -555,6 +620,7 @@ func TestProviderAndBindingProviderBoundaries(t *testing.T) {
 	if _, err := bound.Deliver(context.Background(), value); err == nil {
 		t.Fatal("unrouted durable reply was accepted")
 	}
+	value.ProviderMessageID = ""
 	value.ReplyTarget.BindingID = "binding"
 	boundManager.ready = true
 	if _, err := bound.Deliver(context.Background(), value); !isDeliveryError(err, "unavailable", true) {
@@ -885,8 +951,8 @@ func TestTrustedBindingAndDurableReplyRejectionBoundaries(t *testing.T) {
 	}
 
 	manager := &Manager{ready: true}
-	value := storage.ReplyOutbox{TenantID: "tenant", EventID: "event", ReplyID: "reply", Payload: "payload"}
-	for _, correlations := range []storage.ReplyCorrelationStore{
+	value := storage.ReplyOutbox{TenantID: "tenant", EventID: "event", ReplyID: "reply", Payload: "payload", LeaseOwner: "worker", FencingToken: 1}
+	for _, correlations := range []DeliveryStore{
 		testCorrelations{},
 		testCorrelations{err: errors.New("correlation unavailable")},
 	} {
@@ -903,7 +969,7 @@ func TestTrustedBindingAndDurableReplyRejectionBoundaries(t *testing.T) {
 		t.Fatalf("duplicate binding manager error = %v", err)
 	}
 	if _, err := NewBindingProvider(nil, boundManager); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("nil correlation store error = %v", err)
+		t.Fatalf("nil delivery store error = %v", err)
 	}
 	var provider *BindingProvider
 	if _, err := provider.Deliver(context.Background(), value); !isDeliveryError(err, "invalid", false) {
@@ -941,6 +1007,10 @@ type testCorrelations struct {
 
 func (c testCorrelations) GetReplyCorrelation(context.Context, string, string) (storage.ReplyCorrelation, error) {
 	return storage.ReplyCorrelation{RequestID: c.requestID}, c.err
+}
+
+func (c testCorrelations) RecordReplyReceipt(_ context.Context, receipt storage.ReplyReceipt) (storage.ReplyOutbox, error) {
+	return storage.ReplyOutbox{TenantID: receipt.TenantID, ReplyID: receipt.ReplyID, SegmentIndex: receipt.SegmentIndex, ProviderMessageID: receipt.ProviderID}, c.err
 }
 
 type testDialer struct {

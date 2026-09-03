@@ -4,7 +4,6 @@ import (
 	"context"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	storage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -14,38 +13,39 @@ import (
 // connection. Partial stream events are intentionally excluded from this
 // provider; only the durable final segment is retried after reconnect.
 type Provider struct {
-	manager      *Manager
-	correlations storage.ReplyCorrelationStore
-	mu           sync.Mutex
-	receipts     map[string]string
+	manager *Manager
+	store   DeliveryStore
 }
 
 var _ outbox.Provider = (*Provider)(nil)
 
+// DeliveryStore supplies the durable correlation and acknowledgement records
+// required to recover a final reply after a process restart.
+type DeliveryStore interface {
+	storage.ReplyCorrelationStore
+	storage.ReplyReceiptRecorder
+}
+
 // NewProvider creates the durable final-reply adapter for one manager.
-func NewProvider(manager *Manager, correlations storage.ReplyCorrelationStore) (*Provider, error) {
-	if manager == nil || correlations == nil {
+func NewProvider(manager *Manager, store DeliveryStore) (*Provider, error) {
+	if manager == nil || store == nil {
 		return nil, ErrInvalid
 	}
-	return &Provider{manager: manager, correlations: correlations, receipts: make(map[string]string)}, nil
+	return &Provider{manager: manager, store: store}, nil
 }
 
 // Deliver sends and acknowledges a durable final reply for its correlated request.
 func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (string, error) {
-	if p == nil || p.manager == nil || p.correlations == nil || ctx == nil || strings.TrimSpace(value.Payload) == "" || value.ReplyID == "" {
+	if p == nil || p.manager == nil || p.store == nil || ctx == nil || strings.TrimSpace(value.Payload) == "" || value.ReplyID == "" || value.LeaseOwner == "" || value.FencingToken <= 0 {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
 	}
-	key := value.TenantID + "\x00" + value.ReplyID + "\x00" + strconv.Itoa(value.SegmentIndex)
-	p.mu.Lock()
-	if receipt := p.receipts[key]; receipt != "" {
-		p.mu.Unlock()
+	if receipt := strings.TrimSpace(value.ProviderMessageID); receipt != "" {
 		return receipt, nil
 	}
-	p.mu.Unlock()
 	if !p.manager.Ready() {
 		return "", &outbox.DeliveryError{Class: "unavailable", Retryable: true}
 	}
-	correlation, err := p.correlations.GetReplyCorrelation(ctx, value.TenantID, value.EventID)
+	correlation, err := p.store.GetReplyCorrelation(ctx, value.TenantID, value.EventID)
 	if err != nil || strings.TrimSpace(correlation.RequestID) == "" {
 		return "", &outbox.DeliveryError{Class: "unavailable", Retryable: true}
 	}
@@ -59,21 +59,18 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 		return "", &outbox.DeliveryError{Class: "unavailable", Retryable: true}
 	}
 	receipt := reqID + ":" + strconv.Itoa(value.SegmentIndex)
-	p.mu.Lock()
-	p.receipts[key] = receipt
-	p.mu.Unlock()
+	if _, err := p.store.RecordReplyReceipt(ctx, storage.ReplyReceipt{TenantID: value.TenantID, ReplyID: value.ReplyID, SegmentIndex: value.SegmentIndex, Owner: value.LeaseOwner, FencingToken: value.FencingToken, ProviderID: receipt}); err != nil {
+		return "", &outbox.DeliveryError{Class: "unavailable", Retryable: true}
+	}
 	return receipt, nil
 }
 
-// Reconcile reports locally acknowledged replies as accepted.
+// Reconcile reports durably acknowledged replies as accepted.
 func (p *Provider) Reconcile(_ context.Context, value storage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
-	if p == nil {
+	if p == nil || p.store == nil {
 		return outbox.DeliveryUnknown, "", nil
 	}
-	key := value.TenantID + "\x00" + value.ReplyID + "\x00" + strconv.Itoa(value.SegmentIndex)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if receipt := p.receipts[key]; receipt != "" {
+	if receipt := strings.TrimSpace(value.ProviderMessageID); receipt != "" {
 		return outbox.DeliveryAccepted, receipt, nil
 	}
 	return outbox.DeliveryUnknown, "", nil

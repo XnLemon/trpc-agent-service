@@ -23,6 +23,6 @@
 [{"binding_id":"binding_xxx","secret_ref":"env/wecom-aibot","bot_secret":"..."}]
 ```
 
-最终回复必须在 30 秒内收到 WebSocket 确认；否则会以可重试交付失败回到 Outbox。`disconnected_event` 表示此 Manager 已被替换，连接会停止而不是自动重拨。
+最终回复必须在 30 秒内收到 WebSocket 确认；确认回执会在当前 Outbox lease 内持久化，进程在 `sent` 状态提交前重启时，接管 worker 只会据此完成 reconciliation，不会重复发送该段。未确认时会以可重试交付失败回到 Outbox。`disconnected_event` 表示此 Manager 已被替换，连接会停止而不是自动重拨。
 
 官方协议参考：[文档 60904](https://developer.work.weixin.qq.com/document/60904)；SDK：[aibot-node-sdk](https://github.com/WecomTeam/aibot-node-sdk)。

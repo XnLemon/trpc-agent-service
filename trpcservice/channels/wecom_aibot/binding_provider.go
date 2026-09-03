@@ -19,8 +19,8 @@ var _ outbox.Provider = (*BindingProvider)(nil)
 
 // NewBindingProvider registers the supplied manager set by trusted BindingID.
 // The caller owns manager lifecycle; this provider only owns reply routing.
-func NewBindingProvider(correlations storage.ReplyCorrelationStore, managers ...*Manager) (*BindingProvider, error) {
-	if correlations == nil || len(managers) == 0 {
+func NewBindingProvider(store DeliveryStore, managers ...*Manager) (*BindingProvider, error) {
+	if store == nil || len(managers) == 0 {
 		return nil, ErrInvalid
 	}
 	providers := make(map[string]*Provider, len(managers))
@@ -31,7 +31,7 @@ func NewBindingProvider(correlations storage.ReplyCorrelationStore, managers ...
 		if _, exists := providers[manager.target.BindingID]; exists {
 			return nil, ErrInvalid
 		}
-		provider, err := NewProvider(manager, correlations)
+		provider, err := NewProvider(manager, store)
 		if err != nil {
 			return nil, err
 		}

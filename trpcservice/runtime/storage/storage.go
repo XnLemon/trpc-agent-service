@@ -190,6 +190,17 @@ type ReplyCorrelation struct {
 	TraceParent string
 }
 
+// ReplyReceipt records a provider acknowledgement without advancing the reply
+// lifecycle. The outbox worker owns the subsequent sending-to-sent transition.
+type ReplyReceipt struct {
+	TenantID     string
+	ReplyID      string
+	SegmentIndex int
+	Owner        string
+	FencingToken int64
+	ProviderID   string
+}
+
 // ReplyTransition requests a fenced reply lifecycle transition.
 type ReplyTransition struct {
 	TenantID      string
@@ -241,6 +252,13 @@ type ReplyBatchCorrelationEnqueuer interface {
 // audit and recovery. It is optional for legacy runtime stores.
 type ReplyCorrelationStore interface {
 	GetReplyCorrelation(context.Context, string, string) (ReplyCorrelation, error)
+}
+
+// ReplyReceiptRecorder persists an acknowledged provider receipt while the
+// caller still owns the sending lease. It lets a replacement worker reconcile
+// a reply after a process restart before the normal sent transition commits.
+type ReplyReceiptRecorder interface {
+	RecordReplyReceipt(context.Context, ReplyReceipt) (ReplyOutbox, error)
 }
 
 // ValidateTenant checks the required tenant identity.
