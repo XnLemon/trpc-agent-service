@@ -18,12 +18,16 @@ func (r *InMemoryRepository) List(ctx context.Context, scopes []string, query, s
 		return nil, "", err
 	}
 	visible := make(map[string]struct{}, len(scopes))
+	all := false
 	for _, scope := range scopes {
-		if scope != "" {
+		scope = strings.TrimSpace(scope)
+		if scope == "*" {
+			all = true
+		} else if scope != "" {
 			visible[scope] = struct{}{}
 		}
 	}
-	if len(visible) == 0 {
+	if !all && len(visible) == 0 {
 		return []*tenant.Tenant{}, "", nil
 	}
 	if limit <= 0 {
@@ -44,8 +48,10 @@ func (r *InMemoryRepository) List(ctx context.Context, scopes []string, query, s
 	query = strings.ToLower(strings.TrimSpace(query))
 	status = strings.TrimSpace(status)
 	for _, value := range r.byID {
-		if _, ok := visible[value.TenantID]; !ok {
-			continue
+		if !all {
+			if _, ok := visible[value.TenantID]; !ok {
+				continue
+			}
 		}
 		if status != "" && string(value.Status) != status {
 			continue

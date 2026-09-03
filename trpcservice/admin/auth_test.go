@@ -235,8 +235,15 @@ func TestStaticAuthenticatorConfigurationAndBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !auth.principal.Global || !auth.principal.Allows("", true) || !auth.principal.Allows("tenant-a", true) || !auth.principal.Allows("tenant-a", false) || auth.principal.Allows("missing", false) {
+	if !auth.principal.Global || !auth.principal.Allows("", true) || !auth.principal.Allows("tenant-a", true) || !auth.principal.Allows("tenant-a", false) || !auth.principal.Allows("missing", false) || len(auth.principal.ScopeIDs()) != 1 || auth.principal.ScopeIDs()[0] != "*" {
 		t.Fatalf("unexpected principal scopes = %+v", auth.principal)
+	}
+	scoped, err := NewStaticAuthenticator("scoped-token", []string{"tenant-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scoped.principal.Allows("tenant-b", false) || scoped.principal.Allows("", false) {
+		t.Fatalf("scoped principal crossed tenant boundary = %+v", scoped.principal)
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "/admin/v1", nil)

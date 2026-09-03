@@ -28,7 +28,7 @@ var (
 )
 
 // Principal is the proof-bearing identity for the control-plane API. A global
-// principal is reserved for the configured first-tenant/platform boundary.
+// principal represents the explicitly configured platform-admin wildcard.
 type Principal struct {
 	SubjectID    string
 	TenantScopes map[string]struct{}
@@ -37,6 +37,9 @@ type Principal struct {
 
 // ScopeIDs returns a stable, defensive list for the /me response.
 func (p Principal) ScopeIDs() []string {
+	if p.Global {
+		return []string{"*"}
+	}
 	values := make([]string, 0, len(p.TenantScopes))
 	for scope := range p.TenantScopes {
 		values = append(values, scope)
@@ -47,14 +50,17 @@ func (p Principal) ScopeIDs() []string {
 
 // Allows reports whether the principal may access the tenant operation.
 func (p Principal) Allows(tenantID string, creating bool) bool {
-	// A global scope is intentionally limited to the controlled first-tenant
-	// creation boundary. It never becomes an implicit wildcard for reads or
-	// writes, which keeps every existing resource operation tenant-scoped.
 	if creating {
 		return p.Global
 	}
+	if tenantID == "" {
+		return false
+	}
+	if p.Global {
+		return true
+	}
 	_, ok := p.TenantScopes[tenantID]
-	return ok && tenantID != ""
+	return ok
 }
 
 // Authenticator is deliberately separate from gateway.APIAuthenticator so a

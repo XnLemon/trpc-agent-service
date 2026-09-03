@@ -40,3 +40,16 @@ func TestListScopesFiltersAndPaginatesTenants(t *testing.T) {
 		t.Fatalf("maximum tenant page = items=%+v err=%v", items, err)
 	}
 }
+
+func TestListWildcardIncludesAllTenants(t *testing.T) {
+	repository := NewRepository()
+	for _, key := range []string{"wildcard-first", "wildcard-second"} {
+		if _, err := repository.Create(context.Background(), tenant.CreateInput{TenantKey: key, DisplayName: key}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, next, err := repository.List(context.Background(), []string{" * "}, "", "", "", 50)
+	if err != nil || len(items) != 2 || next != "" {
+		t.Fatalf("wildcard tenant list = items=%+v next=%q err=%v", items, next, err)
+	}
+}

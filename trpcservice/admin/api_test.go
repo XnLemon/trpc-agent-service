@@ -159,8 +159,8 @@ func TestAdminTenantCreateAndReadUseIndependentPrincipal(t *testing.T) {
 		t.Fatalf("created tenant = %+v", created)
 	}
 
-	// The platform wildcard is limited to first-tenant creation; subsequent
-	// resource access requires an explicit tenant-scoped principal.
+	// A platform wildcard can continue to access the created tenant. Keep a
+	// scoped principal check here to preserve the tenant-admin boundary too.
 	scopedAuth, err := NewStaticAuthenticator("admin-token", []string{created.TenantID})
 	if err != nil {
 		t.Fatal(err)
@@ -877,26 +877,45 @@ func TestAdminNormalizationAndBodyBoundaries(t *testing.T) {
 	}
 }
 
-func TestGlobalAdminIsFirstTenantOnlyAndCrossTenantReadsAreHidden(t *testing.T) {
+func TestGlobalAdminListsAndReadsAllTenants(t *testing.T) {
 	handler, _ := testHandler(t)
-	for _, key := range []string{"first", "second"} {
-		request := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants", strings.NewReader(`{"tenant_key":"`+key+`","display_name":"Tenant"}`))
-		request.Header.Set("Authorization", "Bearer admin-token")
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, request)
-		want := http.StatusCreated
-		if key == "second" {
-			want = http.StatusForbidden
-		}
-		if recorder.Code != want {
-			t.Fatalf("%s tenant status = %d, want %d", key, recorder.Code, want)
-		}
-	}
-	cross := httptest.NewRequest(http.MethodGet, "/admin/v1/tenants/t_01ARZ3NDEKTSV4RRFFQ69G5FAV", nil)
-	cross.Header.Set("Authorization", "Bearer admin-token")
+	request := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants", strings.NewReader(`{"tenant_key":"first","display_name":"First"}`))
+	request.Header.Set("Authorization", "Bearer admin-token")
 	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, cross)
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("cross-tenant read status = %d, want 404", recorder.Code)
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("first tenant status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	second, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "second", DisplayName: "Second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := httptest.NewRequest(http.MethodGet, "/admin/v1/tenants", nil)
+	list.Header.Set("Authorization", "Bearer admin-token")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, list)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), second.TenantID) {
+		t.Fatalf("global tenant list = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	me := httptest.NewRequest(http.MethodGet, "/admin/v1/me", nil)
+	me.Header.Set("Authorization", "Bearer admin-token")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, me)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"tenant_scopes":["*"]`) {
+		t.Fatalf("global principal response = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	read := httptest.NewRequest(http.MethodGet, "/admin/v1/tenants/"+second.TenantID, nil)
+	read.Header.Set("Authorization", "Bearer admin-token")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, read)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("global tenant read = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	app := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants/"+second.TenantID+"/apps", strings.NewReader(`{"app_key":"support","display_name":"Support"}`))
+	app.Header.Set("Authorization", "Bearer admin-token")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, app)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("global app create = %d, body=%s", recorder.Code, recorder.Body.String())
 	}
 }

@@ -212,6 +212,27 @@ func TestTenantRepositoryListBoundaries(t *testing.T) {
 	}
 }
 
+func TestTenantRepositoryListsAllTenantsForWildcardScope(t *testing.T) {
+	value, err := tenant.NewTenant(tenant.CreateInput{TenantKey: "wildcard", DisplayName: "Wildcard", Status: tenant.StatusActive, AuditRetentionDays: 90, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`SELECT tenant_id FROM tenant ORDER BY tenant_id`).WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(value.TenantID))
+	mock.ExpectQuery(".*").WithArgs(value.TenantID).WillReturnRows(testTenantRows(value))
+	items, next, err := NewRepository(db).List(context.Background(), []string{" * "}, "", "", "", 50)
+	if err != nil || len(items) != 1 || items[0].TenantID != value.TenantID || next != "" {
+		t.Fatalf("wildcard tenant list = items=%+v next=%q err=%v", items, next, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTenantRepositoryValidatesDefaultsAndErrors(t *testing.T) {
 	input := tenant.CreateInput{
 		TenantKey: "validation-paths", DisplayName: "Validation Paths", Status: tenant.StatusActive,

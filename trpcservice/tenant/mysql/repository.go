@@ -31,12 +31,16 @@ func (r *TenantRepository) List(ctx context.Context, scopes []string, query, sta
 		return nil, "", ErrStorage
 	}
 	visible := make(map[string]struct{}, len(scopes))
+	all := false
 	for _, scope := range scopes {
-		if strings.TrimSpace(scope) != "" {
+		scope = strings.TrimSpace(scope)
+		if scope == "*" {
+			all = true
+		} else if scope != "" {
 			visible[scope] = struct{}{}
 		}
 	}
-	if len(visible) == 0 {
+	if !all && len(visible) == 0 {
 		return []*tenant.Tenant{}, "", nil
 	}
 	if limit <= 0 {
@@ -49,18 +53,23 @@ func (r *TenantRepository) List(ctx context.Context, scopes []string, query, sta
 	if err != nil {
 		return nil, "", err
 	}
-	ids := make([]string, 0, len(visible))
-	for id := range visible {
-		ids = append(ids, id)
+	querySQL := `SELECT tenant_id FROM tenant ORDER BY tenant_id`
+	var args []any
+	if !all {
+		ids := make([]string, 0, len(visible))
+		for id := range visible {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+		args = make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+		// Placeholders are generated from validated scope count; values remain bound arguments.
+		querySQL = `SELECT tenant_id FROM tenant WHERE tenant_id IN (` + placeholders + `) ORDER BY tenant_id` //nolint:gosec // placeholder list contains no user-controlled SQL
 	}
-	sort.Strings(ids)
-	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
-	}
-	// Placeholders are generated from validated scope count; values remain bound arguments.
-	rows, err := r.db.QueryContext(ctx, `SELECT tenant_id FROM tenant WHERE tenant_id IN (`+placeholders+`) ORDER BY tenant_id`, args...) //nolint:gosec // placeholder list contains no user-controlled SQL
+	rows, err := r.db.QueryContext(ctx, querySQL, args...)
 	if err != nil {
 		return nil, "", ErrStorage
 	}

@@ -16,8 +16,8 @@ import (
 // List returns a stable page of only the requested tenant scopes. Scope
 // filtering is part of the database query and therefore precedes pagination.
 func (r *TenantRepository) List(ctx context.Context, scopes []string, query, status, cursor string, limit int) ([]*tenant.Tenant, string, error) {
-	scopeClause, arguments := tenantScopeClause(scopes)
-	if scopeClause == "" {
+	scopeClause, arguments, allowed := tenantScopeClause(scopes)
+	if !allowed {
 		return []*tenant.Tenant{}, "", nil
 	}
 	if r == nil || r.db == nil {
@@ -74,17 +74,21 @@ func (r *TenantRepository) List(ctx context.Context, scopes []string, query, sta
 }
 
 // tenantScopeClause returns a deterministic SQL predicate and arguments for
-// the tenant IDs visible to one Admin principal. An empty predicate means no
-// tenant is visible, never an unrestricted query.
-func tenantScopeClause(scopes []string) (string, []any) {
+// the tenant IDs visible to one Admin principal. The wildcard is explicit;
+// an empty scope remains an empty result rather than an unrestricted query.
+func tenantScopeClause(scopes []string) (string, []any, bool) {
 	visible := make(map[string]struct{}, len(scopes))
 	for _, scope := range scopes {
+		scope = strings.TrimSpace(scope)
+		if scope == "*" {
+			return "", nil, true
+		}
 		if scope != "" {
 			visible[scope] = struct{}{}
 		}
 	}
 	if len(visible) == 0 {
-		return "", nil
+		return "", nil, false
 	}
 	scopeIDs := make([]string, 0, len(visible))
 	for scope := range visible {
@@ -97,7 +101,7 @@ func tenantScopeClause(scopes []string) (string, []any) {
 		placeholders[index] = fmt.Sprintf("$%d", index+1)
 		arguments[index] = scope
 	}
-	return ` WHERE tenant_id IN (` + strings.Join(placeholders, ", ") + `) `, arguments
+	return ` WHERE tenant_id IN (` + strings.Join(placeholders, ", ") + `) `, arguments, true
 }
 
 // TenantRepository persists Tenant roots in PostgreSQL.
