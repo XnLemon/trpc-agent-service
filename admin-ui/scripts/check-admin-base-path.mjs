@@ -7,6 +7,7 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const mainSource = await readFile(path.resolve(scriptDir, '../src/main.tsx'), 'utf8');
 const appSource = await readFile(path.resolve(scriptDir, '../src/App.tsx'), 'utf8');
 const shellSource = await readFile(path.resolve(scriptDir, '../src/components/AppShell.tsx'), 'utf8');
+const viteSource = await readFile(path.resolve(scriptDir, '../vite.config.ts'), 'utf8');
 
 assert.match(
   mainSource,
@@ -16,5 +17,6 @@ assert.match(
 assert.match(appSource, /<Route path="\/login"/);
 assert.doesNotMatch(appSource, /path="\/admin\/login"/);
 assert.doesNotMatch(shellSource, /navigate\('\/admin\/login'\)/);
+assert.match(viteSource, /base: process\.env\.NODE_ENV === 'production' \? '\/admin\/' : '\/'/);
 
 console.log('Admin base-path routing contract: ok');

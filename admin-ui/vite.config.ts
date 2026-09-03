@@ -37,6 +37,9 @@ const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\
 // (third_party/tdesign-react/packages/components) instead of the npm package.
 export default defineConfig({
   plugins: [react()],
+  // Production static hosting mounts the SPA at /admin; keep Vite's root
+  // asset paths for the development server's existing /connect entry.
+  base: process.env.NODE_ENV === 'production' ? '/admin/' : '/',
   resolve: {
     alias: [
       {
