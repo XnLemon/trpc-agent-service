@@ -272,7 +272,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, fmt.Errorf("%w: environment repositories: %v", ErrInvalidConfig, err)
 	}
 	auditWriter = metrics.WrapAuditWriter(auditWriter, config.telemetry)
-	wecomFactory, wecomProvider, err := environmentWeComComponents(config, channelRepo, tenantRepo, appRepo, auditWriter)
+	wecomFactory, wecomProvider, err := environmentWeComComponents(config, channelRepo, tenantRepo, appRepo, runtimeStore, auditWriter)
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = runtimeStores.Close()
@@ -438,13 +438,21 @@ func environmentRepositories(config environmentConfig, db *sql.DB) (tenant.Repos
 	return tenantRepo, appRepo, channelRepo, auditWriter, err
 }
 
-func environmentWeComComponents(config environmentConfig, channelsRepo channels.CandidateConsumer, tenantsRepo tenant.Repository, appsRepo agent.Repository, auditWriter audit.Writer) (func(gateway.DispatchService) (http.Handler, error), outbox.Provider, error) {
+func environmentWeComComponents(config environmentConfig, channelsRepo channels.CandidateConsumer, tenantsRepo tenant.Repository, appsRepo agent.Repository, runtimeStore runtimestorage.RuntimeStore, auditWriter audit.Writer) (func(gateway.DispatchService) (http.Handler, error), outbox.Provider, error) {
 	if config.wecom == nil {
 		return nil, nil, nil
 	}
 	credentials := environmentWeComCredentialResolver{tenantID: config.tenantID, config: *config.wecom}
+	var attachments runtimestorage.AttachmentStore
+	if store, ok := runtimeStore.(runtimestorage.AttachmentStore); ok {
+		attachments = store
+	}
+	var mediaDownloader wecom.MediaDownloader
+	if attachments != nil {
+		mediaDownloader = &wecom.HTTPMediaDownloader{}
+	}
 	factory := func(dispatcher gateway.DispatchService) (http.Handler, error) {
-		return wecom.New(wecom.Config{Candidates: channelsRepo, Tenants: tenantsRepo, Apps: appsRepo, Credentials: credentials, Dispatcher: dispatcher, AuditWriter: auditWriter, Observability: config.telemetry})
+		return wecom.New(wecom.Config{Candidates: channelsRepo, Tenants: tenantsRepo, Apps: appsRepo, Credentials: credentials, Dispatcher: dispatcher, Attachments: attachments, MediaDownloader: mediaDownloader, AuditWriter: auditWriter, Observability: config.telemetry})
 	}
 	return factory, &wecom.BindingProvider{Bindings: channelsRepo, Credentials: credentials}, nil
 }

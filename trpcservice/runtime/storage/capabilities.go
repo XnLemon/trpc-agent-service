@@ -210,6 +210,7 @@ type RuntimeCapabilities interface {
 	AuditStore
 	VectorStore
 	ObjectStore
+	AttachmentStore
 }
 
 // SessionStore is the tenant-scoped session runtime contract.

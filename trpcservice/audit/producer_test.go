@@ -56,6 +56,9 @@ func TestRecorderConvenienceProducersAndNoop(t *testing.T) {
 	if err := r.ToolDecision(context.Background(), EventToolDenied, "req", "trace", "tool", DecisionDeny, string(ErrorTool)); err != nil {
 		t.Fatal(err)
 	}
+	if err := r.ToolExecuted(context.Background(), "req", "trace", "tool"); err != nil {
+		t.Fatal(err)
+	}
 	if err := r.BudgetRejected(context.Background(), "req", "trace"); err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +80,7 @@ func TestRecorderConvenienceProducersAndNoop(t *testing.T) {
 	if err := r.IMReconciled(context.Background(), "req", "trace", ""); err != nil {
 		t.Fatal(err)
 	}
-	if len(w.events) != 9 {
+	if len(w.events) != 10 {
 		t.Fatalf("events = %d", len(w.events))
 	}
 	if err := (Recorder{}).Record(context.Background(), Event{}); err != nil {

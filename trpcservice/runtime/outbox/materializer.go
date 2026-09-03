@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -45,7 +46,18 @@ type MaterializeInput struct {
 	TraceID     string
 	TraceParent string
 	Payload     string
+	Segments    []ReplySegment
 	ReplyTarget runtimestorage.ReplyTarget
+}
+
+// ReplySegment is one protocol-neutral reply selected by the completed Runner
+// turn. Text segments retain historical rune splitting; media segments remain
+// atomic so the target channel can send their verified attachment natively.
+type ReplySegment struct {
+	Kind       runtimestorage.ReplyKind
+	Payload    string
+	Attachment attachment.Reference
+	Fallback   string
 }
 
 // NewMaterializer creates a reply materializer with a default segment size.
@@ -71,17 +83,13 @@ func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) 
 	if m == nil || ctx == nil || runtimestorage.ValidateTenant(input.TenantID) != nil || input.EventID == "" || input.ReplyID == "" || runtimestorage.ValidateReplyTarget(input.ReplyTarget) != nil {
 		return 0, ErrInvalid
 	}
-	segments := splitRunes(input.Payload, m.segmentSize)
-	if len(segments) == 0 {
+	replies, err := m.buildReplies(input)
+	if err != nil {
 		return 0, ErrInvalid
 	}
 	batchStore, ok := m.store.(runtimestorage.ReplyBatchEnqueuer)
 	if !ok {
 		return 0, errors.Join(ErrMaterialization, runtimestorage.ErrInvalid)
-	}
-	replies := make([]runtimestorage.ReplyOutbox, 0, len(segments))
-	for index, payload := range segments {
-		replies = append(replies, runtimestorage.ReplyOutbox{TenantID: input.TenantID, ReplyID: input.ReplyID, EventID: input.EventID, SegmentIndex: index, SegmentCount: len(segments), Payload: payload, ReplyTarget: input.ReplyTarget})
 	}
 	started := time.Now()
 	operationCtx, _, finish := observability.StartOperation(ctx, m.telemetry, observability.OperationStorageOperation, "storage")
@@ -117,7 +125,65 @@ func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) 
 	if err != nil {
 		return 0, redactedMaterializationError(err)
 	}
-	return len(segments), nil
+	return len(replies), nil
+}
+
+func (m *Materializer) buildReplies(input MaterializeInput) ([]runtimestorage.ReplyOutbox, error) {
+	if len(input.Segments) == 0 {
+		parts := splitRunes(input.Payload, m.segmentSize)
+		if len(parts) == 0 {
+			return nil, ErrInvalid
+		}
+		return textReplies(input, parts), nil
+	}
+	if input.Payload != "" {
+		return nil, ErrInvalid
+	}
+	segments := make([]runtimestorage.ReplyOutbox, 0, len(input.Segments))
+	for _, segment := range input.Segments {
+		kind := segment.Kind
+		if kind == "" {
+			kind = runtimestorage.ReplyKindText
+		}
+		if kind == runtimestorage.ReplyKindText {
+			parts := splitRunes(segment.Payload, m.segmentSize)
+			if len(parts) == 0 {
+				return nil, ErrInvalid
+			}
+			segments = append(segments, textReplies(input, parts)...)
+			continue
+		}
+		value, err := runtimestorage.NormalizeReplyOutbox(runtimestorage.ReplyOutbox{
+			Kind: kind, Payload: segment.Payload, Attachment: segment.Attachment, Fallback: segment.Fallback,
+		})
+		if err != nil {
+			return nil, err
+		}
+		segments = append(segments, runtimestorage.ReplyOutbox{
+			TenantID: input.TenantID, ReplyID: input.ReplyID, EventID: input.EventID,
+			Kind: value.Kind, Payload: value.Payload, Attachment: value.Attachment, Fallback: value.Fallback,
+			ReplyTarget: input.ReplyTarget,
+		})
+	}
+	if len(segments) == 0 {
+		return nil, ErrInvalid
+	}
+	for index := range segments {
+		segments[index].SegmentIndex = index
+		segments[index].SegmentCount = len(segments)
+	}
+	return segments, nil
+}
+
+func textReplies(input MaterializeInput, payloads []string) []runtimestorage.ReplyOutbox {
+	replies := make([]runtimestorage.ReplyOutbox, 0, len(payloads))
+	for index, payload := range payloads {
+		replies = append(replies, runtimestorage.ReplyOutbox{
+			TenantID: input.TenantID, ReplyID: input.ReplyID, EventID: input.EventID,
+			SegmentIndex: index, SegmentCount: len(payloads), Payload: payload, ReplyTarget: input.ReplyTarget,
+		})
+	}
+	return replies
 }
 
 // redactedMaterializationError keeps only stable, caller-actionable classes.

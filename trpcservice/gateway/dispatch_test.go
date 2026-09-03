@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
@@ -17,9 +19,11 @@ import (
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
+	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 type capturedRun struct {
@@ -84,6 +88,32 @@ type claimStoreStub struct {
 	getErr, createErr, recordErr, transitionErr error
 }
 
+type transitionCaptureStore struct {
+	runtimestorage.RuntimeStore
+	mu          sync.Mutex
+	transitions []runtimestorage.MessageTransition
+}
+
+type dispatchAttachmentStore struct {
+	bindFn func(context.Context, string, string, []attachment.Reference) error
+	loadFn func(context.Context, string, string, attachment.Reference) (attachment.Content, error)
+}
+
+type failingToolAttachmentStore struct {
+	runtimestorage.AttachmentStore
+}
+
+func (failingToolAttachmentStore) PutAttachment(context.Context, string, attachment.Upload, io.Reader) (attachment.Reference, error) {
+	return attachment.Reference{}, errors.New("attachment storage failed")
+}
+
+func (s dispatchAttachmentStore) BindAttachments(ctx context.Context, tenantID, eventID string, references []attachment.Reference) error {
+	if s.bindFn != nil {
+		return s.bindFn(ctx, tenantID, eventID, references)
+	}
+	return nil
+}
+
 type stagedContext struct {
 	context.Context
 	done      chan struct{}
@@ -106,6 +136,12 @@ func (ctx *stagedContext) Err() error {
 	return nil
 }
 
+func (s dispatchAttachmentStore) Load(ctx context.Context, tenantID, eventID string, reference attachment.Reference) (attachment.Content, error) {
+	if s.loadFn != nil {
+		return s.loadFn(ctx, tenantID, eventID, reference)
+	}
+	return attachment.Content{}, errors.New("attachment unavailable")
+}
 func (s *claimStoreStub) GetSession(context.Context, string, string) (runtimestorage.Session, error) {
 	if s.getErr != nil {
 		return runtimestorage.Session{}, s.getErr
@@ -129,6 +165,24 @@ func (s *claimStoreStub) TransitionMessage(context.Context, runtimestorage.Messa
 		return runtimestorage.MessageEvent{}, s.transitionErr
 	}
 	return runtimestorage.MessageEvent{}, nil
+}
+
+func (s *transitionCaptureStore) TransitionMessage(ctx context.Context, transition runtimestorage.MessageTransition) (runtimestorage.MessageEvent, error) {
+	s.mu.Lock()
+	s.transitions = append(s.transitions, transition)
+	s.mu.Unlock()
+	return s.RuntimeStore.TransitionMessage(ctx, transition)
+}
+
+func (s *transitionCaptureStore) runningLease() (time.Duration, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, transition := range s.transitions {
+		if transition.To == runtimestorage.EventRunning {
+			return transition.LeaseDuration, true
+		}
+	}
+	return 0, false
 }
 
 func newTestDispatcher(t *testing.T, runnerValue *testRunner) (*Dispatcher, Principal) {
@@ -829,6 +883,59 @@ func TestDispatcherDurableChannelClaimSuppressesDuplicateRunner(t *testing.T) {
 	}
 }
 
+func TestDispatcherBindsStoredAttachmentBeforePassingVerifiedContentToRunner(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPlanResolver(PlanResolverConfig{
+		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
+		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("image")
+	store := inmemory.New()
+	t.Cleanup(func() { _ = store.Close() })
+	reference, err := store.PutAttachment(context.Background(), principal.TenantID(), attachment.Upload{ID: "attachment-1", Kind: attachment.KindImage, MIMEType: "image/png", Size: int64(len(data)), Provider: "telegram", ProviderID: "file-1"}, strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatalf("PutAttachment = %v", err)
+	}
+	if _, err := store.Load(context.Background(), principal.TenantID(), "unbound-event", reference); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("unbound Load = %v", err)
+	}
+	var captured trpcmodel.Message
+	runnerValue := &testRunner{runFn: func(_ context.Context, _ string, _ string, message trpcmodel.Message, _ ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		captured = message
+		events := make(chan *trpcevent.Event, 1)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
+		close(events)
+		return events, nil
+	}}
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: InboundMessage{Content: "describe", ExternalMessageID: "attachment-message", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1", Attachments: []attachment.Reference{reference}}})
+	if err != nil {
+		t.Fatalf("Dispatch = %v", err)
+	}
+	if events := collectDispatchEvents(stream); len(events) != 1 || !events[0].Done {
+		t.Fatalf("dispatch events = %+v", events)
+	}
+	if captured.Content != "describe" || len(captured.ContentParts) != 1 || captured.ContentParts[0].Type != trpcmodel.ContentTypeImage || captured.ContentParts[0].Image == nil || string(captured.ContentParts[0].Image.Data) != string(data) {
+		t.Fatalf("Runner message = %+v", captured)
+	}
+}
+
 func TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle(t *testing.T) {
 	fixture := newGatewayFixture(t)
 	target := newTrustedRoutingTarget(t, fixture)
@@ -869,6 +976,263 @@ func TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle(t 
 	assertDurableReplyWorkerCompletes(t, store, principal.TenantID(), message.EventID)
 }
 
+func TestDispatcherMaterializesToolMediaReplyAndReplaysIdempotently(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal := mustChannelPrincipal(t, target)
+	dispatcher, store, runs := newToolMediaDispatcher(t, fixture)
+	request := DispatchRequest{Principal: principal, RequestID: "media-request", TraceID: "media-trace", Message: InboundMessage{Content: "send a test image", ExternalMessageID: "media-message", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"}}
+	assertToolMediaDispatchCompletes(t, dispatcher, request)
+	reply := assertToolMediaOutbox(t, store, principal.TenantID(), target)
+	assertToolMediaCorrelation(t, store, principal.TenantID(), reply.EventID)
+	assertToolMediaDuplicateIsRejected(t, dispatcher, request, runs, store, principal.TenantID())
+}
+
+func mustChannelPrincipal(t *testing.T, target channels.RoutingTarget) Principal {
+	t.Helper()
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return principal
+}
+
+func newToolMediaDispatcher(t *testing.T, fixture gatewayFixture) (*Dispatcher, *inmemory.Store, *atomic.Int32) {
+	t.Helper()
+	resolver, err := NewPlanResolver(PlanResolverConfig{Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := &atomic.Int32{}
+	runnerValue := &testRunner{runFn: func(ctx context.Context, _ string, _ string, _ trpcmodel.Message, _ ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		runs.Add(1)
+		return testImageToolEvents(ctx)
+	}}
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	store := inmemory.New()
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, DrainTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dispatcher, store, runs
+}
+
+func testImageToolEvents(ctx context.Context) (<-chan *trpcevent.Event, error) {
+	tools, err := servicetool.DefaultRegistry().Resolve([]agent.ToolAuthorization{{ToolID: servicetool.SendTestImageID, Required: true}})
+	if err != nil {
+		return nil, err
+	}
+	callable, ok := tools[0].(trpctool.CallableTool)
+	if !ok {
+		return nil, errors.New("tool is not callable")
+	}
+	events := make(chan *trpcevent.Event, 1)
+	if _, err := callable.Call(ctx, []byte("{}")); err != nil {
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Error: &trpcmodel.ResponseError{Message: err.Error()}}}
+	} else {
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
+	}
+	close(events)
+	return events, nil
+}
+
+func assertToolMediaDispatchCompletes(t *testing.T, dispatcher *Dispatcher, request DispatchRequest) {
+	t.Helper()
+	stream, err := dispatcher.Dispatch(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if events := collectDispatchEvents(stream); len(events) != 1 || !events[0].Done {
+		t.Fatalf("tool dispatch events = %+v", events)
+	}
+}
+
+func assertToolMediaOutbox(t *testing.T, store *inmemory.Store, tenantID string, target channels.RoutingTarget) runtimestorage.ReplyOutbox {
+	t.Helper()
+	replies, err := store.ListReplyCandidates(context.Background(), tenantID)
+	if err != nil || len(replies) != 1 {
+		t.Fatalf("media replies = %+v, err=%v", replies, err)
+	}
+	reply := replies[0]
+	if reply.Kind != runtimestorage.ReplyKindImage || reply.Fallback == "" || reply.ReplyTarget.BindingID != target.BindingID || reply.ReplyTarget.ReceiverID != "peer-1" {
+		t.Fatalf("media outbox row = %+v", reply)
+	}
+	if _, err := store.Load(context.Background(), tenantID, reply.EventID, reply.Attachment); err != nil {
+		t.Fatalf("outbox attachment is not tenant/event scoped: %v", err)
+	}
+	return reply
+}
+
+func assertToolMediaCorrelation(t *testing.T, store *inmemory.Store, tenantID, eventID string) {
+	t.Helper()
+	correlation, err := store.GetReplyCorrelation(context.Background(), tenantID, eventID)
+	if err != nil || correlation.RequestID != "media-request" || correlation.TraceID != "media-trace" {
+		t.Fatalf("media reply correlation = %+v, err=%v", correlation, err)
+	}
+}
+
+func assertToolMediaDuplicateIsRejected(t *testing.T, dispatcher *Dispatcher, request DispatchRequest, runs *atomic.Int32, store *inmemory.Store, tenantID string) {
+	t.Helper()
+	if _, err := dispatcher.Dispatch(context.Background(), request); !errors.Is(err, ErrDuplicateMessage) {
+		t.Fatalf("duplicate media dispatch error = %v", err)
+	}
+	if runs.Load() != 1 {
+		t.Fatalf("tool runner calls = %d, want one durable execution", runs.Load())
+	}
+	replies, err := store.ListReplyCandidates(context.Background(), tenantID)
+	if err != nil || len(replies) != 1 {
+		t.Fatalf("replayed media replies = %+v, err=%v", replies, err)
+	}
+}
+
+func TestDispatcherToolFailureMaterializesFallback(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPlanResolver(PlanResolverConfig{Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerValue := &testRunner{runFn: func(ctx context.Context, _ string, _ string, _ trpcmodel.Message, _ ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		tools, resolveErr := servicetool.DefaultRegistry().Resolve([]agent.ToolAuthorization{{ToolID: servicetool.SendTestImageID}})
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		_, callErr := tools[0].(trpctool.CallableTool).Call(ctx, []byte("{}"))
+		events := make(chan *trpcevent.Event, 1)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Error: &trpcmodel.ResponseError{Message: callErr.Error()}}}
+		close(events)
+		return events, nil
+	}}
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	store := inmemory.New()
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, AttachmentStore: failingToolAttachmentStore{AttachmentStore: store}, DrainTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "tool-fallback", TraceID: "tool-fallback-trace", Message: InboundMessage{Content: "send a test image", ExternalMessageID: "tool-fallback-message", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = collectDispatchEvents(stream)
+	replies, err := store.ListReplyCandidates(context.Background(), principal.TenantID())
+	if err != nil || len(replies) != 1 || replies[0].Kind != runtimestorage.ReplyKindText || replies[0].Payload != durableFailureFallbackReply {
+		t.Fatalf("tool failure fallback = %+v, err=%v", replies, err)
+	}
+}
+
+func TestDispatcherDurableInboundLeaseCoversAgentRuntimeTimeout(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPlanResolver(PlanResolverConfig{
+		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
+		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerValue := &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		events := make(chan *trpcevent.Event, 1)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
+		close(events)
+		return events, nil
+	}}
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	store := &transitionCaptureStore{RuntimeStore: inmemory.New()}
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, DrainTimeout: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{
+		Principal: principal, RequestID: "durable-lease",
+		Message: InboundMessage{Content: "inbound", ExternalMessageID: "durable-lease", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collectDispatchEvents(stream)
+	got, ok := store.runningLease()
+	want := time.Duration(fixture.revision.Runtime.ExecutionTimeoutSeconds)*time.Second + durableInboundLeaseGrace
+	if !ok || got != want || got <= 30*time.Second {
+		t.Fatalf("durable inbound lease = %v ok=%v, want %v and longer than 30s", got, ok, want)
+	}
+}
+
+func TestDispatcherDurableChannelModelErrorMaterializesFallbackReply(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPlanResolver(PlanResolverConfig{
+		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
+		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerValue := &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		events := make(chan *trpcevent.Event, 1)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Error: &trpcmodel.ResponseError{Message: "provider secret"}}}
+		close(events)
+		return events, nil
+	}}
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	store := inmemory.New()
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, DrainTimeout: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{
+		Principal: principal, RequestID: "durable-error-fallback",
+		Message: InboundMessage{Content: "inbound", ExternalMessageID: "durable-error-fallback", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collectDispatchEvents(stream)
+	if len(events) != 2 || events[0].Error != ErrExecution.Error() || events[1].Status != "error" {
+		t.Fatalf("dispatch events = %+v", events)
+	}
+	rows, err := store.ListReplyCandidates(context.Background(), principal.TenantID())
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("outbox rows = %+v / %v", rows, err)
+	}
+	row := rows[0]
+	if row.Payload != durableFailureFallbackReply || row.ReplyTarget != (runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: "direct", ReceiverID: "peer-1"}) {
+		t.Fatalf("fallback row = %+v", row)
+	}
+	message, err := store.GetMessage(context.Background(), principal.TenantID(), row.EventID)
+	if err != nil || message.Status != runtimestorage.EventCompleted || message.ReplyID != row.ReplyID || message.SegmentCount != 1 {
+		t.Fatalf("fallback message = %+v / %v", message, err)
+	}
+	assertDurableReplyWorkerCompletesCount(t, store, principal.TenantID(), row.EventID, 1)
+}
+
 func dispatchAndAssertDurableReply(t *testing.T, dispatcher *Dispatcher, principal Principal, store runtimestorage.RuntimeStore) runtimestorage.MessageEvent {
 	t.Helper()
 	target, ok := principal.RoutingTarget()
@@ -907,13 +1271,18 @@ func dispatchAndAssertDurableReply(t *testing.T, dispatcher *Dispatcher, princip
 
 func assertDurableReplyWorkerCompletes(t *testing.T, store runtimestorage.RuntimeStore, tenantID, eventID string) {
 	t.Helper()
+	assertDurableReplyWorkerCompletesCount(t, store, tenantID, eventID, 2)
+}
+
+func assertDurableReplyWorkerCompletesCount(t *testing.T, store runtimestorage.RuntimeStore, tenantID, eventID string, want int) {
+	t.Helper()
 	provider := &durableOutboxProvider{}
 	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: tenantID, Owner: "worker", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	processed, err := worker.RunOnce(context.Background())
-	if err != nil || processed != 2 || len(provider.deliveries) != 2 {
+	if err != nil || processed != want || len(provider.deliveries) != want {
 		t.Fatalf("worker = processed %d deliveries %d err %v", processed, len(provider.deliveries), err)
 	}
 	message, err := store.GetMessage(context.Background(), tenantID, eventID)
@@ -1028,7 +1397,7 @@ func assertDurableClaimReclaimsReconcilingAndValidatesIDs(t *testing.T, dispatch
 	if err != nil || recoveredReconciling == nil {
 		t.Fatalf("reconciling reclaim = %+v err=%v", recoveredReconciling, err)
 	}
-	dispatcher.finishDurable(context.Background(), "", "", recoveredReconciling, errors.New("execution failed"))
+	dispatcher.finishDurable(context.Background(), "", "", recoveredReconciling, errors.New("execution failed"), "", nil)
 	message.ExternalMessageID = ""
 	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing external ID error = %v", err)
@@ -1136,6 +1505,114 @@ func TestDispatcherDurableDispatchFailurePaths(t *testing.T) {
 	_ = registry.Close()
 }
 
+func TestDispatcherDurableAttachmentFailurePaths(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPlanResolver(PlanResolverConfig{Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference := testAttachmentReference(t, attachment.KindImage, "image/png", []byte("image"))
+	newDispatcher := func(t *testing.T, store runtimestorage.RuntimeStore, attachments attachment.Reader) (*Dispatcher, *RunnerRegistry, *atomic.Int32) {
+		t.Helper()
+		var runnerCalls atomic.Int32
+		registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+			return &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+				runnerCalls.Add(1)
+				return nil, nil
+			}}, nil
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dispatcher, err := NewDispatcher(DispatchConfig{
+			Resolver: resolver, Registry: registry, RuntimeStore: store, Attachments: attachments, DrainTimeout: time.Millisecond,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return dispatcher, registry, &runnerCalls
+	}
+	for _, tt := range []struct {
+		name        string
+		attachments attachment.Reader
+		want        error
+	}{
+		{
+			name: "missing binder",
+			attachments: attachmentReaderFunc(func(context.Context, string, string, attachment.Reference) (attachment.Content, error) {
+				return attachment.Content{}, errors.New("unexpected load")
+			}),
+			want: ErrExecution,
+		},
+		{
+			name: "binder failure",
+			attachments: dispatchAttachmentStore{bindFn: func(context.Context, string, string, []attachment.Reference) error {
+				return errors.New("bind failed")
+			}},
+			want: ErrExecution,
+		},
+		{
+			name: "load failure",
+			attachments: dispatchAttachmentStore{loadFn: func(context.Context, string, string, attachment.Reference) (attachment.Content, error) {
+				return attachment.Content{}, errors.New("load failed")
+			}},
+			want: ErrExecution,
+		},
+		{
+			name: "load cancellation",
+			attachments: dispatchAttachmentStore{loadFn: func(context.Context, string, string, attachment.Reference) (attachment.Content, error) {
+				return attachment.Content{}, context.Canceled
+			}},
+			want: context.Canceled,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := inmemory.New()
+			dispatcher, registry, runnerCalls := newDispatcher(t, store, tt.attachments)
+			defer func() { _ = registry.Close() }()
+			message := InboundMessage{
+				Content: "caption", ExternalMessageID: "attachment-" + strings.ReplaceAll(tt.name, " ", "-"), ExternalUserID: "user-1",
+				ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1", Attachments: []attachment.Reference{reference},
+			}
+			stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message})
+			if !errors.Is(err, tt.want) || stream != nil {
+				t.Fatalf("Dispatch() stream=%v err=%v, want %v", stream, err, tt.want)
+			}
+			if runnerCalls.Load() != 0 {
+				t.Fatal("Runner started after attachment preparation failed")
+			}
+			assertDurableMessageStatus(t, store, principal, target, message, runtimestorage.EventFailed)
+		})
+	}
+}
+
+func assertDurableMessageStatus(t *testing.T, store runtimestorage.RuntimeStore, principal Principal, target channels.RoutingTarget, message InboundMessage, status string) {
+	t.Helper()
+	identity, err := dispatchRunnerIdentity(principal, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := replyTarget(target, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, duplicate, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{
+		TenantID: principal.TenantID(), EventID: "probe-" + message.ExternalMessageID, SessionID: identity.SessionID,
+		BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID, ReplyTarget: reply,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !duplicate || event.Status != status {
+		t.Fatalf("durable message duplicate=%v status=%q, want %q", duplicate, event.Status, status)
+	}
+}
+
 func TestDispatcherRedactsRunnerErrors(t *testing.T) {
 	runnerValue := &testRunner{}
 	runnerValue.runFn = func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
@@ -1236,7 +1713,7 @@ func TestDispatcherForwardChecksCancellationAfterReceivingRunnerEvent(t *testing
 	close(runnerEvents)
 	output := make(chan DispatchEvent, 4)
 	_, span := dispatcher.telemetry.Tracer("test").Start(ctx, "forward")
-	dispatcher.forward(ctx, "request-forward-cancel", "trace", runnerEvents, &RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{})
+	dispatcher.forward(ctx, "request-forward-cancel", "trace", runnerEvents, &RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{}, nil)
 	events := collectDispatchEvents(output)
 	if len(events) != 2 || events[0].Error != ErrExecutionCanceled.Error() || !events[1].Done {
 		t.Fatalf("events = %+v", events)
@@ -1262,7 +1739,7 @@ func TestDispatcherClosedRunnerChannelCancellationDoesNotComplete(t *testing.T) 
 	close(runnerEvents)
 	output := make(chan DispatchEvent, 4)
 	_, span := dispatcher.telemetry.Tracer("test").Start(ctx, "forward")
-	dispatcher.forward(ctx, "request-closed-cancel", "trace", runnerEvents, &RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{})
+	dispatcher.forward(ctx, "request-closed-cancel", "trace", runnerEvents, &RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{}, nil)
 	events := collectDispatchEvents(output)
 	if len(events) != 2 || events[0].Error != ErrExecutionCanceled.Error() || !events[1].Done {
 		t.Fatalf("events = %+v", events)
@@ -1330,7 +1807,7 @@ func TestDispatcherForwardSelectCancellationBranch(t *testing.T) {
 	_, span := dispatcher.telemetry.Tracer("test").Start(ctx, "forward")
 	finished := make(chan struct{})
 	go func() {
-		dispatcher.forward(ctx, "request-select-cancel", "trace", runnerEvents, &RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{})
+		dispatcher.forward(ctx, "request-select-cancel", "trace", runnerEvents, &RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{}, nil)
 		close(finished)
 	}()
 	<-ctx.firstErr
@@ -1421,7 +1898,7 @@ func TestDispatcherRunnerEventCancellationDuringSendRecordsCanceledAudit(t *test
 		t.Fatalf("cancellation state done=%v err=%v event=%q error=%q", done, terminalErr, terminalEventType, terminalErrorType)
 	}
 	var finalizedType audit.EventType
-	if err := dispatcher.finalizeForward(ctx, requestID, "", nil, principal, terminalErr, reply.String(), terminalEventType, terminalErrorType,
+	if err := dispatcher.finalizeForward(ctx, requestID, "", nil, principal, terminalErr, reply.String(), nil, terminalEventType, terminalErrorType,
 		func(eventType audit.EventType, errorType string) error {
 			finalizedType = eventType
 			return dispatcher.writeExecutionAudit(context.Background(), principal, InboundMessage{ExternalUserID: "user"}, tenant.RunnerIdentity{}, requestID, "", eventType, errorType)

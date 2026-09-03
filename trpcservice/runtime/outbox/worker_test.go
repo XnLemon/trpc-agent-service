@@ -2,11 +2,14 @@ package outbox_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"sort"
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
@@ -298,6 +301,46 @@ func TestMaterializerSegmentsIdempotently(t *testing.T) {
 	values, err := store.ListReplyCandidates(context.Background(), "tenant-a")
 	if err != nil || len(values) != 3 {
 		t.Fatalf("materialized rows = %d err=%v", len(values), err)
+	}
+}
+
+func TestMaterializerWritesIdempotentStructuredMediaReply(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "media-session", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", EventID: "media-event", SessionID: "media-session", BindingID: "media-binding", ExternalMessageID: "media-message", ReplyTarget: runtimestorage.ReplyTarget{BindingID: "media-binding", ConversationKind: "direct", ReceiverID: "user-a"}}); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("png")
+	digest := sha256.Sum256(data)
+	reference := attachment.Reference{ID: "tool-image", Kind: attachment.KindImage, MIMEType: "image/png", Name: "test.png", Size: int64(len(data)), SHA256: hex.EncodeToString(digest[:]), Provider: "tool", ProviderID: "send_test_image"}
+	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: store, SegmentSize: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := outbox.MaterializeInput{
+		TenantID: "tenant-a", EventID: "media-event", ReplyID: "media-reply", RequestID: "media-request", TraceID: "media-trace",
+		Segments:    []outbox.ReplySegment{{Kind: runtimestorage.ReplyKindImage, Payload: "caption", Attachment: reference, Fallback: "[image attachment: test.png]"}},
+		ReplyTarget: runtimestorage.ReplyTarget{BindingID: "media-binding", ConversationKind: "direct", ReceiverID: "user-a"},
+	}
+	if count, err := materializer.Materialize(context.Background(), input); err != nil || count != 1 {
+		t.Fatalf("media materialization = %d, %v", count, err)
+	}
+	if count, err := materializer.Materialize(context.Background(), input); err != nil || count != 1 {
+		t.Fatalf("idempotent media materialization = %d, %v", count, err)
+	}
+	reply, err := store.GetReply(context.Background(), "tenant-a", "media-reply", 0)
+	if err != nil || reply.Kind != runtimestorage.ReplyKindImage || reply.Attachment != reference || reply.Fallback != "[image attachment: test.png]" || reply.ReplyTarget.ReceiverID != "user-a" {
+		t.Fatalf("structured media reply = %+v, err=%v", reply, err)
+	}
+	correlation, err := store.GetReplyCorrelation(context.Background(), "tenant-a", "media-event")
+	if err != nil || correlation.RequestID != "media-request" || correlation.TraceID != "media-trace" {
+		t.Fatalf("media correlation = %+v, err=%v", correlation, err)
+	}
+	input.Payload = "text"
+	if _, err := materializer.Materialize(context.Background(), input); !errors.Is(err, outbox.ErrInvalid) {
+		t.Fatalf("mixed text and structured media = %v", err)
 	}
 }
 

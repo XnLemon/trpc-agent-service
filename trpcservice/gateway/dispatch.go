@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
@@ -16,6 +18,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
+	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	"github.com/google/uuid"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
@@ -38,11 +41,12 @@ const (
 	forwardTerminalPending uint32 = iota
 	forwardTerminalCanceled
 	forwardTerminalCommitted
-)
 
-const defaultDispatchDrainTimeout = 250 * time.Millisecond
-const durableInboundLease = 30 * time.Second
-const maxDurableExternalMessageIDRunes = 512
+	defaultDispatchDrainTimeout      = 250 * time.Millisecond
+	durableInboundLeaseGrace         = 30 * time.Second
+	durableFailureFallbackReply      = "An error occurred during execution. Please contact the service provider."
+	maxDurableExternalMessageIDRunes = 512
+)
 
 // DispatchEventType identifies the protocol-neutral event surface consumed by
 // JSON and SSE adapters.
@@ -103,20 +107,26 @@ type DispatchConfig struct {
 	AuditWriter audit.Writer
 	// HandoffStore durably reserves and finalizes execution audit facts.
 	HandoffStore audit.HandoffStore
+	// Attachments loads verified tenant-owned media only when an inbound message
+	// contains attachment references. Text-only dispatches remain independent of it.
+	Attachments     attachment.Reader
+	AttachmentStore runtimestorage.AttachmentStore
 }
 
 // Dispatcher resolves a fixed plan, acquires a Runner lease, and translates
 // Runner events into a bounded, redacted event stream.
 type Dispatcher struct {
-	resolver     *PlanResolver
-	registry     *RunnerRegistry
-	drainTimeout time.Duration
-	telemetry    observability.Provider
-	metrics      metrics.Catalog
-	runtimeStore runtimestorage.RuntimeStore
-	materializer *outbox.Materializer
-	auditWriter  audit.Writer
-	handoffStore audit.HandoffStore
+	resolver        *PlanResolver
+	registry        *RunnerRegistry
+	drainTimeout    time.Duration
+	telemetry       observability.Provider
+	metrics         metrics.Catalog
+	runtimeStore    runtimestorage.RuntimeStore
+	materializer    *outbox.Materializer
+	auditWriter     audit.Writer
+	handoffStore    audit.HandoffStore
+	attachments     attachment.Reader
+	attachmentStore runtimestorage.AttachmentStore
 }
 
 type durableExecution struct {
@@ -142,6 +152,18 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
 	}
+	if config.Attachments == nil {
+		if reader, ok := config.RuntimeStore.(attachment.Reader); ok {
+			config.Attachments = reader
+		}
+	}
+	if config.AttachmentStore == nil {
+		if store, ok := config.RuntimeStore.(runtimestorage.AttachmentStore); ok {
+			config.AttachmentStore = store
+		} else if store, ok := config.Attachments.(runtimestorage.AttachmentStore); ok {
+			config.AttachmentStore = store
+		}
+	}
 	config.AuditWriter = metrics.WrapAuditWriter(config.AuditWriter, config.Observability)
 	if config.Materializer == nil && config.RuntimeStore != nil {
 		materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: config.RuntimeStore, Observability: config.Observability})
@@ -150,7 +172,7 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 		}
 		config.Materializer = materializer
 	}
-	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore, materializer: config.Materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore}, nil
+	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore, materializer: config.Materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore, attachments: config.Attachments, attachmentStore: config.AttachmentStore}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.
@@ -195,10 +217,36 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	}
 	planSnapshot := plan.AgentSnapshot()
 	planApp := planSnapshot.App()
-	durable, err := dispatcher.claimInbound(ctx, request.Principal, message, identity)
+	durable, err := dispatcher.claimInboundWithLease(ctx, request.Principal, message, identity, durableInboundLeaseForRuntime(planSnapshot.Revision().Runtime))
 	if err != nil {
 		finishWithError(err)
 		return nil, err
+	}
+	attachmentEventID := ""
+	if durable != nil {
+		attachmentEventID = durable.eventID
+	}
+	if len(message.Attachments) > 0 {
+		binder, ok := dispatcher.attachments.(attachment.Binder)
+		if !ok || attachmentEventID == "" {
+			dispatcher.failDurable(durable, ErrExecution)
+			finishWithError(ErrExecution)
+			return nil, ErrExecution
+		}
+		if err := binder.BindAttachments(ctx, request.Principal.TenantID(), attachmentEventID, message.Attachments); err != nil {
+			dispatcher.failDurable(durable, err)
+			finishWithError(err)
+			return nil, ErrExecution
+		}
+	}
+	userMessage, err := buildUserMessage(ctx, dispatcher.attachments, request.Principal.TenantID(), attachmentEventID, message)
+	if err != nil {
+		dispatcher.failDurable(durable, err)
+		finishWithError(err)
+		if IsContextCancellation(err) {
+			return nil, err
+		}
+		return nil, ErrExecution
 	}
 	if planApp.CanaryRevision != nil && planSnapshot.Revision().Revision == *planApp.CanaryRevision {
 		selectedRevision := planSnapshot.Revision().Revision
@@ -251,7 +299,15 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	runnerStarted := time.Now()
 	runnerCtx, _, finishRunner := observability.StartOperation(ctx, dispatcher.telemetry, observability.OperationRunnerExecution, "runner")
 	_ = dispatcher.metrics.Request(runnerCtx, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution, "status": "started"})
-	runnerEvents, err := runnerValue.Run(runnerCtx, identity.UserID, identity.SessionID, trpcmodel.NewUserMessage(message.Content), trpcagent.WithRequestID(requestID))
+	mediaReplies := servicetool.NewReplyCollector()
+	if durable != nil {
+		runnerCtx = servicetool.WithExecutionContext(runnerCtx, servicetool.ExecutionContext{
+			TenantID: request.Principal.TenantID(), EventID: durable.eventID, RequestID: requestID, TraceID: traceID,
+			Attachments: dispatcher.attachmentStore, Replies: mediaReplies,
+			Audit: audit.Recorder{Writer: dispatcher.auditWriter, TenantID: request.Principal.TenantID()},
+		})
+	}
+	runnerEvents, err := runnerValue.Run(runnerCtx, identity.UserID, identity.SessionID, userMessage, trpcagent.WithRequestID(requestID))
 	if err != nil {
 		finishRunner(err)
 		_ = dispatcher.metrics.Operation(runnerCtx, runnerStarted, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, err)
@@ -291,7 +347,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 
 	output := make(chan DispatchEvent, 32)
 	_ = dispatcher.metrics.Active(ctx, 1, map[string]string{"component": "runner"})
-	go dispatcher.forward(runnerCtx, requestID, traceID, runnerEvents, lease, durable, output, span, started, request.Principal, message, identity, finishRunner, runnerStarted)
+	go dispatcher.forward(runnerCtx, requestID, traceID, runnerEvents, lease, durable, output, span, started, request.Principal, message, identity, finishRunner, runnerStarted, mediaReplies)
 	return output, nil
 }
 
@@ -339,8 +395,15 @@ func detachedCorrelationContext(parent context.Context, requestID, traceID strin
 }
 
 func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity) (result *durableExecution, err error) {
+	return dispatcher.claimInboundWithLease(ctx, principal, message, identity, durableInboundLeaseForRuntime(agent.DefaultRuntimePolicy()))
+}
+
+func (dispatcher *Dispatcher) claimInboundWithLease(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, leaseDuration time.Duration) (result *durableExecution, err error) {
 	if dispatcher.runtimeStore == nil || principal.Kind() != PrincipalChannel {
 		return nil, nil
+	}
+	if leaseDuration <= 0 {
+		leaseDuration = durableInboundLeaseForRuntime(agent.DefaultRuntimePolicy())
 	}
 	started := time.Now()
 	operationCtx, _, finish := observability.StartOperation(ctx, dispatcher.telemetry, observability.OperationStorageOperation, "storage")
@@ -387,7 +450,7 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 	from := event.Status
 	running, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{
 		TenantID: principal.TenantID(), EventID: event.EventID, From: from,
-		To: runtimestorage.EventRunning, Owner: owner, LeaseDuration: durableInboundLease,
+		To: runtimestorage.EventRunning, Owner: owner, LeaseDuration: leaseDuration,
 	})
 	if err != nil {
 		if duplicate && errors.Is(err, runtimestorage.ErrConflict) {
@@ -396,6 +459,14 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Princi
 		return nil, err
 	}
 	return &durableExecution{store: store, tenantID: principal.TenantID(), eventID: event.EventID, owner: owner, fencingToken: running.FencingToken, replyTarget: event.ReplyTarget}, nil
+}
+
+func durableInboundLeaseForRuntime(policy agent.RuntimePolicy) time.Duration {
+	seconds := policy.ExecutionTimeoutSeconds
+	if seconds <= 0 {
+		seconds = agent.DefaultRuntimePolicy().ExecutionTimeoutSeconds
+	}
+	return time.Duration(seconds)*time.Second + durableInboundLeaseGrace
 }
 
 func replyTarget(target channels.RoutingTarget, message InboundMessage) (runtimestorage.ReplyTarget, error) {
@@ -460,28 +531,43 @@ func (dispatcher *Dispatcher) failDurable(durable *durableExecution, cause error
 	})
 }
 
-func (dispatcher *Dispatcher) finishDurable(ctx context.Context, requestID, traceID string, durable *durableExecution, terminalErr error, replies ...string) {
+func (dispatcher *Dispatcher) finishDurable(ctx context.Context, requestID, traceID string, durable *durableExecution, terminalErr error, reply string, mediaReplies []servicetool.ReplyIntent) {
 	if durable == nil {
 		return
 	}
 	durableCtx := detachedCorrelationContext(ctx, requestID, traceID)
-	reply := ""
-	if len(replies) > 0 {
-		reply = replies[0]
+	if terminalErr != nil && !IsContextCancellation(terminalErr) {
+		reply = durableFailureFallbackReply
+		mediaReplies = nil
 	}
 	segments := 0
 	replyID := ""
-	if terminalErr == nil && dispatcher.materializer != nil && strings.TrimSpace(reply) != "" {
-		var err error
-		segments, err = dispatcher.materializer.Materialize(durableCtx, outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: requestID, TraceID: traceID, TraceParent: observability.TraceParentFromContext(durableCtx), Payload: reply, ReplyTarget: durable.replyTarget})
-		if err != nil {
-			terminalErr = err
+	if dispatcher.materializer != nil {
+		input := outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: requestID, TraceID: traceID, TraceParent: observability.TraceParentFromContext(durableCtx), ReplyTarget: durable.replyTarget}
+		if terminalErr == nil && len(mediaReplies) > 0 {
+			input.Segments = mediaReplySegments(mediaReplies)
 		} else {
-			replyID = durable.eventID
+			input.Payload = reply
+		}
+		if strings.TrimSpace(input.Payload) != "" || len(input.Segments) > 0 {
+			var err error
+			segments, err = dispatcher.materializer.Materialize(durableCtx, input)
+			if err != nil {
+				terminalErr = err
+				if len(mediaReplies) > 0 {
+					fallback := outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: requestID, TraceID: traceID, TraceParent: observability.TraceParentFromContext(durableCtx), Payload: durableFailureFallbackReply, ReplyTarget: durable.replyTarget}
+					segments, err = dispatcher.materializer.Materialize(durableCtx, fallback)
+					if err == nil {
+						replyID = durable.eventID
+					}
+				}
+			} else {
+				replyID = durable.eventID
+			}
 		}
 	}
 	to := runtimestorage.EventCompleted
-	if terminalErr != nil {
+	if terminalErr != nil && replyID == "" {
 		to = runtimestorage.EventFailed
 	}
 	_ = dispatcher.observeStorage(durableCtx, func(operationCtx context.Context) error {
@@ -491,6 +577,14 @@ func (dispatcher *Dispatcher) finishDurable(ctx context.Context, requestID, trac
 		})
 		return err
 	})
+}
+
+func mediaReplySegments(intents []servicetool.ReplyIntent) []outbox.ReplySegment {
+	segments := make([]outbox.ReplySegment, 0, len(intents))
+	for _, intent := range intents {
+		segments = append(segments, outbox.ReplySegment{Kind: intent.Kind, Payload: intent.Payload, Attachment: intent.Attachment, Fallback: intent.Fallback})
+	}
+	return segments
 }
 
 func (dispatcher *Dispatcher) observeStorage(ctx context.Context, operation func(context.Context) error) error {
@@ -515,7 +609,7 @@ func (dispatcher *Dispatcher) observeStorage(ctx context.Context, operation func
 	return err
 }
 
-func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, finishRunner func(error), runnerStarted time.Time) {
+func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, finishRunner func(error), runnerStarted time.Time, mediaReplies *servicetool.ReplyCollector) {
 	defer close(output)
 	var terminalState atomic.Uint32
 	terminalState.Store(forwardTerminalPending)
@@ -562,7 +656,7 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 			finishRunner(terminalErr)
 			_ = dispatcher.metrics.Operation(ctx, runnerStarted, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, terminalErr)
 		}
-		terminalErr = dispatcher.finalizeForward(ctx, requestID, traceID, durable, principal, terminalErr, reply.String(), terminalEventType, terminalErrorType, finalizeAudit)
+		terminalErr = dispatcher.finalizeForward(ctx, requestID, traceID, durable, principal, terminalErr, reply.String(), mediaReplies.Intents(), terminalEventType, terminalErrorType, finalizeAudit)
 		finishForwardOutput(ctx, output, requestID, traceID, terminalErr, terminalCommitted, terminalErrorEmitted)
 		_ = dispatcher.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
 		if terminalErr != nil {
@@ -733,7 +827,7 @@ func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requ
 	return true
 }
 
-func (dispatcher *Dispatcher) finalizeForward(ctx context.Context, requestID, traceID string, durable *durableExecution, principal Principal, terminalErr error, reply string, terminalEventType audit.EventType, terminalErrorType string, finalizeAudit func(audit.EventType, string) error) error {
+func (dispatcher *Dispatcher) finalizeForward(ctx context.Context, requestID, traceID string, durable *durableExecution, principal Principal, terminalErr error, reply string, mediaReplies []servicetool.ReplyIntent, terminalEventType audit.EventType, terminalErrorType string, finalizeAudit func(audit.EventType, string) error) error {
 	eventType := terminalEventType
 	errorType := terminalErrorType
 	if eventType == "" {
@@ -763,7 +857,7 @@ func (dispatcher *Dispatcher) finalizeForward(ctx context.Context, requestID, tr
 	if err := finalizeAudit(eventType, errorType); err != nil && terminalErr == nil {
 		terminalErr = auditWriteFailure()
 	}
-	dispatcher.finishDurable(ctx, requestID, traceID, durable, terminalErr, reply)
+	dispatcher.finishDurable(ctx, requestID, traceID, durable, terminalErr, reply, mediaReplies)
 	return terminalErr
 }
 
