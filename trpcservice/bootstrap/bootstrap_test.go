@@ -22,6 +22,7 @@ import (
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom_aibot"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
@@ -520,6 +521,143 @@ func TestEnvironmentWeComCredentialsMustBeConfiguredTogether(t *testing.T) {
 	}
 }
 
+func TestEnvironmentWeComAIBotConnectionsAreScopedAndValidated(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	config := environmentConfig{tenantID: tenantID, apiIdentities: map[string]gateway.APIIdentity{"token": {TenantID: tenantID, AppID: "app_00000000000000000000000000", SubjectID: "service"}}}
+	t.Setenv(envWeComAIBotConnections, `[{"binding_id":"cb_00000000000000000000000000","secret_ref":"env/wecom-aibot","bot_secret":"test-secret"}]`)
+	if err := config.loadWeComAIBots(); err != nil {
+		t.Fatal(err)
+	}
+	if len(config.wecomAIBots) != 1 || config.wecomAIBots[0].BindingID == "" {
+		t.Fatalf("AI Bot connections = %+v", config.wecomAIBots)
+	}
+	resolver := environmentWeComAIBotCredentialResolver{tenantID: tenantID, secrets: map[string]string{"env/wecom-aibot": "test-secret"}}
+	credentials, err := resolver.Resolve(context.Background(), channels.SecretScope{TenantID: tenantID, SecretRef: "env/wecom-aibot"})
+	if err != nil || credentials.BotSecret != "test-secret" {
+		t.Fatalf("AI Bot credentials = %+v %v", credentials, err)
+	}
+	if _, err := resolver.Resolve(context.Background(), channels.SecretScope{TenantID: tenantID, SecretRef: "other"}); err == nil {
+		t.Fatal("unknown AI Bot secret reference was accepted")
+	}
+
+	for _, value := range []string{`[]`, `[{"binding_id":"","secret_ref":"env/wecom-aibot","bot_secret":"test-secret"}]`, `[{"binding_id":"one","secret_ref":"env/ref","bot_secret":"first"},{"binding_id":"one","secret_ref":"env/other","bot_secret":"second"}]`} {
+		t.Setenv(envWeComAIBotConnections, value)
+		candidate := environmentConfig{tenantID: tenantID, apiIdentities: config.apiIdentities}
+		if err := candidate.loadWeComAIBots(); !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("connection configuration %s error = %v", value, err)
+		}
+	}
+}
+
+func TestEnvironmentWeComAIBotComponentsUseTrustedBindings(t *testing.T) {
+	modelCatalog, err := modelprofile.NewProviderCatalog(modelprofile.ProviderSpec{
+		Provider: "fake", Models: []string{"test-model"}, EndpointPolicy: modelprofile.FieldForbidden, SecretRefPolicy: modelprofile.FieldOptional,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backendCatalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
+		Provider: "memory", Capabilities: []backend.Capability{backend.CapabilitySession}, EndpointPolicy: backend.FieldForbidden, SecretRefPolicy: backend.FieldForbidden, Options: map[string]backend.OptionSpec{"namespace": {Kind: backend.OptionString}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenants := tenantmemory.NewRepository()
+	apps := agentmemory.NewRepository()
+	models := modelmemory.NewRepository(modelCatalog)
+	backends := backendmemory.NewRepository(backendCatalog)
+	channelsRepo := channelmemory.NewRepository()
+	root, app := createBootstrapTenantExecutionState(t, tenants, apps, models, backends, "aibot-components", "aibot-components", "test-model", "secret/model")
+	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeComAIBot, "aibot-components")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, _, err := channelsRepo.Create(context.Background(), channels.CreateInput{
+		TenantID: root.TenantID, BindingKey: "aibot-components", Channel: channels.ChannelWeComAIBot,
+		ProviderAccountID: "aibot-components", PublicRouteKeyDigest: routeDigest, AppID: app.AppID,
+		SecretRef: "env/aibot-components", Status: channels.StatusActive,
+		Protocol: channels.ProtocolConfiguration{WeComAIBot: &channels.WeComAIBotProtocolConfiguration{BotID: "bot-components"}},
+		Metadata: channels.ChangeMetadata{ActorType: "test", ActorID: "bootstrap", Reason: "fixture", CorrelationID: "aibot-components"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := environmentConfig{
+		tenantID:    root.TenantID,
+		wecomAIBots: []environmentWeComAIBotConfig{{BindingID: binding.BindingID, SecretRef: binding.SecretRef, BotSecret: "bot-secret"}},
+	}
+	factories, bindingIDs, err := environmentWeComAIBotComponents(context.Background(), environment, channelsRepo, tenants, apps)
+	if err != nil || len(factories) != 1 || len(bindingIDs) != 1 {
+		t.Fatalf("AI Bot components = factories:%d bindings:%d err:%v", len(factories), len(bindingIDs), err)
+	}
+	manager, err := factories[0](bootstrapNoopDispatcher{})
+	if err != nil || manager.Channel() != channels.ChannelWeComAIBot {
+		t.Fatalf("AI Bot manager = %v, %v", manager, err)
+	}
+	runtimeStore := runtimestorageinmemory.New()
+	defer func() { _ = runtimeStore.Close() }()
+	previousOwner := environmentWeComOwnerFunc
+	previousWorker := newEnvironmentWeComWorker
+	defer func() { environmentWeComOwnerFunc = previousOwner }()
+	defer func() { newEnvironmentWeComWorker = previousWorker }()
+	environmentWeComOwnerFunc = func() (string, error) { return "test-owner", nil }
+	var workerConfig outbox.Config
+	newEnvironmentWeComWorker = func(config outbox.Config) (*outbox.Worker, error) {
+		workerConfig = config
+		return outbox.New(config)
+	}
+	workerFactory := environmentOutboxWorkerFactory(environment, runtimeStore, nil, nil, bindingIDs)
+	if _, err := workerFactory([]channels.PollingAdapter{manager}); err != nil {
+		t.Fatalf("AI Bot outbox worker = %v", err)
+	}
+	if workerConfig.LeaseDuration != wecom_aibot.OutboxLeaseDuration {
+		t.Fatalf("AI Bot outbox lease duration = %s, want %s", workerConfig.LeaseDuration, wecom_aibot.OutboxLeaseDuration)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if factories, bindingIDs, err := environmentWeComAIBotComponents(context.Background(), environmentConfig{tenantID: root.TenantID}, channelsRepo, tenants, apps); err != nil || factories != nil || bindingIDs != nil {
+		t.Fatalf("empty AI Bot components = %v %v %v", factories, bindingIDs, err)
+	}
+	duplicate := environment
+	duplicate.wecomAIBots = append(duplicate.wecomAIBots, environmentWeComAIBotConfig{BindingID: "other", SecretRef: binding.SecretRef, BotSecret: "other-secret"})
+	if _, _, err := environmentWeComAIBotComponents(context.Background(), duplicate, channelsRepo, tenants, apps); err == nil {
+		t.Fatal("duplicate AI Bot secret reference was accepted")
+	}
+	unavailable := environment
+	unavailable.wecomAIBots[0].BindingID = "missing-binding"
+	if _, _, err := environmentWeComAIBotComponents(context.Background(), unavailable, channelsRepo, tenants, apps); err == nil {
+		t.Fatal("unavailable AI Bot binding was accepted")
+	}
+}
+
+func TestEnvironmentOutboxWorkerFactoryRoutesAIBotBindings(t *testing.T) {
+	store := runtimestorageinmemory.New()
+	defer func() { _ = store.Close() }()
+	legacy := bootstrapStaticProvider{receipt: "legacy"}
+	aiBot := bootstrapStaticProvider{receipt: "aibot"}
+	router := environmentReplyProvider{legacy: legacy, aiBot: aiBot, aiBotBindingIDs: map[string]struct{}{"aibot-binding": {}}}
+	for _, test := range []struct {
+		binding string
+		want    string
+	}{{binding: "aibot-binding", want: "aibot"}, {binding: "wecom-binding", want: "legacy"}} {
+		receipt, err := router.Deliver(context.Background(), runtimestorage.ReplyOutbox{ReplyTarget: runtimestorage.ReplyTarget{BindingID: test.binding}})
+		if err != nil || receipt != test.want {
+			t.Fatalf("binding %s receipt = %q, %v", test.binding, receipt, err)
+		}
+	}
+	if status, receipt, err := router.Reconcile(context.Background(), runtimestorage.ReplyOutbox{ReplyTarget: runtimestorage.ReplyTarget{BindingID: "aibot-binding"}}); err != nil || status != outbox.DeliveryAccepted || receipt != "aibot" {
+		t.Fatalf("AI Bot reconcile = %q %q %v", status, receipt, err)
+	}
+
+	const tenantID = "t_00000000000000000000000000"
+	factory := environmentOutboxWorkerFactory(environmentConfig{tenantID: tenantID}, store, nil, nil, map[string]struct{}{"aibot-binding": {}})
+	manager := &wecom_aibot.Manager{}
+	if worker, err := factory([]channels.PollingAdapter{manager}); err == nil || worker != nil {
+		t.Fatal("manager without binding identity was accepted")
+	}
+}
+
 func TestWeComHandlerFactoryIsWiredAndOwnedByRuntime(t *testing.T) {
 	config, closeDependencies := testConfig(t)
 	defer closeDependencies()
@@ -546,6 +684,35 @@ func TestWeComHandlerFactoryIsWiredAndOwnedByRuntime(t *testing.T) {
 	}
 	if callback.beginShutdown.Load() != 1 || callback.closed.Load() != 1 {
 		t.Fatalf("WeCom lifecycle = begin %d close %d", callback.beginShutdown.Load(), callback.closed.Load())
+	}
+}
+
+func TestRuntimeOwnsAllWeComAIBotConnectionsAndReadiness(t *testing.T) {
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	first, second := newBootstrapAIBot(), newBootstrapAIBot()
+	config.WeComAIBotFactories = []func(gateway.DispatchService) (channels.PollingAdapter, error){
+		func(gateway.DispatchService) (channels.PollingAdapter, error) { return first, nil },
+		func(gateway.DispatchService) (channels.PollingAdapter, error) { return second, nil },
+	}
+	graph, err := New(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-first.started
+	<-second.started
+	deadline := time.Now().Add(time.Second)
+	for !graph.Ready() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !graph.Ready() {
+		t.Fatal("runtime never became ready after AI Bot authentication")
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if first.beginShutdown.Load() != 1 || first.closed.Load() != 1 || second.beginShutdown.Load() != 1 || second.closed.Load() != 1 {
+		t.Fatalf("AI Bot lifecycle was not owned: first=%d/%d second=%d/%d", first.beginShutdown.Load(), first.closed.Load(), second.beginShutdown.Load(), second.closed.Load())
 	}
 }
 
@@ -1135,7 +1302,7 @@ func TestNewFromEnvironmentBuildsRealGraphWhenDatabaseOpens(t *testing.T) {
 	}
 }
 
-func TestNewFromEnvironmentClosesDatabaseWhenGraphConstructionFails(t *testing.T) {
+func TestNewFromEnvironmentClosesDatabaseWhenMigrationFails(t *testing.T) {
 	setRequiredEnvironment(t)
 	registerBootstrapPingDriver.Do(func() {
 		sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{})
@@ -1146,26 +1313,18 @@ func TestNewFromEnvironmentClosesDatabaseWhenGraphConstructionFails(t *testing.T
 	}
 	previousOpen := openEnvironmentDatabase
 	previousApply := applyEnvironmentMigrations
-	previousStore := newEnvironmentRuntimeStore
-	tracker := &trackingRuntimeStore{RuntimeStore: runtimestorageinmemory.New()}
 	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
 	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return errors.New("migration failed") }
-	newEnvironmentRuntimeStore = func(string, *sql.DB) (runtimestorage.RuntimeStore, error) { return tracker, nil }
 	defer func() {
 		openEnvironmentDatabase = previousOpen
 		applyEnvironmentMigrations = previousApply
-		newEnvironmentRuntimeStore = previousStore
-		_ = tracker.RuntimeStore.Close()
 	}()
 
 	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
-		t.Fatalf("graph construction error = %v", err)
-	}
-	if !tracker.closed.Load() {
-		t.Fatal("runtime store remained open after graph construction failure")
+		t.Fatalf("migration error = %v", err)
 	}
 	if err := db.Ping(); err == nil {
-		t.Fatal("database remained open after graph construction failure")
+		t.Fatal("database remained open after migration failure")
 	}
 }
 
@@ -1385,10 +1544,28 @@ func (testModelFactory) New(context.Context, modelprofile.ModelFactoryInput, mod
 	return nil, errors.New("test factory failure")
 }
 
+type bootstrapNoopDispatcher struct{}
+
+func (bootstrapNoopDispatcher) Dispatch(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
+	events := make(chan gateway.DispatchEvent)
+	close(events)
+	return events, nil
+}
+
 type bootstrapBlockingProvider struct {
 	started  chan struct{}
 	canceled chan struct{}
 	once     sync.Once
+}
+
+type bootstrapStaticProvider struct{ receipt string }
+
+func (p bootstrapStaticProvider) Deliver(context.Context, runtimestorage.ReplyOutbox) (string, error) {
+	return p.receipt, nil
+}
+
+func (p bootstrapStaticProvider) Reconcile(context.Context, runtimestorage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
+	return outbox.DeliveryAccepted, p.receipt, nil
 }
 
 type candidateOnly struct{ channels.CandidateConsumer }
@@ -1505,6 +1682,27 @@ type bootstrapWeComLifecycle struct {
 	beginShutdown atomic.Int32
 	closed        atomic.Int32
 }
+
+type bootstrapAIBot struct {
+	started       chan struct{}
+	startOnce     sync.Once
+	ready         atomic.Bool
+	beginShutdown atomic.Int32
+	closed        atomic.Int32
+}
+
+func newBootstrapAIBot() *bootstrapAIBot          { return &bootstrapAIBot{started: make(chan struct{})} }
+func (*bootstrapAIBot) Channel() channels.Channel { return channels.ChannelWeComAIBot }
+func (bot *bootstrapAIBot) Ready() bool           { return bot.ready.Load() }
+func (bot *bootstrapAIBot) Run(ctx context.Context) error {
+	bot.ready.Store(true)
+	bot.startOnce.Do(func() { close(bot.started) })
+	<-ctx.Done()
+	bot.ready.Store(false)
+	return ctx.Err()
+}
+func (bot *bootstrapAIBot) BeginShutdown() { bot.beginShutdown.Add(1) }
+func (bot *bootstrapAIBot) Close() error   { bot.closed.Add(1); return nil }
 
 func (handler *bootstrapWeComLifecycle) ServeHTTP(writer http.ResponseWriter, _ *http.Request) {
 	handler.calls.Add(1)

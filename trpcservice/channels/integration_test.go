@@ -225,6 +225,20 @@ func TestResolveCandidateRoutingTargetFailureBoundaries(t *testing.T) {
 	}
 }
 
+func TestResolveConfiguredRoutingTargetSealsCurrentBinding(t *testing.T) {
+	fixture := newRoutingTargetFixture(t)
+	target, err := channels.ResolveConfiguredRoutingTarget(fixture.ctx, fixture.consumer, fixture.tenants, fixture.apps, fixture.consumerStub.binding.TenantID, fixture.consumerStub.binding.BindingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.TenantID != fixture.consumerStub.binding.TenantID || target.BindingID != fixture.consumerStub.binding.BindingID || target.Channel != fixture.consumerStub.binding.Channel {
+		t.Fatalf("configured target = %+v", target)
+	}
+	if _, err := channels.ResolveConfiguredRoutingTarget(fixture.ctx, fixture.consumer, fixture.tenants, fixture.apps, fixture.consumerStub.binding.TenantID, "missing"); !errors.Is(err, channels.ErrVerificationFailed) {
+		t.Fatalf("missing configured binding error = %v", err)
+	}
+}
+
 type routingTargetFixture struct {
 	ctx          context.Context
 	consumer     channels.CandidateConsumer
@@ -273,8 +287,12 @@ type routingCandidateConsumerStub struct {
 func (s *routingCandidateConsumerStub) LookupCandidates(context.Context, channels.Channel, string) ([]channels.CandidateBindingContext, error) {
 	return nil, errors.New("unsupported")
 }
-func (s *routingCandidateConsumerStub) Get(context.Context, string, string) (*channels.Binding, error) {
-	return nil, errors.New("unsupported")
+func (s *routingCandidateConsumerStub) Get(_ context.Context, tenantID, bindingID string) (*channels.Binding, error) {
+	if s.binding == nil || s.binding.TenantID != tenantID || s.binding.BindingID != bindingID {
+		return nil, channels.ErrNotFound
+	}
+	binding := s.binding.Clone()
+	return &binding, nil
 }
 func (s *routingCandidateConsumerStub) ConsumeCandidate(context.Context, channels.CandidateBindingContext) (*channels.Binding, error) {
 	if s.consumeErr != nil {

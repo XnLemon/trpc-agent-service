@@ -420,6 +420,43 @@ func TestStoreReplyStateMachineAndFencing(t *testing.T) {
 	}
 }
 
+func TestStoreRecordsReplyReceiptWithinCurrentLease(t *testing.T) {
+	store := inmemory.New()
+	seedEvent(t, store, "tenant-a", "session-receipt", "event-receipt")
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-receipt", EventID: "event-receipt", SegmentIndex: 0, SegmentCount: 1, Payload: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimReply(context.Background(), "tenant-a", "reply-receipt", 0, "worker-a", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, Owner: claimed.LeaseOwner, FencingToken: claimed.FencingToken, ProviderID: "provider-1"})
+	if err != nil || recorded.Status != runtimestorage.ReplySending || recorded.ProviderMessageID != "provider-1" || recorded.FencingToken != claimed.FencingToken || recorded.LeaseOwner != claimed.LeaseOwner {
+		t.Fatalf("recorded receipt = %+v, %v", recorded, err)
+	}
+	if repeated, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, Owner: claimed.LeaseOwner, FencingToken: claimed.FencingToken, ProviderID: "provider-1"}); err != nil || repeated.ProviderMessageID != "provider-1" {
+		t.Fatalf("repeated receipt = %+v, %v", repeated, err)
+	}
+	if _, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, Owner: claimed.LeaseOwner, FencingToken: claimed.FencingToken, ProviderID: "other-provider"}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("conflicting receipt = %v", err)
+	}
+	if _, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: "tenant-a", ReplyID: "missing", Owner: "worker-a", FencingToken: 1, ProviderID: "provider-1"}); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing receipt = %v", err)
+	}
+	if _, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{TenantID: "tenant-a", ReplyID: "reply-receipt", Owner: "worker-a", FencingToken: 1}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid receipt = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.RecordReplyReceipt(canceled, runtimestorage.ReplyReceipt{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, Owner: claimed.LeaseOwner, FencingToken: claimed.FencingToken, ProviderID: "provider-1"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled receipt = %v", err)
+	}
+	retry, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: runtimestorage.ReplyRetryable, Owner: claimed.LeaseOwner, FencingToken: claimed.FencingToken})
+	if err != nil || retry.ProviderMessageID != "provider-1" {
+		t.Fatalf("retry preserves receipt = %+v, %v", retry, err)
+	}
+}
+
 func TestStoreListReplyCandidatesReturnsTenantRows(t *testing.T) {
 	store := inmemory.New()
 	seedEvent(t, store, "tenant-a", "candidate-event", "candidate-event")

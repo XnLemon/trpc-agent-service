@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
@@ -13,7 +14,9 @@ import (
 	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	runtimestorageredis "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	"github.com/alicebob/miniredis/v2"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
@@ -430,17 +433,43 @@ func TestNewFromEnvironmentMigrationAndReadinessFailures(t *testing.T) {
 	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
 	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
 	verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return errors.New("verification failed") }
-	graph, err := NewFromEnvironment(context.Background())
-	if err != nil {
+	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
 		_ = db.Close()
+		t.Fatalf("migration verification error = %v", err)
+	}
+}
+
+func TestNewFromEnvironmentMigratesBeforeResolvingWeComAIBotBindings(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envWeComAIBotConnections, `[{"binding_id":"cb_00000000000000000000000000","secret_ref":"env/wecom-aibot","bot_secret":"test-secret"}]`)
+	registerBootstrapPingDriver.Do(func() {
+		sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{})
+	})
+	db, err := sql.Open("trpc-service-bootstrap-ping", "")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if graph.Ready() {
-		_ = graph.Close()
-		t.Fatal("graph reported ready with failed migration verification")
+	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousVerify := verifyEnvironmentMigrations
+	t.Cleanup(func() {
+		openEnvironmentDatabase = previousOpen
+		applyEnvironmentMigrations = previousApply
+		verifyEnvironmentMigrations = previousVerify
+		_ = db.Close()
+	})
+	migrated := false
+	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+	applyEnvironmentMigrations = func(context.Context, *sql.DB) error {
+		migrated = true
+		return nil
 	}
-	if err := graph.Close(); err != nil {
-		t.Fatal(err)
+	verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("environment assembly error = %v", err)
+	}
+	if !migrated {
+		t.Fatal("AI Bot binding lookup ran before PostgreSQL migrations")
 	}
 }
 
@@ -457,6 +486,458 @@ func TestEnvironmentCatalogsAndIdentityListBoundaries(t *testing.T) {
 		t.Fatalf("empty identity list = %v", err)
 	}
 }
+
+func TestLoadEnvironmentRedisConfigurationIsExplicitAndBounded(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envSessionBackend, "redis")
+	t.Setenv(envRedisAddr, "127.0.0.1:6379")
+	t.Setenv(envRedisPassword, "redis-secret")
+	t.Setenv(envRedisDB, "3")
+	t.Setenv(envRedisKeyPrefix, "service:runtime")
+	t.Setenv(envRedisSecretRef, "env/redis-password")
+	t.Setenv(envRedisDialTimeout, "150ms")
+	t.Setenv(envRedisReadTimeout, "250ms")
+	t.Setenv(envRedisWriteTimeout, "350ms")
+	t.Setenv(envRedisPoolSize, "12")
+
+	config, err := loadEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.redis.Addr != "127.0.0.1:6379" || config.redis.Password != "redis-secret" || config.redis.DB != 3 || config.redis.KeyPrefix != "service:runtime" || config.redis.PoolSize != 12 {
+		t.Fatalf("redis config = %+v", config.redis)
+	}
+	if config.redisEndpoint != "redis://127.0.0.1:6379" || config.redisSecretRef != "env/redis-password" || config.redis.DialTimeout.String() != "150ms" || config.redis.ReadTimeout.String() != "250ms" || config.redis.WriteTimeout.String() != "350ms" {
+		t.Fatalf("redis endpoint/timeouts = %q/%q/%s/%s/%s", config.redisEndpoint, config.redisSecretRef, config.redis.DialTimeout, config.redis.ReadTimeout, config.redis.WriteTimeout)
+	}
+
+	for _, test := range []struct {
+		name  string
+		value string
+	}{
+		{name: "missing address", value: ""},
+		{name: "invalid db", value: "not-an-integer"},
+		{name: "invalid timeout", value: "not-a-duration"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv(envSessionBackend, "redis")
+			t.Setenv(envRedisAddr, "127.0.0.1:6379")
+			switch test.name {
+			case "missing address":
+				t.Setenv(envRedisAddr, test.value)
+			case "invalid db":
+				t.Setenv(envRedisDB, test.value)
+			case "invalid timeout":
+				t.Setenv(envRedisDialTimeout, test.value)
+			}
+			if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("redis configuration error = %v", err)
+			}
+		})
+	}
+}
+
+func TestEnvironmentRedisCatalogAndRegistryBoundaries(t *testing.T) {
+	const (
+		tenantA = "t_00000000000000000000000000"
+		tenantB = "t_00000000000000000000000001"
+	)
+	config := environmentConfig{runtimeStorage: "redis", redisEndpoint: "redis://127.0.0.1:6379", redisSecretRef: "env/redis-password", redis: runtimestorageredis.Config{Password: "redis-secret"}, modelProvider: defaultModelProvider, modelNames: []string{"gpt-4o-mini"}, endpointHosts: []string{"api.openai.com"}, secretRef: "env/model", apiIdentities: map[string]gateway.APIIdentity{
+		"token-a": {TenantID: tenantA, AppID: "app-a", SubjectID: "subject-a"},
+		"token-b": {TenantID: tenantB, AppID: "app-b", SubjectID: "subject-b"},
+	}, modelAPIKeys: map[string]string{tenantA: "model-a", tenantB: "model-b"}}
+	_, backendCatalog, err := environmentCatalogs(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.NewProfile(backend.CreateInput{TenantID: tenantA, ProfileKey: "redis", DisplayName: "Redis", Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: config.redisEndpoint, SecretRef: config.redisSecretRef}}}, backendCatalog); err != nil {
+		t.Fatalf("redis session binding = %v", err)
+	}
+	if _, err := backend.NewProfile(backend.CreateInput{TenantID: tenantA, ProfileKey: "redis-summary", DisplayName: "Redis Summary", Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySummary, Provider: "redis", Endpoint: config.redisEndpoint}}}, backendCatalog); !errors.Is(err, backend.ErrInvalid) {
+		t.Fatalf("unsupported redis capability = %v", err)
+	}
+	if _, err := backend.NewProfile(backend.CreateInput{TenantID: tenantA, ProfileKey: "redis-endpoint", DisplayName: "Redis Endpoint", Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: "redis://other:6379"}}}, backendCatalog); err != nil {
+		t.Fatalf("catalog should accept a valid redis endpoint before provider binding: %v", err)
+	}
+
+	delegate := inmemory.NewSessionService()
+	redisStore := runtimestorageinmemory.New()
+	inMemoryStore := runtimestorageinmemory.New()
+	t.Cleanup(func() { _ = delegate.Close(); _ = redisStore.Close(); _ = inMemoryStore.Close() })
+	secrets, _, providers, err := environmentRegistriesForStores(config, delegate, environmentRuntimeStores{
+		primary: redisStore,
+		providers: map[string]runtimestorage.RuntimeStore{
+			"redis":    redisStore,
+			"inmemory": inMemoryStore,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := secrets.Resolve(context.Background(), modelprofile.SecretScope{TenantID: tenantA, SecretRef: config.redisSecretRef})
+	if err != nil || secret.Value() != "redis-secret" {
+		t.Fatalf("tenant redis secret = %q, %v", secret.Value(), err)
+	}
+	if _, err := secrets.Resolve(context.Background(), modelprofile.SecretScope{TenantID: tenantA, SecretRef: "env/other"}); err == nil {
+		t.Fatal("foreign redis secret reference was accepted")
+	}
+	provider, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis"})
+	if err != nil || provider == nil {
+		t.Fatalf("tenant redis provider = %v", err)
+	}
+	if _, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySummary, Provider: "redis"}); !errors.Is(err, backend.ErrProviderUnavailable) {
+		t.Fatalf("unsupported redis provider capability = %v", err)
+	}
+	if _, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000002"}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis"}); !errors.Is(err, backend.ErrProviderUnavailable) {
+		t.Fatalf("unregistered tenant redis provider = %v", err)
+	}
+	value, err := provider.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: "redis://other:6379"}, secret)
+	if !errors.Is(err, backend.ErrStorageFactory) || value != nil {
+		t.Fatalf("mismatched redis endpoint = %T, %v", value, err)
+	}
+	if strings.Contains(err.Error(), "redis://other:6379") {
+		t.Fatal("redis endpoint leaked in provider error")
+	}
+	value, err = provider.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: config.redisEndpoint, SecretRef: "env/other"}, secret)
+	if !errors.Is(err, backend.ErrStorageFactory) || value != nil {
+		t.Fatalf("mismatched redis secret reference = %T, %v", value, err)
+	}
+}
+
+func TestEnvironmentRedisProfilesUseSeparateInMemoryProvider(t *testing.T) {
+	const (
+		tenantA   = "t_00000000000000000000000000"
+		tenantB   = "t_00000000000000000000000001"
+		sessionID = "same-session"
+		memoryID  = "same-memory"
+	)
+	config := environmentConfig{runtimeStorage: "redis", redisEndpoint: "redis://127.0.0.1:6379", redisSecretRef: "env/redis-password", redis: runtimestorageredis.Config{Password: "redis-secret"}, modelProvider: defaultModelProvider, modelNames: []string{"gpt-4o-mini"}, endpointHosts: []string{"api.openai.com"}, secretRef: "env/model", apiIdentities: map[string]gateway.APIIdentity{
+		"token-a": {TenantID: tenantA, AppID: "app-a", SubjectID: "subject-a"},
+		"token-b": {TenantID: tenantB, AppID: "app-b", SubjectID: "subject-b"},
+	}, modelAPIKeys: map[string]string{tenantA: "model-a", tenantB: "model-b"}}
+	_, catalog, err := environmentCatalogs(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redisProfile, err := backend.NewProfile(backend.CreateInput{TenantID: tenantA, ProfileKey: "redis-runtime", DisplayName: "Redis Runtime", Bindings: []backend.CapabilityBinding{
+		{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: config.redisEndpoint, SecretRef: config.redisSecretRef},
+		{Capability: backend.CapabilityMemory, Provider: "redis", Endpoint: config.redisEndpoint, SecretRef: config.redisSecretRef},
+	}}, catalog)
+	if err != nil {
+		t.Fatalf("redis profile = %v", err)
+	}
+	inMemoryProfile, err := backend.NewProfile(backend.CreateInput{TenantID: tenantB, ProfileKey: "inmemory-runtime", DisplayName: "InMemory Runtime", Bindings: []backend.CapabilityBinding{
+		{Capability: backend.CapabilitySession, Provider: "inmemory"},
+		{Capability: backend.CapabilityMemory, Provider: "inmemory"},
+	}}, catalog)
+	if err != nil {
+		t.Fatalf("in-memory profile = %v", err)
+	}
+
+	delegate := inmemory.NewSessionService()
+	redisStore := runtimestorageinmemory.New()
+	inMemoryStore := runtimestorageinmemory.New()
+	t.Cleanup(func() { _ = delegate.Close(); _ = redisStore.Close(); _ = inMemoryStore.Close() })
+	secrets, _, providers, err := environmentRegistriesForStores(config, delegate, environmentRuntimeStores{
+		primary: redisStore,
+		providers: map[string]runtimestorage.RuntimeStore{
+			"redis":    redisStore,
+			"inmemory": inMemoryStore,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory, err := backend.NewRegistryStorageFactory(providers, secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redisCapabilities, err := factory.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantA, Bindings: redisProfile.Bindings})
+	if err != nil {
+		t.Fatalf("redis capabilities = %v", err)
+	}
+	t.Cleanup(func() { _ = redisCapabilities.Close() })
+	inMemoryCapabilities, err := factory.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantB, Bindings: inMemoryProfile.Bindings})
+	if err != nil {
+		t.Fatalf("in-memory capabilities = %v", err)
+	}
+	t.Cleanup(func() { _ = inMemoryCapabilities.Close() })
+	if _, err := redisCapabilities.Session(); err != nil {
+		t.Fatalf("redis session capability = %v", err)
+	}
+	if _, err := inMemoryCapabilities.Session(); err != nil {
+		t.Fatalf("in-memory session capability = %v", err)
+	}
+	redisMemory, err := redisCapabilities.Memory()
+	if err != nil {
+		t.Fatalf("redis memory capability = %v", err)
+	}
+	inMemoryMemory, err := inMemoryCapabilities.Memory()
+	if err != nil {
+		t.Fatalf("in-memory memory capability = %v", err)
+	}
+	ctx := context.Background()
+	if _, err := redisMemory.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: tenantA, MemoryID: memoryID, UserID: "user", Content: "redis"}); err != nil {
+		t.Fatalf("redis memory write = %v", err)
+	}
+	if _, err := inMemoryMemory.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: tenantB, MemoryID: memoryID, UserID: "user", Content: "in-memory"}); err != nil {
+		t.Fatalf("in-memory memory write = %v", err)
+	}
+	if _, err := redisStore.CreateSession(ctx, tenantA, sessionID, map[string]any{"provider": "redis"}); err != nil {
+		t.Fatalf("redis session write = %v", err)
+	}
+	if _, err := inMemoryStore.CreateSession(ctx, tenantB, sessionID, map[string]any{"provider": "in-memory"}); err != nil {
+		t.Fatalf("in-memory session write = %v", err)
+	}
+	assertEnvironmentRuntimeStoreIsolation(t, redisStore, inMemoryStore, tenantA, tenantB, sessionID, memoryID)
+}
+
+func TestEnvironmentRedisRuntimeStoresOwnPrimaryAndFallback(t *testing.T) {
+	primary := &environmentRuntimeStoreSpy{}
+	fallback := &environmentRuntimeStoreSpy{}
+	previousRedis := newEnvironmentRedisRuntimeStore
+	previousFallback := newEnvironmentInMemoryFallback
+	newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (runtimestorage.RuntimeStore, error) {
+		return primary, nil
+	}
+	newEnvironmentInMemoryFallback = func() runtimestorage.RuntimeStore { return fallback }
+	t.Cleanup(func() {
+		newEnvironmentRedisRuntimeStore = previousRedis
+		newEnvironmentInMemoryFallback = previousFallback
+	})
+	stores, err := newEnvironmentRuntimeStoresForConfig(context.Background(), environmentConfig{runtimeStorage: "redis"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stores.primary != primary || stores.providers["redis"] != primary || stores.providers["inmemory"] != fallback || len(stores.owned) != 2 {
+		t.Fatalf("redis runtime stores = %#v", stores)
+	}
+	if err := stores.Close(); err != nil || primary.closed != 1 || fallback.closed != 1 {
+		t.Fatalf("runtime store close = %v, primary closes=%d fallback closes=%d", err, primary.closed, fallback.closed)
+	}
+	if _, err := environmentRuntimeProviders(environmentConfig{runtimeStorage: "redis"}, environmentRuntimeStores{providers: map[string]runtimestorage.RuntimeStore{"redis": primary}}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("missing in-memory fallback = %v", err)
+	}
+	if _, err := environmentRuntimeProviders(environmentConfig{runtimeStorage: "redis"}, environmentRuntimeStores{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("missing redis primary = %v", err)
+	}
+}
+
+func TestEnvironmentRedisRuntimeStoreFailsClosed(t *testing.T) {
+	server := miniredis.RunT(t)
+	config := environmentConfig{redis: runtimestorageredis.Config{Addr: server.Addr()}}
+	store, err := environmentRedisRuntimeStore(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	addr := server.Addr()
+	server.Close()
+	if _, err := environmentRedisRuntimeStore(context.Background(), environmentConfig{redis: runtimestorageredis.Config{Addr: addr}}); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("unavailable Redis runtime store = %v", err)
+	}
+}
+
+type environmentRuntimeStoreSpy struct {
+	runtimestorage.RuntimeStore
+	closed int
+}
+
+func (store *environmentRuntimeStoreSpy) Close() error {
+	store.closed++
+	return nil
+}
+
+func assertEnvironmentRuntimeStoreIsolation(t *testing.T, redisStore, inMemoryStore runtimestorage.RuntimeStore, tenantA, tenantB, sessionID, memoryID string) {
+	t.Helper()
+	ctx := context.Background()
+	redisSession, err := redisStore.GetSession(ctx, tenantA, sessionID)
+	if err != nil || redisSession.State["provider"] != "redis" {
+		t.Fatalf("redis session = %#v, %v", redisSession, err)
+	}
+	inMemorySession, err := inMemoryStore.GetSession(ctx, tenantB, sessionID)
+	if err != nil || inMemorySession.State["provider"] != "in-memory" {
+		t.Fatalf("in-memory session = %#v, %v", inMemorySession, err)
+	}
+	redisMemory, err := redisStore.(runtimestorage.MemoryStore).GetMemory(ctx, tenantA, memoryID)
+	if err != nil || redisMemory.Content != "redis" {
+		t.Fatalf("redis memory = %#v, %v", redisMemory, err)
+	}
+	inMemoryMemory, err := inMemoryStore.(runtimestorage.MemoryStore).GetMemory(ctx, tenantB, memoryID)
+	if err != nil || inMemoryMemory.Content != "in-memory" {
+		t.Fatalf("in-memory memory = %#v, %v", inMemoryMemory, err)
+	}
+	if _, err := redisStore.GetSession(ctx, tenantB, sessionID); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("redis session leaked into in-memory tenant = %v", err)
+	}
+	if _, err := inMemoryStore.GetSession(ctx, tenantA, sessionID); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("in-memory session leaked into redis tenant = %v", err)
+	}
+	if _, err := redisStore.(runtimestorage.MemoryStore).GetMemory(ctx, tenantB, memoryID); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("redis memory leaked into in-memory tenant = %v", err)
+	}
+	if _, err := inMemoryStore.(runtimestorage.MemoryStore).GetMemory(ctx, tenantA, memoryID); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("in-memory memory leaked into redis tenant = %v", err)
+	}
+}
+
+func TestNewFromEnvironmentRedisConnectionFailureIsRedacted(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envSessionBackend, "redis")
+	t.Setenv(envRedisAddr, "redis.internal:6379")
+	t.Setenv(envRedisPassword, "redis-password")
+	registerBootstrapPingDriver.Do(func() { sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{}) })
+	db, err := sql.Open("trpc-service-bootstrap-ping", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousVerify := verifyEnvironmentMigrations
+	previousRedis := newEnvironmentRedisRuntimeStore
+	t.Cleanup(func() {
+		openEnvironmentDatabase = previousOpen
+		applyEnvironmentMigrations = previousApply
+		verifyEnvironmentMigrations = previousVerify
+		newEnvironmentRedisRuntimeStore = previousRedis
+		_ = db.Close()
+	})
+	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+	newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (runtimestorage.RuntimeStore, error) {
+		return nil, errors.New("dial redis.internal:6379 with password redis-password failed")
+	}
+	_, err = NewFromEnvironment(context.Background())
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("redis connection error = %v", err)
+	}
+	if strings.Contains(err.Error(), "redis.internal:6379") || strings.Contains(err.Error(), "redis-password") {
+		t.Fatalf("redis connection details leaked: %v", err)
+	}
+}
+
+func TestNewFromEnvironmentRuntimeStoreFailureBoundaries(t *testing.T) {
+	tests := []struct {
+		name           string
+		runtimeStorage string
+		configureStore func(context.CancelFunc)
+		wantError      error
+	}{
+		{
+			name:           "redis cancellation wins",
+			runtimeStorage: "redis",
+			configureStore: func(cancel context.CancelFunc) {
+				newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (runtimestorage.RuntimeStore, error) {
+					cancel()
+					return nil, errors.New("redis dial failure")
+				}
+			},
+			wantError: context.Canceled,
+		},
+		{
+			name:           "non redis preserves source error",
+			runtimeStorage: "inmemory",
+			configureStore: func(context.CancelFunc) {
+				newEnvironmentRuntimeStore = func(string, *sql.DB) (runtimestorage.RuntimeStore, error) {
+					return nil, errEnvironmentRuntimeStore
+				}
+			},
+			wantError: errEnvironmentRuntimeStore,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv(envSessionBackend, tt.runtimeStorage)
+			if tt.runtimeStorage == "redis" {
+				t.Setenv(envRedisAddr, "redis.internal:6379")
+			}
+			registerBootstrapPingDriver.Do(func() { sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{}) })
+			db, err := sql.Open("trpc-service-bootstrap-ping", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			previousOpen := openEnvironmentDatabase
+			previousApply := applyEnvironmentMigrations
+			previousVerify := verifyEnvironmentMigrations
+			previousRedis := newEnvironmentRedisRuntimeStore
+			previousStore := newEnvironmentRuntimeStore
+			t.Cleanup(func() {
+				openEnvironmentDatabase = previousOpen
+				applyEnvironmentMigrations = previousApply
+				verifyEnvironmentMigrations = previousVerify
+				newEnvironmentRedisRuntimeStore = previousRedis
+				newEnvironmentRuntimeStore = previousStore
+				_ = db.Close()
+			})
+			openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+			applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+			verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			tt.configureStore(cancel)
+
+			_, err = NewFromEnvironment(ctx)
+			if !errors.Is(err, tt.wantError) {
+				t.Fatalf("runtime store failure = %v, want %v", err, tt.wantError)
+			}
+			if pingErr := db.Ping(); pingErr == nil {
+				t.Fatal("database remained open after runtime store failure")
+			}
+		})
+	}
+}
+
+func TestNewFromEnvironmentDoesNotInitializeRedisStoresBeforeMigrationSucceeds(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envSessionBackend, "redis")
+	t.Setenv(envRedisAddr, "redis.internal:6379")
+	registerBootstrapPingDriver.Do(func() { sql.Register("trpc-service-bootstrap-ping", bootstrapPingDriver{}) })
+	db, err := sql.Open("trpc-service-bootstrap-ping", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	primary := &environmentRuntimeStoreSpy{}
+	fallback := &environmentRuntimeStoreSpy{}
+	primaryCreated, fallbackCreated := 0, 0
+	previousOpen := openEnvironmentDatabase
+	previousApply := applyEnvironmentMigrations
+	previousRedis := newEnvironmentRedisRuntimeStore
+	previousFallback := newEnvironmentInMemoryFallback
+	t.Cleanup(func() {
+		openEnvironmentDatabase = previousOpen
+		applyEnvironmentMigrations = previousApply
+		newEnvironmentRedisRuntimeStore = previousRedis
+		newEnvironmentInMemoryFallback = previousFallback
+		_ = db.Close()
+	})
+	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
+	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return errors.New("migration failed") }
+	newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (runtimestorage.RuntimeStore, error) {
+		primaryCreated++
+		return primary, nil
+	}
+	newEnvironmentInMemoryFallback = func() runtimestorage.RuntimeStore {
+		fallbackCreated++
+		return fallback
+	}
+
+	if _, err := NewFromEnvironment(context.Background()); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("bootstrap failure = %v", err)
+	}
+	if primaryCreated != 0 || fallbackCreated != 0 {
+		t.Fatalf("runtime stores initialized before migration success: primary=%d fallback=%d", primaryCreated, fallbackCreated)
+	}
+	if pingErr := db.Ping(); pingErr == nil {
+		t.Fatal("database remained open after bootstrap failure")
+	}
+}
+
+var errEnvironmentRuntimeStore = errors.New("runtime store initialization failed")
 
 func TestDemoEnvironmentConfigurationBranches(t *testing.T) {
 	setRequiredEnvironment(t)

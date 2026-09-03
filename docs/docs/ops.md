@@ -1,8 +1,9 @@
 # 运维、可观测性与生产风险
 
 > 本页把 [生产架构设计](architecture.md) 转成可执行的发布、监控、恢复和风险检查表。
-> 当前仓库只有控制面领域模型、快照和最小 Runner spine；Gateway、队列、真实 IM/Storage
-> Adapter、Dashboard 和告警规则仍是后续平台实现，不应把本页当作已经部署的运行手册。
+> 本页按代码和自动化测试证据标注能力状态，不等同于一份已经完成生产部署的运行手册。
+> 控制面、Runner spine、SQL/InMemory RuntimeStore，以及可选的 Redis Session/Memory
+> provider 已落地；真实 IM 验签、Dashboard、生产告警平台和其他外部存储适配仍需单独验收。
 
 ## 运行边界与值班目标
 
@@ -209,8 +210,19 @@ backpressure。高峰保护使用租户级 token bucket、全局队列上限、�
 
 ## 当前实现状态与后续门禁
 
-本仓库目前可以验证 Tenant、Agent App/Revision、Model Profile、Backend Profile、无密钥
-Execution Plan、Runner policy 和 Tenant-scoped Session 的模型/边界测试；不能验证真实 IM
-验签、跨节点 CAS、队列至少一次投递、SQL/Redis 迁移或生产告警。后续实现每落地一个 Adapter
-都必须补充：双租户隔离测试、重复/乱序/验签失败测试、provider 一致性契约测试、故障注入、
-审计字段检查和 `mkdocs build --strict`。
+状态只代表当前仓库已有的实现和测试证据：
+
+| 能力 | 状态 | 证据或边界 |
+| --- | --- | --- |
+| Tenant、Agent App/Revision、Model Profile、Backend Profile、Execution Plan 和 Runner policy | 已实现 | 控制面模型、快照和策略测试 |
+| InMemory RuntimeStore | 已实现 | Tenant-scoped Session/Event/Memory 契约测试 |
+| PostgreSQL RuntimeStore | 部分实现 | 迁移、CAS、幂等、Outbox 和可选 live conformance；需要外部 DSN 才能验证重启恢复 |
+| Redis RuntimeStore | 已实现（Issue #108） | `TRPC_SESSION_BACKEND=redis`，Redis Session/Memory、WATCH/MULTI CAS、租户隔离和 readiness PING；可选 live reconnect 测试 |
+| Redis capability 范围 | 明确限制 | 仅 `session`、`memory`；`summary`、`knowledge`、`artifact`、`audit` 和独立向量库 provider 会被拒绝 |
+| Redis/PostgreSQL 迁移、双写、shadow read、自动 cutover | 未实现 | 迁移方案仍需后续工具和演练，不能把切换当作 Redis provider 自带能力 |
+| 对象存储（S3/OSS）和生产向量库（Qdrant/Milvus/pgvector） | 未实现 | 当前只有接口/能力边界，未提供真实外部 adapter 或检索闭环 |
+| 真实 IM 验签、多媒体、Dashboard 和生产告警平台 | 未实现或部分实现 | WeCom/Telegram 的已交付范围以各自 adapter 文档为准；本页不宣称生产运营集成 |
+
+后续每落地一个 Adapter 或运维组件，都必须补充：双租户隔离测试、重复/乱序/验签失败测试、
+provider 一致性契约测试、故障注入、审计字段检查和 `mkdocs build --strict`。只有在提供外部
+依赖并实际运行 live suite 后，才能把相应的 `✅*` 证据升级为生产验收结论。

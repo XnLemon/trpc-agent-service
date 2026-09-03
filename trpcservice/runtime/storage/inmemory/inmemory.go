@@ -698,6 +698,33 @@ func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segmen
 	return cloneReply(value), nil
 }
 
+// RecordReplyReceipt persists a provider acknowledgement without releasing
+// the current sending lease. The worker later owns the sent transition.
+func (s *Store) RecordReplyReceipt(ctx context.Context, receipt runtimestorage.ReplyReceipt) (runtimestorage.ReplyOutbox, error) {
+	if err := check(ctx); err != nil {
+		return runtimestorage.ReplyOutbox{}, err
+	}
+	if runtimestorage.ValidateTenant(receipt.TenantID) != nil || receipt.ReplyID == "" || receipt.SegmentIndex < 0 || receipt.Owner == "" || receipt.FencingToken <= 0 || strings.TrimSpace(receipt.ProviderID) == "" {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := replyKey(receipt.TenantID, receipt.ReplyID, receipt.SegmentIndex)
+	value, ok := s.replies[key]
+	if !ok {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrNotFound
+	}
+	if value.Status != runtimestorage.ReplySending || value.LeaseOwner != receipt.Owner || value.FencingToken != receipt.FencingToken || value.LeaseExpiresAt == nil || !value.LeaseExpiresAt.After(time.Now().UTC()) || value.ProviderMessageID != "" && value.ProviderMessageID != receipt.ProviderID {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
+	}
+	if value.ProviderMessageID == "" {
+		value.ProviderMessageID = receipt.ProviderID
+		value.UpdatedAt = time.Now().UTC()
+		s.replies[key] = value
+	}
+	return cloneReply(value), nil
+}
+
 // TransitionReply applies a fenced reply delivery transition.
 func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.ReplyTransition) (runtimestorage.ReplyOutbox, error) {
 	if err := check(ctx); err != nil {
@@ -732,7 +759,9 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 			value.LeaseExpiresAt = &deadline
 		}
 	}
-	value.ProviderMessageID = transition.ProviderID
+	if transition.ProviderID != "" {
+		value.ProviderMessageID = transition.ProviderID
+	}
 	value.LastErrorClass = transition.ErrorClass
 	value.UpdatedAt = time.Now().UTC()
 	s.replies[k] = value
@@ -823,3 +852,4 @@ func cloneReply(value runtimestorage.ReplyOutbox) runtimestorage.ReplyOutbox {
 }
 
 var _ runtimestorage.RuntimeStore = (*Store)(nil)
+var _ runtimestorage.ReplyReceiptRecorder = (*Store)(nil)

@@ -77,6 +77,7 @@ cd trpc-agent-service
 - [Channel Binding](channel-binding.md) — 租户级通道绑定、候选发现与可信入站路由
 - [Telegram 长轮询 Adapter](telegram.md) — 单 Binding Telegram long polling、文本映射与安全边界
 - [企业微信自建应用 Channel Adapter](wecom.md) — 自建应用 callback、文本/媒体入站与回复 Outbox
+- [企业微信 AI Bot 长连接](wecom-aibot.md) — `wecom_aibot` WebSocket、认证、重连与流式回复
 - [Gateway、Execution Plan 与 HTTP/SSE](gateway.md) — 可信主体、固定执行计划、Runner Registry、
   Dispatch、健康检查、优雅停机和普通/流式 API
 - [PostgreSQL 控制面与启动装配](postgresql-control-plane.md) — 六类控制面表的 migration 顺序、
