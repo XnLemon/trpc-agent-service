@@ -369,6 +369,24 @@ func TestEnvironmentBackendCatalogIncludesTenantScopedS3ArtifactOnly(t *testing.
 	if bindings[0].Options["region"] != "us-east-1" || bindings[0].Options["path_style"] != "false" || bindings[0].Options["max_bytes"] != "33554432" {
 		t.Fatalf("S3 defaults = %#v", bindings[0].Options)
 	}
+	if _, err := catalog.NormalizeBindings([]backend.CapabilityBinding{{
+		Capability: backend.CapabilityArtifact,
+		Provider:   "s3",
+		Endpoint:   "http://minio:9000",
+		SecretRef:  "env/s3",
+		Options:    map[string]string{"bucket": bucket},
+	}}); !errors.Is(err, backend.ErrInvalid) {
+		t.Fatalf("insecure S3 endpoint without opt-in = %v", err)
+	}
+	if _, err := catalog.NormalizeBindings([]backend.CapabilityBinding{{
+		Capability: backend.CapabilityArtifact,
+		Provider:   "s3",
+		Endpoint:   "http://minio:9000",
+		SecretRef:  "env/s3",
+		Options:    map[string]string{"bucket": bucket, "allow_insecure": "true"},
+	}}); err != nil {
+		t.Fatalf("insecure S3 endpoint with opt-in = %v", err)
+	}
 	if _, err := catalog.NormalizeBindings([]backend.CapabilityBinding{{Capability: backend.CapabilityMemory, Provider: "s3", Endpoint: "https://s3.example.test", SecretRef: "env/s3", Options: map[string]string{"bucket": bucket}}}); !errors.Is(err, backend.ErrInvalid) {
 		t.Fatalf("S3 memory binding = %v", err)
 	}

@@ -188,6 +188,12 @@ func validateKey(key string) bool {
 	return true
 }
 
+// validateArtifactID preserves the identifier limit shared by the existing
+// runtime artifact providers while retaining S3 key-safety checks.
+func validateArtifactID(artifactID string) bool {
+	return runtimestorage.ValidateText(artifactID, 256, true) && validateKey(artifactID)
+}
+
 func validateBucket(bucket string) bool {
 	if len(bucket) < 3 || len(bucket) > 63 || strings.ToLower(bucket) != bucket || net.ParseIP(bucket) != nil {
 		return false
@@ -327,7 +333,7 @@ func (s *Store) DeleteObject(ctx context.Context, tenantID, objectKey string) er
 
 // PutArtifact stores or replaces one artifact and returns its committed metadata.
 func (s *Store) PutArtifact(ctx context.Context, value runtimestorage.ArtifactRecord) (runtimestorage.ArtifactRecord, error) {
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.TenantID != s.tenant || !validateKey(value.ArtifactID) || !runtimestorage.ValidateText(value.SessionID, 256, false) || !runtimestorage.ValidateText(value.Name, 512, false) || !runtimestorage.ValidateText(value.MimeType, 256, false) || len(value.Content) == 0 || int64(len(value.Content)) > s.maxBytes {
+	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.TenantID != s.tenant || !validateArtifactID(value.ArtifactID) || !runtimestorage.ValidateText(value.SessionID, 256, false) || !runtimestorage.ValidateText(value.Name, 512, false) || !runtimestorage.ValidateText(value.MimeType, 256, false) || len(value.Content) == 0 || int64(len(value.Content)) > s.maxBytes {
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrInvalid
 	}
 	operation, cancel, err := s.operationContext(ctx, s.writeTimeout)
@@ -371,7 +377,7 @@ func (s *Store) PutArtifact(ctx context.Context, value runtimestorage.ArtifactRe
 
 // GetArtifact loads one validated artifact and returns a defensive content copy.
 func (s *Store) GetArtifact(ctx context.Context, tenantID, artifactID string) (runtimestorage.ArtifactRecord, error) {
-	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateKey(artifactID) {
+	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateArtifactID(artifactID) {
 		return runtimestorage.ArtifactRecord{}, runtimestorage.ErrInvalid
 	}
 	operation, cancel, err := s.operationContext(ctx, s.readTimeout)
@@ -474,7 +480,7 @@ func (s *Store) parseArtifactKeys(items []awss3types.Object, prefix string) ([]s
 		}
 		encoded := path.Base(*item.Key)
 		artifactID, err := base64.RawURLEncoding.DecodeString(encoded)
-		if err != nil || !validateKey(string(artifactID)) || *item.Key != s.remoteKey("artifacts", string(artifactID)) {
+		if err != nil || !validateArtifactID(string(artifactID)) || *item.Key != s.remoteKey("artifacts", string(artifactID)) {
 			return nil, runtimestorage.ErrStorage
 		}
 		keys = append(keys, string(artifactID))
@@ -484,7 +490,7 @@ func (s *Store) parseArtifactKeys(items []awss3types.Object, prefix string) ([]s
 
 // DeleteArtifact removes one artifact.
 func (s *Store) DeleteArtifact(ctx context.Context, tenantID, artifactID string) error {
-	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateKey(artifactID) {
+	if runtimestorage.ValidateTenant(tenantID) != nil || tenantID != s.tenant || !validateArtifactID(artifactID) {
 		return runtimestorage.ErrInvalid
 	}
 	operation, cancel, err := s.operationContext(ctx, s.writeTimeout)

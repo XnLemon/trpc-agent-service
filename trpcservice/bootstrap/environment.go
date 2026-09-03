@@ -1031,7 +1031,12 @@ func s3BackendProviderSpec() backend.ProviderSpec {
 			"read_timeout_ms":    {Kind: backend.OptionInteger, DefaultValue: stringOption("15000"), MinInteger: int64Option(1), MaxInteger: int64Option(300000)},
 			"write_timeout_ms":   {Kind: backend.OptionInteger, DefaultValue: stringOption("15000"), MinInteger: int64Option(1), MaxInteger: int64Option(300000)},
 		},
+		ValidateBinding: validEnvironmentS3Binding,
 	}
+}
+
+func validEnvironmentS3Binding(binding backend.CapabilityBinding) bool {
+	return validEnvironmentS3Endpoint(binding.Endpoint, binding.Options["allow_insecure"] == "true")
 }
 
 func stringOption(value string) *string { return &value }

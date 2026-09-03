@@ -183,6 +183,25 @@ func TestStoreRejectsInvalidAndOversizedTransfersWithoutWrites(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsArtifactIDsBeyondSharedLimit(t *testing.T) {
+	store, client := newTestStore(t, "tenant-a", Options{})
+	ctx := context.Background()
+	artifactID := strings.Repeat("a", 257)
+	value := testArtifact(artifactID, "session", "content")
+	if _, err := store.PutArtifact(ctx, value); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("oversized artifact ID PutArtifact() = %v", err)
+	}
+	if _, err := store.GetArtifact(ctx, "tenant-a", artifactID); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("oversized artifact ID GetArtifact() = %v", err)
+	}
+	if err := store.DeleteArtifact(ctx, "tenant-a", artifactID); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("oversized artifact ID DeleteArtifact() = %v", err)
+	}
+	if client.count() != 0 {
+		t.Fatalf("oversized artifact ID made %d remote writes", client.count())
+	}
+}
+
 func TestStoreListArtifactsSharesReadDeadlineAcrossItems(t *testing.T) {
 	store, client := newTestStore(t, "tenant-a", Options{ReadTimeout: time.Second})
 	if _, err := store.PutArtifact(context.Background(), testArtifact("artifact", "session", "content")); err != nil {
