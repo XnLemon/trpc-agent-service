@@ -36,14 +36,25 @@ func (r *ChannelRepository) List(ctx context.Context, tenantID, query, status, c
 	if err != nil {
 		return nil, "", ErrStorage
 	}
-	defer rows.Close()
-	items := make([]*channels.Binding, 0)
-	q := strings.ToLower(strings.TrimSpace(query))
+	var bindingIDs []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
 			return nil, "", ErrStorage
 		}
+		bindingIDs = append(bindingIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, "", ErrStorage
+	}
+	if err := rows.Close(); err != nil {
+		return nil, "", ErrStorage
+	}
+	items := make([]*channels.Binding, 0)
+	q := strings.ToLower(strings.TrimSpace(query))
+	for _, id := range bindingIDs {
 		value, err := r.Get(ctx, tenantID, id)
 		if err != nil {
 			return nil, "", ErrStorage

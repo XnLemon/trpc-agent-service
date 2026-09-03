@@ -67,6 +67,19 @@ type listEnvelope struct {
 	Total      *int   `json:"total,omitempty"`
 }
 
+func newListEnvelope(items any, nextCursor string) (listEnvelope, error) {
+	envelope := listEnvelope{Items: items}
+	if nextCursor == "" {
+		return envelope, nil
+	}
+	offset, err := strconv.Atoi(nextCursor)
+	if err != nil || offset < 0 {
+		return listEnvelope{}, fmt.Errorf("%w: invalid repository cursor", errInvalidRequest)
+	}
+	envelope.NextCursor = encodeCursor(offset)
+	return envelope, nil
+}
+
 func listOptions(r *http.Request) ListOptions {
 	if r == nil {
 		return ListOptions{Limit: 50}
@@ -83,6 +96,21 @@ func listOptions(r *http.Request) ListOptions {
 		Query: strings.TrimSpace(values.Get("q")), Status: strings.TrimSpace(values.Get("status")),
 		Cursor: strings.TrimSpace(values.Get("cursor")), Limit: limit,
 	}
+}
+
+// repositoryListOptions converts the externally opaque page cursor to the
+// numeric offset used by the current repository implementations.
+func repositoryListOptions(r *http.Request) (ListOptions, error) {
+	options := listOptions(r)
+	if options.Cursor == "" {
+		return options, nil
+	}
+	offset, err := decodeCursor(options.Cursor)
+	if err != nil {
+		return ListOptions{}, err
+	}
+	options.Cursor = strconv.Itoa(offset)
+	return options, nil
 }
 
 func listURLValues(options ListOptions) url.Values {

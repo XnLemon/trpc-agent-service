@@ -86,7 +86,7 @@ func (r *ChannelRepository) List(ctx context.Context, tenantID, query, status, c
 		if status != "" && string(value.Status) != status {
 			continue
 		}
-		if query != "" && !strings.Contains(strings.ToLower(value.BindingID+" "+value.BindingKey+" "+value.ProviderAccountID), query) {
+		if query != "" && !strings.Contains(strings.ToLower(value.BindingID+" "+value.BindingKey+" "+string(value.Channel)+" "+value.ProviderAccountID), query) {
 			continue
 		}
 		items = append(items, value)

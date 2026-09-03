@@ -48,6 +48,9 @@ func (r *ModelRepository) List(ctx context.Context, tenantID, query, status, cur
 		}
 		items = append(items, v)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, "", ErrStorage
+	}
 	if offset >= len(items) {
 		return []*model.Profile{}, "", nil
 	}

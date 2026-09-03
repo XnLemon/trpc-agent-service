@@ -119,7 +119,7 @@ func (r *AgentRepository) ListRevisions(ctx context.Context, tenantID, appID, qu
 		if status != "" && string(value.State) != status {
 			continue
 		}
-		if query != "" && !strings.Contains(strings.ToLower(value.Description+" "+value.Instruction), query) {
+		if query != "" && !strings.Contains(strings.ToLower(value.Description+" "+value.Instruction+" "+value.GlobalInstruction), query) {
 			continue
 		}
 		items = append(items, value)

@@ -60,6 +60,9 @@ func (r *AgentRepository) List(ctx context.Context, tenantID, query, status, cur
 		clone := v.Clone()
 		items = append(items, &clone)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, "", ErrStorage
+	}
 	if offset >= len(items) {
 		return []*agent.App{}, "", nil
 	}
@@ -95,14 +98,25 @@ func (r *AgentRepository) ListRevisions(ctx context.Context, tenantID, appID, qu
 	if err != nil {
 		return nil, "", mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
 	}
-	defer rows.Close()
-	items := make([]*agent.Revision, 0)
-	q := strings.ToLower(strings.TrimSpace(query))
+	var revisions []int64
 	for rows.Next() {
 		var number int64
 		if err := rows.Scan(&number); err != nil {
+			_ = rows.Close()
 			return nil, "", ErrStorage
 		}
+		revisions = append(revisions, number)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, "", ErrStorage
+	}
+	if err := rows.Close(); err != nil {
+		return nil, "", ErrStorage
+	}
+	items := make([]*agent.Revision, 0)
+	q := strings.ToLower(strings.TrimSpace(query))
+	for _, number := range revisions {
 		v, err := loadAgentRevision(ctx, r.db, tenantID, appID, number, false)
 		if err != nil {
 			return nil, "", ErrStorage
@@ -110,7 +124,7 @@ func (r *AgentRepository) ListRevisions(ctx context.Context, tenantID, appID, qu
 		if status != "" && string(v.State) != status {
 			continue
 		}
-		if q != "" && !strings.Contains(strings.ToLower(v.Description+" "+v.Instruction), q) {
+		if q != "" && !strings.Contains(strings.ToLower(v.Description+" "+v.Instruction+" "+v.GlobalInstruction), q) {
 			continue
 		}
 		items = append(items, v)

@@ -107,6 +107,29 @@ func TestAgentRepositoryListsAppsAndRevisions(t *testing.T) {
 	}
 }
 
+func TestAgentRepositoryRevisionSearchIncludesGlobalInstruction(t *testing.T) {
+	app := newStoredAgentApp(t)
+	revision := newStoredAgentRevision(t, app, 1, false)
+	revision.GlobalInstruction = "Follow the tenant policy"
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`FROM public\.agent_app_revision WHERE tenant_id=\$1 AND app_id=\$2`).
+		WithArgs(app.TenantID, app.AppID).
+		WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(revision.Revision))
+	expectAgentRevision(t, mock, revision)
+
+	items, next, err := NewRepository(db).ListRevisions(context.Background(), app.TenantID, app.AppID, "tenant policy", "", "", 50)
+	if err != nil || len(items) != 1 || items[0].Revision != revision.Revision || next != "" {
+		t.Fatalf("global instruction search = items=%+v next=%q err=%v", items, next, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAgentRepositoryRejectsInvalidInputsBeforeTransactions(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

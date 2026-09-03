@@ -32,14 +32,25 @@ func (r *BackendRepository) List(ctx context.Context, tenantID, query, status, c
 	if err != nil {
 		return nil, "", ErrStorage
 	}
-	defer rows.Close()
-	items := make([]*backend.Profile, 0)
-	q := strings.ToLower(strings.TrimSpace(query))
+	var profileIDs []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
 			return nil, "", ErrStorage
 		}
+		profileIDs = append(profileIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, "", ErrStorage
+	}
+	if err := rows.Close(); err != nil {
+		return nil, "", ErrStorage
+	}
+	items := make([]*backend.Profile, 0)
+	q := strings.ToLower(strings.TrimSpace(query))
+	for _, id := range profileIDs {
 		value, err := loadBackendProfile(ctx, r.db, r.catalog, tenantID, id, false)
 		if err != nil {
 			return nil, "", ErrStorage

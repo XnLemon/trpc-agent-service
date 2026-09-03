@@ -334,9 +334,16 @@ func (h *Handler) tenants(ctx context.Context, r *http.Request, p Principal) (in
 		if !ok {
 			return 0, nil, errListUnsupported
 		}
-		o := listOptions(r)
+		o, err := repositoryListOptions(r)
+		if err != nil {
+			return 0, nil, err
+		}
 		items, next, err := lister.List(ctx, p.ScopeIDs(), o.Query, o.Status, o.Cursor, o.Limit)
-		return http.StatusOK, listEnvelope{Items: items, NextCursor: next}, err
+		if err != nil {
+			return 0, nil, err
+		}
+		value, err := newListEnvelope(items, next)
+		return http.StatusOK, value, err
 	}
 	if r.Method != http.MethodPost || !p.Allows("", true) {
 		return 0, nil, ErrForbidden
@@ -436,9 +443,16 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 			if !ok {
 				return 0, nil, errListUnsupported
 			}
-			o := listOptions(r)
+			o, err := repositoryListOptions(r)
+			if err != nil {
+				return 0, nil, err
+			}
 			items, next, err := lister.List(ctx, tenantID, o.Query, o.Status, o.Cursor, o.Limit)
-			return http.StatusOK, listEnvelope{Items: items, NextCursor: next}, err
+			if err != nil {
+				return 0, nil, err
+			}
+			value, err := newListEnvelope(items, next)
+			return http.StatusOK, value, err
 		}
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
@@ -535,9 +549,16 @@ func (h *Handler) revisions(ctx context.Context, r *http.Request, p Principal, t
 			if !ok {
 				return 0, nil, errListUnsupported
 			}
-			o := listOptions(r)
+			o, err := repositoryListOptions(r)
+			if err != nil {
+				return 0, nil, err
+			}
 			items, next, err := lister.ListRevisions(ctx, tenantID, appID, o.Query, o.Status, o.Cursor, o.Limit)
-			return http.StatusOK, listEnvelope{Items: items, NextCursor: next}, err
+			if err != nil {
+				return 0, nil, err
+			}
+			value, err := newListEnvelope(items, next)
+			return http.StatusOK, value, err
 		}
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
@@ -591,9 +612,16 @@ func (h *Handler) models(ctx context.Context, r *http.Request, p Principal, tena
 			if !ok {
 				return 0, nil, errListUnsupported
 			}
-			o := listOptions(r)
+			o, err := repositoryListOptions(r)
+			if err != nil {
+				return 0, nil, err
+			}
 			items, next, err := lister.List(ctx, tenantID, o.Query, o.Status, o.Cursor, o.Limit)
-			return http.StatusOK, listEnvelope{Items: items, NextCursor: next}, err
+			if err != nil {
+				return 0, nil, err
+			}
+			value, err := newListEnvelope(items, next)
+			return http.StatusOK, value, err
 		}
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
@@ -642,9 +670,16 @@ func (h *Handler) backends(ctx context.Context, r *http.Request, p Principal, te
 			if !ok {
 				return 0, nil, errListUnsupported
 			}
-			o := listOptions(r)
+			o, err := repositoryListOptions(r)
+			if err != nil {
+				return 0, nil, err
+			}
 			items, next, err := lister.List(ctx, tenantID, o.Query, o.Status, o.Cursor, o.Limit)
-			return http.StatusOK, listEnvelope{Items: items, NextCursor: next}, err
+			if err != nil {
+				return 0, nil, err
+			}
+			value, err := newListEnvelope(items, next)
+			return http.StatusOK, value, err
 		}
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
@@ -693,9 +728,16 @@ func (h *Handler) bindings(ctx context.Context, r *http.Request, p Principal, te
 			if !ok {
 				return 0, nil, errListUnsupported
 			}
-			o := listOptions(r)
+			o, err := repositoryListOptions(r)
+			if err != nil {
+				return 0, nil, err
+			}
 			items, next, err := lister.List(ctx, tenantID, o.Query, o.Status, o.Cursor, o.Limit)
-			return http.StatusOK, listEnvelope{Items: items, NextCursor: next}, err
+			if err != nil {
+				return 0, nil, err
+			}
+			value, err := newListEnvelope(items, next)
+			return http.StatusOK, value, err
 		}
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
