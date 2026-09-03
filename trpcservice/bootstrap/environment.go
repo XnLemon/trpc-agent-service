@@ -8,11 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
@@ -37,6 +42,7 @@ import (
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	runtimestorageredis "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
+	runtimestorages3 "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/s3"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -82,7 +88,12 @@ const (
 	envRedisReadTimeout  = "TRPC_REDIS_READ_TIMEOUT"
 	envRedisWriteTimeout = "TRPC_REDIS_WRITE_TIMEOUT"
 	envRedisPoolSize     = "TRPC_REDIS_POOL_SIZE"
-	envDemoMode          = "TRPC_DEMO_MODE"
+	envS3AccessKeyID     = "TRPC_S3_ACCESS_KEY_ID"
+	// #nosec G101 -- environment variable name, not a secret.
+	envS3SecretKey = "TRPC_S3_SECRET_KEY"
+	// #nosec G101 -- environment variable name, not a secret.
+	envS3SecretRef = "TRPC_S3_SECRET_REF"
+	envDemoMode    = "TRPC_DEMO_MODE"
 	// #nosec G101 -- environment variable name, not a secret.
 	envWeComCallbackToken  = "WECOM_CALLBACK_TOKEN"
 	envWeComEncodingAESKey = "WECOM_ENCODING_AES_KEY"
@@ -109,18 +120,27 @@ const (
 )
 
 var (
-	openEnvironmentDatabase          = postgres.Open
-	openMySQLEnvironmentDatabase     = mysql.Open
-	applyEnvironmentMigrations       = migrations.Apply
-	applyMySQLEnvironmentMigrations  = migrations.ApplyMySQL
-	verifyEnvironmentMigrations      = migrations.Verify
-	verifyMySQLEnvironmentMigrations = migrations.VerifyMySQL
-	newEnvironmentRuntimeStore       = environmentRuntimeStore
-	newEnvironmentRedisRuntimeStore  = environmentRedisRuntimeStore
-	newEnvironmentInMemoryFallback   = func() runtimestorage.RuntimeStore { return runtimestorageinmemory.New() }
-	environmentWeComOwnerFunc        = environmentWeComOwner
-	newEnvironmentWeComWorker        = outbox.New
+	openEnvironmentDatabase                         = postgres.Open
+	openMySQLEnvironmentDatabase                    = mysql.Open
+	applyEnvironmentMigrations                      = migrations.Apply
+	applyMySQLEnvironmentMigrations                 = migrations.ApplyMySQL
+	verifyEnvironmentMigrations                     = migrations.Verify
+	verifyMySQLEnvironmentMigrations                = migrations.VerifyMySQL
+	newEnvironmentRuntimeStore                      = environmentRuntimeStore
+	newEnvironmentRedisRuntimeStore                 = environmentRedisRuntimeStore
+	newEnvironmentInMemoryFallback                  = func() runtimestorage.RuntimeStore { return runtimestorageinmemory.New() }
+	newEnvironmentS3Store            s3StoreFactory = newEnvironmentS3StoreFromConfig
+	environmentWeComOwnerFunc                       = environmentWeComOwner
+	newEnvironmentWeComWorker                       = outbox.New
 )
+
+type s3StoreFactory func(context.Context, string, backend.CapabilityBinding, modelprofile.SecretValue) (environmentS3Store, error)
+
+type environmentS3Store interface {
+	runtimestorage.ArtifactStore
+	runtimestorage.ObjectStore
+	Probe(context.Context) error
+}
 
 // environmentConfig is intentionally private: it contains the one secret
 // handed to the ModelFactory and must not become a serializable application
@@ -146,6 +166,9 @@ type environmentConfig struct {
 	redis          runtimestorageredis.Config
 	redisEndpoint  string
 	redisSecretRef string
+	s3AccessKeyID  string
+	s3SecretKey    string
+	s3SecretRef    string
 	demoMode       bool
 	wecom          *environmentWeComConfig
 	wecomAIBots    []environmentWeComAIBotConfig
@@ -577,6 +600,11 @@ func environmentRegistriesForStores(config environmentConfig, delegateSessions s
 				return nil, nil, nil, err
 			}
 		}
+		if config.s3AccessKeyID != "" {
+			if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.s3SecretRef}, config.s3AccessKeyID+":"+config.s3SecretKey); err != nil {
+				return nil, nil, nil, err
+			}
+		}
 		if err := registerEnvironmentRuntimeProviders(backendRegistry, identity.TenantID, delegateSessions, config, runtimeProviders); err != nil {
 			return nil, nil, nil, err
 		}
@@ -615,6 +643,9 @@ func registerEnvironmentRuntimeProviders(registry *backend.ProviderRegistry, ten
 			}
 		}
 	}
+	if err := registry.Register(tenantID, backend.CapabilityArtifact, "s3", environmentS3CapabilityProvider{tenantID: tenantID, secretRef: config.s3SecretRef}); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -646,7 +677,7 @@ func loadEnvironment() (environmentConfig, error) {
 		demoMode:       demoMode,
 		telemetry:      observability.NewNoopProvider(),
 	}
-	loaders := []func() error{config.loadDatabase, config.loadIdentities, config.loadAdmin, config.loadModel, config.loadRuntime, config.loadWeCom, config.loadWeComAIBots}
+	loaders := []func() error{config.loadDatabase, config.loadIdentities, config.loadAdmin, config.loadModel, config.loadRuntime, config.loadS3, config.loadWeCom, config.loadWeComAIBots}
 	for _, load := range loaders {
 		if err := load(); err != nil {
 			return environmentConfig{}, err
@@ -656,6 +687,29 @@ func loadEnvironment() (environmentConfig, error) {
 		return environmentConfig{}, err
 	}
 	return config, nil
+}
+
+func (config *environmentConfig) loadS3() error {
+	config.s3AccessKeyID = strings.TrimSpace(os.Getenv(envS3AccessKeyID))
+	config.s3SecretKey = os.Getenv(envS3SecretKey)
+	config.s3SecretRef = environmentOrDefault(envS3SecretRef, "env/trpc-s3-credentials")
+	configured := config.s3AccessKeyID != "" || config.s3SecretKey != ""
+	if !configured {
+		config.s3SecretRef = ""
+		return nil
+	}
+	if config.s3AccessKeyID == "" || config.s3SecretKey == "" || strings.ContainsAny(config.s3AccessKeyID, "\r\n") || strings.ContainsAny(config.s3SecretKey, "\r\n") {
+		return fmt.Errorf("%w: S3 credentials must be configured together", ErrInvalidConfig)
+	}
+	if _, err := modelprofile.NewSecretValue(config.s3AccessKeyID + ":" + config.s3SecretKey); err != nil {
+		return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envS3SecretKey)
+	}
+	for _, identity := range config.apiIdentities {
+		if err := (modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.s3SecretRef}).Validate(); err != nil {
+			return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envS3SecretRef)
+		}
+	}
+	return nil
 }
 
 func (config *environmentConfig) loadTelemetry() error {
@@ -1132,18 +1186,46 @@ func newEnvironmentBackendCatalog(runtimeStorage string) (*backend.ProviderCatal
 			EndpointSchemes: []string{"redis"},
 			SecretRefPolicy: backend.FieldOptional,
 			Options:         map[string]backend.OptionSpec{},
-		}, inMemory)
+		}, s3BackendProviderSpec(), inMemory)
 		if err != nil {
 			return nil, fmt.Errorf("%w: backend catalog is invalid", ErrInvalidConfig)
 		}
 		return backendCatalog, nil
 	}
-	backendCatalog, err := backend.NewProviderCatalog(inMemory)
+	backendCatalog, err := backend.NewProviderCatalog(s3BackendProviderSpec(), inMemory)
 	if err != nil {
 		return nil, fmt.Errorf("%w: backend catalog is invalid", ErrInvalidConfig)
 	}
 	return backendCatalog, nil
 }
+
+func s3BackendProviderSpec() backend.ProviderSpec {
+	return backend.ProviderSpec{
+		Provider:        "s3",
+		Capabilities:    []backend.Capability{backend.CapabilityArtifact},
+		EndpointPolicy:  backend.FieldRequired,
+		EndpointSchemes: []string{"http", "https"},
+		SecretRefPolicy: backend.FieldRequired,
+		Options: map[string]backend.OptionSpec{
+			"bucket":             {Kind: backend.OptionString, Required: true},
+			"region":             {Kind: backend.OptionString, DefaultValue: stringOption("us-east-1")},
+			"path_style":         {Kind: backend.OptionBoolean, DefaultValue: stringOption("false")},
+			"allow_insecure":     {Kind: backend.OptionBoolean, DefaultValue: stringOption("false")},
+			"max_bytes":          {Kind: backend.OptionInteger, DefaultValue: stringOption("33554432"), MinInteger: int64Option(1), MaxInteger: int64Option(1073741824)},
+			"connect_timeout_ms": {Kind: backend.OptionInteger, DefaultValue: stringOption("15000"), MinInteger: int64Option(1), MaxInteger: int64Option(300000)},
+			"read_timeout_ms":    {Kind: backend.OptionInteger, DefaultValue: stringOption("15000"), MinInteger: int64Option(1), MaxInteger: int64Option(300000)},
+			"write_timeout_ms":   {Kind: backend.OptionInteger, DefaultValue: stringOption("15000"), MinInteger: int64Option(1), MaxInteger: int64Option(300000)},
+		},
+		ValidateBinding: validEnvironmentS3Binding,
+	}
+}
+
+func validEnvironmentS3Binding(binding backend.CapabilityBinding) bool {
+	return validEnvironmentS3Endpoint(binding.Endpoint, binding.Options["allow_insecure"] == "true") && validS3Bucket(binding.Options["bucket"])
+}
+
+func stringOption(value string) *string { return &value }
+func int64Option(value int64) *int64    { return &value }
 
 func environmentBool(name string) (bool, error) {
 	value := strings.TrimSpace(os.Getenv(name))
@@ -1300,6 +1382,151 @@ type environmentRuntimeCapabilityProvider struct {
 	redisEndpoint         string
 	redisSecretRef        string
 	redisPasswordRequired bool
+}
+
+type environmentS3CapabilityProvider struct {
+	tenantID  string
+	secretRef string
+}
+
+func (provider environmentS3CapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
+	if ctx == nil {
+		return nil, context.Canceled
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if provider.tenantID == "" || input.TenantID != provider.tenantID || binding.Capability != backend.CapabilityArtifact || strings.ToLower(strings.TrimSpace(binding.Provider)) != "s3" || provider.secretRef == "" || binding.SecretRef != provider.secretRef {
+		return nil, backend.ErrStorageFactory
+	}
+	store, err := newEnvironmentS3Store(ctx, provider.tenantID, binding, secret)
+	if err != nil || store == nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, backend.ErrStorageFactory
+	}
+	if err := store.Probe(ctx); err != nil {
+		_ = store.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, backend.ErrStorageFactory
+	}
+	return store, nil
+}
+
+func newEnvironmentS3StoreFromConfig(ctx context.Context, tenantID string, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (environmentS3Store, error) {
+	if ctx == nil || ctx.Err() != nil || tenantID == "" {
+		return nil, backend.ErrStorageFactory
+	}
+	accessKey, secretKey, err := parseEnvironmentS3Credentials(binding.SecretRef, secret)
+	if err != nil {
+		return nil, backend.ErrStorageFactory
+	}
+	endpoint := strings.TrimSpace(binding.Endpoint)
+	options, err := parseEnvironmentS3Options(binding.Options)
+	if err != nil || !validEnvironmentS3Endpoint(endpoint, options.allowInsecure) {
+		return nil, backend.ErrStorageFactory
+	}
+	cfg := awssdk.Config{
+		Region:      options.region,
+		Credentials: credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
+	}
+	return runtimestorages3.NewFromConfig(cfg, options.bucket, tenantID, endpoint, options.pathStyle, options.allowInsecure, runtimestorages3.Options{
+		MaxBytes: options.maxBytes, ConnectTimeout: options.connectTimeout, ReadTimeout: options.readTimeout, WriteTimeout: options.writeTimeout,
+	})
+}
+
+func parseEnvironmentS3Credentials(secretRef string, secret modelprofile.SecretValue) (string, string, error) {
+	if secretRef == "" || secret.Value() == "" {
+		return "", "", backend.ErrStorageFactory
+	}
+	accessKey, secretKey, ok := strings.Cut(secret.Value(), ":")
+	if !ok || strings.TrimSpace(accessKey) == "" || secretKey == "" || strings.ContainsAny(accessKey, "\r\n") || strings.ContainsAny(secretKey, "\r\n") {
+		return "", "", backend.ErrStorageFactory
+	}
+	return accessKey, secretKey, nil
+}
+
+func validEnvironmentS3Endpoint(endpoint string, allowInsecure bool) bool {
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return false
+	}
+	return parsed.Scheme == "https" || (parsed.Scheme == "http" && allowInsecure)
+}
+
+type environmentS3Options struct {
+	bucket, region string
+	pathStyle      bool
+	allowInsecure  bool
+	maxBytes       int64
+	connectTimeout time.Duration
+	readTimeout    time.Duration
+	writeTimeout   time.Duration
+}
+
+func parseEnvironmentS3Options(raw map[string]string) (environmentS3Options, error) {
+	for key := range raw {
+		switch key {
+		case "bucket", "region", "path_style", "allow_insecure", "max_bytes", "connect_timeout_ms", "read_timeout_ms", "write_timeout_ms":
+		default:
+			return environmentS3Options{}, backend.ErrStorageFactory
+		}
+	}
+	value := func(key, fallback string) string {
+		if item := strings.TrimSpace(raw[key]); item != "" {
+			return item
+		}
+		return fallback
+	}
+	result := environmentS3Options{bucket: value("bucket", ""), region: value("region", "us-east-1")}
+	if result.bucket == "" || result.region == "" || len(result.region) > 128 || strings.ContainsAny(result.region, "\r\n\t ") || !validS3Bucket(result.bucket) {
+		return environmentS3Options{}, backend.ErrStorageFactory
+	}
+	var err error
+	if result.pathStyle, err = strconv.ParseBool(value("path_style", "false")); err != nil {
+		return environmentS3Options{}, backend.ErrStorageFactory
+	}
+	if result.allowInsecure, err = strconv.ParseBool(value("allow_insecure", "false")); err != nil {
+		return environmentS3Options{}, backend.ErrStorageFactory
+	}
+	maxBytes, err := strconv.ParseInt(value("max_bytes", "33554432"), 10, 64)
+	if err != nil || maxBytes < 1 || maxBytes > 1<<30 {
+		return environmentS3Options{}, backend.ErrStorageFactory
+	}
+	result.maxBytes = maxBytes
+	for key, target := range map[string]*time.Duration{
+		"connect_timeout_ms": &result.connectTimeout,
+		"read_timeout_ms":    &result.readTimeout,
+		"write_timeout_ms":   &result.writeTimeout,
+	} {
+		milliseconds, parseErr := strconv.ParseInt(value(key, "15000"), 10, 64)
+		if parseErr != nil || milliseconds < 1 || milliseconds > 300000 {
+			return environmentS3Options{}, backend.ErrStorageFactory
+		}
+		*target = time.Duration(milliseconds) * time.Millisecond
+	}
+	return result, nil
+}
+
+func validS3Bucket(bucket string) bool {
+	if len(bucket) < 3 || len(bucket) > 63 || strings.ToLower(bucket) != bucket || net.ParseIP(bucket) != nil || strings.Contains(bucket, "..") {
+		return false
+	}
+	for _, label := range strings.Split(bucket, ".") {
+		if label == "" || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, value := range label {
+			if (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') || value == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func (provider environmentRuntimeCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {

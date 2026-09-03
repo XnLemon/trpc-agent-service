@@ -374,6 +374,9 @@ type ProviderSpec struct {
 	EndpointSchemes []string
 	SecretRefPolicy FieldPolicy
 	Options         map[string]OptionSpec
+	// ValidateBinding optionally applies provider-specific validation to a
+	// normalized, secret-free capability binding.
+	ValidateBinding func(CapabilityBinding) bool
 }
 
 type compiledProviderSpec struct {
@@ -382,6 +385,7 @@ type compiledProviderSpec struct {
 	endpointSchemes map[string]struct{}
 	secretRefPolicy FieldPolicy
 	options         map[string]OptionSpec
+	validateBinding func(CapabilityBinding) bool
 }
 
 // ProviderCatalog is an immutable trusted registry used to reject unknown
@@ -471,7 +475,7 @@ func compileProviderSpec(spec ProviderSpec) (compiledProviderSpec, []Capability,
 	}
 	return compiledProviderSpec{
 		provider: provider, endpointPolicy: spec.EndpointPolicy, endpointSchemes: schemes,
-		secretRefPolicy: spec.SecretRefPolicy, options: options,
+		secretRefPolicy: spec.SecretRefPolicy, options: options, validateBinding: spec.ValidateBinding,
 	}, capabilities, nil
 }
 
@@ -647,10 +651,14 @@ func (spec compiledProviderSpec) normalizeBinding(capability Capability, endpoin
 			return CapabilityBinding{}, fmt.Errorf("%w: required option %q is missing", ErrInvalid, key)
 		}
 	}
-	return CapabilityBinding{
+	result := CapabilityBinding{
 		Capability: capability, Provider: spec.provider, Endpoint: endpoint,
 		Options: normalizedOptions, SecretRef: secretRef,
-	}, nil
+	}
+	if spec.validateBinding != nil && !spec.validateBinding(result.Clone()) {
+		return CapabilityBinding{}, fmt.Errorf("%w: provider binding is invalid", ErrInvalid)
+	}
+	return result, nil
 }
 
 func normalizeEndpoint(endpoint string, policy FieldPolicy, schemes map[string]struct{}) (string, error) {

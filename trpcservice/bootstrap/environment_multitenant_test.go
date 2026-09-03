@@ -350,6 +350,230 @@ func TestEnvironmentRuntimeCapabilityProviderNew(t *testing.T) {
 	}
 }
 
+func TestEnvironmentBackendCatalogIncludesTenantScopedS3ArtifactOnly(t *testing.T) {
+	catalog, err := newEnvironmentBackendCatalog("postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bucket := "tenant-artifacts"
+	bindings, err := catalog.NormalizeBindings([]backend.CapabilityBinding{{
+		Capability: backend.CapabilityArtifact,
+		Provider:   "s3",
+		Endpoint:   "https://s3.example.test",
+		SecretRef:  "env/s3",
+		Options:    map[string]string{"bucket": bucket},
+	}})
+	if err != nil || len(bindings) != 1 {
+		t.Fatalf("S3 artifact binding = %#v, %v", bindings, err)
+	}
+	if bindings[0].Options["region"] != "us-east-1" || bindings[0].Options["path_style"] != "false" || bindings[0].Options["max_bytes"] != "33554432" {
+		t.Fatalf("S3 defaults = %#v", bindings[0].Options)
+	}
+	if _, err := catalog.NormalizeBindings([]backend.CapabilityBinding{{
+		Capability: backend.CapabilityArtifact,
+		Provider:   "s3",
+		Endpoint:   "http://minio:9000",
+		SecretRef:  "env/s3",
+		Options:    map[string]string{"bucket": bucket},
+	}}); !errors.Is(err, backend.ErrInvalid) {
+		t.Fatalf("insecure S3 endpoint without opt-in = %v", err)
+	}
+	if _, err := catalog.NormalizeBindings([]backend.CapabilityBinding{{
+		Capability: backend.CapabilityArtifact,
+		Provider:   "s3",
+		Endpoint:   "http://minio:9000",
+		SecretRef:  "env/s3",
+		Options:    map[string]string{"bucket": bucket, "allow_insecure": "true"},
+	}}); err != nil {
+		t.Fatalf("insecure S3 endpoint with opt-in = %v", err)
+	}
+	for _, unsafeBucket := range []string{"BAD_BUCKET", "foo..bar", "192.168.1.1"} {
+		if _, err := catalog.NormalizeBindings([]backend.CapabilityBinding{{
+			Capability: backend.CapabilityArtifact,
+			Provider:   "s3",
+			Endpoint:   "https://s3.example.test",
+			SecretRef:  "env/s3",
+			Options:    map[string]string{"bucket": unsafeBucket},
+		}}); !errors.Is(err, backend.ErrInvalid) {
+			t.Fatalf("unsafe S3 bucket %q = %v", unsafeBucket, err)
+		}
+	}
+	if _, err := catalog.NormalizeBindings([]backend.CapabilityBinding{{Capability: backend.CapabilityMemory, Provider: "s3", Endpoint: "https://s3.example.test", SecretRef: "env/s3", Options: map[string]string{"bucket": bucket}}}); !errors.Is(err, backend.ErrInvalid) {
+		t.Fatalf("S3 memory binding = %v", err)
+	}
+	for _, options := range []map[string]string{{"bucket": bucket, "secret": "leak"}, {"bucket": bucket, "max_bytes": "0"}} {
+		if _, err := catalog.NormalizeBindings([]backend.CapabilityBinding{{Capability: backend.CapabilityArtifact, Provider: "s3", Endpoint: "https://s3.example.test", SecretRef: "env/s3", Options: options}}); !errors.Is(err, backend.ErrInvalid) {
+			t.Fatalf("invalid S3 options %#v = %v", options, err)
+		}
+	}
+	for _, options := range []map[string]string{{"bucket": "BAD"}, {"bucket": "a..b"}, {"bucket": bucket, "unknown": "value"}, {"bucket": bucket, "path_style": "maybe"}, {"bucket": bucket, "allow_insecure": "maybe"}, {"bucket": bucket, "max_bytes": "0"}, {"bucket": bucket, "connect_timeout_ms": "0"}} {
+		if _, err := parseEnvironmentS3Options(options); !errors.Is(err, backend.ErrStorageFactory) {
+			t.Fatalf("invalid S3 bucket %#v = %v", options, err)
+		}
+	}
+}
+
+func TestLoadEnvironmentS3CredentialsAreOptionalAndTenantScoped(t *testing.T) {
+	setRequiredEnvironment(t)
+	for _, name := range []string{envS3AccessKeyID, envS3SecretKey, envS3SecretRef} {
+		t.Setenv(name, "")
+	}
+	config, err := loadEnvironment()
+	if err != nil {
+		t.Fatalf("S3-disabled environment = %v", err)
+	}
+	if config.s3AccessKeyID != "" || config.s3SecretKey != "" || config.s3SecretRef != "" {
+		t.Fatalf("S3-disabled config = %+v", config)
+	}
+	t.Setenv(envS3AccessKeyID, "access")
+	t.Setenv(envS3SecretKey, "secret")
+	t.Setenv(envS3SecretRef, "env/custom-s3")
+	config, err = loadEnvironment()
+	if err != nil || config.s3AccessKeyID != "access" || config.s3SecretKey != "secret" || config.s3SecretRef != "env/custom-s3" {
+		t.Fatalf("S3-enabled config = %+v, %v", config, err)
+	}
+}
+
+func TestEnvironmentS3CapabilityProviderValidatesScopeAndProbe(t *testing.T) {
+	original := newEnvironmentS3Store
+	t.Cleanup(func() { newEnvironmentS3Store = original })
+	store := &testS3CapabilityStore{}
+	newEnvironmentS3Store = func(context.Context, string, backend.CapabilityBinding, modelprofile.SecretValue) (environmentS3Store, error) {
+		return store, nil
+	}
+	secret, err := modelprofile.NewSecretValue("access:secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := environmentS3CapabilityProvider{tenantID: "t_00000000000000000000000000", secretRef: "env/s3"}
+	input := backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000"}
+	binding := backend.CapabilityBinding{Capability: backend.CapabilityArtifact, Provider: "s3", Endpoint: "https://s3.example.test", SecretRef: "env/s3", Options: map[string]string{"bucket": "tenant-artifacts"}}
+	if _, err := provider.New(nil, input, binding, secret); !errors.Is(err, context.Canceled) {
+		t.Fatalf("nil S3 provider context = %v", err)
+	}
+	if _, err := provider.New(canceledContext(), input, binding, secret); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled S3 provider context = %v", err)
+	}
+	value, err := provider.New(context.Background(), input, binding, secret)
+	if err != nil || value != store || store.probes != 1 {
+		t.Fatalf("S3 provider = %T, %v, probes=%d", value, err, store.probes)
+	}
+	if _, err := provider.New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000001"}, binding, secret); !errors.Is(err, backend.ErrStorageFactory) {
+		t.Fatalf("foreign S3 tenant = %v", err)
+	}
+	store.probeErr = errors.New("unavailable")
+	if _, err := provider.New(context.Background(), input, binding, secret); !errors.Is(err, backend.ErrStorageFactory) || store.closes != 1 {
+		t.Fatalf("S3 probe failure = %v, closes=%d", err, store.closes)
+	}
+	store.probeErr = nil
+	newEnvironmentS3Store = func(context.Context, string, backend.CapabilityBinding, modelprofile.SecretValue) (environmentS3Store, error) {
+		return nil, errors.New("factory unavailable")
+	}
+	if _, err := provider.New(context.Background(), input, binding, secret); !errors.Is(err, backend.ErrStorageFactory) {
+		t.Fatalf("S3 factory failure = %v", err)
+	}
+	newEnvironmentS3Store = func(context.Context, string, backend.CapabilityBinding, modelprofile.SecretValue) (environmentS3Store, error) {
+		return nil, nil
+	}
+	if _, err := provider.New(context.Background(), input, binding, secret); !errors.Is(err, backend.ErrStorageFactory) {
+		t.Fatalf("nil S3 store = %v", err)
+	}
+}
+
+func TestEnvironmentS3ConfigurationBoundaries(t *testing.T) {
+	secret, err := modelprofile.NewSecretValue("access:secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	validBinding := backend.CapabilityBinding{Endpoint: "https://s3.example.test", SecretRef: "env/s3", Options: map[string]string{"bucket": "tenant-artifacts"}}
+	if store, err := newEnvironmentS3StoreFromConfig(context.Background(), "t_00000000000000000000000000", validBinding, secret); err != nil || store == nil {
+		t.Fatalf("valid S3 store = %T, %v", store, err)
+	} else {
+		_ = store.Close()
+	}
+	for _, test := range []struct {
+		name   string
+		ctx    context.Context
+		tenant string
+		bind   backend.CapabilityBinding
+		secret modelprofile.SecretValue
+	}{
+		{name: "nil context", tenant: "tenant", bind: validBinding, secret: secret},
+		{name: "canceled context", ctx: canceledContext(), tenant: "tenant", bind: validBinding, secret: secret},
+		{name: "empty tenant", ctx: context.Background(), bind: validBinding, secret: secret},
+		{name: "missing secret", ctx: context.Background(), tenant: "tenant", bind: validBinding},
+		{name: "invalid credentials", ctx: context.Background(), tenant: "tenant", bind: validBinding, secret: mustEnvironmentSecret(t, "access")},
+		{name: "invalid endpoint", ctx: context.Background(), tenant: "tenant", bind: backend.CapabilityBinding{Endpoint: "http://minio:9000", SecretRef: "env/s3", Options: map[string]string{"bucket": "tenant-artifacts"}}, secret: secret},
+		{name: "invalid options", ctx: context.Background(), tenant: "tenant", bind: backend.CapabilityBinding{Endpoint: "https://s3.example.test", SecretRef: "env/s3", Options: map[string]string{"bucket": "BAD"}}, secret: secret},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := test.ctx
+			if ctx == nil && test.name != "nil context" {
+				ctx = context.Background()
+			}
+			if _, err := newEnvironmentS3StoreFromConfig(ctx, test.tenant, test.bind, test.secret); !errors.Is(err, backend.ErrStorageFactory) {
+				t.Fatalf("newEnvironmentS3StoreFromConfig() = %v", err)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name  string
+		ref   string
+		value string
+		want  bool
+	}{
+		{name: "valid", ref: "env/s3", value: "access:secret", want: true},
+		{name: "missing ref", value: "access:secret"},
+		{name: "missing separator", ref: "env/s3", value: "access"},
+		{name: "empty access", ref: "env/s3", value: ":secret"},
+		{name: "empty secret", ref: "env/s3", value: "access:"},
+		{name: "newline", ref: "env/s3", value: "access:sec\nret"},
+	} {
+		t.Run("credentials/"+test.name, func(t *testing.T) {
+			value, err := modelprofile.NewSecretValue(test.value)
+			if test.value == "" {
+				value = modelprofile.SecretValue{}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			access, key, parseErr := parseEnvironmentS3Credentials(test.ref, value)
+			if (parseErr == nil) != test.want || (test.want && (access != "access" || key != "secret")) {
+				t.Fatalf("parseEnvironmentS3Credentials() = %q, %q, %v", access, key, parseErr)
+			}
+		})
+	}
+}
+
+func canceledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+func mustEnvironmentSecret(t *testing.T, value string) modelprofile.SecretValue {
+	t.Helper()
+	secret, err := modelprofile.NewSecretValue(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return secret
+}
+
+type testS3CapabilityStore struct {
+	runtimestorage.ArtifactStore
+	runtimestorage.ObjectStore
+	probes   int
+	closes   int
+	probeErr error
+}
+
+func (store *testS3CapabilityStore) Probe(context.Context) error {
+	store.probes++
+	return store.probeErr
+}
+func (store *testS3CapabilityStore) Close() error { store.closes++; return nil }
+
 type environmentKnowledgeOnlyStore struct {
 	runtimestorage.RuntimeStore
 	knowledge runtimestorage.KnowledgeStore
