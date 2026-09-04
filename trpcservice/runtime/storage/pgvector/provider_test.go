@@ -187,6 +187,7 @@ func TestNewRecoversAllPendingDocumentsBeyondQueueCapacity(t *testing.T) {
 			t.Fatal("pending document was not recovered")
 		}
 	}
+	time.Sleep(50 * time.Millisecond)
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
 	}

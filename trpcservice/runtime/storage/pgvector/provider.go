@@ -60,8 +60,9 @@ var (
 	ErrIncompatible = errors.New("incompatible embedding")
 )
 
-// Embedder is the provider-owned embedding boundary. Implementations must not
-// select a network endpoint or credentials from tenant document data.
+// Embedder is the provider-owned embedding boundary. Implementations must
+// return when ctx is canceled and must not select a network endpoint or
+// credentials from tenant document data.
 type Embedder interface {
 	Embed(context.Context, string) ([]float64, error)
 }
@@ -474,6 +475,9 @@ func cloneDocument(value Document) Document {
 }
 
 func (s *Store) enqueue(ctx context.Context, key documentKey) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
