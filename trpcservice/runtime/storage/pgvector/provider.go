@@ -31,6 +31,7 @@ const (
 	defaultQueueSize    = 128
 	defaultWorkers      = 1
 	maxLimit            = 100
+	indexRetryDelay     = 10 * time.Millisecond
 )
 
 // IndexStatus describes whether a durable source document is searchable.
@@ -210,7 +211,7 @@ type documentKey struct{ knowledgeID, documentID, chunkID string }
 // documentQueries are composed once from the validated schema identifier.
 // Values supplied by document callers remain positional PostgreSQL arguments.
 type documentQueries struct {
-	upsert, get, search, delete, retry, reconcile                   string
+	upsert, get, search, searchKnowledge, delete, retry, reconcile  string
 	loadIndex, recoverPending, markReady, markFailed, deleteVectors string
 }
 
@@ -225,8 +226,8 @@ func New(db *sql.DB, tenantID string, config Config) (*Store, error) {
 		return nil, err
 	}
 	store := newStore(db, tenantID, config)
-	store.recoverPending()
 	store.startWorkers()
+	store.recoverPending()
 	return store, nil
 }
 
@@ -383,17 +384,18 @@ func validKey(value string, required bool) bool {
 func newDocumentQueries(table string) documentQueries {
 	const columns = "tenant_id,knowledge_id,document_id,chunk_id,source,source_version,content,content_ref,metadata,embedding_model,embedding_version,embedding_dimension,checksum,version,index_status,attempts,last_error_class,deleted_at,created_at,updated_at"
 	return documentQueries{
-		upsert:         "INSERT INTO " + table + " (tenant_id,collection,knowledge_id,document_id,chunk_id,source,source_version,content,content_ref,metadata,embedding_model,embedding_version,embedding_dimension,checksum,index_status,embedding,version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NULLIF($16,'' )::vector,1) ON CONFLICT (tenant_id,collection,knowledge_id,document_id,chunk_id) DO UPDATE SET source=EXCLUDED.source,source_version=EXCLUDED.source_version,content=EXCLUDED.content,content_ref=EXCLUDED.content_ref,metadata=EXCLUDED.metadata,embedding_model=EXCLUDED.embedding_model,embedding_version=EXCLUDED.embedding_version,embedding_dimension=EXCLUDED.embedding_dimension,checksum=EXCLUDED.checksum,index_status=$15,embedding=NULLIF($16,'')::vector,version=" + table + ".version+1,attempts=0,last_error_class='',deleted_at=NULL,updated_at=now() RETURNING " + columns,
-		get:            "SELECT " + columns + " FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5",
-		search:         "SELECT " + columns + ",embedding::text FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND embedding_model=$3 AND embedding_version=$4 AND embedding_dimension=$5 AND index_status='ready' AND deleted_at IS NULL AND embedding IS NOT NULL",
-		delete:         "UPDATE " + table + " SET index_status='deleted',deleted_at=now(),embedding=NULL,version=version+1,updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL",
-		retry:          "UPDATE " + table + " SET index_status='pending',attempts=0,last_error_class='',updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL AND index_status IN ('failed','pending','ready','dead_letter')",
-		reconcile:      "SELECT knowledge_id,document_id,chunk_id FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND deleted_at IS NULL AND index_status IN ('failed','dead_letter') ORDER BY updated_at,knowledge_id,document_id,chunk_id",
-		loadIndex:      "SELECT content,embedding_model,embedding_version,embedding_dimension,version,index_status,COALESCE(embedding::text,'') FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL",
-		recoverPending: "SELECT knowledge_id,document_id,chunk_id FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND index_status='pending' AND deleted_at IS NULL ORDER BY updated_at,knowledge_id,document_id,chunk_id",
-		markReady:      "UPDATE " + table + " SET embedding=$6::vector,index_status='ready',attempts=attempts+1,last_error_class='',updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND version=$7 AND index_status='pending' AND deleted_at IS NULL",
-		markFailed:     "UPDATE " + table + " SET index_status=CASE WHEN attempts+1 >= $7 THEN 'dead_letter' ELSE 'failed' END,attempts=attempts+1,last_error_class=$8,updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND version=$6 AND index_status='pending' AND deleted_at IS NULL",
-		deleteVectors:  "UPDATE " + table + " SET index_status='deleted',deleted_at=now(),embedding=NULL,version=version+1,updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND document_id=$3 AND deleted_at IS NULL",
+		upsert:          "INSERT INTO " + table + " (tenant_id,collection,knowledge_id,document_id,chunk_id,source,source_version,content,content_ref,metadata,embedding_model,embedding_version,embedding_dimension,checksum,index_status,embedding,version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NULLIF($16,'' )::vector,1) ON CONFLICT (tenant_id,collection,knowledge_id,document_id,chunk_id) DO UPDATE SET source=EXCLUDED.source,source_version=EXCLUDED.source_version,content=EXCLUDED.content,content_ref=EXCLUDED.content_ref,metadata=EXCLUDED.metadata,embedding_model=EXCLUDED.embedding_model,embedding_version=EXCLUDED.embedding_version,embedding_dimension=EXCLUDED.embedding_dimension,checksum=EXCLUDED.checksum,index_status=$15,embedding=NULLIF($16,'')::vector,version=" + table + ".version+1,attempts=0,last_error_class='',deleted_at=NULL,updated_at=now() RETURNING " + columns,
+		get:             "SELECT " + columns + " FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5",
+		search:          "SELECT " + columns + ",embedding::text FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND embedding_model=$3 AND embedding_version=$4 AND embedding_dimension=$5 AND index_status='ready' AND deleted_at IS NULL AND embedding IS NOT NULL",
+		searchKnowledge: "SELECT " + columns + ",embedding::text FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND embedding_model=$3 AND embedding_version=$4 AND embedding_dimension=$5 AND source=$6 AND index_status='ready' AND deleted_at IS NULL AND embedding IS NOT NULL",
+		delete:          "UPDATE " + table + " SET index_status='deleted',deleted_at=now(),embedding=NULL,version=version+1,updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL",
+		retry:           "UPDATE " + table + " SET index_status='pending',attempts=0,last_error_class='',updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL AND index_status IN ('failed','pending','ready','dead_letter')",
+		reconcile:       "SELECT knowledge_id,document_id,chunk_id FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND deleted_at IS NULL AND index_status IN ('failed','dead_letter') ORDER BY updated_at,knowledge_id,document_id,chunk_id",
+		loadIndex:       "SELECT content,embedding_model,embedding_version,embedding_dimension,version,index_status,COALESCE(embedding::text,'') FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL",
+		recoverPending:  "SELECT knowledge_id,document_id,chunk_id FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND index_status='pending' AND deleted_at IS NULL ORDER BY updated_at,knowledge_id,document_id,chunk_id",
+		markReady:       "UPDATE " + table + " SET embedding=$6::vector,index_status='ready',attempts=attempts+1,last_error_class='',updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND version=$7 AND index_status='pending' AND deleted_at IS NULL",
+		markFailed:      "UPDATE " + table + " SET index_status=CASE WHEN attempts+1 >= $7 THEN 'dead_letter' ELSE 'failed' END,attempts=attempts+1,last_error_class=$8,updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND version=$6 AND index_status='pending' AND deleted_at IS NULL",
+		deleteVectors:   "UPDATE " + table + " SET index_status='deleted',deleted_at=now(),embedding=NULL,version=version+1,updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND document_id=$3 AND deleted_at IS NULL",
 	}
 }
 
@@ -410,7 +412,7 @@ func (s *Store) recoverPending() {
 		}
 		select {
 		case s.queue <- indexJob{key: key}:
-		default:
+		case <-s.workerCtx.Done():
 			return
 		}
 	}
@@ -579,13 +581,23 @@ func (s *Store) GetDocument(ctx context.Context, knowledgeID, documentID, chunkI
 // Search applies tenant and readiness boundaries in SQL, then applies trusted
 // authorization filters before ranking and limiting results.
 func (s *Store) Search(ctx context.Context, embedding []float64, options SearchOptions) ([]SearchResult, error) {
+	return s.searchWithSource(ctx, embedding, options, "")
+}
+
+func (s *Store) searchWithSource(ctx context.Context, embedding []float64, options SearchOptions, source string) ([]SearchResult, error) {
 	if err := s.check(ctx); err != nil {
 		return nil, err
 	}
 	if err := validateSearchOptions(embedding, options, s.dimension); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, s.queries.search, s.tenantID, s.collection, s.model, s.modelVer, s.dimension)
+	query := s.queries.search
+	args := []any{s.tenantID, s.collection, s.model, s.modelVer, s.dimension}
+	if source != "" {
+		query = s.queries.searchKnowledge
+		args = append(args, source)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
@@ -800,29 +812,29 @@ func (s *Store) worker() {
 		case <-s.stop:
 			return
 		case job := <-s.queue:
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				s.index(s.workerCtx, job.key)
-			}()
-			select {
-			case <-done:
-			case <-s.workerCtx.Done():
-				return
+			for s.index(s.workerCtx, job.key) {
+				timer := time.NewTimer(indexRetryDelay)
+				select {
+				case <-s.workerCtx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
 			}
 		}
 	}
 }
 
-func (s *Store) index(ctx context.Context, key documentKey) {
+// index returns true when the durable row remains pending and should be
+// retried after a transient storage failure.
+func (s *Store) index(ctx context.Context, key documentKey) bool {
 	var content, model, modelVersion, status, vectorRaw string
 	var dimension, version int
 	if err := s.db.QueryRowContext(ctx, s.queries.loadIndex, s.tenantID, s.collection, key.knowledgeID, key.documentID, key.chunkID).Scan(&content, &model, &modelVersion, &dimension, &version, &status, &vectorRaw); err != nil {
-		return
+		return ctx.Err() == nil
 	}
 	if status == string(IndexDeleted) || model != s.model || modelVersion != s.modelVer || dimension != s.dimension {
-		s.markFailed(ctx, key, version, ErrIncompatible)
-		return
+		return s.markFailed(ctx, key, version, ErrIncompatible) != nil && ctx.Err() == nil
 	}
 	var vector []float64
 	var err error
@@ -835,28 +847,28 @@ func (s *Store) index(ctx context.Context, key documentKey) {
 		err = ErrIncompatible
 	}
 	if ctx.Err() != nil {
-		return
+		return false
 	}
 	if err != nil {
-		s.markFailed(ctx, key, version, err)
-		return
+		return s.markFailed(ctx, key, version, err) != nil && ctx.Err() == nil
 	}
 	encoded, err := encodeVector(vector)
 	if err != nil {
-		s.markFailed(ctx, key, version, err)
-		return
+		return s.markFailed(ctx, key, version, err) != nil && ctx.Err() == nil
 	}
 	if _, err := s.db.ExecContext(ctx, s.queries.markReady, s.tenantID, s.collection, key.knowledgeID, key.documentID, key.chunkID, encoded, version); err != nil {
-		s.markFailed(ctx, key, version, err)
+		return s.markFailed(ctx, key, version, err) != nil && ctx.Err() == nil
 	}
+	return false
 }
 
-func (s *Store) markFailed(ctx context.Context, key documentKey, version int, cause error) {
+func (s *Store) markFailed(ctx context.Context, key documentKey, version int, cause error) error {
 	class := "provider_error"
 	if errors.Is(cause, ErrIncompatible) {
 		class = "incompatible_embedding"
 	}
-	_, _ = s.db.ExecContext(ctx, s.queries.markFailed, s.tenantID, s.collection, key.knowledgeID, key.documentID, key.chunkID, version, s.maxAttempts, class)
+	_, err := s.db.ExecContext(ctx, s.queries.markFailed, s.tenantID, s.collection, key.knowledgeID, key.documentID, key.chunkID, version, s.maxAttempts, class)
+	return err
 }
 
 // PutKnowledge adapts the legacy document contract to one default chunk.
@@ -864,7 +876,7 @@ func (s *Store) PutKnowledge(ctx context.Context, value runtimestorage.Knowledge
 	if s == nil || value.TenantID != s.tenantID {
 		return runtimestorage.KnowledgeDocument{}, runtimestorage.ErrInvalid
 	}
-	doc, err := s.Upsert(ctx, DocumentInput{KnowledgeID: value.DocumentID, DocumentID: value.DocumentID, ChunkID: "default", Content: value.Content, Metadata: value.Metadata, Embedding: value.Embedding, Checksum: value.Digest})
+	doc, err := s.Upsert(ctx, DocumentInput{KnowledgeID: value.DocumentID, DocumentID: value.DocumentID, ChunkID: "default", Source: string(runtimestorage.VectorSourceKnowledge), Content: value.Content, Metadata: value.Metadata, Embedding: value.Embedding, Checksum: value.Digest})
 	if err != nil {
 		return runtimestorage.KnowledgeDocument{}, err
 	}
@@ -888,7 +900,7 @@ func (s *Store) SearchKnowledge(ctx context.Context, tenantID string, embedding 
 	if s == nil || tenantID != s.tenantID {
 		return nil, runtimestorage.ErrInvalid
 	}
-	values, err := s.Search(ctx, embedding, SearchOptions{Limit: limit})
+	values, err := s.searchWithSource(ctx, embedding, SearchOptions{Limit: limit}, string(runtimestorage.VectorSourceKnowledge))
 	if err != nil {
 		return nil, err
 	}

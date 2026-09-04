@@ -159,7 +159,96 @@ func TestNewRecoversPendingDocuments(t *testing.T) {
 	}
 }
 
-func TestCloseCancelsBlockingEmbedder(t *testing.T) {
+func TestNewRecoversAllPendingDocumentsBeyondQueueCapacity(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	indexed := make(chan struct{}, 2)
+	embedder := pgvector.EmbeddingFunc(func(context.Context, string) ([]float64, error) {
+		indexed <- struct{}{}
+		return []float64{1, 0}, nil
+	})
+	mock.ExpectQuery("SELECT knowledge_id,document_id,chunk_id FROM public\\.runtime_pgvector_documents WHERE tenant_id=\\$1").WithArgs("tenant-a", "knowledge").WillReturnRows(sqlmock.NewRows([]string{"knowledge_id", "document_id", "chunk_id"}).AddRow("knowledge", "first", "chunk").AddRow("knowledge", "second", "chunk"))
+	for _, documentID := range []string{"first", "second"} {
+		mock.ExpectQuery("SELECT content,embedding_model,embedding_version").WithArgs("tenant-a", "knowledge", "knowledge", documentID, "chunk").WillReturnRows(sqlmock.NewRows([]string{"content", "embedding_model", "embedding_version", "embedding_dimension", "version", "index_status", "embedding"}).AddRow("text", "deterministic", "v1", 2, 1, "pending", ""))
+		mock.ExpectExec("UPDATE public\\.runtime_pgvector_documents SET embedding=").WithArgs("tenant-a", "knowledge", "knowledge", documentID, "chunk", "[1,0]", 1).WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+	store, err := pgvector.New(db, "tenant-a", pgvector.Config{Dimension: 2, QueueSize: 1, Embedder: embedder})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	for index := 0; index < 2; index++ {
+		select {
+		case <-indexed:
+		case <-time.After(time.Second):
+			t.Fatal("pending document was not recovered")
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIndexRetriesTransientLoadFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	indexed := make(chan struct{})
+	embedder := pgvector.EmbeddingFunc(func(context.Context, string) ([]float64, error) {
+		close(indexed)
+		return []float64{1, 0}, nil
+	})
+	mock.ExpectQuery("SELECT knowledge_id,document_id,chunk_id FROM public\\.runtime_pgvector_documents WHERE tenant_id=\\$1").WithArgs("tenant-a", "knowledge").WillReturnRows(sqlmock.NewRows([]string{"knowledge_id", "document_id", "chunk_id"}).AddRow("knowledge", "retry", "chunk"))
+	mock.ExpectQuery("SELECT content,embedding_model,embedding_version").WithArgs("tenant-a", "knowledge", "knowledge", "retry", "chunk").WillReturnError(errors.New("temporary database failure"))
+	mock.ExpectQuery("SELECT content,embedding_model,embedding_version").WithArgs("tenant-a", "knowledge", "knowledge", "retry", "chunk").WillReturnRows(sqlmock.NewRows([]string{"content", "embedding_model", "embedding_version", "embedding_dimension", "version", "index_status", "embedding"}).AddRow("text", "deterministic", "v1", 2, 1, "pending", ""))
+	mock.ExpectExec("UPDATE public\\.runtime_pgvector_documents SET embedding=").WithArgs("tenant-a", "knowledge", "knowledge", "retry", "chunk", "[1,0]", 1).WillReturnResult(sqlmock.NewResult(0, 1))
+	store, err := pgvector.New(db, "tenant-a", pgvector.Config{Dimension: 2, Embedder: embedder})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	select {
+	case <-indexed:
+	case <-time.After(time.Second):
+		t.Fatal("transient load failure was not retried")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSearchKnowledgeRestrictsKnowledgeSource(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectQuery("SELECT knowledge_id,document_id,chunk_id FROM public\\.runtime_pgvector_documents WHERE tenant_id=\\$1").WithArgs("tenant-a", "knowledge").WillReturnRows(sqlmock.NewRows([]string{"knowledge_id", "document_id", "chunk_id"}))
+	store, err := pgvector.New(db, "tenant-a", pgvector.Config{Dimension: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rows := sqlmock.NewRows([]string{"tenant_id", "knowledge_id", "document_id", "chunk_id", "source", "source_version", "content", "content_ref", "metadata", "embedding_model", "embedding_version", "embedding_dimension", "checksum", "version", "index_status", "attempts", "last_error_class", "deleted_at", "created_at", "updated_at", "embedding"})
+	rows.AddRow("tenant-a", "doc", "doc", "default", "knowledge", "", "knowledge", "", []byte(`{}`), "deterministic", "v1", 2, "digest", 1, "ready", 0, "", nil, when, when, "[1,0]")
+	mock.ExpectQuery("SELECT tenant_id,knowledge_id,document_id,chunk_id.*source=\\$6").WithArgs("tenant-a", "knowledge", "deterministic", "v1", 2, "knowledge").WillReturnRows(rows)
+	values, err := store.SearchKnowledge(context.Background(), "tenant-a", []float64{1, 0}, 1)
+	if err != nil || len(values) != 1 || values[0].Document.DocumentID != "doc" {
+		t.Fatalf("knowledge search = %+v, %v", values, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCloseWaitsForCanceledEmbedder(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -167,11 +256,12 @@ func TestCloseCancelsBlockingEmbedder(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	mock.ExpectQuery("SELECT knowledge_id,document_id,chunk_id FROM public\\.runtime_pgvector_documents WHERE tenant_id=\\$1").WithArgs("tenant-a", "knowledge").WillReturnRows(sqlmock.NewRows([]string{"knowledge_id", "document_id", "chunk_id"}))
 	started := make(chan struct{})
-	release := make(chan struct{})
-	embedder := pgvector.EmbeddingFunc(func(context.Context, string) ([]float64, error) {
+	returned := make(chan struct{})
+	embedder := pgvector.EmbeddingFunc(func(ctx context.Context, _ string) ([]float64, error) {
 		close(started)
-		<-release
-		return []float64{1, 0}, nil
+		<-ctx.Done()
+		close(returned)
+		return nil, ctx.Err()
 	})
 	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	rows := sqlmock.NewRows([]string{"tenant_id", "knowledge_id", "document_id", "chunk_id", "source", "source_version", "content", "content_ref", "metadata", "embedding_model", "embedding_version", "embedding_dimension", "checksum", "version", "index_status", "attempts", "last_error_class", "deleted_at", "created_at", "updated_at"}).AddRow("tenant-a", "knowledge", "doc", "chunk", "", "", "text", "", []byte(`{}`), "deterministic", "v1", 2, "checksum", int64(1), "pending", 0, "", nil, when, when)
@@ -195,11 +285,15 @@ func TestCloseCancelsBlockingEmbedder(t *testing.T) {
 		close(closed)
 	}()
 	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("embedder did not observe cancellation")
+	}
+	select {
 	case <-closed:
 	case <-time.After(time.Second):
-		t.Fatal("Close waited for a blocking embedder")
+		t.Fatal("Close did not wait for the canceled embedder")
 	}
-	close(release)
 }
 
 func TestProviderCompatibilityBoundariesRejectForeignTenants(t *testing.T) {
