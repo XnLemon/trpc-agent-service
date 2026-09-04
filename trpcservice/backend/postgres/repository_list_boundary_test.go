@@ -9,6 +9,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 )
 
+//nolint:gocyclo // Exercises every list failure and pagination branch.
 func TestBackendRepositoryListFailureAndPaginationBranches(t *testing.T) {
 	catalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
 		Provider: "inmemory", Capabilities: []backend.Capability{backend.CapabilitySession},

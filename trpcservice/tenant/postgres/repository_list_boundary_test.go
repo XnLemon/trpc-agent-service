@@ -9,6 +9,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
+//nolint:gocyclo // Exercises every list failure and pagination branch.
 func TestTenantRepositoryListFailureAndPaginationBranches(t *testing.T) {
 	value, err := tenant.NewTenant(tenant.CreateInput{
 		TenantKey: "list-boundary", DisplayName: "List Boundary", Status: tenant.StatusActive,

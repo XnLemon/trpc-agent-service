@@ -97,6 +97,7 @@ func TestAgentRepositoryListBoundaryBranches(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // Exercises the complete SQL list contract in one fixture.
 func TestAgentRepositoryListCoversFilteringPagingAndScanReturns(t *testing.T) {
 	first := newStoredAgentApp(t)
 	first.AppKey, first.DisplayName = "primary", "Primary"

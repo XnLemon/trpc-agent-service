@@ -43,6 +43,7 @@ func TestListScopesFiltersAndPaginatesAppsAndRevisions(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // Exercises cancellation, cursor, and paging boundaries together.
 func TestListBoundaryReturnsContextCursorAndEmptyPageErrors(t *testing.T) {
 	repository := NewRepository()
 	app := createApp(t, repository, tenantOne, "boundary")
