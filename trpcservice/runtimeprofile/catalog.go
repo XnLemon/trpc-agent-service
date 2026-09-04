@@ -52,6 +52,16 @@ func ValidateComposition(root string, graph map[string]CompositionConfig) error 
 		if !ok {
 			return fmt.Errorf("%w: child %s is not declared", ErrInvalid, node)
 		}
+		validKind := false
+		for _, entry := range BuiltinCatalog() {
+			if cfg.Kind == entry.Kind {
+				validKind = true
+				break
+			}
+		}
+		if !validKind {
+			return fmt.Errorf("%w: unsupported composition kind %q", ErrInvalid, cfg.Kind)
+		}
 		state[node] = 1
 		seen := map[string]bool{}
 		for _, child := range cfg.Children {
