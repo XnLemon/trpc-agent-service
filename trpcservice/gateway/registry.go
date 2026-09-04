@@ -11,6 +11,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtimeprofile"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session"
@@ -125,13 +126,14 @@ func NewRunnerRegistry(config RunnerRegistryConfig) (*RunnerRegistry, error) {
 // Session service, Secret Resolver, and Model Factory are borrowed by the
 // registry and remain owned by the caller.
 type RuntimeRunnerRegistryConfig struct {
-	Registry       RunnerRegistryConfig
-	SecretResolver model.SecretResolver
-	ModelFactory   model.ModelFactory
-	Sessions       session.Service
-	StorageFactory backend.StorageFactory
-	Observability  observability.Provider
-	ToolRegistry   *servicetool.Registry
+	Registry         RunnerRegistryConfig
+	SecretResolver   model.SecretResolver
+	ModelFactory     model.ModelFactory
+	Sessions         session.Service
+	StorageFactory   backend.StorageFactory
+	Observability    observability.Provider
+	ToolRegistry     *servicetool.Registry
+	RuntimeFactories *runtimeprofile.RuntimeFactoryRegistry
 }
 
 // NewRuntimeRunnerRegistry creates a registry backed by runtime.NewRunner.
@@ -139,11 +141,31 @@ func NewRuntimeRunnerRegistry(config RuntimeRunnerRegistryConfig) (*RunnerRegist
 	if config.ModelFactory == nil || (config.Sessions == nil && config.StorageFactory == nil) {
 		return nil, fmt.Errorf("%w: runtime Runner dependencies are required", ErrInvalid)
 	}
-	config.Registry.Factory = func(ctx context.Context, plan runtime.ExecutionPlan) (Runner, error) {
+	defaultFactory := func(ctx context.Context, plan runtime.ExecutionPlan) (Runner, error) {
 		if config.StorageFactory != nil {
 			return runtime.NewRunnerWithToolRegistry(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability, config.ToolRegistry, config.StorageFactory)
 		}
 		return runtime.NewRunnerWithToolRegistry(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability, config.ToolRegistry)
+	}
+	if config.Registry.Factory == nil {
+		config.Registry.Factory = defaultFactory
+	}
+	if config.RuntimeFactories != nil {
+		configured := config.Registry.Factory
+		config.Registry.Factory = func(ctx context.Context, plan runtime.ExecutionPlan) (Runner, error) {
+			input, err := plan.AgentFactoryInput()
+			if err != nil {
+				return nil, err
+			}
+			if input.RuntimeProfileID != "" && input.RuntimeProfileID != "builtin-llm" {
+				factory, resolveErr := config.RuntimeFactories.Resolve(input.RuntimeProfileID)
+				if resolveErr != nil {
+					return nil, resolveErr
+				}
+				return factory(ctx, plan)
+			}
+			return configured(ctx, plan)
+		}
 	}
 	return NewRunnerRegistry(config.Registry)
 }

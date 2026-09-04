@@ -30,6 +30,13 @@ type CacheKey struct {
 	BackendProfileID      string
 	BackendProfileVersion int64
 	BackendContentDigest  string
+	RuntimeProfileID      string
+	RuntimeKind           string
+	RuntimeMode           string
+	RuntimeVersion        string
+	RuntimeDigest         string
+	RuntimeConfigDigest   string
+	RuntimeGovernance     string
 }
 
 // ExecutionPlan is the sealed input for one execution. Every embedded
@@ -123,6 +130,9 @@ func (plan ExecutionPlan) CacheKey() (CacheKey, error) {
 		ModelProfileID: modelKey.ProfileID, ModelProfileVersion: modelKey.ProfileVersion,
 		ModelContentDigest: modelKey.ContentDigest, BackendProfileID: backendKey.ProfileID,
 		BackendProfileVersion: backendKey.ProfileVersion, BackendContentDigest: backendKey.ContentDigest,
+		RuntimeProfileID: agentKey.RuntimeProfileID, RuntimeKind: agentKey.RuntimeKind, RuntimeMode: agentKey.RuntimeMode,
+		RuntimeVersion: agentKey.RuntimeVersion, RuntimeDigest: agentKey.RuntimeDigest,
+		RuntimeConfigDigest: agentKey.RuntimeConfigDigest, RuntimeGovernance: agentKey.RuntimeGovernance,
 	}, nil
 }
 

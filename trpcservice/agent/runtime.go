@@ -20,36 +20,50 @@ type AgentExecutionSnapshot struct {
 // FactoryCacheKey is the comparable identity for one materialized Agent.
 // Versions prevent mutable tenant or App metadata from reusing stale entries.
 type FactoryCacheKey struct {
-	TenantID      string
-	TenantVersion int64
-	AppID         string
-	AppVersion    int64
-	Revision      int64
-	ContentDigest string
+	TenantID            string
+	TenantVersion       int64
+	AppID               string
+	AppVersion          int64
+	Revision            int64
+	ContentDigest       string
+	RuntimeProfileID    string
+	RuntimeKind         string
+	RuntimeMode         string
+	RuntimeVersion      string
+	RuntimeDigest       string
+	RuntimeConfigDigest string
+	RuntimeGovernance   string
 }
 
 // LLMAgentFactoryInput is the provider-neutral subset mapped into
 // tRPC-Agent-Go's LLMAgent and runtime options by a later dependency resolver.
 // References remain IDs; secrets and live clients are intentionally absent.
 type LLMAgentFactoryInput struct {
-	TenantID          string
-	TenantVersion     int64
-	AppID             string
-	AppKey            string
-	AppVersion        int64
-	DisplayName       string
-	Name              string
-	Description       string
-	Revision          int64
-	ContentDigest     string
-	Kind              Kind
-	SchemaVersion     int
-	Instruction       string
-	GlobalInstruction string
-	ModelProfileID    string
-	Generation        GenerationConfig
-	Runtime           RuntimePolicy
-	Tools             []ToolAuthorization
+	TenantID            string
+	TenantVersion       int64
+	AppID               string
+	AppKey              string
+	AppVersion          int64
+	DisplayName         string
+	Name                string
+	Description         string
+	Revision            int64
+	ContentDigest       string
+	Kind                Kind
+	SchemaVersion       int
+	Instruction         string
+	GlobalInstruction   string
+	ModelProfileID      string
+	Generation          GenerationConfig
+	Runtime             RuntimePolicy
+	Tools               []ToolAuthorization
+	RuntimeProfileID    string
+	RuntimeKind         string
+	RuntimeMode         string
+	RuntimeVersion      string
+	RuntimeDigest       string
+	RuntimeConfigDigest string
+	RuntimeGovernance   string
 }
 
 // Clone returns a defensive copy of Factory input pointer and slice fields.
@@ -136,10 +150,13 @@ func (snapshot AgentExecutionSnapshot) CacheKey() (FactoryCacheKey, error) {
 	if err := snapshot.validate(); err != nil {
 		return FactoryCacheKey{}, err
 	}
+	profileID, kind, mode, version, digest, configDigest, governance := snapshot.revision.RuntimeIdentity()
 	return FactoryCacheKey{
 		TenantID: snapshot.tenant.TenantID, TenantVersion: snapshot.tenant.Version,
 		AppID: snapshot.app.AppID, AppVersion: snapshot.app.Version,
 		Revision: snapshot.revision.Revision, ContentDigest: snapshot.revision.ContentDigest,
+		RuntimeProfileID: profileID, RuntimeKind: kind, RuntimeMode: mode, RuntimeVersion: version,
+		RuntimeDigest: digest, RuntimeConfigDigest: configDigest, RuntimeGovernance: governance,
 	}, nil
 }
 
@@ -150,6 +167,7 @@ func (snapshot AgentExecutionSnapshot) FactoryInput() (LLMAgentFactoryInput, err
 	if err := snapshot.validate(); err != nil {
 		return LLMAgentFactoryInput{}, err
 	}
+	profileID, kind, mode, version, digest, configDigest, governance := snapshot.revision.RuntimeIdentity()
 	return LLMAgentFactoryInput{
 		TenantID: snapshot.tenant.TenantID, TenantVersion: snapshot.tenant.Version,
 		AppID: snapshot.app.AppID, AppKey: snapshot.app.AppKey, AppVersion: snapshot.app.Version,
@@ -159,7 +177,9 @@ func (snapshot AgentExecutionSnapshot) FactoryInput() (LLMAgentFactoryInput, err
 		SchemaVersion: snapshot.revision.SchemaVersion, Instruction: snapshot.revision.Instruction,
 		GlobalInstruction: snapshot.revision.GlobalInstruction, ModelProfileID: snapshot.revision.ModelProfileID,
 		Generation: cloneGenerationConfig(snapshot.revision.Generation), Runtime: snapshot.revision.Runtime,
-		Tools: cloneTools(snapshot.revision.Tools),
+		Tools:            cloneTools(snapshot.revision.Tools),
+		RuntimeProfileID: profileID, RuntimeKind: kind, RuntimeMode: mode, RuntimeVersion: version,
+		RuntimeDigest: digest, RuntimeConfigDigest: configDigest, RuntimeGovernance: governance,
 	}, nil
 }
 
