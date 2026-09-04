@@ -201,3 +201,109 @@ func TestCloseCancelsBlockingEmbedder(t *testing.T) {
 	}
 	close(release)
 }
+
+func TestProviderCompatibilityBoundariesRejectForeignTenants(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectQuery("SELECT knowledge_id,document_id,chunk_id FROM public\\.runtime_pgvector_documents WHERE tenant_id=\\$1").WithArgs("tenant-a", "knowledge").WillReturnRows(sqlmock.NewRows([]string{"knowledge_id", "document_id", "chunk_id"}))
+	store, err := pgvector.New(db, "tenant-a", pgvector.Config{Dimension: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	foreign := runtimestorage.KnowledgeDocument{TenantID: "tenant-b", DocumentID: "doc", Content: "text"}
+	if _, err := store.PutDocument(context.Background(), pgvector.DocumentInput{}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("PutDocument invalid input = %v", err)
+	}
+	if _, err := store.GetDocument(context.Background(), "", "", ""); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("GetDocument invalid key = %v", err)
+	}
+	if _, err := store.SearchDocuments(context.Background(), []float64{1}, pgvector.SearchOptions{}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("SearchDocuments invalid embedding = %v", err)
+	}
+	if err := store.Reindex(context.Background(), "", "", ""); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("Reindex invalid key = %v", err)
+	}
+	if _, err := store.PutKnowledge(context.Background(), foreign); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("PutKnowledge foreign tenant = %v", err)
+	}
+	if _, err := store.GetKnowledge(context.Background(), "tenant-b", "doc"); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("GetKnowledge foreign tenant = %v", err)
+	}
+	if _, err := store.SearchKnowledge(context.Background(), "tenant-b", []float64{1, 0}, 1); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("SearchKnowledge foreign tenant = %v", err)
+	}
+	if err := store.DeleteKnowledge(context.Background(), "tenant-b", "doc"); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("DeleteKnowledge foreign tenant = %v", err)
+	}
+	vector := runtimestorage.VectorRecord{TenantID: "tenant-b", DocumentID: "doc"}
+	if err := store.UpsertVector(context.Background(), vector); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("UpsertVector foreign tenant = %v", err)
+	}
+	if _, err := store.SearchVectors(context.Background(), "tenant-b", []float64{1, 0}, 1); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("SearchVectors foreign tenant = %v", err)
+	}
+	if err := store.DeleteVector(context.Background(), "tenant-b", "doc"); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("DeleteVector foreign tenant = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProviderPingAndDeleteBoundaries(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectQuery("SELECT knowledge_id,document_id,chunk_id FROM public\\.runtime_pgvector_documents WHERE tenant_id=\\$1").WithArgs("tenant-a", "knowledge").WillReturnRows(sqlmock.NewRows([]string{"knowledge_id", "document_id", "chunk_id"}))
+	store, err := pgvector.New(db, "tenant-a", pgvector.Config{Dimension: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	mock.ExpectPing()
+	if err := store.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectExec("UPDATE public\\.runtime_pgvector_documents SET index_status='deleted'").WithArgs("tenant-a", "knowledge", "knowledge", "doc", "chunk").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := store.Delete(context.Background(), "knowledge", "doc", "chunk"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEmbeddingFailureIsFencedAndClassified(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectQuery("SELECT knowledge_id,document_id,chunk_id FROM public\\.runtime_pgvector_documents WHERE tenant_id=\\$1").WithArgs("tenant-a", "knowledge").WillReturnRows(sqlmock.NewRows([]string{"knowledge_id", "document_id", "chunk_id"}))
+	embedder := pgvector.EmbeddingFunc(func(context.Context, string) ([]float64, error) {
+		return nil, pgvector.ErrEmbedding
+	})
+	store, err := pgvector.New(db, "tenant-a", pgvector.Config{Dimension: 2, Embedder: embedder, MaxAttempts: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	row := sqlmock.NewRows([]string{"tenant_id", "knowledge_id", "document_id", "chunk_id", "source", "source_version", "content", "content_ref", "metadata", "embedding_model", "embedding_version", "embedding_dimension", "checksum", "version", "index_status", "attempts", "last_error_class", "deleted_at", "created_at", "updated_at"}).AddRow("tenant-a", "knowledge", "doc", "chunk", "", "", "text", "", []byte(`{}`), "deterministic", "v1", 2, "checksum", int64(1), "pending", 0, "", nil, when, when)
+	mock.ExpectQuery("INSERT INTO public\\.runtime_pgvector_documents").WillReturnRows(row)
+	mock.ExpectQuery("SELECT content,embedding_model,embedding_version").WillReturnRows(sqlmock.NewRows([]string{"content", "embedding_model", "embedding_version", "embedding_dimension", "version", "index_status", "embedding"}).AddRow("text", "deterministic", "v1", 2, 1, "pending", ""))
+	mock.ExpectExec("UPDATE public\\.runtime_pgvector_documents SET index_status=CASE").WithArgs("tenant-a", "knowledge", "knowledge", "doc", "chunk", 1, 2, "provider_error").WillReturnResult(sqlmock.NewResult(0, 1))
+	if _, err := store.Upsert(context.Background(), pgvector.DocumentInput{KnowledgeID: "knowledge", DocumentID: "doc", ChunkID: "chunk", Content: "text", Checksum: "checksum"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
