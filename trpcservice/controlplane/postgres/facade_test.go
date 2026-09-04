@@ -3,8 +3,8 @@ package postgres
 import (
 	"database/sql"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/agent/postgres"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -46,7 +46,7 @@ func NewTenantRepository(db *sql.DB) *TenantRepository {
 	return tenantpostgres.NewRepository(db)
 }
 
-func encodeAgentRevisionParts(revision agent.Revision) ([]byte, []byte, []byte, error) {
+func encodeAgentRevisionParts(revision appmodel.Revision) ([]byte, []byte, []byte, error) {
 	generation, err := storagepostgres.EncodeJSON(revision.Generation)
 	if err != nil {
 		return nil, nil, nil, err

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
@@ -19,14 +19,14 @@ import (
 
 func TestMediaReplyToolRespectsRevisionAuthorization(t *testing.T) {
 	registry := DefaultRegistry()
-	tools, err := registry.Resolve([]agent.ToolAuthorization{{ToolID: SendTestImageID, Required: true}})
+	tools, err := registry.Resolve([]appmodel.ToolAuthorization{{ToolID: SendTestImageID, Required: true}})
 	if err != nil || len(tools) != 1 || tools[0].Declaration().Name != SendTestImageID {
 		t.Fatalf("authorized tools = %#v, err=%v", tools, err)
 	}
-	if tools, err := registry.Resolve([]agent.ToolAuthorization{{ToolID: "unknown"}}); err != nil || len(tools) != 0 {
+	if tools, err := registry.Resolve([]appmodel.ToolAuthorization{{ToolID: "unknown"}}); err != nil || len(tools) != 0 {
 		t.Fatalf("optional unknown tools = %#v, err=%v", tools, err)
 	}
-	if _, err := registry.Resolve([]agent.ToolAuthorization{{ToolID: "unknown", Required: true}}); !errors.Is(err, ErrRequiredUnavailable) {
+	if _, err := registry.Resolve([]appmodel.ToolAuthorization{{ToolID: "unknown", Required: true}}); !errors.Is(err, ErrRequiredUnavailable) {
 		t.Fatalf("required unknown tool error = %v", err)
 	}
 }
@@ -57,7 +57,7 @@ func TestMediaReplyToolStoresBoundAttachmentWithoutExposingIt(t *testing.T) {
 
 func resolveTestImageTool(t *testing.T) trpctool.CallableTool {
 	t.Helper()
-	tools, err := DefaultRegistry().Resolve([]agent.ToolAuthorization{{ToolID: SendTestImageID}})
+	tools, err := DefaultRegistry().Resolve([]appmodel.ToolAuthorization{{ToolID: SendTestImageID}})
 	if err != nil || len(tools) != 1 {
 		t.Fatalf("tool resolution = %#v, err=%v", tools, err)
 	}

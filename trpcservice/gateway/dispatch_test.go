@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -426,12 +426,12 @@ func TestDispatcherCancellationFinalizesAuditAndHandoff(t *testing.T) {
 func TestDispatcherAuditsCanarySelectionBeforeExecutionStart(t *testing.T) {
 	fixture := newGatewayFixture(t)
 	current, candidate := int64(1), int64(2)
-	app := fixture.app.Clone()
-	app.CurrentRevision, app.CanaryRevision = &current, &candidate
+	appRoot := fixture.app.Clone()
+	appRoot.CurrentRevision, appRoot.CanaryRevision = &current, &candidate
 	candidateRevision := fixture.revision.Clone()
 	candidateRevision.Revision = candidate
 	resolverConfig := resolverTestConfig(fixture)
-	resolverConfig.Apps = resolverAgentRepository{Repository: fixture.apps, getFn: func(context.Context, string, string) (*agent.App, error) { return &app, nil }, getRevisionFn: func(_ context.Context, _ string, _ string, revision int64) (*agent.Revision, error) {
+	resolverConfig.Apps = resolverAgentRepository{Repository: fixture.apps, getFn: func(context.Context, string, string) (*appmodel.App, error) { return &appRoot, nil }, getRevisionFn: func(_ context.Context, _ string, _ string, revision int64) (*appmodel.Revision, error) {
 		if revision == candidate {
 			return &candidateRevision, nil
 		}
@@ -462,7 +462,7 @@ func TestDispatcherAuditsCanarySelectionBeforeExecutionStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	dispatcher.auditWriter = writer
-	principal := mustAPIPrincipal(t, fixture.tenant.TenantID, app.AppID)
+	principal := mustAPIPrincipal(t, fixture.tenant.TenantID, appRoot.AppID)
 	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "canary-audit", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
 	if err != nil {
 		t.Fatal(err)
@@ -1022,7 +1022,7 @@ func newToolMediaDispatcher(t *testing.T, fixture gatewayFixture) (*Dispatcher, 
 }
 
 func testImageToolEvents(ctx context.Context) (<-chan *trpcevent.Event, error) {
-	tools, err := servicetool.DefaultRegistry().Resolve([]agent.ToolAuthorization{{ToolID: servicetool.SendTestImageID, Required: true}})
+	tools, err := servicetool.DefaultRegistry().Resolve([]appmodel.ToolAuthorization{{ToolID: servicetool.SendTestImageID, Required: true}})
 	if err != nil {
 		return nil, err
 	}
@@ -1101,7 +1101,7 @@ func TestDispatcherToolFailureMaterializesFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	runnerValue := &testRunner{runFn: func(ctx context.Context, _ string, _ string, _ trpcmodel.Message, _ ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
-		tools, resolveErr := servicetool.DefaultRegistry().Resolve([]agent.ToolAuthorization{{ToolID: servicetool.SendTestImageID}})
+		tools, resolveErr := servicetool.DefaultRegistry().Resolve([]appmodel.ToolAuthorization{{ToolID: servicetool.SendTestImageID}})
 		if resolveErr != nil {
 			return nil, resolveErr
 		}

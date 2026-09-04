@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
@@ -17,7 +17,7 @@ import (
 // not depend on an InMemory implementation.
 type PlanResolverConfig struct {
 	Tenants        tenant.Repository
-	Apps           agent.Repository
+	Apps           appmodel.Repository
 	Models         model.Repository
 	Backends       backend.Repository
 	ModelCatalog   *model.ProviderCatalog
@@ -28,7 +28,7 @@ type PlanResolverConfig struct {
 // Principal. It never accepts tenant/app/profile IDs from a request body.
 type PlanResolver struct {
 	tenants        tenant.Repository
-	apps           agent.Repository
+	apps           appmodel.Repository
 	models         model.Repository
 	backends       backend.Repository
 	modelCatalog   *model.ProviderCatalog
@@ -37,8 +37,8 @@ type PlanResolver struct {
 
 type resolvedPlanInputs struct {
 	tenantSnapshot tenant.ConfigurationSnapshot
-	app            *agent.App
-	revision       *agent.Revision
+	app            *appmodel.App
+	revision       *appmodel.Revision
 	model          *model.Profile
 	backend        *backend.Profile
 }

@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelsinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/telegram"
@@ -364,18 +364,18 @@ func newTrustedTarget(providerAccountID string) (channels.RoutingTarget, error) 
 	if err != nil {
 		return channels.RoutingTarget{}, errConfiguration
 	}
-	app, err := agent.NewApp(agent.CreateInput{
+	appRoot, err := appmodel.NewApp(appmodel.CreateInput{
 		TenantID: root.TenantID, AppKey: "telegram-e2e", DisplayName: "Telegram E2E", Description: "Deterministic Telegram transport test",
 	})
 	if err != nil {
 		return channels.RoutingTarget{}, errConfiguration
 	}
 	revision := int64(1)
-	app.Status = agent.StatusActive
-	app.CurrentRevision = &revision
-	app.Version++
-	app.UpdatedAt = app.CreatedAt.Add(time.Second)
-	if err := app.Validate(); err != nil {
+	appRoot.Status = appmodel.StatusActive
+	appRoot.CurrentRevision = &revision
+	appRoot.Version++
+	appRoot.UpdatedAt = appRoot.CreatedAt.Add(time.Second)
+	if err := appRoot.Validate(); err != nil {
 		return channels.RoutingTarget{}, errConfiguration
 	}
 	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelTelegram, "telegram-e2e")
@@ -387,7 +387,7 @@ func newTrustedTarget(providerAccountID string) (channels.RoutingTarget, error) 
 	secret := "telegram-e2e-verifier-secret"
 	binding, _, err := repository.Create(context.Background(), channels.CreateInput{
 		TenantID: root.TenantID, BindingKey: "telegram-e2e", Channel: channels.ChannelTelegram,
-		ProviderAccountID: providerAccountID, PublicRouteKeyDigest: routeDigest, AppID: app.AppID,
+		ProviderAccountID: providerAccountID, PublicRouteKeyDigest: routeDigest, AppID: appRoot.AppID,
 		SecretRef: "examples/telegram-e2e", // #nosec G101 -- symbolic fixture reference, not secret material.
 		Status:    channels.StatusActive,
 		Protocol:  channels.ProtocolConfiguration{Telegram: &channels.TelegramProtocolConfiguration{}},
@@ -417,7 +417,7 @@ func newTrustedTarget(providerAccountID string) (channels.RoutingTarget, error) 
 	if err != nil {
 		return channels.RoutingTarget{}, errConfiguration
 	}
-	target, err := channels.NewRoutingTarget(snapshot, binding, app, verified)
+	target, err := channels.NewRoutingTarget(snapshot, binding, appRoot, verified)
 	if err != nil {
 		return channels.RoutingTarget{}, errConfiguration
 	}

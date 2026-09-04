@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
@@ -1120,13 +1120,13 @@ func (r targetTenantRepository) Get(_ context.Context, tenantID string) (*tenant
 }
 
 type targetAppRepository struct {
-	agent.Repository
-	value *agent.App
+	appmodel.Repository
+	value *appmodel.App
 }
 
-func (r targetAppRepository) Get(_ context.Context, tenantID, appID string) (*agent.App, error) {
+func (r targetAppRepository) Get(_ context.Context, tenantID, appID string) (*appmodel.App, error) {
 	if r.value == nil || r.value.TenantID != tenantID || r.value.AppID != appID {
-		return nil, agent.ErrNotFound
+		return nil, appmodel.ErrNotFound
 	}
 	value := r.value.Clone()
 	return &value, nil
@@ -1138,25 +1138,25 @@ func testRoutingTarget(t *testing.T) (channels.RoutingTarget, targetConsumer) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, err := agent.NewApp(agent.CreateInput{TenantID: root.TenantID, AppKey: "aibot", DisplayName: "AI Bot", Description: "test"})
+	appRoot, err := appmodel.NewApp(appmodel.CreateInput{TenantID: root.TenantID, AppKey: "aibot", DisplayName: "AI Bot", Description: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	revision := int64(1)
-	app.Status, app.CurrentRevision, app.Version, app.UpdatedAt = agent.StatusActive, &revision, 2, app.CreatedAt.Add(time.Second)
-	if err := app.Validate(); err != nil {
+	appRoot.Status, appRoot.CurrentRevision, appRoot.Version, appRoot.UpdatedAt = appmodel.StatusActive, &revision, 2, appRoot.CreatedAt.Add(time.Second)
+	if err := appRoot.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeComAIBot, "aibot-test-route")
 	if err != nil {
 		t.Fatal(err)
 	}
-	binding, err := channels.NewBinding(channels.CreateInput{TenantID: root.TenantID, BindingKey: "aibot", Channel: channels.ChannelWeComAIBot, ProviderAccountID: "bot-account", PublicRouteKeyDigest: routeDigest, AppID: app.AppID, SecretRef: "secret/aibot", Protocol: channels.ProtocolConfiguration{WeComAIBot: &channels.WeComAIBotProtocolConfiguration{BotID: "bot-1"}}, Status: channels.StatusActive})
+	binding, err := channels.NewBinding(channels.CreateInput{TenantID: root.TenantID, BindingKey: "aibot", Channel: channels.ChannelWeComAIBot, ProviderAccountID: "bot-account", PublicRouteKeyDigest: routeDigest, AppID: appRoot.AppID, SecretRef: "secret/aibot", Protocol: channels.ProtocolConfiguration{WeComAIBot: &channels.WeComAIBotProtocolConfiguration{BotID: "bot-1"}}, Status: channels.StatusActive})
 	if err != nil {
 		t.Fatal(err)
 	}
 	consumer := targetConsumer{binding: binding}
-	target, err := channels.ResolveConfiguredRoutingTarget(context.Background(), consumer, targetTenantRepository{value: root}, targetAppRepository{value: app}, root.TenantID, binding.BindingID)
+	target, err := channels.ResolveConfiguredRoutingTarget(context.Background(), consumer, targetTenantRepository{value: root}, targetAppRepository{value: appRoot}, root.TenantID, binding.BindingID)
 	if err != nil {
 		t.Fatal(err)
 	}

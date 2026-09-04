@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -395,7 +395,7 @@ func detachedCorrelationContext(parent context.Context, requestID, traceID strin
 }
 
 func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity) (result *durableExecution, err error) {
-	return dispatcher.claimInboundWithLease(ctx, principal, message, identity, durableInboundLeaseForRuntime(agent.DefaultRuntimePolicy()))
+	return dispatcher.claimInboundWithLease(ctx, principal, message, identity, durableInboundLeaseForRuntime(appmodel.DefaultRuntimePolicy()))
 }
 
 func (dispatcher *Dispatcher) claimInboundWithLease(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, leaseDuration time.Duration) (result *durableExecution, err error) {
@@ -403,7 +403,7 @@ func (dispatcher *Dispatcher) claimInboundWithLease(ctx context.Context, princip
 		return nil, nil
 	}
 	if leaseDuration <= 0 {
-		leaseDuration = durableInboundLeaseForRuntime(agent.DefaultRuntimePolicy())
+		leaseDuration = durableInboundLeaseForRuntime(appmodel.DefaultRuntimePolicy())
 	}
 	started := time.Now()
 	operationCtx, _, finish := observability.StartOperation(ctx, dispatcher.telemetry, observability.OperationStorageOperation, "storage")
@@ -461,10 +461,10 @@ func (dispatcher *Dispatcher) claimInboundWithLease(ctx context.Context, princip
 	return &durableExecution{store: store, tenantID: principal.TenantID(), eventID: event.EventID, owner: owner, fencingToken: running.FencingToken, replyTarget: event.ReplyTarget}, nil
 }
 
-func durableInboundLeaseForRuntime(policy agent.RuntimePolicy) time.Duration {
+func durableInboundLeaseForRuntime(policy appmodel.RuntimePolicy) time.Duration {
 	seconds := policy.ExecutionTimeoutSeconds
 	if seconds <= 0 {
-		seconds = agent.DefaultRuntimePolicy().ExecutionTimeoutSeconds
+		seconds = appmodel.DefaultRuntimePolicy().ExecutionTimeoutSeconds
 	}
 	return time.Duration(seconds)*time.Second + durableInboundLeaseGrace
 }

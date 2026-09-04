@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	agentinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	agentinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -234,15 +234,15 @@ func newDurableTelegramFixture(t *testing.T, providerAccountID string) durableTe
 		t.Fatal(err)
 	}
 	apps := agentinmemory.NewRepository()
-	app, err := apps.Create(ctx, agent.CreateInput{TenantID: root.TenantID, AppKey: "telegram-outbox-e2e", DisplayName: "Telegram Outbox E2E", Description: "Durable Telegram reply test"})
+	appRoot, err := apps.Create(ctx, appmodel.CreateInput{TenantID: root.TenantID, AppKey: "telegram-outbox-e2e", DisplayName: "Telegram Outbox E2E", Description: "Durable Telegram reply test"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft, err := apps.CreateDraft(ctx, agent.CreateDraftInput{TenantID: root.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version, Configuration: agent.DraftConfiguration{Description: "Telegram Outbox E2E", Instruction: "Reply deterministically.", ModelProfileID: modelProfile.ProfileID, Runtime: agent.DefaultRuntimePolicy()}})
+	draft, err := apps.CreateDraft(ctx, appmodel.CreateDraftInput{TenantID: root.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version, Configuration: appmodel.DraftConfiguration{Description: "Telegram Outbox E2E", Instruction: "Reply deterministically.", ModelProfileID: modelProfile.ProfileID, Runtime: appmodel.DefaultRuntimePolicy()}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	publishedApp, _, _, err := apps.Publish(ctx, agent.PublishInput{TenantID: root.TenantID, AppID: app.AppID, Revision: draft.Revision, ExpectedAppVersion: app.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: agentMetadata()})
+	publishedApp, _, _, err := apps.Publish(ctx, appmodel.PublishInput{TenantID: root.TenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: agentMetadata()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,8 +295,8 @@ func newDurableTelegramFixture(t *testing.T, providerAccountID string) durableTe
 	return durableTelegramFixture{target: target, resolver: planResolver}
 }
 
-func agentMetadata() agent.ChangeMetadata {
-	return agent.ChangeMetadata{ActorType: "example", ActorID: "telegram-outbox-e2e", Reason: "durable Telegram reply test", CorrelationID: "telegram-outbox-e2e"}
+func agentMetadata() appmodel.ChangeMetadata {
+	return appmodel.ChangeMetadata{ActorType: "example", ActorID: "telegram-outbox-e2e", Reason: "durable Telegram reply test", CorrelationID: "telegram-outbox-e2e"}
 }
 
 func modelMetadata() model.ChangeMetadata {

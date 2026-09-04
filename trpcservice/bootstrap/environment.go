@@ -21,9 +21,10 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	agentmysql "github.com/XnLemon/trpc-agent-service/trpcservice/agent/mysql"
-	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/agent/postgres"
+	agentsessionstore "github.com/XnLemon/trpc-agent-service/trpcservice/agent/sessionstore"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	agentmysql "github.com/XnLemon/trpc-agent-service/trpcservice/app/mysql"
+	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	auditpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/audit/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
@@ -37,7 +38,6 @@ import (
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
-	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
@@ -435,7 +435,7 @@ func openPostgresEnvironmentDatabaseForConfig(ctx context.Context, config enviro
 	return db, nil
 }
 
-func environmentRepositories(config environmentConfig, db *sql.DB) (tenant.Repository, agent.Repository, channels.CandidateConsumer, audit.Writer, error) {
+func environmentRepositories(config environmentConfig, db *sql.DB) (tenant.Repository, appmodel.Repository, channels.CandidateConsumer, audit.Writer, error) {
 	if config.driver == ControlPlaneDriverMySQL {
 		return tenantmysql.NewRepository(db), agentmysql.NewRepository(db), channelmysql.NewRepository(db), nil, nil
 	}
@@ -452,7 +452,7 @@ func environmentRepositories(config environmentConfig, db *sql.DB) (tenant.Repos
 	return tenantRepo, appRepo, channelRepo, auditWriter, err
 }
 
-func environmentWeComComponents(config environmentConfig, channelsRepo channels.CandidateConsumer, tenantsRepo tenant.Repository, appsRepo agent.Repository, runtimeStore runtimestorage.RuntimeStore, auditWriter audit.Writer) (func(gateway.DispatchService) (http.Handler, error), outbox.Provider, error) {
+func environmentWeComComponents(config environmentConfig, channelsRepo channels.CandidateConsumer, tenantsRepo tenant.Repository, appsRepo appmodel.Repository, runtimeStore runtimestorage.RuntimeStore, auditWriter audit.Writer) (func(gateway.DispatchService) (http.Handler, error), outbox.Provider, error) {
 	if config.wecom == nil {
 		return nil, nil, nil
 	}
@@ -471,7 +471,7 @@ func environmentWeComComponents(config environmentConfig, channelsRepo channels.
 	return factory, &wecom.BindingProvider{Bindings: channelsRepo, Credentials: credentials}, nil
 }
 
-func environmentWeComAIBotComponents(ctx context.Context, config environmentConfig, channelsRepo channels.CandidateConsumer, tenantsRepo tenant.Repository, appsRepo agent.Repository) ([]func(gateway.DispatchService) (channels.PollingAdapter, error), map[string]struct{}, error) {
+func environmentWeComAIBotComponents(ctx context.Context, config environmentConfig, channelsRepo channels.CandidateConsumer, tenantsRepo tenant.Repository, appsRepo appmodel.Repository) ([]func(gateway.DispatchService) (channels.PollingAdapter, error), map[string]struct{}, error) {
 	if len(config.wecomAIBots) == 0 {
 		return nil, nil, nil
 	}
@@ -1583,7 +1583,7 @@ func (provider environmentRuntimeCapabilityProvider) validateRedisBinding(bindin
 
 func (provider environmentRuntimeCapabilityProvider) newCapability(ctx context.Context, input backend.StorageFactoryInput) (any, error) {
 	if provider.capability == backend.CapabilitySession {
-		return runtimesessionpostgres.NewWithObservability(input.TenantID, provider.delegate, provider.store, provider.telemetry, provider.backend)
+		return agentsessionstore.NewWithObservability(input.TenantID, provider.delegate, provider.store, provider.telemetry, provider.backend)
 	}
 	// The runtime store is owned by the environment, not by an individual
 	// tenant CapabilitySet. Wrap it so factory cleanup cannot stop shared
@@ -1654,7 +1654,7 @@ func (provider environmentSessionCapabilityProvider) New(ctx context.Context, in
 	if ctx == nil {
 		return nil, context.Canceled
 	}
-	return runtimesessionpostgres.NewWithObservability(input.TenantID, provider.delegate, provider.store, provider.telemetry, provider.backend)
+	return agentsessionstore.NewWithObservability(input.TenantID, provider.delegate, provider.store, provider.telemetry, provider.backend)
 }
 
 func (environmentModelFactory) New(ctx context.Context, input modelprofile.ModelFactoryInput, secret modelprofile.SecretValue) (trpcmodel.Model, error) {

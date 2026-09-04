@@ -1,5 +1,5 @@
 // Package runtime composes immutable control-plane snapshots into one
-// tenant-scoped execution plan and assembles the minimum Runner spine.
+// tenant-scoped execution plan and exposes internal scheduling boundaries.
 package runtime
 
 import (
@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -46,8 +47,8 @@ type ExecutionPlan struct {
 // the same tenant and the Model Profile must satisfy the Revision reference.
 func NewExecutionPlan(
 	tenantSnapshot tenant.ConfigurationSnapshot,
-	app *agent.App,
-	revision *agent.Revision,
+	appRoot *appmodel.App,
+	revision *appmodel.Revision,
 	modelProfile *modelprofile.Profile,
 	modelCatalog *modelprofile.ProviderCatalog,
 	backendProfile *backend.Profile,
@@ -60,10 +61,10 @@ func NewExecutionPlan(
 	if !tenantValue.CanAcceptExecution() {
 		return ExecutionPlan{}, errors.New("invalid execution plan: tenant cannot accept execution")
 	}
-	if app != nil && revision != nil && app.AppID != revision.AppID {
+	if appRoot != nil && revision != nil && appRoot.AppID != revision.AppID {
 		return ExecutionPlan{}, errors.New("invalid execution plan: revision does not belong to App")
 	}
-	agentSnapshot, err := agent.NewAgentExecutionSnapshot(tenantSnapshot, app, revision)
+	agentSnapshot, err := agent.NewAgentExecutionSnapshot(tenantSnapshot, appRoot, revision)
 	if err != nil {
 		return ExecutionPlan{}, fmt.Errorf("invalid execution plan: agent snapshot: %w", err)
 	}
@@ -148,6 +149,32 @@ func (plan ExecutionPlan) StorageFactoryInput() (backend.StorageFactoryInput, er
 		return backend.StorageFactoryInput{}, err
 	}
 	return plan.backend.FactoryInput()
+}
+
+// AgentRunnerInput projects a validated plan into the external-agent adapter
+// boundary. Runtime owns the complete plan; agent owns tRPC-Agent-Go wiring.
+func (plan ExecutionPlan) AgentRunnerInput() (agent.RunnerInput, error) {
+	if err := plan.validate(); err != nil {
+		return agent.RunnerInput{}, err
+	}
+	agentInput, err := plan.agent.FactoryInput()
+	if err != nil {
+		return agent.RunnerInput{}, err
+	}
+	modelInput, err := plan.model.FactoryInput()
+	if err != nil {
+		return agent.RunnerInput{}, err
+	}
+	storageInput, err := plan.backend.FactoryInput()
+	if err != nil {
+		return agent.RunnerInput{}, err
+	}
+	return agent.RunnerInput{
+		Tenant:  plan.Tenant(),
+		Agent:   agentInput,
+		Model:   modelInput,
+		Storage: storageInput,
+	}, nil
 }
 
 // WithExecutionPlan carries a validated defensive plan in a Context.

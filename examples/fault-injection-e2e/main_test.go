@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	agentinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	agentinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
@@ -236,7 +236,7 @@ func TestFaultInjectionRegistryConstructionE2E(t *testing.T) {
 
 type fixture struct {
 	tenantA, tenantB *tenant.Tenant
-	appA, appB       *agent.App
+	appA, appB       *appmodel.App
 	resolver         *gateway.PlanResolver
 	dispatcher       *gateway.Dispatcher
 	runner           *faultRunner
@@ -282,7 +282,7 @@ func newFixture(t *testing.T) fixture {
 	return fixture{tenantA: tenantA, tenantB: tenantB, appA: appA, appB: appB, resolver: resolver, dispatcher: dispatcher, runner: runner, planA: planA, planB: planB, modelCatalog: modelCatalog, backendCatalog: backendCatalog}
 }
 
-func makePlan(t *testing.T, root *tenant.Tenant, app *agent.App, apps *agentinmemory.InMemoryRepository, models *modelinmemory.InMemoryRepository, backends *backendinmemory.InMemoryRepository, modelCatalog *model.ProviderCatalog, backendCatalog *backend.ProviderCatalog) runtime.ExecutionPlan {
+func makePlan(t *testing.T, root *tenant.Tenant, app *appmodel.App, apps *agentinmemory.InMemoryRepository, models *modelinmemory.InMemoryRepository, backends *backendinmemory.InMemoryRepository, modelCatalog *model.ProviderCatalog, backendCatalog *backend.ProviderCatalog) runtime.ExecutionPlan {
 	t.Helper()
 	if app.CurrentRevision == nil || root.DefaultBackendProfileID == nil {
 		t.Fatal("fixture did not publish default references")
@@ -311,7 +311,7 @@ func makePlan(t *testing.T, root *tenant.Tenant, app *agent.App, apps *agentinme
 	return plan
 }
 
-func createTenant(t *testing.T, tenants *tenantinmemory.InMemoryRepository, apps *agentinmemory.InMemoryRepository, models *modelinmemory.InMemoryRepository, backends *backendinmemory.InMemoryRepository, suffix string) (*tenant.Tenant, *agent.App) {
+func createTenant(t *testing.T, tenants *tenantinmemory.InMemoryRepository, apps *agentinmemory.InMemoryRepository, models *modelinmemory.InMemoryRepository, backends *backendinmemory.InMemoryRepository, suffix string) (*tenant.Tenant, *appmodel.App) {
 	t.Helper()
 	ctx := context.Background()
 	root, err := tenants.Create(ctx, tenant.CreateInput{TenantKey: "fault-tenant-" + suffix, DisplayName: "Fault Tenant " + suffix, AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1})
@@ -326,15 +326,15 @@ func createTenant(t *testing.T, tenants *tenantinmemory.InMemoryRepository, apps
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, err := apps.Create(ctx, agent.CreateInput{TenantID: root.TenantID, AppKey: "fault-app-" + suffix, DisplayName: "Fault App " + suffix, Description: "Deterministic fault-injection E2E"})
+	appRoot, err := apps.Create(ctx, appmodel.CreateInput{TenantID: root.TenantID, AppKey: "fault-app-" + suffix, DisplayName: "Fault App " + suffix, Description: "Deterministic fault-injection E2E"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft, err := apps.CreateDraft(ctx, agent.CreateDraftInput{TenantID: root.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version, Configuration: agent.DraftConfiguration{Instruction: "Reply deterministically.", ModelProfileID: modelProfile.ProfileID, Runtime: agent.DefaultRuntimePolicy()}})
+	draft, err := apps.CreateDraft(ctx, appmodel.CreateDraftInput{TenantID: root.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version, Configuration: appmodel.DraftConfiguration{Instruction: "Reply deterministically.", ModelProfileID: modelProfile.ProfileID, Runtime: appmodel.DefaultRuntimePolicy()}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	published, _, _, err := apps.Publish(ctx, agent.PublishInput{TenantID: root.TenantID, AppID: app.AppID, Revision: draft.Revision, ExpectedAppVersion: app.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: agent.ChangeMetadata{ActorType: "example", ActorID: "fault-e2e", Reason: "fixture", CorrelationID: "fault-e2e"}})
+	published, _, _, err := apps.Publish(ctx, appmodel.PublishInput{TenantID: root.TenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: appmodel.ChangeMetadata{ActorType: "example", ActorID: "fault-e2e", Reason: "fixture", CorrelationID: "fault-e2e"}})
 	if err != nil {
 		t.Fatal(err)
 	}

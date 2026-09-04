@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -271,7 +271,7 @@ type routingTargetCapability struct {
 // NewRoutingTarget validates the trusted Tenant snapshot, current Binding,
 // active App, and verifier result as one boundary. It ignores all external
 // route hints and does not expose SecretRef.
-func NewRoutingTarget(tenantSnapshot tenant.ConfigurationSnapshot, binding *Binding, app *agent.App, verified VerifiedBinding) (RoutingTarget, error) {
+func NewRoutingTarget(tenantSnapshot tenant.ConfigurationSnapshot, binding *Binding, app *appmodel.App, verified VerifiedBinding) (RoutingTarget, error) {
 	tenantValue := tenantSnapshot.Tenant()
 	if err := tenantValue.Validate(); err != nil || !tenantValue.CanAcceptExecution() {
 		return RoutingTarget{}, fmt.Errorf("%w: tenant snapshot cannot accept inbound routing", ErrVerificationFailed)
@@ -309,7 +309,7 @@ func ResolveCandidateRoutingTarget(
 	ctx context.Context,
 	consumer CandidateConsumer,
 	tenants tenant.Repository,
-	apps agent.Repository,
+	apps appmodel.Repository,
 	candidate CandidateBindingContext,
 	verify func(context.Context, Binding) error,
 ) (RoutingTarget, error) {
@@ -344,7 +344,7 @@ func ResolveCandidateRoutingTarget(
 // ResolveConfiguredRoutingTarget seals a target for a process-configured
 // Binding after reading the current trusted control-plane state. BindingID is
 // an operator-owned startup setting, never an inbound routing hint.
-func ResolveConfiguredRoutingTarget(ctx context.Context, consumer CandidateConsumer, tenants tenant.Repository, apps agent.Repository, tenantID, bindingID string) (RoutingTarget, error) {
+func ResolveConfiguredRoutingTarget(ctx context.Context, consumer CandidateConsumer, tenants tenant.Repository, apps appmodel.Repository, tenantID, bindingID string) (RoutingTarget, error) {
 	if ctx == nil {
 		return RoutingTarget{}, ErrVerificationFailed
 	}
@@ -364,7 +364,7 @@ func ResolveConfiguredRoutingTarget(ctx context.Context, consumer CandidateConsu
 	return routingTargetForBinding(ctx, tenants, apps, binding)
 }
 
-func routingTargetForBinding(ctx context.Context, tenants tenant.Repository, apps agent.Repository, binding *Binding) (RoutingTarget, error) {
+func routingTargetForBinding(ctx context.Context, tenants tenant.Repository, apps appmodel.Repository, binding *Binding) (RoutingTarget, error) {
 	if binding == nil {
 		return RoutingTarget{}, ErrVerificationFailed
 	}

@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -1947,11 +1947,11 @@ func (repository dynamicTenantRepository) Get(_ context.Context, tenantID string
 }
 
 type dynamicAppRepository struct {
-	agent.Repository
-	value *agent.App
+	appmodel.Repository
+	value *appmodel.App
 }
 
-func (repository dynamicAppRepository) Get(_ context.Context, tenantID, appID string) (*agent.App, error) {
+func (repository dynamicAppRepository) Get(_ context.Context, tenantID, appID string) (*appmodel.App, error) {
 	if repository.value == nil || repository.value.TenantID != tenantID || repository.value.AppID != appID {
 		return nil, channels.ErrNotFound
 	}
@@ -1986,14 +1986,14 @@ func dynamicTestTenant(t *testing.T) *tenant.Tenant {
 	return value
 }
 
-func dynamicTestApp(t *testing.T, tenantID string) *agent.App {
+func dynamicTestApp(t *testing.T, tenantID string) *appmodel.App {
 	t.Helper()
-	value, err := agent.NewApp(agent.CreateInput{TenantID: tenantID, AppKey: "dynamic", DisplayName: "Dynamic App", Description: "callback test"})
+	value, err := appmodel.NewApp(appmodel.CreateInput{TenantID: tenantID, AppKey: "dynamic", DisplayName: "Dynamic App", Description: "callback test"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	revision := int64(1)
-	value.Status = agent.StatusActive
+	value.Status = appmodel.StatusActive
 	value.CurrentRevision = &revision
 	value.Version = 2
 	value.UpdatedAt = value.CreatedAt.Add(time.Second)

@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -1289,7 +1289,7 @@ func newTrustedTarget(t *testing.T, channel channels.Channel, tenantKey, provide
 	return target
 }
 
-func activeTenantApp(t *testing.T, key string) (*tenant.Tenant, tenant.ConfigurationSnapshot, *agent.App) {
+func activeTenantApp(t *testing.T, key string) (*tenant.Tenant, tenant.ConfigurationSnapshot, *appmodel.App) {
 	t.Helper()
 	root, err := tenant.NewTenant(tenant.CreateInput{TenantKey: key, DisplayName: "Telegram Test Tenant", AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1})
 	if err != nil {
@@ -1299,12 +1299,12 @@ func activeTenantApp(t *testing.T, key string) (*tenant.Tenant, tenant.Configura
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, err := agent.NewApp(agent.CreateInput{TenantID: root.TenantID, AppKey: "support", DisplayName: "Support", Description: "offline Telegram test"})
+	app, err := appmodel.NewApp(appmodel.CreateInput{TenantID: root.TenantID, AppKey: "support", DisplayName: "Support", Description: "offline Telegram test"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	revision := int64(1)
-	app.Status = agent.StatusActive
+	app.Status = appmodel.StatusActive
 	app.CurrentRevision = &revision
 	app.Version = 2
 	app.UpdatedAt = app.CreatedAt.Add(time.Second)

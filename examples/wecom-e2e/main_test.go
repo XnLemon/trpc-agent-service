@@ -23,8 +23,8 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	agentinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	agentinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -186,15 +186,15 @@ func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture
 		t.Fatal(err)
 	}
 	appRepo := agentinmemory.NewRepository()
-	app, err := appRepo.Create(ctx, agent.CreateInput{TenantID: root.TenantID, AppKey: "wecom-e2e", DisplayName: "WeCom E2E", Description: "Deterministic WeCom callback"})
+	appRoot, err := appRepo.Create(ctx, appmodel.CreateInput{TenantID: root.TenantID, AppKey: "wecom-e2e", DisplayName: "WeCom E2E", Description: "Deterministic WeCom callback"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft, err := appRepo.CreateDraft(ctx, agent.CreateDraftInput{TenantID: root.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version, Configuration: agent.DraftConfiguration{Instruction: "Reply deterministically.", ModelProfileID: modelProfile.ProfileID, Runtime: agent.DefaultRuntimePolicy()}})
+	draft, err := appRepo.CreateDraft(ctx, appmodel.CreateDraftInput{TenantID: root.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version, Configuration: appmodel.DraftConfiguration{Instruction: "Reply deterministically.", ModelProfileID: modelProfile.ProfileID, Runtime: appmodel.DefaultRuntimePolicy()}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	published, _, _, err := appRepo.Publish(ctx, agent.PublishInput{TenantID: root.TenantID, AppID: app.AppID, Revision: draft.Revision, ExpectedAppVersion: app.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: agent.ChangeMetadata{ActorType: "example", ActorID: "wecom-e2e", Reason: "test", CorrelationID: "wecom-e2e"}})
+	published, _, _, err := appRepo.Publish(ctx, appmodel.PublishInput{TenantID: root.TenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: appmodel.ChangeMetadata{ActorType: "example", ActorID: "wecom-e2e", Reason: "test", CorrelationID: "wecom-e2e"}})
 	if err != nil {
 		t.Fatal(err)
 	}

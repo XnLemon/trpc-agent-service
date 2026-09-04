@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -115,7 +115,7 @@ type Config struct {
 
 	Candidates  channels.CandidateConsumer
 	Tenants     tenant.Repository
-	Apps        agent.Repository
+	Apps        appmodel.Repository
 	Credentials CredentialResolver
 	// AuditWriter receives mandatory accepted and duplicate ingress facts.
 	AuditWriter audit.Writer
@@ -146,7 +146,7 @@ type Handler struct {
 	dynamic            bool
 	candidates         channels.CandidateConsumer
 	tenants            tenant.Repository
-	apps               agent.Repository
+	apps               appmodel.Repository
 	credentials        CredentialResolver
 	dispatcher         gateway.DispatchService
 	maxBodyBytes       int64
