@@ -75,3 +75,44 @@ func TestEnvironmentPGVectorCatalogValidatesNamespaceAndEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestEnvironmentPGVectorOptionParsingIsBounded(t *testing.T) {
+	options, err := parseEnvironmentPGVectorOptions(map[string]string{
+		"schema": "runtime", "collection": "docs", "embedding_model": "model-v2", "embedding_version": "v3",
+		"dimension": "64", "queue_size": "8", "workers": "2", "max_attempts": "5",
+	})
+	if err != nil || options.schema != "runtime" || options.collection != "docs" || options.dimension != 64 || options.queueSize != 8 || options.workers != 2 || options.maxAttempts != 5 {
+		t.Fatalf("parsed pgvector options = %#v, %v", options, err)
+	}
+	if defaults, err := parseEnvironmentPGVectorOptions(nil); err != nil || defaults.dimension != 32 || defaults.queueSize != 128 {
+		t.Fatalf("default pgvector options = %#v, %v", defaults, err)
+	}
+	for _, raw := range []map[string]string{
+		{"unknown": "value"},
+		{"schema": "bad value"},
+		{"dimension": "0"},
+		{"queue_size": "10001"},
+		{"workers": "nope"},
+		{"max_attempts": "101"},
+	} {
+		if _, err := parseEnvironmentPGVectorOptions(raw); err == nil {
+			t.Fatalf("invalid pgvector options accepted: %#v", raw)
+		}
+	}
+	if valueOr(map[string]string{"key": "  value  "}, "key", "fallback") != "value" || valueOr(nil, "key", "fallback") != "fallback" {
+		t.Fatal("valueOr did not apply trimming/default")
+	}
+	for _, endpoint := range []string{"postgres://db.example:5432", "postgresql://DB.EXAMPLE"} {
+		if !validEnvironmentPGVectorEndpoint(endpoint) {
+			t.Fatalf("valid endpoint rejected: %s", endpoint)
+		}
+	}
+	for _, endpoint := range []string{"", "https://db.example", "postgres://user@db.example", "postgres://db.example?sslmode=disable", "postgres://db.example#fragment"} {
+		if validEnvironmentPGVectorEndpoint(endpoint) {
+			t.Fatalf("invalid endpoint accepted: %s", endpoint)
+		}
+	}
+	if !samePostgresEndpoint("postgres://db.example", "postgresql://DB.EXAMPLE:5432") || samePostgresEndpoint("postgres://one", "postgres://two") || samePostgresEndpoint("not a URL", "postgres://db.example") {
+		t.Fatal("PostgreSQL endpoint equivalence is incorrect")
+	}
+}
