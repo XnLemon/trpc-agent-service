@@ -102,6 +102,9 @@ func TestEnvironmentPGVectorOptionParsingIsBounded(t *testing.T) {
 	if valueOr(map[string]string{"key": "  value  "}, "key", "fallback") != "value" || valueOr(nil, "key", "fallback") != "fallback" {
 		t.Fatal("valueOr did not apply trimming/default")
 	}
+}
+
+func TestEnvironmentPGVectorEndpointValidation(t *testing.T) {
 	for _, endpoint := range []string{"postgres://db.example:5432", "postgresql://DB.EXAMPLE"} {
 		if !validEnvironmentPGVectorEndpoint(endpoint) {
 			t.Fatalf("valid endpoint rejected: %s", endpoint)
