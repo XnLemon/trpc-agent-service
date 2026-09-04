@@ -262,44 +262,63 @@ func resolveAndBuild(ctx context.Context, input ModelFactoryInput, resolver Secr
 	if policy != nil && policy.Validate() != nil {
 		return nil, fmt.Errorf("%w: resilience policy is invalid", ErrInvalid)
 	}
-	secret := SecretValue{}
-	if input.SecretRef != "" {
-		if resolver == nil {
-			return nil, fmt.Errorf("%w: secret resolver is required", ErrInvalid)
-		}
-		scope := SecretScope{TenantID: input.TenantID, SecretRef: input.SecretRef}
-		if err := scope.Validate(); err != nil {
+	secret, err := resolveModelSecret(ctx, input, resolver, policy)
+	if err != nil {
+		if errors.Is(err, ErrInvalid) {
 			return nil, err
 		}
-		var resolved SecretValue
-		resolve := func(resolveCtx context.Context) error {
-			candidate, err := resolver.Resolve(resolveCtx, scope)
-			if err != nil {
-				return err
-			}
-			if candidate.Value() == "" {
-				return ErrSecretResolution
-			}
-			resolved = candidate
-			return nil
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		var err error
-		if policy == nil {
-			err = resolve(ctx)
-		} else {
-			err = policy.Execute(ctx, resolve)
-		}
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, ErrSecretResolution
-		}
-		if resolved.Value() == "" {
-			return nil, ErrSecretResolution
-		}
-		secret = resolved
+		return nil, ErrSecretResolution
 	}
+	model, err := buildModel(ctx, input, secret, factory, policy)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, ErrModelFactory
+	}
+	return model, nil
+}
+
+func resolveModelSecret(ctx context.Context, input ModelFactoryInput, resolver SecretResolver, policy *resilience.Policy) (SecretValue, error) {
+	if input.SecretRef == "" {
+		return SecretValue{}, nil
+	}
+	if resolver == nil {
+		return SecretValue{}, fmt.Errorf("%w: secret resolver is required", ErrInvalid)
+	}
+	scope := SecretScope{TenantID: input.TenantID, SecretRef: input.SecretRef}
+	if err := scope.Validate(); err != nil {
+		return SecretValue{}, err
+	}
+	var resolved SecretValue
+	resolve := func(resolveCtx context.Context) error {
+		candidate, err := resolver.Resolve(resolveCtx, scope)
+		if err != nil {
+			return err
+		}
+		if candidate.Value() == "" {
+			return ErrSecretResolution
+		}
+		resolved = candidate
+		return nil
+	}
+	if policy == nil {
+		if err := resolve(ctx); err != nil {
+			return SecretValue{}, err
+		}
+	} else if err := policy.Execute(ctx, resolve); err != nil {
+		return SecretValue{}, err
+	}
+	if resolved.Value() == "" {
+		return SecretValue{}, ErrSecretResolution
+	}
+	return resolved, nil
+}
+
+func buildModel(ctx context.Context, input ModelFactoryInput, secret SecretValue, factory ModelFactory, policy *resilience.Policy) (trpcmodel.Model, error) {
 	var model trpcmodel.Model
 	build := func(buildCtx context.Context) error {
 		candidate, err := factory.New(buildCtx, input.Clone(), secret)
@@ -312,17 +331,12 @@ func resolveAndBuild(ctx context.Context, input ModelFactoryInput, resolver Secr
 		model = candidate
 		return nil
 	}
-	var err error
 	if policy == nil {
-		err = build(ctx)
-	} else {
-		err = policy.Execute(ctx, build)
-	}
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if err := build(ctx); err != nil {
+			return nil, err
 		}
-		return nil, ErrModelFactory
+	} else if err := policy.Execute(ctx, build); err != nil {
+		return nil, err
 	}
 	if model == nil {
 		return nil, fmt.Errorf("%w: returned nil model", ErrModelFactory)
