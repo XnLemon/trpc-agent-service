@@ -164,6 +164,9 @@ func TestNewInjectsFactoryAndRejectsBotIdentityMismatch(t *testing.T) {
 	if adapter == nil || adapter.principal.Kind() != gateway.PrincipalChannel {
 		t.Fatal("adapter did not retain a trusted channel principal")
 	}
+	if adapter.OutboxLeaseDuration() != OutboxLeaseDuration(3*time.Second) {
+		t.Fatalf("adapter outbox lease = %s, want %s", adapter.OutboxLeaseDuration(), OutboxLeaseDuration(3*time.Second))
+	}
 
 	recorder := &errorRecorder{}
 	mismatched := &fakeFactory{client: &fakeBot{me: &models.User{ID: 54321, IsBot: true}}}
@@ -180,6 +183,15 @@ func TestNewInjectsFactoryAndRejectsBotIdentityMismatch(t *testing.T) {
 	}
 	if len(dispatcher.requests()) != 0 {
 		t.Fatal("identity mismatch reached Dispatch")
+	}
+}
+
+func TestOutboxLeaseDurationCoversDefaultAndConfiguredPollTimeout(t *testing.T) {
+	if got, want := OutboxLeaseDuration(0), 70*time.Second; got != want {
+		t.Fatalf("default Telegram outbox lease = %s, want %s", got, want)
+	}
+	if got, want := OutboxLeaseDuration(10*time.Minute), 10*time.Minute+10*time.Second; got != want {
+		t.Fatalf("configured Telegram outbox lease = %s, want %s", got, want)
 	}
 }
 
@@ -370,6 +382,34 @@ func TestPollingErrorsUseStableRedactedHook(t *testing.T) {
 	}
 }
 
+func TestBeginShutdownCancelsPollingRun(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "polling-shutdown", "12345")
+	started, stopped := make(chan struct{}), make(chan struct{})
+	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}, startFn: func(ctx context.Context) {
+		close(started)
+		<-ctx.Done()
+		close(stopped)
+	}}
+	adapter := newTestAdapter(t, target, &dispatchStub{}, client)
+	defer func() { _ = adapter.Close() }()
+	runErr := make(chan error, 1)
+	go func() { runErr <- adapter.Run(context.Background()) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("polling run did not start")
+	}
+	adapter.BeginShutdown()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("BeginShutdown did not cancel polling")
+	}
+	if err := <-runErr; err != nil {
+		t.Fatalf("polling run returned error = %v", err)
+	}
+}
+
 func TestHandleUpdateMapsPrivateTextAndAggregatesDispatchEvents(t *testing.T) {
 	target := newTrustedTarget(t, channels.ChannelTelegram, "private", "12345")
 	dispatcher := &dispatchStub{events: []gateway.DispatchEvent{
@@ -397,6 +437,88 @@ func TestHandleUpdateMapsPrivateTextAndAggregatesDispatchEvents(t *testing.T) {
 	assertPrivateInboundRequest(t, target, request, dispatcher.contextValue(key), key)
 	sent := client.sent()
 	assertPrivateReply(t, sent, aw.events)
+}
+
+func TestDurableRepliesLeaveDeliveryToOutboxWorker(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "durable-replies", "12345")
+	dispatcher := &dispatchStub{events: []gateway.DispatchEvent{
+		{Type: gateway.DispatchEventMessage, Text: "reply"},
+		{Type: gateway.DispatchEventDone, Done: true},
+	}}
+	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
+	adapter, err := New(context.Background(), Config{
+		BotToken: "12345:runtime-secret", Target: target, Dispatcher: dispatcher,
+		DurableReplies: true, Factory: &fakeFactory{client: client}, AuditWriter: &telegramAuditWriter{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = adapter.Close() }()
+	update := textUpdate(70, models.ChatTypePrivate, 100, 42, "input", 0)
+	if err := adapter.HandleUpdate(context.Background(), update); err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatcher.requests()) != 1 || len(client.sent()) != 0 {
+		t.Fatalf("durable reply was sent from the inbound handler: dispatch=%d sends=%v", len(dispatcher.requests()), client.sent())
+	}
+	if err := adapter.HandleUpdate(context.Background(), update); err != nil {
+		t.Fatalf("durable replay returned an error: %v", err)
+	}
+	if len(dispatcher.requests()) != 1 || len(client.sent()) != 0 {
+		t.Fatalf("durable replay redispatched or sent a reply: dispatch=%d sends=%v", len(dispatcher.requests()), client.sent())
+	}
+
+	failureDispatcher := &dispatchStub{events: []gateway.DispatchEvent{
+		{Type: gateway.DispatchEventError, Error: "redacted"},
+		{Type: gateway.DispatchEventDone, Done: true},
+	}}
+	failureClient := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
+	failureAdapter, err := New(context.Background(), Config{
+		BotToken: "12345:runtime-secret", Target: target, Dispatcher: failureDispatcher,
+		DurableReplies: true, Factory: &fakeFactory{client: failureClient}, AuditWriter: &telegramAuditWriter{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = failureAdapter.Close() }()
+	failureUpdate := textUpdate(71, models.ChatTypePrivate, 100, 42, "failure", 0)
+	if err := failureAdapter.HandleUpdate(context.Background(), failureUpdate); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("durable dispatch failure = %v", err)
+	}
+	if len(failureClient.sent()) != 0 {
+		t.Fatalf("durable dispatch failure used a direct fallback: %v", failureClient.sent())
+	}
+	if err := failureAdapter.HandleUpdate(context.Background(), failureUpdate); err != nil {
+		t.Fatalf("durable failed replay returned an error: %v", err)
+	}
+	if len(failureDispatcher.requests()) != 1 {
+		t.Fatalf("durable failed replay redispatched: %d", len(failureDispatcher.requests()))
+	}
+
+	materializationDispatcher := &dispatchStub{events: []gateway.DispatchEvent{
+		{Type: gateway.DispatchEventMessage, Text: "reply"},
+		{Type: gateway.DispatchEventError, Error: gateway.ErrReplyMaterialization.Error()},
+		{Type: gateway.DispatchEventDone, Done: true},
+	}}
+	materializationClient := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
+	materializationAdapter, err := New(context.Background(), Config{
+		BotToken: "12345:runtime-secret", Target: target, Dispatcher: materializationDispatcher,
+		DurableReplies: true, Factory: &fakeFactory{client: materializationClient}, AuditWriter: &telegramAuditWriter{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = materializationAdapter.Close() }()
+	materializationUpdate := textUpdate(72, models.ChatTypePrivate, 100, 42, "materialization failure", 0)
+	if err := materializationAdapter.HandleUpdate(context.Background(), materializationUpdate); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("materialization failure = %v", err)
+	}
+	if err := materializationAdapter.HandleUpdate(context.Background(), materializationUpdate); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("materialization retry = %v", err)
+	}
+	if len(materializationDispatcher.requests()) != 2 || len(materializationClient.sent()) != 0 {
+		t.Fatalf("materialization failure was cached or sent directly: dispatch=%d sends=%v", len(materializationDispatcher.requests()), materializationClient.sent())
+	}
 }
 
 func assertPrivateInboundRequest(t *testing.T, target channels.RoutingTarget, request gateway.DispatchRequest, contextValue any, key contextKey) {

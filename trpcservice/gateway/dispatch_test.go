@@ -103,8 +103,21 @@ type failingToolAttachmentStore struct {
 	runtimestorage.AttachmentStore
 }
 
+type materializationFailureStore struct {
+	*inmemory.Store
+	err error
+}
+
 func (failingToolAttachmentStore) PutAttachment(context.Context, string, attachment.Upload, io.Reader) (attachment.Reference, error) {
 	return attachment.Reference{}, errors.New("attachment storage failed")
+}
+
+func (s *materializationFailureStore) EnqueueReplies(context.Context, []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	return nil, s.err
+}
+
+func (s *materializationFailureStore) EnqueueRepliesWithCorrelation(context.Context, runtimestorage.ReplyCorrelation, []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	return nil, s.err
 }
 
 func (s dispatchAttachmentStore) BindAttachments(ctx context.Context, tenantID, eventID string, references []attachment.Reference) error {
@@ -1233,6 +1246,65 @@ func TestDispatcherDurableChannelModelErrorMaterializesFallbackReply(t *testing.
 	assertDurableReplyWorkerCompletesCount(t, store, principal.TenantID(), row.EventID, 1)
 }
 
+func TestDispatcherDoesNotAcknowledgeReplyMaterializationFailure(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	target := newTrustedRoutingTarget(t, fixture)
+	principal, err := NewChannelPrincipal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPlanResolver(PlanResolverConfig{
+		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
+		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerValue := &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		events := make(chan *trpcevent.Event, 1)
+		events <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true, Choices: []trpcmodel.Choice{{Message: trpcmodel.Message{Content: "reply"}}}}}
+		close(events)
+		return events, nil
+	}}
+	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	store := &materializationFailureStore{Store: inmemory.New(), err: errors.New("database password=secret")}
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, DrainTimeout: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := InboundMessage{Content: "inbound", ExternalMessageID: "materialization-failure", ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"}
+	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: message.ExternalMessageID, Message: message})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := collectDispatchEvents(stream)
+	if len(events) != 3 || events[0].Type != DispatchEventMessage || events[1].Error != ErrReplyMaterialization.Error() || !events[2].Done {
+		t.Fatalf("materialization failure events = %+v", events)
+	}
+	if strings.Contains(events[1].Error, "secret") {
+		t.Fatal("materialization error leaked provider details")
+	}
+	recorded, duplicate, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{
+		TenantID: principal.TenantID(), EventID: "probe-materialization-failure", SessionID: "unused", BindingID: target.BindingID,
+		ExternalMessageID: message.ExternalMessageID,
+	})
+	if err != nil || !duplicate || recorded.Status != runtimestorage.EventRunning {
+		t.Fatalf("materialization failure message = %+v duplicate=%v err=%v", recorded, duplicate, err)
+	}
+	rows, err := store.ListReplyCandidates(context.Background(), principal.TenantID())
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("materialization failure created outbox rows = %+v err=%v", rows, err)
+	}
+	markers, err := store.ListReplyMaterializations(context.Background(), principal.TenantID())
+	if err != nil || len(markers) != 1 || markers[0].Payload != "reply" {
+		t.Fatalf("materialization failure recovery marker = %+v err=%v", markers, err)
+	}
+}
+
 func dispatchAndAssertDurableReply(t *testing.T, dispatcher *Dispatcher, principal Principal, store runtimestorage.RuntimeStore) runtimestorage.MessageEvent {
 	t.Helper()
 	target, ok := principal.RoutingTarget()
@@ -1397,7 +1469,7 @@ func assertDurableClaimReclaimsReconcilingAndValidatesIDs(t *testing.T, dispatch
 	if err != nil || recoveredReconciling == nil {
 		t.Fatalf("reconciling reclaim = %+v err=%v", recoveredReconciling, err)
 	}
-	dispatcher.finishDurable(context.Background(), "", "", recoveredReconciling, errors.New("execution failed"), "", nil)
+	_ = dispatcher.finishDurable(context.Background(), "", "", recoveredReconciling, errors.New("execution failed"), "", nil)
 	message.ExternalMessageID = ""
 	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing external ID error = %v", err)
@@ -1474,27 +1546,27 @@ func TestDispatcherDurableDispatchFailurePaths(t *testing.T) {
 		return nil, errors.New("runner")
 	}
 	dispatcher, registry := newDispatcher(runError, false)
-	if _, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message("run-error")}); !errors.Is(err, ErrExecution) {
-		t.Fatalf("runner error = %v", err)
+	if stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message("run-error")}); err != nil || len(collectDispatchEvents(stream)) != 2 {
+		t.Fatalf("runner error stream=%v err=%v", stream, err)
 	}
 	_ = registry.Close()
 	nilEvents := func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
 		return nil, nil
 	}
 	dispatcher, registry = newDispatcher(nilEvents, false)
-	if _, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message("nil-events")}); !errors.Is(err, ErrExecution) {
-		t.Fatalf("nil events = %v", err)
+	if stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message("nil-events")}); err != nil || len(collectDispatchEvents(stream)) != 2 {
+		t.Fatalf("nil events stream=%v err=%v", stream, err)
 	}
 	_ = registry.Close()
 	dispatcher, registry = newDispatcher(nil, true)
-	if _, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message("nil-runner")}); !errors.Is(err, ErrRunnerUnavailable) {
-		t.Fatalf("nil runner = %v", err)
+	if stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message("nil-runner")}); err != nil || len(collectDispatchEvents(stream)) != 2 {
+		t.Fatalf("nil runner stream=%v err=%v", stream, err)
 	}
 	_ = registry.Close()
 	dispatcher, registry = newDispatcher(nilEvents, false)
 	_ = registry.Close()
-	if _, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message("closed-registry")}); err == nil {
-		t.Fatal("expected closed registry error")
+	if stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message("closed-registry")}); err != nil || len(collectDispatchEvents(stream)) != 2 {
+		t.Fatalf("closed registry stream=%v err=%v", stream, err)
 	}
 	_ = registry.Close()
 	badPrincipal := mustAPIPrincipal(t, fixture.tenant.TenantID, "app_01ARZ3NDEKTSV4RRFFQ69G5FAW")
@@ -1580,13 +1652,21 @@ func TestDispatcherDurableAttachmentFailurePaths(t *testing.T) {
 				ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1", Attachments: []attachment.Reference{reference},
 			}
 			stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message})
-			if !errors.Is(err, tt.want) || stream != nil {
-				t.Fatalf("Dispatch() stream=%v err=%v, want %v", stream, err, tt.want)
+			if tt.want == context.Canceled {
+				if !errors.Is(err, tt.want) || stream != nil {
+					t.Fatalf("Dispatch() stream=%v err=%v, want %v", stream, err, tt.want)
+				}
+			} else if err != nil || stream == nil || len(collectDispatchEvents(stream)) != 2 {
+				t.Fatalf("Dispatch() stream=%v err=%v, want durable failure stream", stream, err)
 			}
 			if runnerCalls.Load() != 0 {
 				t.Fatal("Runner started after attachment preparation failed")
 			}
-			assertDurableMessageStatus(t, store, principal, target, message, runtimestorage.EventFailed)
+			wantStatus := runtimestorage.EventCompleted
+			if tt.want == context.Canceled {
+				wantStatus = runtimestorage.EventFailed
+			}
+			assertDurableMessageStatus(t, store, principal, target, message, wantStatus)
 		})
 	}
 }

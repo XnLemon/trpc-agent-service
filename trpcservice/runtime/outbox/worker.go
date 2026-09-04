@@ -61,6 +61,7 @@ type Worker struct {
 	tenantID      string
 	owner         string
 	leaseDuration time.Duration
+	materializer  *Materializer
 	maxAttempts   int
 	backoffBase   time.Duration
 	backoffMax    time.Duration
@@ -92,6 +93,9 @@ type Config struct {
 	TenantID      string
 	Owner         string
 	LeaseDuration time.Duration
+	// Materializer enables recovery of a terminal reply whose outbox
+	// materialization was interrupted after the Runner completed.
+	Materializer  *Materializer
 	MaxAttempts   int
 	BackoffBase   time.Duration
 	BackoffMax    time.Duration
@@ -130,7 +134,7 @@ func New(config Config) (*Worker, error) {
 	if config.ProviderName == "" {
 		config.ProviderName = "other"
 	}
-	return &Worker{store: config.Store, provider: config.Provider, channel: config.Channel, providerName: config.ProviderName, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, jitter: config.Jitter, telemetry: config.Observability, metrics: metrics.New(config.Observability), audit: audit.Recorder{Writer: config.AuditWriter, TenantID: config.TenantID}}, nil
+	return &Worker{store: config.Store, provider: config.Provider, channel: config.Channel, providerName: config.ProviderName, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, materializer: config.Materializer, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, jitter: config.Jitter, telemetry: config.Observability, metrics: metrics.New(config.Observability), audit: audit.Recorder{Writer: config.AuditWriter, TenantID: config.TenantID}}, nil
 }
 
 // Run polls until ctx is canceled. It owns no goroutine after returning.
@@ -192,9 +196,17 @@ func (w *Worker) runLoop(runCtx context.Context, pollInterval time.Duration) err
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	for {
-		if _, err := w.RunOnce(runCtx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		_, _ = w.RunOnce(runCtx)
+		// Only cancellation of the worker's own context ends the loop. An
+		// operation may return a context error after an internal timeout or
+		// transient dependency failure; that item must not take down the worker.
+		if err := runCtx.Err(); err != nil {
 			return err
 		}
+		// A single storage, audit, or provider transition error must not
+		// permanently stop the process-owned worker. RunOnce has already
+		// fenced the affected item where possible; the next poll retries the
+		// remaining eligible work and lets expired leases be reconciled.
 		select {
 		case <-runCtx.Done():
 			return runCtx.Err()
@@ -225,6 +237,7 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 	if ctx == nil {
 		return 0, ErrInvalid
 	}
+	materializationErr := w.repairMaterializations(ctx)
 	candidates, err := observeStorage(w, ctx, func(operationCtx context.Context) ([]runtimestorage.ReplyOutbox, error) {
 		return w.store.ListReplyCandidates(operationCtx, w.tenantID)
 	})
@@ -260,7 +273,131 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 			return processed, err
 		}
 	}
-	return processed, nil
+	return processed, materializationErr
+}
+
+func (w *Worker) repairMaterializations(ctx context.Context) error {
+	if w == nil || w.materializer == nil {
+		return nil
+	}
+	markers, ok := w.store.(runtimestorage.ReplyMaterializationStore)
+	if !ok {
+		return nil
+	}
+	intents, err := observeStorage(w, ctx, func(operationCtx context.Context) ([]runtimestorage.ReplyMaterializationIntent, error) {
+		return markers.ListReplyMaterializations(operationCtx, w.tenantID)
+	})
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, intent := range intents {
+		if err := w.repairMaterialization(ctx, markers, intent); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (w *Worker) repairMaterialization(ctx context.Context, markers runtimestorage.ReplyMaterializationStore, intent runtimestorage.ReplyMaterializationIntent) error {
+	event, deleteMarker, materialize, err := w.prepareMaterialization(ctx, intent)
+	if err != nil {
+		return err
+	}
+	if deleteMarker {
+		return w.deleteMaterialization(ctx, markers, intent)
+	}
+	if !materialize {
+		return nil
+	}
+	materializeCtx := observability.WithCorrelation(ctx, intent.RequestID, intent.TraceID)
+	if intent.TraceParent != "" {
+		materializeCtx = observability.ContextWithTraceParent(materializeCtx, intent.TraceParent)
+	}
+	count, materializeErr := w.materializer.Materialize(materializeCtx, materializeInput(intent))
+	if materializeErr != nil {
+		return materializeErr
+	}
+	_, transitionErr := w.transitionMaterialization(materializeCtx, runtimestorage.MessageTransition{
+		TenantID: intent.TenantID, EventID: intent.EventID, From: runtimestorage.EventRunning,
+		To: runtimestorage.EventCompleted, Owner: w.owner, FencingToken: event.FencingToken,
+		ReplyID: intent.ReplyID, SegmentCount: count,
+	})
+	if errors.Is(transitionErr, runtimestorage.ErrConflict) {
+		return nil
+	}
+	if transitionErr != nil {
+		return transitionErr
+	}
+	return w.deleteMaterialization(materializeCtx, markers, intent)
+}
+
+func (w *Worker) prepareMaterialization(ctx context.Context, intent runtimestorage.ReplyMaterializationIntent) (runtimestorage.MessageEvent, bool, bool, error) {
+	event, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.MessageEvent, error) {
+		return w.store.GetMessage(operationCtx, intent.TenantID, intent.EventID)
+	})
+	if errors.Is(err, runtimestorage.ErrNotFound) {
+		return runtimestorage.MessageEvent{}, true, false, nil
+	}
+	if err != nil {
+		return runtimestorage.MessageEvent{}, false, false, err
+	}
+	if event.Status == runtimestorage.EventCompleted || event.Status == runtimestorage.EventReplyPending || event.Status == runtimestorage.EventReplied || event.Status == runtimestorage.EventFailed {
+		// A terminal event means either materialization and the lifecycle
+		// transition already committed, or the execution was explicitly
+		// failed. In both cases the recovery record is no longer actionable.
+		return event, true, false, nil
+	}
+	if event.Status == runtimestorage.EventRunning {
+		if event.LeaseExpiresAt != nil && event.LeaseExpiresAt.After(time.Now().UTC()) {
+			return event, false, false, nil
+		}
+		reconciled, transitionErr := w.transitionMaterialization(ctx, runtimestorage.MessageTransition{
+			TenantID: intent.TenantID, EventID: intent.EventID, From: runtimestorage.EventRunning,
+			To: runtimestorage.EventExecutionReconciling, Owner: w.owner,
+		})
+		if errors.Is(transitionErr, runtimestorage.ErrConflict) {
+			return event, false, false, nil
+		}
+		if transitionErr != nil {
+			return runtimestorage.MessageEvent{}, false, false, transitionErr
+		}
+		event = reconciled
+	}
+	if event.Status == runtimestorage.EventReceived || event.Status == runtimestorage.EventExecutionReconciling {
+		claimed, transitionErr := w.transitionMaterialization(ctx, runtimestorage.MessageTransition{
+			TenantID: intent.TenantID, EventID: intent.EventID, From: event.Status,
+			To: runtimestorage.EventRunning, Owner: w.owner, LeaseDuration: w.leaseDuration,
+		})
+		if errors.Is(transitionErr, runtimestorage.ErrConflict) {
+			return event, false, false, nil
+		}
+		if transitionErr != nil {
+			return runtimestorage.MessageEvent{}, false, false, transitionErr
+		}
+		event = claimed
+	}
+	return event, false, event.Status == runtimestorage.EventRunning, nil
+}
+
+func materializeInput(intent runtimestorage.ReplyMaterializationIntent) MaterializeInput {
+	segments := make([]ReplySegment, len(intent.Segments))
+	for index, segment := range intent.Segments {
+		segments[index] = ReplySegment{Kind: segment.Kind, Payload: segment.Payload, Attachment: segment.Attachment, Fallback: segment.Fallback}
+	}
+	return MaterializeInput{TenantID: intent.TenantID, EventID: intent.EventID, ReplyID: intent.ReplyID, RequestID: intent.RequestID, TraceID: intent.TraceID, TraceParent: intent.TraceParent, Payload: intent.Payload, Segments: segments, ReplyTarget: intent.ReplyTarget}
+}
+
+func (w *Worker) transitionMaterialization(ctx context.Context, transition runtimestorage.MessageTransition) (runtimestorage.MessageEvent, error) {
+	return observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.MessageEvent, error) {
+		return w.store.TransitionMessage(operationCtx, transition)
+	})
+}
+
+func (w *Worker) deleteMaterialization(ctx context.Context, markers runtimestorage.ReplyMaterializationStore, intent runtimestorage.ReplyMaterializationIntent) error {
+	return observeStorageError(w, ctx, func(operationCtx context.Context) error {
+		return markers.DeleteReplyMaterialization(operationCtx, intent.TenantID, intent.EventID)
+	})
 }
 
 func (w *Worker) precedingSegmentsState(ctx context.Context, candidate runtimestorage.ReplyOutbox) (precedingSegmentState, error) {
@@ -360,6 +497,20 @@ func restoreCorrelationContext(ctx context.Context, store runtimestorage.Runtime
 
 func (w *Worker) acceptDelivery(ctx, operationCtx context.Context, claimed runtimestorage.ReplyOutbox, providerID string) error {
 	_ = w.metrics.Delivery(operationCtx, map[string]string{"component": "channel", "channel": w.channel, "provider": w.providerName, "status": "success", "error_class": ""})
+	if providerID != "" {
+		if receipts, ok := w.store.(runtimestorage.ReplyReceiptRecorder); ok {
+			if _, err := observeStorage(w, operationCtx, func(storageCtx context.Context) (runtimestorage.ReplyOutbox, error) {
+				return receipts.RecordReplyReceipt(storageCtx, runtimestorage.ReplyReceipt{
+					TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex,
+					Owner: w.owner, FencingToken: claimed.FencingToken, ProviderID: providerID,
+				})
+			}); err != nil {
+				// Keep the row in sending until the lease expires. A replacement
+				// worker can reconcile the durable receipt without redelivery.
+				return err
+			}
+		}
+	}
 	_, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.ReplyOutbox, error) {
 		return w.store.TransitionReply(operationCtx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: runtimestorage.ReplySent, Owner: w.owner, FencingToken: claimed.FencingToken, ProviderID: providerID})
 	})
@@ -488,7 +639,14 @@ func (w *Worker) advanceEvent(ctx context.Context, eventID string) {
 }
 
 func (w *Worker) reconcile(ctx context.Context, claimed runtimestorage.ReplyOutbox) bool {
-	status, providerID, err := w.provider.Reconcile(ctx, claimed)
+	var status DeliveryStatus
+	var providerID string
+	var err error
+	if claimed.ProviderMessageID != "" {
+		status, providerID = DeliveryAccepted, claimed.ProviderMessageID
+	} else {
+		status, providerID, err = w.provider.Reconcile(ctx, claimed)
+	}
 	if err != nil || status == DeliveryUnknown {
 		return false
 	}
@@ -525,6 +683,13 @@ func observeStorage[T any](worker *Worker, ctx context.Context, operation func(c
 	}
 	_ = worker.metrics.BackendDuration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "storage", "provider": provider, "status": status, "error_class": observability.ErrorClass(err)})
 	return value, err
+}
+
+func observeStorageError(worker *Worker, ctx context.Context, operation func(context.Context) error) error {
+	_, err := observeStorage(worker, ctx, func(operationCtx context.Context) (struct{}, error) {
+		return struct{}{}, operation(operationCtx)
+	})
+	return err
 }
 
 func classify(err error) (string, bool) {

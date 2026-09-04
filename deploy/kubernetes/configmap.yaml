@@ -7,3 +7,7 @@ data:
   TRPC_SESSION_BACKEND: postgres
   TRPC_S3_SECRET_REF: env/trpc-s3-credentials
   OTEL_SERVICE_NAME: trpc-agent-service
+  # Uncomment all Telegram settings together for the polling deployment path.
+  # TELEGRAM_MODE: polling
+  # TELEGRAM_BINDING_ID: cb_replace-me
+  # TELEGRAM_SECRET_REF: env/telegram-bot

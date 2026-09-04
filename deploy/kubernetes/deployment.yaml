@@ -3,6 +3,8 @@ kind: Deployment
 metadata:
   name: trpc-agent-service
 spec:
+  # Telegram polling must run with one replica per Bot token. Use a dedicated
+  # overlay with replicas: 1 and a non-overlapping rollout when enabled.
   replicas: 2
   revisionHistoryLimit: 3
   strategy:

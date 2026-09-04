@@ -106,8 +106,9 @@ type Config struct {
 	// OutboxWorker is constructed from trusted provider routing configuration.
 	// Bootstrap owns its lifecycle but never derives a recipient from HTTP.
 	OutboxWorker *outbox.Worker
-	// OutboxWorkerFactory creates the owned worker after AI Bot factories have
-	// produced their managers. It is mutually exclusive with OutboxWorker.
+	// OutboxWorkerFactory creates the owned worker after configured channel
+	// factories have produced their adapters. It is mutually exclusive with
+	// OutboxWorker.
 	OutboxWorkerFactory func([]channels.PollingAdapter) (*outbox.Worker, error)
 	OutboxPollInterval  time.Duration
 	// AuditWriter receives execution and configured channel delivery facts.
@@ -122,6 +123,9 @@ type Config struct {
 	// WeComAIBotFactories constructs every configured AI Bot connection after
 	// Dispatcher construction. Returned adapters are owned by Runtime.
 	WeComAIBotFactories []func(gateway.DispatchService) (channels.PollingAdapter, error)
+	// TelegramPollingFactory constructs the one configured Telegram long-polling
+	// adapter after Dispatcher construction. Runtime owns its lifecycle.
+	TelegramPollingFactory func(gateway.DispatchService) (channels.PollingAdapter, error)
 
 	Registry          gateway.RunnerRegistryConfig
 	HTTP              gateway.HTTPConfig
@@ -137,16 +141,17 @@ type Config struct {
 // before the HTTP server is drained; Close then closes the Runner Registry and
 // only after that resources explicitly owned by this graph.
 type Runtime struct {
-	Handler        *gateway.HTTPHandler
-	Resolver       *gateway.PlanResolver
-	Registry       *gateway.RunnerRegistry
-	Dispatcher     *gateway.Dispatcher
-	OutboxWorker   *outbox.Worker
-	wecomLifecycle callbackLifecycle
-	wecomHandler   http.Handler
-	wecomAIBots    []channels.PollingAdapter
-	aiBotDone      []chan struct{}
-	aiBotCancel    context.CancelFunc
+	Handler         *gateway.HTTPHandler
+	Resolver        *gateway.PlanResolver
+	Registry        *gateway.RunnerRegistry
+	Dispatcher      *gateway.Dispatcher
+	OutboxWorker    *outbox.Worker
+	wecomLifecycle  callbackLifecycle
+	wecomHandler    http.Handler
+	wecomAIBots     []channels.PollingAdapter
+	pollingAdapters []channels.PollingAdapter
+	pollingDone     []chan struct{}
+	pollingCancel   context.CancelFunc
 
 	db               *sql.DB
 	ownDB            bool
@@ -208,15 +213,17 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 		return nil, err
 	}
 	if err := configureAdmin(&config, runtimeGraph.Registry); err != nil {
+		_ = runtimeGraph.Close()
 		return nil, err
 	}
 	if err := configureHandler(runtimeGraph, config); err != nil {
+		_ = runtimeGraph.Close()
 		return nil, err
 	}
 	if err := startOutboxWorker(runtimeGraph, config.OutboxPollInterval); err != nil {
 		return nil, err
 	}
-	if err := startAIBots(runtimeGraph); err != nil {
+	if err := startPollingAdapters(runtimeGraph); err != nil {
 		_ = runtimeGraph.Close()
 		return nil, ErrInvalidConfig
 	}
@@ -366,7 +373,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 		_ = registry.Close()
 		return nil, ErrInvalidConfig
 	}
-	aiBots, err := configureRuntimeChannels(&config, dispatcher)
+	aiBots, pollingAdapters, err := configureRuntimeChannels(&config, dispatcher)
 	if err != nil {
 		_ = registry.Close()
 		return nil, ErrInvalidConfig
@@ -386,7 +393,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 		db:           config.DB, ownDB: config.OwnDB, readyGate: readyGate,
 		ping: ping, verifyMigrations: config.VerifyMigrations, closeDeps: config.CloseDependencies,
 		telemetry:   config.Observability,
-		wecomAIBots: aiBots,
+		wecomAIBots: aiBots, pollingAdapters: pollingAdapters,
 	}
 	if lifecycle, ok := config.WeComHandler.(callbackLifecycle); ok {
 		runtimeGraph.wecomLifecycle = lifecycle
@@ -394,46 +401,67 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	return runtimeGraph, nil
 }
 
-func configureRuntimeChannels(config *Config, dispatcher gateway.DispatchService) ([]channels.PollingAdapter, error) {
+func configureRuntimeChannels(config *Config, dispatcher gateway.DispatchService) ([]channels.PollingAdapter, []channels.PollingAdapter, error) {
 	if config.WeComHandler != nil && config.WeComHandlerFactory != nil {
-		return nil, ErrInvalidConfig
+		return nil, nil, ErrInvalidConfig
 	}
 	if config.WeComHandlerFactory != nil {
 		handler, err := config.WeComHandlerFactory(dispatcher)
 		if err != nil || handler == nil {
-			return nil, ErrInvalidConfig
+			return nil, nil, ErrInvalidConfig
 		}
 		config.WeComHandler = handler
 	}
 	aiBots, err := newWeComAIBots(config.WeComAIBotFactories, dispatcher)
 	if err != nil {
-		return nil, err
+		closeCallbackLifecycle(config.WeComHandler)
+		return nil, nil, err
+	}
+	pollingAdapters := append([]channels.PollingAdapter(nil), aiBots...)
+	if config.TelegramPollingFactory != nil {
+		telegramAdapter, telegramErr := config.TelegramPollingFactory(dispatcher)
+		if telegramErr != nil || telegramAdapter == nil || telegramAdapter.Channel() != channels.ChannelTelegram {
+			if telegramAdapter != nil {
+				_ = telegramAdapter.Close()
+			}
+			_ = closePollingAdapters(pollingAdapters)
+			closeCallbackLifecycle(config.WeComHandler)
+			return nil, nil, ErrInvalidConfig
+		}
+		pollingAdapters = append(pollingAdapters, telegramAdapter)
 	}
 	if config.OutboxWorker != nil && config.OutboxWorkerFactory != nil {
-		return nil, ErrInvalidConfig
+		_ = closePollingAdapters(pollingAdapters)
+		closeCallbackLifecycle(config.WeComHandler)
+		return nil, nil, ErrInvalidConfig
 	}
 	if config.OutboxWorkerFactory == nil {
-		return aiBots, nil
+		return aiBots, pollingAdapters, nil
 	}
-	worker, err := config.OutboxWorkerFactory(aiBots)
+	worker, err := config.OutboxWorkerFactory(pollingAdapters)
 	if err != nil || worker == nil {
-		return nil, ErrInvalidConfig
+		_ = closePollingAdapters(pollingAdapters)
+		closeCallbackLifecycle(config.WeComHandler)
+		return nil, nil, ErrInvalidConfig
 	}
 	config.OutboxWorker = worker
-	return aiBots, nil
+	return aiBots, pollingAdapters, nil
 }
 
 func newWeComAIBots(factories []func(gateway.DispatchService) (channels.PollingAdapter, error), dispatcher gateway.DispatchService) ([]channels.PollingAdapter, error) {
 	aiBots := make([]channels.PollingAdapter, 0, len(factories))
 	for _, factory := range factories {
 		if factory == nil {
+			_ = closePollingAdapters(aiBots)
 			return nil, ErrInvalidConfig
 		}
 		aiBot, err := factory(dispatcher)
 		if err != nil || aiBot == nil || aiBot.Channel() != channels.ChannelWeComAIBot {
+			_ = closePollingAdapters(aiBots)
 			return nil, ErrInvalidConfig
 		}
 		if _, ok := aiBot.(pollingHealth); !ok {
+			_ = closePollingAdapters(aiBots)
 			return nil, ErrInvalidConfig
 		}
 		aiBots = append(aiBots, aiBot)
@@ -441,22 +469,41 @@ func newWeComAIBots(factories []func(gateway.DispatchService) (channels.PollingA
 	return aiBots, nil
 }
 
-func startAIBots(runtimeGraph *Runtime) error {
-	if runtimeGraph == nil || len(runtimeGraph.wecomAIBots) == 0 {
+func startPollingAdapters(runtimeGraph *Runtime) error {
+	if runtimeGraph == nil || len(runtimeGraph.pollingAdapters) == 0 {
 		return nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	runtimeGraph.aiBotCancel = cancel
-	runtimeGraph.aiBotDone = make([]chan struct{}, 0, len(runtimeGraph.wecomAIBots))
-	for _, adapter := range runtimeGraph.wecomAIBots {
+	runtimeGraph.pollingCancel = cancel
+	runtimeGraph.pollingDone = make([]chan struct{}, 0, len(runtimeGraph.pollingAdapters))
+	for _, adapter := range runtimeGraph.pollingAdapters {
 		done := make(chan struct{})
-		runtimeGraph.aiBotDone = append(runtimeGraph.aiBotDone, done)
+		runtimeGraph.pollingDone = append(runtimeGraph.pollingDone, done)
 		go func(adapter channels.PollingAdapter, done chan struct{}) {
 			defer close(done)
 			_ = adapter.Run(ctx)
 		}(adapter, done)
 	}
 	return nil
+}
+
+func closePollingAdapters(adapters []channels.PollingAdapter) error {
+	var closeErr error
+	for _, adapter := range adapters {
+		if adapter != nil {
+			closeErr = errors.Join(closeErr, adapter.Close())
+		}
+	}
+	return closeErr
+}
+
+func closeCallbackLifecycle(handler http.Handler) {
+	lifecycle, ok := handler.(callbackLifecycle)
+	if !ok {
+		return
+	}
+	lifecycle.BeginShutdown()
+	_ = lifecycle.Close()
 }
 
 func configureAdmin(config *Config, registry *gateway.RunnerRegistry) error {
@@ -466,7 +513,6 @@ func configureAdmin(config *Config, registry *gateway.RunnerRegistry) error {
 	}
 	bindingRepository, ok := config.Channels.(channels.Repository)
 	if !ok {
-		_ = registry.Close()
 		return ErrInvalidConfig
 	}
 	adminHandler, err := admin.NewHandler(admin.Config{
@@ -479,7 +525,6 @@ func configureAdmin(config *Config, registry *gateway.RunnerRegistry) error {
 		}),
 	})
 	if err != nil {
-		_ = registry.Close()
 		return ErrInvalidConfig
 	}
 	config.AdminHandler = adminHandler
@@ -519,7 +564,6 @@ func configureHandler(runtimeGraph *Runtime, config Config) error {
 		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout, Observability: config.Observability,
 	})
 	if err != nil {
-		_ = runtimeGraph.Registry.Close()
 		return ErrInvalidConfig
 	}
 	runtimeGraph.Handler = handler
@@ -531,8 +575,7 @@ func startOutboxWorker(runtimeGraph *Runtime, pollInterval time.Duration) error 
 		return nil
 	}
 	if err := runtimeGraph.OutboxWorker.Start(context.Background(), pollInterval); err != nil {
-		_ = runtimeGraph.Handler.Close()
-		_ = runtimeGraph.Registry.Close()
+		_ = runtimeGraph.Close()
 		return ErrInvalidConfig
 	}
 	return nil
@@ -582,7 +625,7 @@ func (graph *Runtime) BeginShutdown() {
 	if graph.wecomLifecycle != nil {
 		graph.wecomLifecycle.BeginShutdown()
 	}
-	for _, adapter := range graph.wecomAIBots {
+	for _, adapter := range graph.pollingAdapters {
 		if lifecycle, ok := adapter.(interface{ BeginShutdown() }); ok {
 			lifecycle.BeginShutdown()
 		}
@@ -604,13 +647,13 @@ func (graph *Runtime) Close() error {
 		if graph.wecomLifecycle != nil {
 			closeErr = errors.Join(closeErr, graph.wecomLifecycle.Close())
 		}
-		if graph.aiBotCancel != nil {
-			graph.aiBotCancel()
+		if graph.pollingCancel != nil {
+			graph.pollingCancel()
 		}
-		for _, adapter := range graph.wecomAIBots {
+		for _, adapter := range graph.pollingAdapters {
 			closeErr = errors.Join(closeErr, adapter.Close())
 		}
-		for _, done := range graph.aiBotDone {
+		for _, done := range graph.pollingDone {
 			<-done
 		}
 		if graph.Registry != nil {

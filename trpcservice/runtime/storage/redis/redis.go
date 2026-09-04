@@ -51,15 +51,16 @@ type Store struct {
 }
 
 type state struct {
-	Version             int                                        `json:"version"`
-	Sessions            map[string]runtimestorage.Session          `json:"sessions,omitempty"`
-	Events              map[string]runtimestorage.MessageEvent     `json:"events,omitempty"`
-	Messages            map[string]string                          `json:"messages,omitempty"`
-	Histories           map[string][]runtimestorage.EventPayload   `json:"histories,omitempty"`
-	Replies             map[string]runtimestorage.ReplyOutbox      `json:"replies,omitempty"`
-	Correlations        map[string]runtimestorage.ReplyCorrelation `json:"correlations,omitempty"`
-	Memories            map[string]runtimestorage.MemoryRecord     `json:"memories,omitempty"`
-	MemoryIndexHandoffs map[string]int64                           `json:"memory_index_handoffs,omitempty"`
+	Version             int                                                  `json:"version"`
+	Sessions            map[string]runtimestorage.Session                    `json:"sessions,omitempty"`
+	Events              map[string]runtimestorage.MessageEvent               `json:"events,omitempty"`
+	Messages            map[string]string                                    `json:"messages,omitempty"`
+	Histories           map[string][]runtimestorage.EventPayload             `json:"histories,omitempty"`
+	Replies             map[string]runtimestorage.ReplyOutbox                `json:"replies,omitempty"`
+	Materializations    map[string]runtimestorage.ReplyMaterializationIntent `json:"materializations,omitempty"`
+	Correlations        map[string]runtimestorage.ReplyCorrelation           `json:"correlations,omitempty"`
+	Memories            map[string]runtimestorage.MemoryRecord               `json:"memories,omitempty"`
+	MemoryIndexHandoffs map[string]int64                                     `json:"memory_index_handoffs,omitempty"`
 }
 
 // New creates a store using a caller-owned Redis client.
@@ -163,7 +164,7 @@ func (s *Store) key(tenantID string) string {
 }
 
 func emptyState() state {
-	return state{Version: stateVersion, Sessions: map[string]runtimestorage.Session{}, Events: map[string]runtimestorage.MessageEvent{}, Messages: map[string]string{}, Histories: map[string][]runtimestorage.EventPayload{}, Replies: map[string]runtimestorage.ReplyOutbox{}, Correlations: map[string]runtimestorage.ReplyCorrelation{}, Memories: map[string]runtimestorage.MemoryRecord{}, MemoryIndexHandoffs: map[string]int64{}}
+	return state{Version: stateVersion, Sessions: map[string]runtimestorage.Session{}, Events: map[string]runtimestorage.MessageEvent{}, Messages: map[string]string{}, Histories: map[string][]runtimestorage.EventPayload{}, Replies: map[string]runtimestorage.ReplyOutbox{}, Materializations: map[string]runtimestorage.ReplyMaterializationIntent{}, Correlations: map[string]runtimestorage.ReplyCorrelation{}, Memories: map[string]runtimestorage.MemoryRecord{}, MemoryIndexHandoffs: map[string]int64{}}
 }
 
 func normalizeState(value state) state {
@@ -184,6 +185,9 @@ func normalizeState(value state) state {
 	}
 	if value.Replies == nil {
 		value.Replies = map[string]runtimestorage.ReplyOutbox{}
+	}
+	if value.Materializations == nil {
+		value.Materializations = map[string]runtimestorage.ReplyMaterializationIntent{}
 	}
 	if value.Correlations == nil {
 		value.Correlations = map[string]runtimestorage.ReplyCorrelation{}
@@ -341,6 +345,10 @@ func cloneReply(v runtimestorage.ReplyOutbox) runtimestorage.ReplyOutbox {
 	}
 	return v
 }
+func cloneMaterialization(v runtimestorage.ReplyMaterializationIntent) runtimestorage.ReplyMaterializationIntent {
+	v.Segments = append([]runtimestorage.ReplyMaterializationSegment(nil), v.Segments...)
+	return v
+}
 func cloneMemory(v runtimestorage.MemoryRecord) runtimestorage.MemoryRecord {
 	v.Topics = append([]string(nil), v.Topics...)
 	v.Metadata = cloneMap(v.Metadata)
@@ -375,6 +383,79 @@ func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID strin
 	}
 	result.TraceParent = observability.NormalizeTraceParent(result.TraceParent)
 	return result, nil
+}
+
+// PutReplyMaterialization stores one idempotent durable reply recovery record.
+func (s *Store) PutReplyMaterialization(ctx context.Context, input runtimestorage.ReplyMaterializationIntent) (runtimestorage.ReplyMaterializationIntent, error) {
+	if err := s.check(ctx); err != nil {
+		return runtimestorage.ReplyMaterializationIntent{}, err
+	}
+	input, err := runtimestorage.NormalizeReplyMaterializationIntent(input)
+	if err != nil {
+		return runtimestorage.ReplyMaterializationIntent{}, err
+	}
+	var result runtimestorage.ReplyMaterializationIntent
+	err = s.mutate(ctx, input.TenantID, func(value *state) error {
+		event, ok := value.Events[input.EventID]
+		if !ok {
+			return runtimestorage.ErrNotFound
+		}
+		if event.ReplyTarget != input.ReplyTarget {
+			return runtimestorage.ErrConflict
+		}
+		if existing, ok := value.Materializations[input.EventID]; ok {
+			if !existing.SameContract(input) {
+				return runtimestorage.ErrConflict
+			}
+			result = cloneMaterialization(existing)
+			return nil
+		}
+		now := time.Now().UTC()
+		input.CreatedAt, input.UpdatedAt = now, now
+		value.Materializations[input.EventID] = input
+		result = cloneMaterialization(input)
+		return nil
+	})
+	return result, err
+}
+
+// ListReplyMaterializations returns pending recovery records for a tenant.
+func (s *Store) ListReplyMaterializations(ctx context.Context, tenantID string) ([]runtimestorage.ReplyMaterializationIntent, error) {
+	if err := s.check(ctx); err != nil {
+		return nil, err
+	}
+	if err := runtimestorage.ValidateTenant(tenantID); err != nil {
+		return nil, err
+	}
+	value, err := s.load(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]runtimestorage.ReplyMaterializationIntent, 0)
+	for _, item := range value.Materializations {
+		result = append(result, cloneMaterialization(item))
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].EventID < result[j].EventID
+		}
+		return result[i].CreatedAt.Before(result[j].CreatedAt)
+	})
+	return result, nil
+}
+
+// DeleteReplyMaterialization removes one recovery record idempotently.
+func (s *Store) DeleteReplyMaterialization(ctx context.Context, tenantID, eventID string) error {
+	if err := s.check(ctx); err != nil {
+		return err
+	}
+	if runtimestorage.ValidateTenant(tenantID) != nil || strings.TrimSpace(eventID) == "" {
+		return runtimestorage.ErrInvalid
+	}
+	return s.mutate(ctx, tenantID, func(value *state) error {
+		delete(value.Materializations, eventID)
+		return nil
+	})
 }
 
 // GetSession returns one tenant-scoped session.
@@ -471,6 +552,7 @@ func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) e
 					delete(value.Replies, key)
 				}
 			}
+			delete(value.Materializations, event.EventID)
 		}
 		return nil
 	})

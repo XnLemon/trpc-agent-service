@@ -6,9 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/go-telegram/bot"
@@ -24,6 +27,34 @@ type providerBot struct {
 	calls          int
 	photoCalls     int
 	documentCalls  int
+}
+
+type blockingProviderBot struct {
+	started chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	calls   int
+}
+
+func (b *blockingProviderBot) Start(context.Context) {}
+func (b *blockingProviderBot) GetMe(context.Context) (*models.User, error) {
+	return &models.User{ID: 1, IsBot: true}, nil
+}
+func (b *blockingProviderBot) SendMessage(ctx context.Context, _ *bot.SendMessageParams) (*models.Message, error) {
+	b.mu.Lock()
+	b.calls++
+	b.mu.Unlock()
+	select {
+	case <-b.started:
+	default:
+		close(b.started)
+	}
+	select {
+	case <-b.release:
+		return &models.Message{ID: 99}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (b *providerBot) Start(context.Context) {}
@@ -86,6 +117,158 @@ func TestProviderUsesStableReceiptAndReconcile(t *testing.T) {
 	}
 	if botClient.params.ChatID != int64(99) || botClient.params.MessageThreadID != 7 || botClient.params.Text != "hello" {
 		t.Fatalf("send params = %+v", botClient.params)
+	}
+}
+
+func TestProviderReconcilesDurableReceipt(t *testing.T) {
+	provider, err := NewProvider(&providerBot{}, 99, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := runtimestorage.ReplyOutbox{ProviderMessageID: "durable-42"}
+	status, receipt, err := provider.Reconcile(context.Background(), reply)
+	if err != nil || status != outbox.DeliveryAccepted || receipt != "durable-42" {
+		t.Fatalf("durable reconcile = %s/%q err=%v", status, receipt, err)
+	}
+}
+
+func TestProviderCoalescesConcurrentDelivery(t *testing.T) {
+	client := &blockingProviderBot{started: make(chan struct{}), release: make(chan struct{})}
+	provider, err := NewProvider(client, 99, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "concurrent", SegmentIndex: 0, Payload: "hello"}
+	results := make(chan string, 2)
+	go func() {
+		receipt, err := provider.Deliver(context.Background(), reply)
+		if err != nil {
+			t.Errorf("first delivery = %q/%v", receipt, err)
+		}
+		results <- receipt
+	}()
+	<-client.started
+	go func() {
+		receipt, err := provider.Deliver(context.Background(), reply)
+		if err != nil {
+			t.Errorf("coalesced delivery = %q/%v", receipt, err)
+		}
+		results <- receipt
+	}()
+	time.Sleep(10 * time.Millisecond)
+	client.mu.Lock()
+	if client.calls != 1 {
+		t.Fatalf("concurrent delivery sent %d provider requests while the first was in flight", client.calls)
+	}
+	client.mu.Unlock()
+	close(client.release)
+	for index := 0; index < 2; index++ {
+		if receipt := <-results; receipt != "99" {
+			t.Fatalf("delivery receipt = %q, want 99", receipt)
+		}
+	}
+}
+
+func TestBindingProviderRoutesDurableTelegramTargets(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "binding-provider", "12345")
+	botClient := &providerBot{message: &models.Message{ID: 43}}
+	adapter := &Adapter{client: botClient, target: target}
+	provider, err := NewBindingProvider(adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := runtimestorage.ReplyOutbox{
+		TenantID: target.TenantID, ReplyID: "reply-binding", SegmentIndex: 0, Payload: "hello",
+		ReplyTarget: runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: "group", ReceiverID: "-10042", ThreadID: "7"},
+	}
+	receipt, err := provider.Deliver(context.Background(), reply)
+	if err != nil || receipt != "43" {
+		t.Fatalf("binding delivery = %q, %v", receipt, err)
+	}
+	if botClient.params == nil || botClient.params.ChatID != int64(-10042) || botClient.params.MessageThreadID != 7 || botClient.params.Text != "hello" {
+		t.Fatalf("binding send params = %+v", botClient.params)
+	}
+	if _, err := provider.Deliver(context.Background(), reply); err != nil || botClient.calls != 1 {
+		t.Fatalf("binding duplicate delivery calls=%d err=%v", botClient.calls, err)
+	}
+	if status, receipt, err := provider.Reconcile(context.Background(), reply); err != nil || status != outbox.DeliveryAccepted || receipt != "43" {
+		t.Fatalf("binding reconcile = %s/%q err=%v", status, receipt, err)
+	}
+	invalid := reply
+	invalid.ReplyTarget.BindingID = "other-binding"
+	if _, err := provider.Deliver(context.Background(), invalid); err == nil {
+		t.Fatal("binding provider accepted an unregistered binding")
+	}
+}
+
+func TestBindingProviderRejectsInvalidAdaptersAndTargets(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "binding-provider-invalid", "12345")
+	client := &providerBot{message: &models.Message{ID: 44}}
+	valid := &Adapter{client: client, target: target}
+	for name, adapters := range map[string][]*Adapter{
+		"no adapters":    nil,
+		"nil adapter":    {nil},
+		"missing client": {{target: target}},
+		"wrong channel": func() []*Adapter {
+			wrong := target
+			wrong.Channel = channels.ChannelWeCom
+			return []*Adapter{{client: client, target: wrong}}
+		}(),
+		"missing binding": func() []*Adapter {
+			missing := target
+			missing.BindingID = ""
+			return []*Adapter{{client: client, target: missing}}
+		}(),
+		"missing tenant": func() []*Adapter {
+			missing := target
+			missing.TenantID = ""
+			return []*Adapter{{client: client, target: missing}}
+		}(),
+		"tampered target": func() []*Adapter {
+			tampered := target
+			tampered.ConfigDigest = "tampered"
+			return []*Adapter{{client: client, target: tampered}}
+		}(),
+		"duplicate binding": {valid, valid},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewBindingProvider(adapters...); !errors.Is(err, outbox.ErrInvalid) {
+				t.Fatalf("NewBindingProvider() error = %v", err)
+			}
+		})
+	}
+	provider, err := NewBindingProvider(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := runtimestorage.ReplyOutbox{TenantID: target.TenantID, ReplyID: "invalid-target", SegmentIndex: 0, Payload: "hello", ReplyTarget: runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: "direct", ReceiverID: "42"}}
+	for name, mutate := range map[string]func(*runtimestorage.ReplyOutbox){
+		"missing binding": func(value *runtimestorage.ReplyOutbox) { value.ReplyTarget.BindingID = "" },
+		"wrong tenant":    func(value *runtimestorage.ReplyOutbox) { value.TenantID = "other-tenant" },
+		"zero receiver":   func(value *runtimestorage.ReplyOutbox) { value.ReplyTarget.ReceiverID = "0" },
+		"noncanonical receiver": func(value *runtimestorage.ReplyOutbox) {
+			value.ReplyTarget.ReceiverID = "042"
+		},
+		"invalid receiver": func(value *runtimestorage.ReplyOutbox) { value.ReplyTarget.ReceiverID = "not-an-id" },
+		"negative thread":  func(value *runtimestorage.ReplyOutbox) { value.ReplyTarget.ThreadID = "-1" },
+		"noncanonical thread": func(value *runtimestorage.ReplyOutbox) {
+			value.ReplyTarget.ThreadID = "07"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := base
+			mutate(&value)
+			if _, err := provider.Deliver(context.Background(), value); err == nil {
+				t.Fatal("invalid Telegram target was accepted")
+			}
+		})
+	}
+	var nilProvider *BindingProvider
+	if _, err := nilProvider.Deliver(context.Background(), base); err == nil {
+		t.Fatal("nil binding provider unexpectedly delivered")
+	}
+	if _, _, err := provider.Reconcile(context.Background(), base); err != nil {
+		t.Fatalf("unknown receipt reconcile = %v", err)
 	}
 }
 
@@ -239,6 +422,32 @@ func TestProviderDocumentEmptyNameUsesReferenceID(t *testing.T) {
 	upload, ok := botClient.documentParams.Document.(*models.InputFileUpload)
 	if !ok || upload.Filename != reference.ID {
 		t.Fatalf("document upload = %#v", botClient.documentParams.Document)
+	}
+}
+
+func TestProviderDocumentFallsBackAndClassifiesSendFailure(t *testing.T) {
+	reference := providerAttachmentReference(t, attachment.KindDocument, "application/pdf", "brief.pdf", []byte("pdf"))
+	textFallback, err := NewProvider(&providerBot{message: &models.Message{ID: 15}}, 9, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt, err := textFallback.Deliver(context.Background(), runtimestorage.ReplyOutbox{
+		TenantID: "tenant-a", EventID: "event-doc", ReplyID: "reply-doc-fallback", SegmentIndex: 0,
+		Kind: runtimestorage.ReplyKindDocument, Payload: "caption", Attachment: reference, Fallback: "[document attachment]",
+	}); err != nil || receipt != "15" {
+		t.Fatalf("document fallback = %q, %v", receipt, err)
+	}
+	failed, err := NewProvider(&providerBot{message: &models.Message{ID: 16}, err: errors.New("telegram failure")}, 9, 0, WithAttachmentReader(&providerAttachmentReader{content: attachment.Content{Data: []byte("pdf")}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = failed.Deliver(context.Background(), runtimestorage.ReplyOutbox{
+		TenantID: "tenant-a", EventID: "event-doc", ReplyID: "reply-doc-failed", SegmentIndex: 0,
+		Kind: runtimestorage.ReplyKindDocument, Payload: "caption", Attachment: reference, Fallback: "[document attachment]",
+	})
+	var deliveryErr *outbox.DeliveryError
+	if !errors.As(err, &deliveryErr) || deliveryErr.Class != "provider_error" || !deliveryErr.Retryable {
+		t.Fatalf("document send error = %#v", err)
 	}
 }
 

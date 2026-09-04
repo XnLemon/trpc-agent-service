@@ -192,9 +192,11 @@ func assertResponsesTextAndUsage(t *testing.T, responses <-chan *trpcmodel.Respo
 	t.Helper()
 	var got string
 	var usage *trpcmodel.Usage
+	var terminal *trpcmodel.Response
 	count := 0
 	for response := range responses {
 		count++
+		terminal = response
 		if len(response.Choices) > 0 {
 			got += response.Choices[0].Delta.Content
 		}
@@ -203,8 +205,8 @@ func assertResponsesTextAndUsage(t *testing.T, responses <-chan *trpcmodel.Respo
 			t.Fatalf("unexpected error: %v", response.Error)
 		}
 	}
-	if got != "北京" || count != 3 {
-		t.Fatalf("got text %q across %d responses", got, count)
+	if got != "北京" || count != 3 || terminal == nil || !terminal.IsFinalResponse() || len(terminal.Choices) != 1 || terminal.Choices[0].Message.Content != "" {
+		t.Fatalf("got text %q across %d responses, terminal=%#v", got, count, terminal)
 	}
 	if usage == nil || usage.TotalTokens != 5 {
 		t.Fatalf("unexpected usage: %#v", usage)
@@ -224,9 +226,11 @@ func TestResponsesModelStreamsCompletedOutputFallbackAndUsage(t *testing.T) {
 	}
 	var got string
 	var usage *trpcmodel.Usage
+	var terminal *trpcmodel.Response
 	count := 0
 	for response := range responses {
 		count++
+		terminal = response
 		if len(response.Choices) > 0 {
 			got += response.Choices[0].Delta.Content
 		}
@@ -237,8 +241,8 @@ func TestResponsesModelStreamsCompletedOutputFallbackAndUsage(t *testing.T) {
 			t.Fatalf("unexpected error: %v", response.Error)
 		}
 	}
-	if got != "成功" || count != 2 {
-		t.Fatalf("got text %q across %d responses", got, count)
+	if got != "成功" || count != 2 || terminal == nil || !terminal.IsFinalResponse() || len(terminal.Choices) != 1 || terminal.Choices[0].Message.Content != "" {
+		t.Fatalf("got text %q across %d responses, terminal=%#v", got, count, terminal)
 	}
 	if usage == nil || usage.TotalTokens != 6 {
 		t.Fatalf("unexpected usage: %#v", usage)
@@ -287,7 +291,7 @@ func TestResponsesModelStreamsOutputItemFallback(t *testing.T) {
 					t.Fatalf("unexpected error: %v", response.Error)
 				}
 			}
-			if got == "" || terminal == nil || terminal.Usage == nil || terminal.Usage.TotalTokens != 6 {
+			if got == "" || terminal == nil || !terminal.IsFinalResponse() || len(terminal.Choices) != 1 || terminal.Choices[0].Message.Content != "" || terminal.Usage == nil || terminal.Usage.TotalTokens != 6 {
 				t.Fatalf("got text %q terminal %#v", got, terminal)
 			}
 		})
@@ -471,6 +475,16 @@ func TestResponsesModelMapsFunctionCallHistory(t *testing.T) {
 	}})
 	if len(input) != 2 || input[0].Type != "function_call" || input[0].CallID != "call-1" || input[0].Name != "send_test_image" || input[0].Arguments != "{}" || input[1].Type != "function_call_output" || input[1].CallID != "call-1" || input[1].Output != "{\"status\":\"queued\"}" {
 		t.Fatalf("function history = %#v", input)
+	}
+}
+
+func TestResponsesModelMapsAssistantHistoryAsOutputContent(t *testing.T) {
+	input := responsesInput(&trpcmodel.Request{Messages: []trpcmodel.Message{
+		{Role: trpcmodel.RoleUser, Content: "new question"},
+		{Role: trpcmodel.RoleAssistant, Content: "previous answer"},
+	}})
+	if len(input) != 2 || input[0].Content[0].Type != "input_text" || input[1].Content[0].Type != "output_text" || input[1].Content[0].Text != "previous answer" {
+		t.Fatalf("role-specific text history = %#v", input)
 	}
 }
 

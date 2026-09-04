@@ -30,6 +30,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/channels/mysql"
 	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/telegram"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom_aibot"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
@@ -107,10 +108,15 @@ const (
 	envWeComSecretRef = "WECOM_SECRET_REF"
 	// #nosec G101 -- environment variable name, not a credential.
 	envWeComAIBotConnections = "WECOM_AIBOT_CONNECTIONS"
-	envOTLPEndpoint          = "OTEL_EXPORTER_OTLP_ENDPOINT"
-	envOTLPHeaders           = "OTEL_EXPORTER_OTLP_HEADERS"
-	envOTLPInsecure          = "OTEL_EXPORTER_OTLP_INSECURE"
-	envOTELServiceName       = "OTEL_SERVICE_NAME"
+	// #nosec G101 -- environment variable name, not a credential.
+	envTelegramBotToken  = "TELEGRAM_BOT_TOKEN"
+	envTelegramBindingID = "TELEGRAM_BINDING_ID"
+	envTelegramSecretRef = "TELEGRAM_SECRET_REF"
+	envTelegramMode      = "TELEGRAM_MODE"
+	envOTLPEndpoint      = "OTEL_EXPORTER_OTLP_ENDPOINT"
+	envOTLPHeaders       = "OTEL_EXPORTER_OTLP_HEADERS"
+	envOTLPInsecure      = "OTEL_EXPORTER_OTLP_INSECURE"
+	envOTELServiceName   = "OTEL_SERVICE_NAME"
 
 	defaultModelProvider = "openai"
 	defaultModelNames    = "gpt-4o-mini"
@@ -136,6 +142,7 @@ var (
 	newEnvironmentS3Store            s3StoreFactory = newEnvironmentS3StoreFromConfig
 	environmentWeComOwnerFunc                       = environmentWeComOwner
 	newEnvironmentWeComWorker                       = outbox.New
+	newEnvironmentTelegramAdapter                   = telegram.New
 )
 
 type s3StoreFactory func(context.Context, string, backend.CapabilityBinding, modelprofile.SecretValue) (environmentS3Store, error)
@@ -146,9 +153,9 @@ type environmentS3Store interface {
 	Probe(context.Context) error
 }
 
-// environmentConfig is intentionally private: it contains the one secret
-// handed to the ModelFactory and must not become a serializable application
-// configuration object.
+// environmentConfig is intentionally private: it contains startup-only
+// secrets handed to model and channel factories and must not become a
+// serializable application configuration object.
 type environmentConfig struct {
 	driver         ControlPlaneDriver
 	dsn            string
@@ -178,6 +185,7 @@ type environmentConfig struct {
 	demoMode       bool
 	wecom          *environmentWeComConfig
 	wecomAIBots    []environmentWeComAIBotConfig
+	telegram       *environmentTelegramConfig
 	telemetry      observability.Provider
 	otlp           observability.OTLPConfig
 }
@@ -195,6 +203,15 @@ type environmentWeComAIBotConfig struct {
 	BindingID string `json:"binding_id"`
 	SecretRef string `json:"secret_ref"`
 	BotSecret string `json:"bot_secret"`
+}
+
+// environmentTelegramConfig contains one operator-selected Telegram binding
+// and retains the Bot token only for the startup construction path.
+type environmentTelegramConfig struct {
+	bindingID string
+	secretRef string
+	botToken  string
+	mode      string
 }
 
 // environmentRuntimeStores owns process-scoped runtime stores. The primary
@@ -286,12 +303,12 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, fmt.Errorf("%w: environment repositories: %v", ErrInvalidConfig, err)
 	}
 	auditWriter = metrics.WrapAuditWriter(auditWriter, config.telemetry)
-	wecomFactory, wecomProvider, err := environmentWeComComponents(config, channelRepo, tenantRepo, appRepo, runtimeStore, auditWriter)
+	wecomFactory, wecomProvider, telegramFactory, err := environmentChannelComponents(ctx, config, channelRepo, tenantRepo, appRepo, runtimeStore, auditWriter)
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = runtimeStores.Close()
 		_ = db.Close()
-		return nil, fmt.Errorf("%w: wecom components: %v", ErrInvalidConfig, err)
+		return nil, err
 	}
 	secretRegistry, modelRegistry, backendRegistry, err := environmentRegistriesForStores(config, delegateSessions, runtimeStores)
 	if err != nil {
@@ -316,27 +333,28 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, fmt.Errorf("%w: storage factory: %v", ErrInvalidConfig, err)
 	}
 	graph, err := NewWithDatabase(ctx, db, Config{
-		OwnDB:               true,
-		ControlPlaneDriver:  config.driver,
-		Observability:       config.telemetry,
-		Tenants:             tenantRepo,
-		Apps:                appRepo,
-		Channels:            channelRepo,
-		ModelCatalog:        modelCatalog,
-		BackendCatalog:      backendCatalog,
-		SecretResolver:      secretRegistry,
-		ModelFactory:        modelRegistry,
-		StorageFactory:      storageFactory,
-		Sessions:            delegateSessions,
-		RuntimeStore:        runtimeStore,
-		RuntimeTenantID:     "",
-		Authenticator:       authenticator,
-		AdminAuthenticator:  adminAuthenticator,
-		WeComHandlerFactory: wecomFactory,
-		WeComAIBotFactories: aiBotFactories,
-		OutboxWorkerFactory: workerFactory,
-		OutboxPollInterval:  time.Second,
-		AuditWriter:         auditWriter,
+		OwnDB:                  true,
+		ControlPlaneDriver:     config.driver,
+		Observability:          config.telemetry,
+		Tenants:                tenantRepo,
+		Apps:                   appRepo,
+		Channels:               channelRepo,
+		ModelCatalog:           modelCatalog,
+		BackendCatalog:         backendCatalog,
+		SecretResolver:         secretRegistry,
+		ModelFactory:           modelRegistry,
+		StorageFactory:         storageFactory,
+		Sessions:               delegateSessions,
+		RuntimeStore:           runtimeStore,
+		RuntimeTenantID:        "",
+		Authenticator:          authenticator,
+		AdminAuthenticator:     adminAuthenticator,
+		WeComHandlerFactory:    wecomFactory,
+		WeComAIBotFactories:    aiBotFactories,
+		TelegramPollingFactory: telegramFactory,
+		OutboxWorkerFactory:    workerFactory,
+		OutboxPollInterval:     time.Second,
+		AuditWriter:            auditWriter,
 		Ping: func(pingContext context.Context) error {
 			return environmentPing(pingContext, config.driver, db, runtimeStore)
 		},
@@ -354,6 +372,26 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	}
 	telemetryOwned = false
 	return graph, nil
+}
+
+func environmentChannelComponents(
+	ctx context.Context,
+	config environmentConfig,
+	channelsRepo channels.CandidateConsumer,
+	tenantsRepo tenant.Repository,
+	appsRepo agent.Repository,
+	runtimeStore runtimestorage.RuntimeStore,
+	auditWriter audit.Writer,
+) (func(gateway.DispatchService) (http.Handler, error), outbox.Provider, func(gateway.DispatchService) (channels.PollingAdapter, error), error) {
+	wecomFactory, wecomProvider, err := environmentWeComComponents(config, channelsRepo, tenantsRepo, appsRepo, runtimeStore, auditWriter)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("%w: wecom components: %v", ErrInvalidConfig, err)
+	}
+	telegramFactory, err := environmentTelegramComponents(ctx, config, channelsRepo, tenantsRepo, appsRepo, runtimeStore, auditWriter)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("%w: telegram components: %v", ErrInvalidConfig, err)
+	}
+	return wecomFactory, wecomProvider, telegramFactory, nil
 }
 
 func openEnvironmentDatabaseForConfig(ctx context.Context, config environmentConfig) (*sql.DB, func(context.Context, *sql.DB) error, func(context.Context, *sql.DB) error, error) {
@@ -502,66 +540,175 @@ func environmentWeComAIBotComponents(ctx context.Context, config environmentConf
 }
 
 func environmentOutboxWorkerFactory(config environmentConfig, runtimeStore runtimestorage.RuntimeStore, auditWriter audit.Writer, legacy outbox.Provider, aiBotBindingIDs map[string]struct{}) func([]channels.PollingAdapter) (*outbox.Worker, error) {
-	if legacy == nil && len(aiBotBindingIDs) == 0 {
+	if legacy == nil && len(aiBotBindingIDs) == 0 && config.telegram == nil {
 		return nil
 	}
 	return func(adapters []channels.PollingAdapter) (*outbox.Worker, error) {
-		provider := legacy
-		channel, providerName := "wecom", "wecom"
-		leaseDuration := 30 * time.Second
-		if len(aiBotBindingIDs) > 0 {
-			leaseDuration = wecom_aibot.OutboxLeaseDuration
-			deliveryStore, ok := runtimeStore.(wecom_aibot.DeliveryStore)
-			if !ok {
-				return nil, errors.New("runtime store does not support durable reply acknowledgements")
-			}
-			managers := make([]*wecom_aibot.Manager, 0, len(aiBotBindingIDs))
-			for _, adapter := range adapters {
-				manager, ok := adapter.(*wecom_aibot.Manager)
-				if !ok {
-					return nil, errors.New("wecom ai bot adapter has an invalid type")
-				}
-				managers = append(managers, manager)
-			}
-			if len(managers) != len(aiBotBindingIDs) {
-				return nil, errors.New("wecom ai bot manager count is invalid")
-			}
-			aiBotProvider, err := wecom_aibot.NewBindingProvider(deliveryStore, managers...)
-			if err != nil {
-				return nil, err
-			}
-			if provider == nil {
-				provider, channel, providerName = aiBotProvider, "wecom_aibot", "wecom_aibot"
-			} else {
-				provider = environmentReplyProvider{legacy: provider, aiBot: aiBotProvider, aiBotBindingIDs: aiBotBindingIDs}
-			}
+		provider, channel, providerName, leaseDuration, err := environmentOutboxProvider(config, runtimeStore, legacy, aiBotBindingIDs, adapters)
+		if err != nil {
+			return nil, err
 		}
 		owner, err := environmentWeComOwnerFunc()
 		if err != nil {
 			return nil, err
 		}
-		return newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: provider, Channel: channel, ProviderName: providerName, TenantID: config.tenantID, Owner: owner, LeaseDuration: leaseDuration, AuditWriter: auditWriter, Observability: config.telemetry})
+		materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: runtimeStore, Observability: config.telemetry})
+		if err != nil {
+			return nil, err
+		}
+		return newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: provider, Materializer: materializer, Channel: channel, ProviderName: providerName, TenantID: config.tenantID, Owner: owner, LeaseDuration: leaseDuration, AuditWriter: auditWriter, Observability: config.telemetry})
 	}
+}
+
+func environmentOutboxProvider(
+	config environmentConfig,
+	runtimeStore runtimestorage.RuntimeStore,
+	legacy outbox.Provider,
+	aiBotBindingIDs map[string]struct{},
+	adapters []channels.PollingAdapter,
+) (outbox.Provider, string, string, time.Duration, error) {
+	aiBotProvider, err := environmentAIBotOutboxProvider(runtimeStore, aiBotBindingIDs, adapters)
+	if err != nil {
+		return nil, "", "", 0, err
+	}
+	telegramProvider, telegramBindingIDs, err := environmentTelegramOutboxProvider(config, adapters)
+	if err != nil {
+		return nil, "", "", 0, err
+	}
+	providerCount := 0
+	if legacy != nil {
+		providerCount++
+	}
+	if aiBotProvider != nil {
+		providerCount++
+	}
+	if telegramProvider != nil {
+		providerCount++
+	}
+	leaseDuration := 30 * time.Second
+	if telegramProvider != nil {
+		for _, adapter := range adapters {
+			telegramAdapter, ok := adapter.(*telegram.Adapter)
+			if ok && telegramAdapter.OutboxLeaseDuration() > leaseDuration {
+				leaseDuration = telegramAdapter.OutboxLeaseDuration()
+			}
+		}
+	}
+	if aiBotProvider != nil && leaseDuration < wecom_aibot.OutboxLeaseDuration {
+		// AI Bot delivery waits for the provider acknowledgement and then
+		// commits a fenced receipt. A mixed worker must retain that longer
+		// lease even when the selected reply targets are mostly Telegram or
+		// the legacy WeCom webhook.
+		leaseDuration = wecom_aibot.OutboxLeaseDuration
+	}
+	switch providerCount {
+	case 0:
+		return nil, "", "", 0, errors.New("no outbox provider is configured")
+	case 1:
+		switch {
+		case telegramProvider != nil:
+			return telegramProvider, "telegram", "telegram", leaseDuration, nil
+		case aiBotProvider != nil:
+			return aiBotProvider, "wecom_aibot", "wecom_aibot", wecom_aibot.OutboxLeaseDuration, nil
+		default:
+			return legacy, "wecom", "wecom", leaseDuration, nil
+		}
+	default:
+		return environmentReplyProvider{
+			legacy: legacy, aiBot: aiBotProvider, telegram: telegramProvider,
+			aiBotBindingIDs: aiBotBindingIDs, telegramBindingIDs: telegramBindingIDs,
+		}, "mixed", "mixed", leaseDuration, nil
+	}
+}
+
+func environmentAIBotOutboxProvider(runtimeStore runtimestorage.RuntimeStore, bindingIDs map[string]struct{}, adapters []channels.PollingAdapter) (outbox.Provider, error) {
+	if len(bindingIDs) == 0 {
+		return nil, nil
+	}
+	deliveryStore, ok := runtimeStore.(wecom_aibot.DeliveryStore)
+	if !ok {
+		return nil, errors.New("runtime store does not support durable reply acknowledgements")
+	}
+	managers := make([]*wecom_aibot.Manager, 0, len(bindingIDs))
+	for _, adapter := range adapters {
+		manager, ok := adapter.(*wecom_aibot.Manager)
+		if !ok {
+			continue
+		}
+		managers = append(managers, manager)
+	}
+	if len(managers) != len(bindingIDs) {
+		return nil, errors.New("wecom ai bot manager count is invalid")
+	}
+	return wecom_aibot.NewBindingProvider(deliveryStore, managers...)
+}
+
+func environmentTelegramOutboxProvider(config environmentConfig, adapters []channels.PollingAdapter) (outbox.Provider, map[string]struct{}, error) {
+	if config.telegram == nil {
+		return nil, nil, nil
+	}
+	telegramAdapters := make([]*telegram.Adapter, 0, 1)
+	for _, adapter := range adapters {
+		telegramAdapter, ok := adapter.(*telegram.Adapter)
+		if ok {
+			telegramAdapters = append(telegramAdapters, telegramAdapter)
+		}
+	}
+	if len(telegramAdapters) != 1 {
+		return nil, nil, errors.New("telegram adapter count is invalid")
+	}
+	provider, err := telegram.NewBindingProvider(telegramAdapters...)
+	if err != nil {
+		return nil, nil, err
+	}
+	return provider, map[string]struct{}{config.telegram.bindingID: {}}, nil
 }
 
 type environmentReplyProvider struct {
-	legacy          outbox.Provider
-	aiBot           outbox.Provider
-	aiBotBindingIDs map[string]struct{}
+	legacy             outbox.Provider
+	aiBot              outbox.Provider
+	telegram           outbox.Provider
+	aiBotBindingIDs    map[string]struct{}
+	telegramBindingIDs map[string]struct{}
 }
 
 func (p environmentReplyProvider) Deliver(ctx context.Context, value runtimestorage.ReplyOutbox) (string, error) {
-	if _, ok := p.aiBotBindingIDs[value.ReplyTarget.BindingID]; ok {
-		return p.aiBot.Deliver(ctx, value)
+	provider, err := p.provider(value)
+	if err != nil {
+		return "", err
 	}
-	return p.legacy.Deliver(ctx, value)
+	return provider.Deliver(ctx, value)
 }
 
 func (p environmentReplyProvider) Reconcile(ctx context.Context, value runtimestorage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
-	if _, ok := p.aiBotBindingIDs[value.ReplyTarget.BindingID]; ok {
-		return p.aiBot.Reconcile(ctx, value)
+	provider, err := p.provider(value)
+	if err != nil {
+		return outbox.DeliveryUnknown, "", err
 	}
-	return p.legacy.Reconcile(ctx, value)
+	return provider.Reconcile(ctx, value)
+}
+
+func (p environmentReplyProvider) provider(value runtimestorage.ReplyOutbox) (outbox.Provider, error) {
+	if _, ok := p.telegramBindingIDs[value.ReplyTarget.BindingID]; ok {
+		if p.telegram == nil {
+			return nil, environmentInvalidDelivery()
+		}
+		return p.telegram, nil
+	}
+	if _, ok := p.aiBotBindingIDs[value.ReplyTarget.BindingID]; ok {
+		if p.aiBot == nil {
+			return nil, environmentInvalidDelivery()
+		}
+		return p.aiBot, nil
+	}
+	if p.legacy == nil {
+		return nil, environmentInvalidDelivery()
+	}
+	return p.legacy, nil
+}
+
+func environmentInvalidDelivery() error {
+	return &outbox.DeliveryError{Class: "invalid", Retryable: false}
 }
 
 func environmentRegistries(config environmentConfig, delegateSessions session.Service, runtimeStore runtimestorage.RuntimeStore) (*modelprofile.SecretRegistry, *modelprofile.ModelProviderRegistry, *backend.ProviderRegistry, error) {
@@ -691,7 +838,7 @@ func loadEnvironment() (environmentConfig, error) {
 		demoMode:       demoMode,
 		telemetry:      observability.NewNoopProvider(),
 	}
-	loaders := []func() error{config.loadDatabase, config.loadIdentities, config.loadAdmin, config.loadModel, config.loadRuntime, config.loadS3, config.loadWeCom, config.loadWeComAIBots}
+	loaders := []func() error{config.loadDatabase, config.loadIdentities, config.loadAdmin, config.loadModel, config.loadRuntime, config.loadS3, config.loadWeCom, config.loadWeComAIBots, config.loadTelegram}
 	for _, load := range loaders {
 		if err := load(); err != nil {
 			return environmentConfig{}, err

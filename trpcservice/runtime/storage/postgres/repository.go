@@ -19,6 +19,7 @@ type Store struct{ db *sql.DB }
 
 const eventColumns = "tenant_id,event_id,session_id,binding_id,external_message_id,idempotency_key,event_seq,status,fencing_token,lease_owner,lease_expires_at,reply_id,segment_count,reply_conversation_kind,reply_receiver_id,reply_thread_id,created_at,updated_at"
 const replyColumns = "tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_kind,attachment_id,attachment_kind,attachment_mime_type,attachment_name,attachment_size,attachment_sha256,attachment_provider,attachment_provider_id,fallback,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status,attempts,fencing_token,lease_owner,lease_expires_at,provider_message_id,last_error_class,created_at,updated_at"
+const materializationColumns = "tenant_id,event_id,reply_id,request_id,trace_id,trace_parent,payload,segments::text,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,created_at,updated_at"
 const insertReplyStatement = "INSERT INTO public.reply_outbox (tenant_id,reply_id,event_id,segment_index,segment_count,payload,reply_kind,attachment_id,attachment_kind,attachment_mime_type,attachment_name,attachment_size,attachment_sha256,attachment_provider,attachment_provider_id,fallback,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id,status) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'pending' WHERE EXISTS (SELECT 1 FROM public.message_event WHERE tenant_id=$1 AND event_id=$3 AND ((reply_conversation_kind='' AND reply_receiver_id='' AND reply_thread_id='' AND $17='' AND $18='' AND $19='' AND $20='') OR (binding_id=$17 AND reply_conversation_kind=$18 AND reply_receiver_id=$19 AND reply_thread_id=$20))) ON CONFLICT (tenant_id,reply_id,segment_index) DO UPDATE SET updated_at=public.reply_outbox.updated_at WHERE public.reply_outbox.event_id=EXCLUDED.event_id AND public.reply_outbox.segment_count=EXCLUDED.segment_count AND public.reply_outbox.payload=EXCLUDED.payload AND public.reply_outbox.reply_kind=EXCLUDED.reply_kind AND public.reply_outbox.attachment_id=EXCLUDED.attachment_id AND public.reply_outbox.attachment_kind=EXCLUDED.attachment_kind AND public.reply_outbox.attachment_mime_type=EXCLUDED.attachment_mime_type AND public.reply_outbox.attachment_name=EXCLUDED.attachment_name AND public.reply_outbox.attachment_size=EXCLUDED.attachment_size AND public.reply_outbox.attachment_sha256=EXCLUDED.attachment_sha256 AND public.reply_outbox.attachment_provider=EXCLUDED.attachment_provider AND public.reply_outbox.attachment_provider_id=EXCLUDED.attachment_provider_id AND public.reply_outbox.fallback=EXCLUDED.fallback AND public.reply_outbox.reply_binding_id=EXCLUDED.reply_binding_id AND public.reply_outbox.reply_conversation_kind=EXCLUDED.reply_conversation_kind AND public.reply_outbox.reply_receiver_id=EXCLUDED.reply_receiver_id AND public.reply_outbox.reply_thread_id=EXCLUDED.reply_thread_id"
 
 // New creates a PostgreSQL runtime store over db.
@@ -39,6 +40,89 @@ func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID strin
 	}
 	value.TraceParent = observability.NormalizeTraceParent(value.TraceParent)
 	return value, nil
+}
+
+// PutReplyMaterialization stores one idempotent durable reply recovery record.
+func (s *Store) PutReplyMaterialization(ctx context.Context, input runtimestorage.ReplyMaterializationIntent) (runtimestorage.ReplyMaterializationIntent, error) {
+	if err := check(ctx); err != nil {
+		return runtimestorage.ReplyMaterializationIntent{}, err
+	}
+	input, err := runtimestorage.NormalizeReplyMaterializationIntent(input)
+	if err != nil {
+		return runtimestorage.ReplyMaterializationIntent{}, err
+	}
+	event, err := s.GetMessage(ctx, input.TenantID, input.EventID)
+	if err != nil {
+		return runtimestorage.ReplyMaterializationIntent{}, err
+	}
+	if event.ReplyTarget != input.ReplyTarget {
+		return runtimestorage.ReplyMaterializationIntent{}, runtimestorage.ErrConflict
+	}
+	segments, err := json.Marshal(input.Segments)
+	if err != nil {
+		return runtimestorage.ReplyMaterializationIntent{}, runtimestorage.ErrInvalid
+	}
+	if len(input.Segments) == 0 {
+		segments = []byte("[]")
+	}
+	var value runtimestorage.ReplyMaterializationIntent
+	var encodedSegments []byte
+	err = s.db.QueryRowContext(ctx, "INSERT INTO public.runtime_reply_materialization (tenant_id,event_id,reply_id,request_id,trace_id,trace_parent,payload,segments,reply_binding_id,reply_conversation_kind,reply_receiver_id,reply_thread_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12) ON CONFLICT (tenant_id,event_id) DO UPDATE SET updated_at=public.runtime_reply_materialization.updated_at WHERE public.runtime_reply_materialization.reply_id=EXCLUDED.reply_id AND public.runtime_reply_materialization.request_id=EXCLUDED.request_id AND public.runtime_reply_materialization.trace_id=EXCLUDED.trace_id AND public.runtime_reply_materialization.trace_parent=EXCLUDED.trace_parent AND public.runtime_reply_materialization.payload=EXCLUDED.payload AND public.runtime_reply_materialization.segments=EXCLUDED.segments AND public.runtime_reply_materialization.reply_binding_id=EXCLUDED.reply_binding_id AND public.runtime_reply_materialization.reply_conversation_kind=EXCLUDED.reply_conversation_kind AND public.runtime_reply_materialization.reply_receiver_id=EXCLUDED.reply_receiver_id AND public.runtime_reply_materialization.reply_thread_id=EXCLUDED.reply_thread_id RETURNING "+materializationColumns, input.TenantID, input.EventID, input.ReplyID, input.RequestID, input.TraceID, input.TraceParent, input.Payload, segments, input.ReplyTarget.BindingID, input.ReplyTarget.ConversationKind, input.ReplyTarget.ReceiverID, input.ReplyTarget.ThreadID).Scan(materializationArgs(&value, &encodedSegments)...)
+	if err == nil {
+		if err := decodeMaterializationSegments(encodedSegments, &value); err != nil {
+			return runtimestorage.ReplyMaterializationIntent{}, err
+		}
+		return cloneMaterialization(value), nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return runtimestorage.ReplyMaterializationIntent{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	return runtimestorage.ReplyMaterializationIntent{}, runtimestorage.ErrConflict
+}
+
+// ListReplyMaterializations returns pending recovery records for a tenant.
+func (s *Store) ListReplyMaterializations(ctx context.Context, tenantID string) ([]runtimestorage.ReplyMaterializationIntent, error) {
+	if err := check(ctx); err != nil {
+		return nil, err
+	}
+	if err := runtimestorage.ValidateTenant(tenantID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT "+materializationColumns+" FROM public.runtime_reply_materialization WHERE tenant_id=$1 ORDER BY created_at,event_id", tenantID)
+	if err != nil {
+		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	defer func() { _ = rows.Close() }()
+	result := make([]runtimestorage.ReplyMaterializationIntent, 0)
+	for rows.Next() {
+		var value runtimestorage.ReplyMaterializationIntent
+		var encodedSegments []byte
+		if err := rows.Scan(materializationArgs(&value, &encodedSegments)...); err != nil {
+			return nil, runtimestorage.ErrStorage
+		}
+		if err := decodeMaterializationSegments(encodedSegments, &value); err != nil {
+			return nil, err
+		}
+		result = append(result, cloneMaterialization(value))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, runtimestorage.ErrStorage
+	}
+	return result, nil
+}
+
+// DeleteReplyMaterialization removes one recovery record idempotently.
+func (s *Store) DeleteReplyMaterialization(ctx context.Context, tenantID, eventID string) error {
+	if err := check(ctx); err != nil {
+		return err
+	}
+	if runtimestorage.ValidateTenant(tenantID) != nil || strings.TrimSpace(eventID) == "" {
+		return runtimestorage.ErrInvalid
+	}
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM public.runtime_reply_materialization WHERE tenant_id=$1 AND event_id=$2", tenantID, eventID); err != nil {
+		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	return nil
 }
 
 // GetSession loads a tenant-scoped session.
@@ -657,6 +741,9 @@ func check(ctx context.Context) error {
 func eventArgs(value *runtimestorage.MessageEvent) []any {
 	return []any{&value.TenantID, &value.EventID, &value.SessionID, &value.BindingID, &value.ExternalMessageID, &value.IdempotencyKey, &value.EventSeq, &value.Status, &value.FencingToken, &value.LeaseOwner, &value.LeaseExpiresAt, &value.ReplyID, &value.SegmentCount, &value.ReplyTarget.ConversationKind, &value.ReplyTarget.ReceiverID, &value.ReplyTarget.ThreadID, &value.CreatedAt, &value.UpdatedAt}
 }
+func materializationArgs(value *runtimestorage.ReplyMaterializationIntent, segments *[]byte) []any {
+	return []any{&value.TenantID, &value.EventID, &value.ReplyID, &value.RequestID, &value.TraceID, &value.TraceParent, &value.Payload, segments, &value.ReplyTarget.BindingID, &value.ReplyTarget.ConversationKind, &value.ReplyTarget.ReceiverID, &value.ReplyTarget.ThreadID, &value.CreatedAt, &value.UpdatedAt}
+}
 func replyInsertArgs(value runtimestorage.ReplyOutbox) []any {
 	return []any{
 		value.TenantID, value.ReplyID, value.EventID, value.SegmentIndex, value.SegmentCount, value.Payload,
@@ -699,6 +786,21 @@ func clonePayload(value runtimestorage.EventPayload) runtimestorage.EventPayload
 	value.Payload = append([]byte(nil), value.Payload...)
 	return value
 }
+func cloneMaterialization(value runtimestorage.ReplyMaterializationIntent) runtimestorage.ReplyMaterializationIntent {
+	value.Segments = append([]runtimestorage.ReplyMaterializationSegment(nil), value.Segments...)
+	return value
+}
+func decodeMaterializationSegments(encoded []byte, value *runtimestorage.ReplyMaterializationIntent) error {
+	if value == nil || json.Unmarshal(encoded, &value.Segments) != nil {
+		return runtimestorage.ErrStorage
+	}
+	normalized, err := runtimestorage.NormalizeReplyMaterializationIntent(*value)
+	if err != nil {
+		return runtimestorage.ErrStorage
+	}
+	*value = normalized
+	return nil
+}
 func validatePayload(value runtimestorage.EventPayload) error {
 	if runtimestorage.ValidateSession(value.TenantID, value.SessionID) != nil || value.EventID == "" || len(value.Payload) == 0 || !json.Valid(value.Payload) {
 		return runtimestorage.ErrInvalid
@@ -715,3 +817,4 @@ func cloneReply(value runtimestorage.ReplyOutbox) runtimestorage.ReplyOutbox {
 
 var _ runtimestorage.RuntimeStore = (*Store)(nil)
 var _ runtimestorage.ReplyReceiptRecorder = (*Store)(nil)
+var _ runtimestorage.ReplyMaterializationStore = (*Store)(nil)

@@ -92,7 +92,9 @@ TRPC_MODEL_API_KEY
 
 多租户时，用 `TRPC_API_IDENTITIES` 替代旧的三个 API identity 字段，并用
 `TRPC_MODEL_API_KEYS` 为每个 tenant 提供模型密钥；详细格式见下方配置参考。若启用企业微信，
-四个 `WECOM_*` 字段必须一起提供。
+四个 `WECOM_*` 字段必须一起提供。若启用 Telegram 部署入口，
+`TELEGRAM_MODE`、`TELEGRAM_BINDING_ID`、`TELEGRAM_SECRET_REF` 和
+`TELEGRAM_BOT_TOKEN` 也必须一起提供；当前入口只支持 `polling`。
 
 ### 2. 固定镜像版本并应用
 
@@ -215,6 +217,30 @@ S3 Artifact provider 是按 Profile 选择的可选能力，不会因为设置�
 真实部署应使用 HTTPS S3/OSS-compatible endpoint，并将凭据交给 Secret Manager。[runtime-storage.md](runtime-storage.md)
 中的 live conformance 测试只在显式提供测试环境变量时运行。
 
+### Telegram polling 部署
+
+| 变量 | 必需/默认 | 说明 |
+| --- | --- | --- |
+| `TELEGRAM_MODE` | 启用 Telegram 时必需，`polling` | 当前环境 bootstrap 只支持长轮询；不启用时留空 |
+| `TELEGRAM_BINDING_ID` | 启用 Telegram 时必需 | 已创建且 active 的 Telegram Binding ID；不是公开 route key |
+| `TELEGRAM_SECRET_REF` | 启用 Telegram 时必需 | 必须与该 Binding 的 `SecretRef` 和单租户 identity 匹配 |
+| `TELEGRAM_BOT_TOKEN` | 启用 Telegram 时必需 | BotFather token，仅在进程启动时注入；不写入控制面、日志、trace 或审计 |
+
+先通过 Admin API 创建并激活一个 `channel=telegram` 的 Binding，把 Telegram Bot 的
+数字账号 ID 写入 `provider_account_id`，把 `SecretRef` 设置为
+`TELEGRAM_SECRET_REF`，再部署服务。启动时会用 Bot API `getMe` 校验 token 对应的账号
+是否等于 Binding 的可信账号；运行时 AttachmentStore 可用时，Outbox 的图片/文档 segment
+会分别调用 Telegram 原生 `sendPhoto`/`sendDocument`，读取失败、格式不支持或没有 store
+时发送已落库的确定性文本 fallback。
+
+该入口采用 OpenClaw 类长轮询：Telegram adapter 由 Bootstrap 创建并由 Runtime 负责
+`Run/Close`，同一进程内的 Telegram 与其他 IM 回复共用一个有租约的 durable Outbox worker。
+同一个 Bot token 只能有一个 active polling owner；Kubernetes 启用 Telegram 时必须在专用
+overlay 中设置 `replicas: 1`，并将滚动更新改为不产生新旧 Pod 重叠（例如
+`maxSurge: 0`、`maxUnavailable: 1`）。默认两副本 base 不应直接承载同一个 Telegram
+polling token。当前部署路径不启用 WebSocket、SSE 或增量回复；每条 Telegram 回复在
+Runner 完成后一次性发送。
+
 ### 企业微信与 OpenTelemetry
 
 | 变量 | 必需/默认 | 说明 |
@@ -229,6 +255,7 @@ S3 Artifact provider 是按 Profile 选择的可选能力，不会因为设置�
 | `OTEL_SERVICE_NAME` | 否，`trpc-agent-service` | OTLP resource service name |
 
 四个 WeCom 变量必须全为空或全部设置；单套 WeCom 凭据只允许绑定一个 API identity。
+Telegram 的四个部署变量也必须全为空或全部设置；它与 WeCom 一样只允许单个 API identity。
 OTLP exporter 故障不会把 header 或 Secret 写入 span、metric、日志或错误文本。
 
 ## 验证与 CI

@@ -14,7 +14,7 @@ Telegram getUpdates
   -> gateway.Channel Principal
   -> gateway.DispatchService
   -> 完整消费脱敏 DispatchEvent
-  -> 聚合并分段
+  -> durable Reply Outbox
   -> Telegram sendMessage / SendPhoto / SendDocument
 ```
 
@@ -31,6 +31,7 @@ Webhook 由调用方拥有 HTTP listener，`telegram.Webhook` 只负责精确 pa
 | `BotToken` | 仅为运行时输入，不能写入 Binding、Plan、缓存键、日志、trace 或错误；构造成功后只由 SDK client 持有 |
 | `Target` | 必须由现有 trusted boundary 创建并通过 `Validate()`；必须是 active Telegram Binding 的 RoutingTarget |
 | `Dispatcher` | 使用现有 `gateway.DispatchService`；适配器不能直接调用 Runner |
+| `DurableReplies` | 部署路径设为 true；入站 handler 只完成幂等记录，由 Reply Outbox worker 独占最终投递；false 保留 standalone 直发兼容模式 |
 | `Idempotency` | 可注入现有 `gateway.IdempotencyStore`；未注入时由适配器拥有一个进程内实例，不宣称跨进程保证 |
 | `APIBaseURL` | 可选 HTTPS origin，仅用于 SDK Bot API；不从 Telegram update 或 webhook 字段读取 |
 | `HTTPClient` | 可选的 SDK HTTP client，测试使用 fake/`httptest`，不要求真实凭据 |
@@ -81,7 +82,8 @@ Issue #98 之后，图片、文档、音频和视频会保留 provider file id�
 principal 调用 `IdempotencyStore.Begin`：
 
 - pending duplicate 不再次调用 Dispatch，也不启动隐藏 retry；
-- completed duplicate 重用已缓存的脱敏 DispatchEvent，并只重新发送一个聚合后的逻辑回复；
+- completed duplicate 重用已缓存的脱敏 DispatchEvent；standalone 兼容模式会重放一个聚合后的逻辑回复，
+  deployment durable 模式则由已存在的 Outbox 记录负责投递，不再次发送；
 - dispatch 或发送前的处理失败释放 claim，允许调用方按既有进程内策略重新处理；
 - 该 store 只保证当前进程，不能暗示跨节点、重启恢复或持久化语义。
 
@@ -91,9 +93,12 @@ principal 调用 `IdempotencyStore.Begin`：
 的稳定值，Context 原样向下传递。它必须读完事件 channel 直到关闭，不能在第一个 `message` 或
 `done` 后提前退出。只拼接 `DispatchEventMessage.Text`；收到脱敏 `error`、stream 异常或空的
 dispatch stream 时，发送固定的适配器级失败文本，不暴露 provider error、stack trace、Secret
-或 repository 细节。
+或 repository 细节；deployment durable 模式将该失败结果交给 Reply Outbox worker，standalone
+兼容模式才由 adapter 直发固定文本。
 
-正常文本回复按 Unicode code point 切分，每段最多 4096 个 code point，并逐段调用：
+部署路径把完整逻辑回复物化到 durable Reply Outbox，由 worker 按通道能力异步发送；不会在入站
+polling handler 中直发，也不会因重复 update 重复发送。正常文本回复按 Unicode code point
+切分，每段最多 4096 个 code point，并逐段调用：
 
 ```text
 sendMessage(chat_id=Message.Chat.ID,
@@ -101,8 +106,9 @@ sendMessage(chat_id=Message.Chat.ID,
             text=chunk)
 ```
 
-不为每个 partial event 发送 Telegram 消息，不在本 Issue 引入编辑消息、队列、退避或后台重试。
-`sendMessage` 失败只通过稳定的 `send` hook 暴露；若已发送部分分段，不回滚也不启动隐式重试。
+不为每个 partial event 发送 Telegram 消息；Telegram deployment 使用已有 Outbox 的 lease、退避、
+重试和死信边界。standalone 兼容模式仍可同步直发，`sendMessage` 失败只通过稳定的 `send`
+hook 暴露；部署模式的 provider 失败由 worker 记录并重试。
 
 ## 5. 生命周期与错误脱敏
 
@@ -112,6 +118,7 @@ sequenceDiagram
     participant A as Telegram Adapter
     participant B as Bot SDK
     participant G as Gateway Dispatch
+    participant W as Outbox Worker
     participant T as Telegram API
 
     C->>A: New(ctx, runtime token, trusted Target)
@@ -125,7 +132,9 @@ sequenceDiagram
     B->>A: HandleUpdate(ctx, update)
     A->>G: trusted Principal + normalized InboundMessage
     G-->>A: complete redacted DispatchEvent stream
-    A->>T: one or more sendMessage chunks
+    A->>G: materialize final Reply Outbox
+    G-->>A: complete idempotency claim
+    W->>T: one or more sendMessage chunks
     C-->>B: cancel ctx
     B-->>A: stop polling and synchronous handlers
     A-->>C: Run returns
@@ -157,12 +166,13 @@ README 和 MkDocs 状态应明确区分已交付与后续能力：
 
 ## 7. 真实 Telegram E2E
 
-Issue #33 提供根目录 `examples/telegram-e2e/` 示例和手动触发的 CI 工作流，
-用于验证真实的 `getMe -> getUpdates -> sendMessage` 边界。示例内部使用确定性
-`DispatchService`，因此不会把模型供应商凭据和 Telegram 传输冒烟测试混在一起。
+Issue #33 提供根目录 `examples/telegram-e2e/` 示例和 CI 工作流，用于验证真实的
+`getMe -> getUpdates -> sendMessage` 边界。工作流只在 `main` 上执行 secret-bearing
+live job；PR 和手动选择其他分支时会跳过该 job，避免把 live Bot 凭据交给未合并代码。
+示例内部使用确定性 `DispatchService`，因此不会把模型供应商凭据和 Telegram 传输冒烟测试混在一起。
 
 本地运行只需要在进程环境中提供 `TELEGRAM_BOT_TOKEN`；Token 不得进入仓库、日志、
-trace 或错误。CI 使用受保护的 `telegram-e2e` Environment，至少配置接收 Bot 的
+trace 或错误。CI 使用限制到 `main` 分支的 `telegram-e2e` Environment，至少配置接收 Bot 的
 `TELEGRAM_BOT_TOKEN`，并在需要完全自动化入站消息时配置第二个受控测试 Bot 的
 `TELEGRAM_SENDER_BOT_TOKEN`。一个 Bot Token 不能模拟普通用户向自己发送入站消息，
 所以当前 workflow 必须显式配置第二个受控测试 Bot；本地人工运行可以不配置发送者。

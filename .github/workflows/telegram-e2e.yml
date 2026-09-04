@@ -17,6 +17,11 @@ on:
         required: true
         type: boolean
         default: false
+      media_e2e:
+        description: Send one actual image through the protected Telegram provider
+        required: true
+        type: boolean
+        default: false
 
 concurrency:
   group: telegram-live-e2e
@@ -28,7 +33,9 @@ permissions:
 jobs:
   telegram-e2e:
     name: Telegram live long-polling E2E
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # This job receives live bot credentials. Run only code from main; a PR
+    # checkout or manually selected branch must never execute with secrets.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: telegram-e2e
     timeout-minutes: 5
@@ -66,3 +73,11 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_SENDER_BOT_TOKEN: ${{ secrets.TELEGRAM_SENDER_BOT_TOKEN }}
+
+      - name: Run optional Telegram media E2E
+        if: github.event_name == 'workflow_dispatch' && inputs.media_e2e
+        run: go test ./examples/telegram-e2e -run TestTelegramProviderMediaOutboxRunnerE2E -count=1 -v
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_SENDER_BOT_TOKEN: ${{ secrets.TELEGRAM_SENDER_BOT_TOKEN }}
+          TELEGRAM_MEDIA_E2E: "true"

@@ -31,14 +31,16 @@ import (
 )
 
 const (
-	defaultPollTimeout     = time.Minute
-	minimumPollTimeout     = 2 * time.Second
-	maximumPollTimeout     = 10 * time.Minute
-	maximumTokenRunes      = 1024
-	maximumReplyRunes      = 4096
-	failureReply           = "Sorry, I couldn't process that message."
-	defaultAttachmentBytes = 64 << 20
-	maximumAttachmentBytes = 64 << 20
+	defaultPollTimeout      = time.Minute
+	minimumPollTimeout      = 2 * time.Second
+	maximumPollTimeout      = 10 * time.Minute
+	telegramHTTPClientGrace = 5 * time.Second
+	telegramDeliveryGrace   = 5 * time.Second
+	maximumTokenRunes       = 1024
+	maximumReplyRunes       = 4096
+	failureReply            = "Sorry, I couldn't process that message."
+	defaultAttachmentBytes  = 64 << 20
+	maximumAttachmentBytes  = 64 << 20
 )
 
 var (
@@ -238,6 +240,9 @@ type Config struct {
 	Target channels.RoutingTarget
 	// Dispatcher is the existing protocol-neutral Gateway execution service.
 	Dispatcher gateway.DispatchService
+	// DurableReplies delegates final delivery to the configured Reply Outbox
+	// worker. When false, the adapter keeps its legacy direct-send behavior.
+	DurableReplies bool
 	// Idempotency optionally supplies a shared process-local store. When nil,
 	// the adapter owns a new process-local store.
 	Idempotency *gateway.IdempotencyStore
@@ -273,6 +278,7 @@ type Config struct {
 type Adapter struct {
 	client             BotClient
 	dispatcher         gateway.DispatchService
+	durableReplies     bool
 	principal          gateway.Principal
 	target             channels.RoutingTarget
 	idempotency        *gateway.IdempotencyStore
@@ -284,6 +290,7 @@ type Adapter struct {
 	attachments        runtimestorage.AttachmentStore
 	mediaDownloader    MediaDownloader
 	maxAttachmentBytes int64
+	pollTimeout        time.Duration
 
 	mu        sync.RWMutex
 	closed    bool
@@ -324,10 +331,10 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 		factory = sdkBotFactory{}
 	}
 	adapter := &Adapter{
-		dispatcher: config.Dispatcher, principal: normalized.principal, target: normalized.target,
+		dispatcher: config.Dispatcher, durableReplies: config.DurableReplies, principal: normalized.principal, target: normalized.target,
 		idempotency: idempotency, ownIdempotency: ownIdempotency, errorHook: config.ErrorHook,
 		audit:       audit.Recorder{Writer: config.AuditWriter, TenantID: normalized.target.TenantID},
-		attachments: config.Attachments, maxAttachmentBytes: normalized.maxAttachmentBytes,
+		attachments: config.Attachments, maxAttachmentBytes: normalized.maxAttachmentBytes, pollTimeout: normalized.pollTimeout,
 	}
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
@@ -359,6 +366,25 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 		}
 	}
 	return adapter, nil
+}
+
+// OutboxLeaseDuration returns the minimum lease that covers Telegram's
+// long-poll HTTP timeout plus the durable receipt commit grace period. The
+// same Bot client handles polling and sends, so the lease must outlive both.
+func OutboxLeaseDuration(pollTimeout time.Duration) time.Duration {
+	if pollTimeout <= 0 {
+		pollTimeout = defaultPollTimeout
+	}
+	return pollTimeout + telegramHTTPClientGrace + telegramDeliveryGrace
+}
+
+// OutboxLeaseDuration returns the delivery lease required by this adapter's
+// configured Telegram HTTP timeout.
+func (adapter *Adapter) OutboxLeaseDuration() time.Duration {
+	if adapter == nil {
+		return 0
+	}
+	return OutboxLeaseDuration(adapter.pollTimeout)
 }
 
 func normalizeConfig(ctx context.Context, config Config) (normalizedConfig, error) {
@@ -466,6 +492,20 @@ func (adapter *Adapter) Run(ctx context.Context) error {
 // Channel identifies the protocol owned by this Adapter.
 func (*Adapter) Channel() channels.Channel { return channels.ChannelTelegram }
 
+// BeginShutdown cancels the current polling run while keeping the adapter
+// closeable for the runtime's ownership cleanup.
+func (adapter *Adapter) BeginShutdown() {
+	if adapter == nil {
+		return
+	}
+	adapter.mu.RLock()
+	cancel := adapter.runCancel
+	adapter.mu.RUnlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // Close closes only idempotency state owned by the adapter. Injected stores and
 // HTTP clients remain owned by their callers; polling is stopped by canceling
 // the Context passed to Run.
@@ -558,6 +598,9 @@ func (adapter *Adapter) handleReplay(ctx context.Context, message *models.Messag
 	if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressAccepted, inbound.ExternalMessageID, "", inbound.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
 		return ErrDispatch
 	}
+	if adapter.durableReplies {
+		return nil
+	}
 	if err := adapter.sendEvents(ctx, message, replay); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
@@ -576,11 +619,22 @@ func (adapter *Adapter) handleClaimedUpdate(ctx context.Context, message *models
 
 	events, dispatchErr := adapter.dispatch(ctx, inbound)
 	if dispatchErr != nil {
-		_ = claim.Fail()
 		if errors.Is(dispatchErr, context.Canceled) || errors.Is(dispatchErr, context.DeadlineExceeded) {
+			_ = claim.Fail()
 			return dispatchErr
 		}
 		adapter.report(ErrorOperationDispatch, ErrDispatch)
+		if adapter.durableReplies && len(events) > 0 {
+			if dispatchEventsContain(events, gateway.ErrReplyMaterialization.Error()) {
+				_ = claim.Fail()
+				return ErrDispatch
+			}
+			if err := claim.Complete(events); err != nil {
+				return ErrDispatch
+			}
+			return ErrDispatch
+		}
+		_ = claim.Fail()
 		if sendErr := adapter.sendText(ctx, message, failureReply); sendErr != nil {
 			if !errors.Is(sendErr, context.Canceled) && !errors.Is(sendErr, context.DeadlineExceeded) {
 				adapter.report(ErrorOperationSend, ErrSendMessage)
@@ -590,6 +644,9 @@ func (adapter *Adapter) handleClaimedUpdate(ctx context.Context, message *models
 	}
 	if err := claim.Complete(events); err != nil {
 		return ErrDispatch
+	}
+	if adapter.durableReplies {
+		return nil
 	}
 	if err := adapter.sendEvents(ctx, message, events); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -602,6 +659,15 @@ func (adapter *Adapter) handleClaimedUpdate(ctx context.Context, message *models
 		return ErrDispatch
 	}
 	return nil
+}
+
+func dispatchEventsContain(events []gateway.DispatchEvent, errorText string) bool {
+	for _, event := range events {
+		if event.Type == gateway.DispatchEventError && event.Error == errorText {
+			return true
+		}
+	}
+	return false
 }
 
 func (adapter *Adapter) sdkHandler() bot.HandlerFunc {
@@ -633,7 +699,7 @@ func (adapter *Adapter) dispatch(ctx context.Context, message gateway.InboundMes
 		case event, ok := <-stream:
 			if !ok {
 				if !done || failed {
-					return nil, ErrDispatch
+					return events, ErrDispatch
 				}
 				return events, nil
 			}
