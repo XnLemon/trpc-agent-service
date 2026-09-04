@@ -93,6 +93,71 @@ func TestPolicyCancellationSkipsFallback(t *testing.T) {
 	}
 }
 
+func TestPolicyZeroValueIsInvalid(t *testing.T) {
+	var policy Policy
+	if err := policy.Validate(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Validate() = %v, want ErrInvalid", err)
+	}
+	if err := policy.Execute(context.Background(), func(context.Context) error { return nil }); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Execute() = %v, want ErrInvalid", err)
+	}
+}
+
+func TestPolicyReturnsFallbackErrorAfterRetryableAttempts(t *testing.T) {
+	dependency := errors.New("unavailable")
+	fallbackErr := errors.New("fallback failed")
+	var calls int
+	policy, err := New(Config{
+		Timeout: time.Second, MaxAttempts: 2, FailureThreshold: 2, OpenTimeout: time.Second,
+		Retryable: func(error) bool { return true },
+		Fallback:  func(context.Context, error) error { return fallbackErr },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.Execute(context.Background(), func(context.Context) error { calls++; return dependency }); !errors.Is(err, fallbackErr) {
+		t.Fatalf("Execute() = %v, want fallback error", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want two bounded attempts", calls)
+	}
+}
+
+func TestPolicyStopsRetryDuringBackoffCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	policy, err := New(Config{
+		Timeout: time.Second, MaxAttempts: 2, Backoff: time.Second, MaxBackoff: time.Second,
+		FailureThreshold: 2, OpenTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+	if err := policy.Execute(ctx, func(context.Context) error { calls++; return errors.New("retryable") }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Execute() = %v, want cancellation", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want cancellation before second attempt", calls)
+	}
+}
+
+func TestCircuitBreakerCancellationAndInvalidState(t *testing.T) {
+	breaker := &CircuitBreaker{state: StateHalfOpen, failureThreshold: 1, openTimeout: time.Second}
+	breaker.cancel()
+	if state := breaker.State(); state != StateOpen {
+		t.Fatalf("state after canceled probe = %q, want open", state)
+	}
+	invalid := &CircuitBreaker{state: State("invalid"), failureThreshold: 1, openTimeout: time.Second}
+	if err := invalid.before(time.Now()); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid state error = %v, want ErrInvalid", err)
+	}
+}
+
 func TestNewRejectsInvalidConfiguration(t *testing.T) {
 	cases := []Config{
 		{MaxAttempts: 1, FailureThreshold: 1, OpenTimeout: time.Second},

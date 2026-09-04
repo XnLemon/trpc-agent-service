@@ -108,10 +108,24 @@ func (policy *Policy) State() State {
 	return policy.breaker.State()
 }
 
+// Validate reports whether the policy was fully initialized by New.
+func (policy *Policy) Validate() error {
+	if policy == nil || policy.breaker == nil || policy.timeout <= 0 || policy.maxAttempts < 1 || policy.backoff < 0 || policy.maxBackoff < policy.backoff || policy.failureThreshold < 1 || policy.openTimeout <= 0 || policy.retryable == nil {
+		return ErrInvalid
+	}
+	if policy.breaker.failureThreshold < 1 || policy.breaker.openTimeout <= 0 {
+		return ErrInvalid
+	}
+	return nil
+}
+
 // Execute runs operation under the policy. The operation receives a fresh
 // context bounded by Timeout for each attempt. A nil operation is invalid.
 func (policy *Policy) Execute(ctx context.Context, operation func(context.Context) error) error {
 	if policy == nil || ctx == nil || operation == nil {
+		return ErrInvalid
+	}
+	if err := policy.Validate(); err != nil {
 		return ErrInvalid
 	}
 	if err := ctx.Err(); err != nil {

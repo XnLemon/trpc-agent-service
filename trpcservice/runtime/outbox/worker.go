@@ -109,7 +109,7 @@ type Config struct {
 
 // New creates a reply worker after validating delivery and lease settings.
 func New(config Config) (*Worker, error) {
-	if config.Store == nil || config.Provider == nil || runtimestorage.ValidateTenant(config.TenantID) != nil || config.Owner == "" || config.LeaseDuration <= 0 {
+	if config.Store == nil || config.Provider == nil || runtimestorage.ValidateTenant(config.TenantID) != nil || config.Owner == "" || config.LeaseDuration <= 0 || config.Resilience != nil && config.Resilience.Validate() != nil {
 		return nil, ErrInvalid
 	}
 	if config.MaxAttempts <= 0 {
@@ -495,7 +495,14 @@ func (w *Worker) advanceEvent(ctx context.Context, eventID string) {
 
 func (w *Worker) reconcile(ctx context.Context, claimed runtimestorage.ReplyOutbox) bool {
 	status, providerID, err := w.reconcileProvider(ctx, claimed)
-	if err != nil || status == DeliveryUnknown {
+	if err != nil {
+		return false
+	}
+	switch status {
+	case DeliveryAccepted, DeliveryRejected:
+	case DeliveryUnknown, "":
+		return false
+	default:
 		return false
 	}
 	to := runtimestorage.ReplySent
@@ -523,6 +530,11 @@ func (w *Worker) deliver(ctx context.Context, value runtimestorage.ReplyOutbox) 
 		providerID, err = w.provider.Deliver(callCtx, value)
 		return err
 	})
+	if err == nil && providerID == "" {
+		// A fallback can report success without having contacted the provider.
+		// Without a receipt, accepting the outbox row would silently lose it.
+		return "", &DeliveryError{Class: "provider_error", Retryable: false}
+	}
 	return providerID, err
 }
 

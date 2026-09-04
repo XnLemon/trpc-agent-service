@@ -224,7 +224,7 @@ type ResilientTool struct {
 
 // NewResilientTool wraps a callable tool with a shared execution policy.
 func NewResilientTool(delegate trpctool.CallableTool, policy *resilience.Policy) (*ResilientTool, error) {
-	if delegate == nil || delegate.Declaration() == nil || policy == nil {
+	if delegate == nil || delegate.Declaration() == nil || policy == nil || policy.Validate() != nil {
 		return nil, ErrUnavailable
 	}
 	return &ResilientTool{delegate: delegate, policy: policy}, nil
@@ -252,17 +252,32 @@ func (tool *ResilientTool) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	return result, err
 }
 
-// ResolveWithPolicy resolves authorized tools and wraps callable tools with a
-// bounded execution policy. Non-callable tools remain unchanged.
-func (registry *Registry) ResolveWithPolicy(authorizations []agent.ToolAuthorization, policy *resilience.Policy) ([]trpctool.Tool, error) {
+// ResolveWithPolicy resolves authorized tools and wraps only the explicitly
+// listed retry-safe callable tools with a bounded execution policy. Callers
+// must list a tool only when its external side effects are idempotent under
+// repeated calls. Non-callable and unlisted tools remain unchanged.
+func (registry *Registry) ResolveWithPolicy(authorizations []agent.ToolAuthorization, policy *resilience.Policy, retrySafeToolIDs ...string) ([]trpctool.Tool, error) {
 	tools, err := registry.Resolve(authorizations)
 	if err != nil || policy == nil {
 		return tools, err
 	}
+	if err := policy.Validate(); err != nil {
+		return nil, ErrUnavailable
+	}
+	retrySafe := make(map[string]struct{}, len(retrySafeToolIDs))
+	for _, id := range retrySafeToolIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			retrySafe[id] = struct{}{}
+		}
+	}
 	wrapped := make([]trpctool.Tool, 0, len(tools))
 	for _, tool := range tools {
 		callable, ok := tool.(trpctool.CallableTool)
-		if !ok {
+		if !ok || tool.Declaration() == nil {
+			wrapped = append(wrapped, tool)
+			continue
+		}
+		if _, ok := retrySafe[tool.Declaration().Name]; !ok {
 			wrapped = append(wrapped, tool)
 			continue
 		}

@@ -254,7 +254,7 @@ type ResilientStorageFactory struct {
 
 // NewResilientStorageFactory wraps a StorageFactory with a shared policy.
 func NewResilientStorageFactory(delegate StorageFactory, policy *resilience.Policy) (*ResilientStorageFactory, error) {
-	if delegate == nil || policy == nil {
+	if delegate == nil || policy == nil || policy.Validate() != nil {
 		return nil, fmt.Errorf("%w: storage factory and resilience policy are required", ErrStorageFactory)
 	}
 	return &ResilientStorageFactory{delegate: delegate, policy: policy}, nil
@@ -278,6 +278,9 @@ func (factory *ResilientStorageFactory) New(ctx context.Context, input StorageFa
 		result = candidate
 		return err
 	})
+	if err == nil && result == nil {
+		return nil, ErrStorageFactory
+	}
 	return result, err
 }
 

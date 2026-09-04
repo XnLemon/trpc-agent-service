@@ -70,6 +70,33 @@ func TestResilientStorageFactoryRetriesAndClosesFailedCapability(t *testing.T) {
 	}
 }
 
+func TestResilientStorageFactoryRejectsSuccessfulFallbackWithoutCapabilities(t *testing.T) {
+	delegate := StorageFactoryFunc(func(context.Context, StorageFactoryInput) (*CapabilitySet, error) {
+		return nil, errors.New("backend unavailable")
+	})
+	policy, err := resilience.New(resilience.Config{
+		Timeout: time.Second, MaxAttempts: 1, FailureThreshold: 1, OpenTimeout: time.Second,
+		Fallback: func(context.Context, error) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory, err := NewResilientStorageFactory(delegate, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set, err := factory.New(context.Background(), StorageFactoryInput{}); set != nil || !errors.Is(err, ErrStorageFactory) {
+		t.Fatalf("New() set=%v err=%v, want storage factory error", set, err)
+	}
+}
+
+func TestNewResilientStorageFactoryRejectsZeroPolicy(t *testing.T) {
+	var policy resilience.Policy
+	if _, err := NewResilientStorageFactory(StorageFactoryFunc(func(context.Context, StorageFactoryInput) (*CapabilitySet, error) { return nil, nil }), &policy); !errors.Is(err, ErrStorageFactory) {
+		t.Fatalf("NewResilientStorageFactory() = %v, want ErrStorageFactory", err)
+	}
+}
+
 func TestCapabilitySetMaterializesExplicitSummary(t *testing.T) {
 	const tenantID = "t_00000000000000000000000000"
 	store := &summaryCapabilityStub{}

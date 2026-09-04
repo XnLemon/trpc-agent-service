@@ -31,7 +31,7 @@ policy, err := resilience.New(resilience.Config{
 
 - `model.ResolveAndBuildWithPolicy` 包住 Secret Resolver 和 Model Factory。解析或构造失败会继续使用既有脱敏错误。
 - `backend.NewResilientStorageFactory` 包住 capability materialization；失败尝试返回的 capability 会立即关闭，避免泄漏资源。
-- `tool.NewResilientTool` 与 `Registry.ResolveWithPolicy` 只包装 `CallableTool`，保留工具声明和参数边界。
+- `tool.NewResilientTool` 与 `Registry.ResolveWithPolicy` 只包装显式列入 `retrySafeToolIDs` 的 `CallableTool`，保留工具声明和参数边界；没有外部幂等证明的副作用工具不会自动重试。
 - `outbox.Config.Resilience` 包住 IM Provider 的 `Deliver`/`Reconcile`。只有 Provider 支持 `ReplyID + SegmentIndex` 外部幂等键时，才允许对 `Deliver` 开启重试。
 
 Fallback 必须返回一个安全的成功结果或明确错误，不能把原始 provider 错误、凭据、用户内容或 DSN 写入响应、日志、审计或持久化状态。副作用 Tool 不应配置自动重试；应使用外部幂等键、人工审批或补偿流程。

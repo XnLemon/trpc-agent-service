@@ -138,6 +138,94 @@ func TestWorkerAppliesExplicitProviderResiliencePolicy(t *testing.T) {
 	}
 }
 
+func TestWorkerDoesNotTreatSuccessfulFallbackAsProviderDelivery(t *testing.T) {
+	tests := []struct {
+		name           string
+		openCircuit    bool
+		wantDeliveries int
+	}{
+		{name: "exhausted attempts", wantDeliveries: 1},
+		{name: "open circuit", openCircuit: true, wantDeliveries: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := inmemory.New()
+			seedReply(t, store, "tenant-a", "event-fallback-"+test.name, "reply-fallback-"+test.name)
+			provider := &providerStub{deliverID: "", deliverErr: &outbox.DeliveryError{Class: "unavailable", Retryable: true}}
+			policy, err := resilience.New(resilience.Config{
+				Timeout: time.Second, MaxAttempts: 1, FailureThreshold: 1, OpenTimeout: time.Minute,
+				Fallback: func(context.Context, error) error { return nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.openCircuit {
+				if err := policy.Execute(context.Background(), func(context.Context) error { return errors.New("dependency down") }); err != nil {
+					t.Fatalf("open circuit setup = %v", err)
+				}
+			}
+			worker, err := outbox.New(outbox.Config{
+				Store: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, MaxAttempts: 1, Resilience: policy,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := worker.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce() = %v", err)
+			}
+			reply, err := store.GetReply(context.Background(), "tenant-a", "reply-fallback-"+test.name, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reply.Status != runtimestorage.ReplyDeadLetter || reply.ProviderMessageID != "" {
+				t.Fatalf("reply = %+v, want dead-letter without provider receipt", reply)
+			}
+			if provider.deliveries != test.wantDeliveries {
+				t.Fatalf("provider deliveries = %d, want %d", provider.deliveries, test.wantDeliveries)
+			}
+		})
+	}
+}
+
+func TestWorkerDoesNotTreatSuccessfulReconcileFallbackAsDelivery(t *testing.T) {
+	store := inmemory.New()
+	seedReply(t, store, "tenant-a", "event-reconcile-fallback", "reply-reconcile-fallback")
+	if _, err := store.ClaimReply(context.Background(), "tenant-a", "reply-reconcile-fallback", 0, "old-worker", time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	provider := &providerStub{}
+	policy, err := resilience.New(resilience.Config{
+		Timeout: time.Second, MaxAttempts: 1, FailureThreshold: 1, OpenTimeout: time.Minute,
+		Fallback: func(context.Context, error) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.Execute(context.Background(), func(context.Context) error { return errors.New("dependency down") }); err != nil {
+		t.Fatalf("open circuit setup = %v", err)
+	}
+	worker, err := outbox.New(outbox.Config{
+		Store: store, Provider: provider, TenantID: "tenant-a", Owner: "new-worker", LeaseDuration: time.Second, Resilience: policy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce() = %v", err)
+	}
+	reply, err := store.GetReply(context.Background(), "tenant-a", "reply-reconcile-fallback", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.Status == runtimestorage.ReplySent || reply.ProviderMessageID != "" {
+		t.Fatalf("reply = %+v, must not be marked sent without a receipt", reply)
+	}
+	if provider.reconciliations != 0 {
+		t.Fatalf("provider reconciliations = %d, want zero while circuit is open", provider.reconciliations)
+	}
+}
+
 func failThenSuccess(failures int) func(runtimestorage.ReplyOutbox) error {
 	return func(runtimestorage.ReplyOutbox) error {
 		if failures > 0 {

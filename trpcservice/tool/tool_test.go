@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/resilience"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -75,6 +76,57 @@ func TestResilientToolRetriesCallableOperation(t *testing.T) {
 		t.Fatalf("Call() result=%v err=%v calls=%d", result, err, delegate.calls)
 	}
 }
+
+func TestResolveWithPolicyRequiresExplicitRetrySafeToolID(t *testing.T) {
+	delegate := &callableTool{remainingFailures: 1}
+	registry, err := NewRegistry(callableFactory{delegate: delegate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := resilience.New(resilience.Config{Timeout: time.Second, MaxAttempts: 2, FailureThreshold: 2, OpenTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorizations := []agent.ToolAuthorization{{ToolID: "callable", Required: true}}
+	tools, err := registry.ResolveWithPolicy(authorizations, policy)
+	if err != nil || len(tools) != 1 {
+		t.Fatalf("ResolveWithPolicy() = %v, %v", tools, err)
+	}
+	if _, err := tools[0].(trpctool.CallableTool).Call(context.Background(), []byte(`{}`)); err == nil {
+		t.Fatal("unlisted callable tool unexpectedly retried to success")
+	}
+	if delegate.calls != 1 {
+		t.Fatalf("unlisted tool calls = %d, want one", delegate.calls)
+	}
+
+	delegate = &callableTool{remainingFailures: 1}
+	registry, err = NewRegistry(callableFactory{delegate: delegate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, err = registry.ResolveWithPolicy(authorizations, policy, " callable ")
+	if err != nil || len(tools) != 1 {
+		t.Fatalf("ResolveWithPolicy() opt-in = %v, %v", tools, err)
+	}
+	if _, err := tools[0].(trpctool.CallableTool).Call(context.Background(), []byte(`{}`)); err != nil || delegate.calls != 2 {
+		t.Fatalf("opt-in call err=%v calls=%d, want two attempts", err, delegate.calls)
+	}
+}
+
+func TestNewResilientToolRejectsZeroPolicy(t *testing.T) {
+	var policy resilience.Policy
+	if _, err := NewResilientTool(&callableTool{}, &policy); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("NewResilientTool() = %v, want ErrUnavailable", err)
+	}
+}
+
+type callableFactory struct {
+	delegate trpctool.CallableTool
+}
+
+func (factory callableFactory) ID() string { return "callable" }
+
+func (factory callableFactory) New() trpctool.Tool { return factory.delegate }
 
 type callableTool struct {
 	remainingFailures int
