@@ -289,19 +289,12 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, fmt.Errorf("%w: environment repositories: %v", ErrInvalidConfig, err)
 	}
 	auditWriter = metrics.WrapAuditWriter(auditWriter, config.telemetry)
-	wecomFactory, wecomProvider, err := environmentWeComComponents(config, channelRepo, tenantRepo, appRepo, runtimeStore, auditWriter)
+	wecomFactory, wecomProvider, telegramFactory, err := environmentChannelComponents(ctx, config, channelRepo, tenantRepo, appRepo, runtimeStore, auditWriter)
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = runtimeStores.Close()
 		_ = db.Close()
-		return nil, fmt.Errorf("%w: wecom components: %v", ErrInvalidConfig, err)
-	}
-	telegramFactory, err := environmentTelegramComponents(ctx, config, channelRepo, tenantRepo, appRepo, runtimeStore, auditWriter)
-	if err != nil {
-		_ = delegateSessions.Close()
-		_ = runtimeStores.Close()
-		_ = db.Close()
-		return nil, fmt.Errorf("%w: telegram components: %v", ErrInvalidConfig, err)
+		return nil, err
 	}
 	secretRegistry, modelRegistry, backendRegistry, err := environmentRegistriesForStores(config, delegateSessions, runtimeStores)
 	if err != nil {
@@ -365,6 +358,26 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	}
 	telemetryOwned = false
 	return graph, nil
+}
+
+func environmentChannelComponents(
+	ctx context.Context,
+	config environmentConfig,
+	channelsRepo channels.CandidateConsumer,
+	tenantsRepo tenant.Repository,
+	appsRepo agent.Repository,
+	runtimeStore runtimestorage.RuntimeStore,
+	auditWriter audit.Writer,
+) (func(gateway.DispatchService) (http.Handler, error), outbox.Provider, func(gateway.DispatchService) (channels.PollingAdapter, error), error) {
+	wecomFactory, wecomProvider, err := environmentWeComComponents(config, channelsRepo, tenantsRepo, appsRepo, runtimeStore, auditWriter)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("%w: wecom components: %v", ErrInvalidConfig, err)
+	}
+	telegramFactory, err := environmentTelegramComponents(ctx, config, channelsRepo, tenantsRepo, appsRepo, runtimeStore, auditWriter)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("%w: telegram components: %v", ErrInvalidConfig, err)
+	}
+	return wecomFactory, wecomProvider, telegramFactory, nil
 }
 
 func openEnvironmentDatabaseForConfig(ctx context.Context, config environmentConfig) (*sql.DB, func(context.Context, *sql.DB) error, func(context.Context, *sql.DB) error, error) {
