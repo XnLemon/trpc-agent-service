@@ -113,6 +113,55 @@ func TestWorkerDeliversAndFencesProviderReceipt(t *testing.T) {
 	}
 }
 
+func TestWorkerRepairsInterruptedReplyMaterializationBeforeDelivery(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-repair", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{
+		TenantID: "tenant-a", EventID: "event-repair", SessionID: "session-repair", BindingID: "binding-repair", ExternalMessageID: "external-repair",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{
+		TenantID: "tenant-a", EventID: "event-repair", From: runtimestorage.EventReceived, To: runtimestorage.EventRunning,
+		Owner: "old-runner", LeaseDuration: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if _, err := store.PutReplyMaterialization(context.Background(), runtimestorage.ReplyMaterializationIntent{
+		TenantID: "tenant-a", EventID: "event-repair", ReplyID: "reply-repair", RequestID: "request-repair", TraceID: "trace-repair", Payload: "recovered",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &providerStub{deliverID: "provider-repair"}
+	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: store, SegmentSize: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, Materializer: materializer, TenantID: "tenant-a", Owner: "repair-worker", LeaseDuration: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	processed, err := worker.RunOnce(context.Background())
+	if err != nil || processed != 1 || provider.deliveries != 1 {
+		t.Fatalf("repair run = processed %d deliveries %d err=%v", processed, provider.deliveries, err)
+	}
+	if _, err := store.GetReply(context.Background(), "tenant-a", "reply-repair", 0); err != nil {
+		t.Fatalf("repaired reply = %v", err)
+	}
+	final, err := store.GetMessage(context.Background(), "tenant-a", event.EventID)
+	if err != nil || final.Status != runtimestorage.EventReplied {
+		t.Fatalf("repaired event = %+v err=%v", final, err)
+	}
+	markers, err := store.ListReplyMaterializations(context.Background(), "tenant-a")
+	if err != nil || len(markers) != 0 {
+		t.Fatalf("recovery markers = %+v err=%v", markers, err)
+	}
+}
+
 func TestWorkerDeliversReplySegmentsInOrder(t *testing.T) {
 	base := inmemory.New()
 	seedReply(t, base, "tenant-a", "event-segments", "reply-segments")
@@ -262,6 +311,35 @@ func TestWorkerReconcilesExpiredSendingBeforeRedelivery(t *testing.T) {
 	updated, err := store.GetMessage(context.Background(), "tenant-a", event.EventID)
 	if err != nil || updated.Status != runtimestorage.EventReplied {
 		t.Fatalf("reconciled event status = %+v err=%v", updated, err)
+	}
+}
+
+func TestWorkerReconcilesDurableProviderReceiptAfterRestart(t *testing.T) {
+	store := inmemory.New()
+	seedReply(t, store, "tenant-a", "event-durable-receipt", "reply-durable-receipt")
+	claimed, err := store.ClaimReply(context.Background(), "tenant-a", "reply-durable-receipt", 0, "old-worker", time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordReplyReceipt(context.Background(), runtimestorage.ReplyReceipt{
+		TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex,
+		Owner: claimed.LeaseOwner, FencingToken: claimed.FencingToken, ProviderID: "provider-durable",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+
+	provider := &providerStub{reconcileStatus: outbox.DeliveryUnknown}
+	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "new-worker", LeaseDuration: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := worker.RunOnce(context.Background()); err != nil || processed != 1 {
+		t.Fatalf("durable receipt run = %d/%v", processed, err)
+	}
+	value, err := store.GetReply(context.Background(), "tenant-a", "reply-durable-receipt", 0)
+	if err != nil || value.Status != runtimestorage.ReplySent || value.ProviderMessageID != "provider-durable" || provider.reconciliations != 0 || provider.deliveries != 0 {
+		t.Fatalf("durable receipt reconciliation = %+v provider=%+v err=%v", value, provider, err)
 	}
 }
 

@@ -250,7 +250,7 @@ func assertEnvironmentTelegramOutboxRouting(t *testing.T, config environmentConf
 		t.Fatalf("Telegram outbox provider = %v, %v, %v", telegramProvider, bindingIDs, err)
 	}
 	selected, channel, providerName, leaseDuration, err := environmentOutboxProvider(config, runtimeStore, nil, nil, []channels.PollingAdapter{adapter})
-	if err != nil || selected == nil || channel != "telegram" || providerName != "telegram" || leaseDuration <= 0 {
+	if err != nil || selected == nil || channel != "telegram" || providerName != "telegram" || leaseDuration < adapter.OutboxLeaseDuration() {
 		t.Fatalf("Telegram outbox selection = %T/%q/%q/%s/%v", selected, channel, providerName, leaseDuration, err)
 	}
 	legacy := bootstrapStaticProvider{receipt: "legacy"}

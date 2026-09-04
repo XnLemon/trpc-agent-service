@@ -31,14 +31,16 @@ import (
 )
 
 const (
-	defaultPollTimeout     = time.Minute
-	minimumPollTimeout     = 2 * time.Second
-	maximumPollTimeout     = 10 * time.Minute
-	maximumTokenRunes      = 1024
-	maximumReplyRunes      = 4096
-	failureReply           = "Sorry, I couldn't process that message."
-	defaultAttachmentBytes = 64 << 20
-	maximumAttachmentBytes = 64 << 20
+	defaultPollTimeout      = time.Minute
+	minimumPollTimeout      = 2 * time.Second
+	maximumPollTimeout      = 10 * time.Minute
+	telegramHTTPClientGrace = 5 * time.Second
+	telegramDeliveryGrace   = 5 * time.Second
+	maximumTokenRunes       = 1024
+	maximumReplyRunes       = 4096
+	failureReply            = "Sorry, I couldn't process that message."
+	defaultAttachmentBytes  = 64 << 20
+	maximumAttachmentBytes  = 64 << 20
 )
 
 var (
@@ -288,6 +290,7 @@ type Adapter struct {
 	attachments        runtimestorage.AttachmentStore
 	mediaDownloader    MediaDownloader
 	maxAttachmentBytes int64
+	pollTimeout        time.Duration
 
 	mu        sync.RWMutex
 	closed    bool
@@ -331,7 +334,7 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 		dispatcher: config.Dispatcher, durableReplies: config.DurableReplies, principal: normalized.principal, target: normalized.target,
 		idempotency: idempotency, ownIdempotency: ownIdempotency, errorHook: config.ErrorHook,
 		audit:       audit.Recorder{Writer: config.AuditWriter, TenantID: normalized.target.TenantID},
-		attachments: config.Attachments, maxAttachmentBytes: normalized.maxAttachmentBytes,
+		attachments: config.Attachments, maxAttachmentBytes: normalized.maxAttachmentBytes, pollTimeout: normalized.pollTimeout,
 	}
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
@@ -363,6 +366,25 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 		}
 	}
 	return adapter, nil
+}
+
+// OutboxLeaseDuration returns the minimum lease that covers Telegram's
+// long-poll HTTP timeout plus the durable receipt commit grace period. The
+// same Bot client handles polling and sends, so the lease must outlive both.
+func OutboxLeaseDuration(pollTimeout time.Duration) time.Duration {
+	if pollTimeout <= 0 {
+		pollTimeout = defaultPollTimeout
+	}
+	return pollTimeout + telegramHTTPClientGrace + telegramDeliveryGrace
+}
+
+// OutboxLeaseDuration returns the delivery lease required by this adapter's
+// configured Telegram HTTP timeout.
+func (adapter *Adapter) OutboxLeaseDuration() time.Duration {
+	if adapter == nil {
+		return 0
+	}
+	return OutboxLeaseDuration(adapter.pollTimeout)
 }
 
 func normalizeConfig(ctx context.Context, config Config) (normalizedConfig, error) {

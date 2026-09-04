@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"reflect"
 	"strings"
 	"time"
 
@@ -200,6 +201,73 @@ type ReplyOutbox struct {
 	UpdatedAt         time.Time
 }
 
+// ReplyMaterializationSegment is the protocol-neutral reply descriptor kept
+// durable until its outbox rows and owning message transition are committed.
+// It contains attachment metadata only; attachment bytes remain in the
+// tenant-scoped attachment store.
+type ReplyMaterializationSegment struct {
+	Kind       ReplyKind
+	Payload    string
+	Attachment attachment.Reference
+	Fallback   string
+}
+
+// ReplyMaterializationIntent is a durable recovery record for the small gap
+// between a Runner terminal result and its reply outbox materialization. The
+// record is deleted only after both the outbox and message lifecycle commit.
+type ReplyMaterializationIntent struct {
+	TenantID    string
+	EventID     string
+	ReplyID     string
+	RequestID   string
+	TraceID     string
+	TraceParent string
+	Payload     string
+	Segments    []ReplyMaterializationSegment
+	ReplyTarget ReplyTarget
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// NormalizeReplyMaterializationIntent validates and canonicalizes one
+// recovery record before it crosses a storage boundary.
+func NormalizeReplyMaterializationIntent(value ReplyMaterializationIntent) (ReplyMaterializationIntent, error) {
+	if ValidateTenant(value.TenantID) != nil || strings.TrimSpace(value.EventID) == "" || strings.TrimSpace(value.ReplyID) == "" || ValidateReplyTarget(value.ReplyTarget) != nil {
+		return ReplyMaterializationIntent{}, ErrInvalid
+	}
+	if (strings.TrimSpace(value.Payload) == "") == (len(value.Segments) == 0) {
+		return ReplyMaterializationIntent{}, ErrInvalid
+	}
+	value.EventID = strings.TrimSpace(value.EventID)
+	value.ReplyID = strings.TrimSpace(value.ReplyID)
+	if len(value.Segments) == 0 {
+		value.Segments = nil
+		return value, nil
+	}
+	normalized := make([]ReplyMaterializationSegment, len(value.Segments))
+	for index, segment := range value.Segments {
+		kind := segment.Kind
+		if kind == "" {
+			kind = ReplyKindText
+		}
+		reply, err := NormalizeReplyOutbox(ReplyOutbox{Kind: kind, Payload: segment.Payload, Attachment: segment.Attachment, Fallback: segment.Fallback})
+		if err != nil || (reply.Kind == ReplyKindText && strings.TrimSpace(reply.Payload) == "") {
+			return ReplyMaterializationIntent{}, ErrInvalid
+		}
+		normalized[index] = ReplyMaterializationSegment{Kind: reply.Kind, Payload: reply.Payload, Attachment: reply.Attachment, Fallback: reply.Fallback}
+	}
+	value.Segments = normalized
+	return value, nil
+}
+
+// SameContract reports whether two recovery records describe the same
+// materialization. Timestamps are persistence metadata and are excluded.
+func (value ReplyMaterializationIntent) SameContract(other ReplyMaterializationIntent) bool {
+	value.CreatedAt, value.UpdatedAt = time.Time{}, time.Time{}
+	other.CreatedAt, other.UpdatedAt = time.Time{}, time.Time{}
+	return reflect.DeepEqual(value, other)
+}
+
 // ReplyCorrelation is the durable link between an execution request and its
 // asynchronously delivered reply. It is kept separately so existing reply
 // rows remain backwards compatible.
@@ -280,6 +348,16 @@ type ReplyCorrelationStore interface {
 // a reply after a process restart before the normal sent transition commits.
 type ReplyReceiptRecorder interface {
 	RecordReplyReceipt(context.Context, ReplyReceipt) (ReplyOutbox, error)
+}
+
+// ReplyMaterializationStore persists recovery records for terminal Runner
+// replies. It is optional so legacy RuntimeStore implementations can continue
+// to serve text-only/API workloads, while production stores implement it for
+// durable channel delivery.
+type ReplyMaterializationStore interface {
+	PutReplyMaterialization(context.Context, ReplyMaterializationIntent) (ReplyMaterializationIntent, error)
+	ListReplyMaterializations(context.Context, string) ([]ReplyMaterializationIntent, error)
+	DeleteReplyMaterialization(context.Context, string, string) error
 }
 
 // ValidateTenant checks the required tenant identity.

@@ -535,32 +535,10 @@ func (dispatcher *Dispatcher) finishDurable(ctx context.Context, requestID, trac
 	segments := 0
 	replyID := ""
 	if dispatcher.materializer != nil {
-		input := outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: requestID, TraceID: traceID, TraceParent: observability.TraceParentFromContext(durableCtx), ReplyTarget: durable.replyTarget}
-		if terminalErr == nil && len(mediaReplies) > 0 {
-			input.Segments = mediaReplySegments(mediaReplies)
-		} else {
-			input.Payload = reply
-		}
-		if strings.TrimSpace(input.Payload) != "" || len(input.Segments) > 0 {
-			materializeErr := error(nil)
-			segments, materializeErr = dispatcher.materializer.Materialize(durableCtx, input)
-			if materializeErr != nil {
-				if len(mediaReplies) > 0 {
-					fallback := outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: requestID, TraceID: traceID, TraceParent: observability.TraceParentFromContext(durableCtx), Payload: durableFailureFallbackReply, ReplyTarget: durable.replyTarget}
-					segments, materializeErr = dispatcher.materializer.Materialize(durableCtx, fallback)
-					if materializeErr == nil {
-						replyID = durable.eventID
-					}
-				}
-			}
-			if materializeErr != nil {
-				// Keep the running event fenced and retryable. The current lease
-				// cannot be moved to execution_reconciling until it expires.
-				return ErrReplyMaterialization
-			}
-			if replyID == "" {
-				replyID = durable.eventID
-			}
+		var err error
+		replyID, segments, err = dispatcher.materializeDurableReply(durableCtx, requestID, traceID, durable, reply, mediaReplies, terminalErr == nil)
+		if err != nil {
+			return err
 		}
 	} else if strings.TrimSpace(reply) != "" || len(mediaReplies) > 0 {
 		return ErrReplyMaterialization
@@ -569,14 +547,57 @@ func (dispatcher *Dispatcher) finishDurable(ctx context.Context, requestID, trac
 	if terminalErr != nil && replyID == "" {
 		to = runtimestorage.EventFailed
 	}
-	_ = dispatcher.observeStorage(durableCtx, func(operationCtx context.Context) error {
+	if err := dispatcher.observeStorage(durableCtx, func(operationCtx context.Context) error {
 		_, err := durable.store.TransitionMessage(operationCtx, runtimestorage.MessageTransition{
 			TenantID: durable.tenantID, EventID: durable.eventID, From: runtimestorage.EventRunning,
 			To: to, Owner: durable.owner, FencingToken: durable.fencingToken, ReplyID: replyID, SegmentCount: segments,
 		})
 		return err
-	})
+	}); err != nil {
+		return ErrReplyMaterialization
+	}
+	if markers, ok := durable.store.(runtimestorage.ReplyMaterializationStore); ok && (strings.TrimSpace(reply) != "" || len(mediaReplies) > 0 || terminalErr != nil) {
+		// Cleanup is intentionally best effort. If it fails, the worker
+		// observes the completed event and removes the marker safely.
+		_ = markers.DeleteReplyMaterialization(durableCtx, durable.tenantID, durable.eventID)
+	}
 	return nil
+}
+
+func (dispatcher *Dispatcher) materializeDurableReply(ctx context.Context, requestID, traceID string, durable *durableExecution, reply string, mediaReplies []servicetool.ReplyIntent, useMedia bool) (string, int, error) {
+	input := outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: requestID, TraceID: traceID, TraceParent: observability.TraceParentFromContext(ctx), ReplyTarget: durable.replyTarget}
+	if useMedia && len(mediaReplies) > 0 {
+		input.Segments = mediaReplySegments(mediaReplies)
+	} else {
+		input.Payload = reply
+	}
+	if strings.TrimSpace(input.Payload) == "" && len(input.Segments) == 0 {
+		return "", 0, nil
+	}
+	markers, durableRecovery := durable.store.(runtimestorage.ReplyMaterializationStore)
+	if durableRecovery {
+		if _, err := markers.PutReplyMaterialization(ctx, replyMaterializationIntent(input)); err != nil {
+			return "", 0, ErrReplyMaterialization
+		}
+	}
+	segments, err := dispatcher.materializer.Materialize(ctx, input)
+	if err == nil {
+		return durable.eventID, segments, nil
+	}
+	// A durable recovery record keeps native media intact and lets the
+	// outbox worker retry it after a storage interruption. The channel
+	// provider still owns its deterministic media fallback.
+	if len(mediaReplies) == 0 || durableRecovery {
+		// Keep the running event fenced and retryable. The current lease
+		// cannot be moved to execution_reconciling until it expires.
+		return "", 0, ErrReplyMaterialization
+	}
+	fallback := outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: requestID, TraceID: traceID, TraceParent: observability.TraceParentFromContext(ctx), Payload: durableFailureFallbackReply, ReplyTarget: durable.replyTarget}
+	segments, err = dispatcher.materializer.Materialize(ctx, fallback)
+	if err != nil {
+		return "", 0, ErrReplyMaterialization
+	}
+	return durable.eventID, segments, nil
 }
 
 func mediaReplySegments(intents []servicetool.ReplyIntent) []outbox.ReplySegment {
@@ -585,6 +606,18 @@ func mediaReplySegments(intents []servicetool.ReplyIntent) []outbox.ReplySegment
 		segments = append(segments, outbox.ReplySegment{Kind: intent.Kind, Payload: intent.Payload, Attachment: intent.Attachment, Fallback: intent.Fallback})
 	}
 	return segments
+}
+
+func replyMaterializationIntent(input outbox.MaterializeInput) runtimestorage.ReplyMaterializationIntent {
+	segments := make([]runtimestorage.ReplyMaterializationSegment, len(input.Segments))
+	for index, segment := range input.Segments {
+		segments[index] = runtimestorage.ReplyMaterializationSegment{Kind: segment.Kind, Payload: segment.Payload, Attachment: segment.Attachment, Fallback: segment.Fallback}
+	}
+	return runtimestorage.ReplyMaterializationIntent{
+		TenantID: input.TenantID, EventID: input.EventID, ReplyID: input.ReplyID,
+		RequestID: input.RequestID, TraceID: input.TraceID, TraceParent: input.TraceParent,
+		Payload: input.Payload, Segments: segments, ReplyTarget: input.ReplyTarget,
+	}
 }
 
 func (dispatcher *Dispatcher) observeStorage(ctx context.Context, operation func(context.Context) error) error {

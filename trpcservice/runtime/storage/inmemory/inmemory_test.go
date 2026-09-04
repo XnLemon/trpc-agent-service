@@ -268,6 +268,9 @@ func TestStoreDeleteSessionRemovesAssociatedRuntimeData(t *testing.T) {
 	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-1", EventID: "event-1", SegmentIndex: 0, SegmentCount: 1}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.PutReplyMaterialization(context.Background(), runtimestorage.ReplyMaterializationIntent{TenantID: "tenant-a", EventID: "event-1", ReplyID: "reply-1", Payload: "payload"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.DeleteSession(context.Background(), "tenant-a", "session-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -279,6 +282,9 @@ func TestStoreDeleteSessionRemovesAssociatedRuntimeData(t *testing.T) {
 	}
 	if _, err := store.GetReply(context.Background(), "tenant-a", "reply-1", 0); !errors.Is(err, runtimestorage.ErrNotFound) {
 		t.Fatalf("deleted reply = %v", err)
+	}
+	if markers, err := store.ListReplyMaterializations(context.Background(), "tenant-a"); err != nil || len(markers) != 0 {
+		t.Fatalf("deleted recovery marker = %+v err=%v", markers, err)
 	}
 	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-1", nil); err != nil {
 		t.Fatalf("recreate session: %v", err)

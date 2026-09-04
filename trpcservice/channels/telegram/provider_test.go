@@ -120,6 +120,18 @@ func TestProviderUsesStableReceiptAndReconcile(t *testing.T) {
 	}
 }
 
+func TestProviderReconcilesDurableReceipt(t *testing.T) {
+	provider, err := NewProvider(&providerBot{}, 99, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := runtimestorage.ReplyOutbox{ProviderMessageID: "durable-42"}
+	status, receipt, err := provider.Reconcile(context.Background(), reply)
+	if err != nil || status != outbox.DeliveryAccepted || receipt != "durable-42" {
+		t.Fatalf("durable reconcile = %s/%q err=%v", status, receipt, err)
+	}
+}
+
 func TestProviderCoalescesConcurrentDelivery(t *testing.T) {
 	client := &blockingProviderBot{started: make(chan struct{}), release: make(chan struct{})}
 	provider, err := NewProvider(client, 99, 0)

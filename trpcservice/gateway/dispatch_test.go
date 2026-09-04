@@ -1299,6 +1299,10 @@ func TestDispatcherDoesNotAcknowledgeReplyMaterializationFailure(t *testing.T) {
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("materialization failure created outbox rows = %+v err=%v", rows, err)
 	}
+	markers, err := store.ListReplyMaterializations(context.Background(), principal.TenantID())
+	if err != nil || len(markers) != 1 || markers[0].Payload != "reply" {
+		t.Fatalf("materialization failure recovery marker = %+v err=%v", markers, err)
+	}
 }
 
 func dispatchAndAssertDurableReply(t *testing.T, dispatcher *Dispatcher, principal Principal, store runtimestorage.RuntimeStore) runtimestorage.MessageEvent {

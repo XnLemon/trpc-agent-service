@@ -538,7 +538,11 @@ func environmentOutboxWorkerFactory(config environmentConfig, runtimeStore runti
 		if err != nil {
 			return nil, err
 		}
-		return newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: provider, Channel: channel, ProviderName: providerName, TenantID: config.tenantID, Owner: owner, LeaseDuration: leaseDuration, AuditWriter: auditWriter, Observability: config.telemetry})
+		materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: runtimeStore, Observability: config.telemetry})
+		if err != nil {
+			return nil, err
+		}
+		return newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: provider, Materializer: materializer, Channel: channel, ProviderName: providerName, TenantID: config.tenantID, Owner: owner, LeaseDuration: leaseDuration, AuditWriter: auditWriter, Observability: config.telemetry})
 	}
 }
 
@@ -568,6 +572,14 @@ func environmentOutboxProvider(
 		providerCount++
 	}
 	leaseDuration := 30 * time.Second
+	if telegramProvider != nil {
+		for _, adapter := range adapters {
+			telegramAdapter, ok := adapter.(*telegram.Adapter)
+			if ok && telegramAdapter.OutboxLeaseDuration() > leaseDuration {
+				leaseDuration = telegramAdapter.OutboxLeaseDuration()
+			}
+		}
+	}
 	if aiBotProvider != nil && leaseDuration < wecom_aibot.OutboxLeaseDuration {
 		// AI Bot delivery waits for the provider acknowledgement and then
 		// commits a fenced receipt. A mixed worker must retain that longer

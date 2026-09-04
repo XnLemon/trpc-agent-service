@@ -164,6 +164,9 @@ func TestNewInjectsFactoryAndRejectsBotIdentityMismatch(t *testing.T) {
 	if adapter == nil || adapter.principal.Kind() != gateway.PrincipalChannel {
 		t.Fatal("adapter did not retain a trusted channel principal")
 	}
+	if adapter.OutboxLeaseDuration() != OutboxLeaseDuration(3*time.Second) {
+		t.Fatalf("adapter outbox lease = %s, want %s", adapter.OutboxLeaseDuration(), OutboxLeaseDuration(3*time.Second))
+	}
 
 	recorder := &errorRecorder{}
 	mismatched := &fakeFactory{client: &fakeBot{me: &models.User{ID: 54321, IsBot: true}}}
@@ -180,6 +183,15 @@ func TestNewInjectsFactoryAndRejectsBotIdentityMismatch(t *testing.T) {
 	}
 	if len(dispatcher.requests()) != 0 {
 		t.Fatal("identity mismatch reached Dispatch")
+	}
+}
+
+func TestOutboxLeaseDurationCoversDefaultAndConfiguredPollTimeout(t *testing.T) {
+	if got, want := OutboxLeaseDuration(0), 70*time.Second; got != want {
+		t.Fatalf("default Telegram outbox lease = %s, want %s", got, want)
+	}
+	if got, want := OutboxLeaseDuration(10*time.Minute), 10*time.Minute+10*time.Second; got != want {
+		t.Fatalf("configured Telegram outbox lease = %s, want %s", got, want)
 	}
 }
 

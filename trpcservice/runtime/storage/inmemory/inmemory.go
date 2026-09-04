@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,27 +17,28 @@ import (
 
 // Store is a concurrency-safe in-memory implementation of the runtime store.
 type Store struct {
-	mu           *sync.RWMutex
-	sessions     map[string]runtimestorage.Session
-	events       map[string]runtimestorage.MessageEvent
-	histories    map[string][]runtimestorage.EventPayload
-	messages     map[string]string
-	replies      map[string]runtimestorage.ReplyOutbox
-	correlations map[string]runtimestorage.ReplyCorrelation
-	memories     map[string]runtimestorage.MemoryRecord
-	summaries    map[string]runtimestorage.SummaryRecord
-	knowledge    map[string]runtimestorage.KnowledgeDocument
-	artifacts    map[string]runtimestorage.ArtifactRecord
-	audits       map[string][]runtimestorage.AuditRecord
-	vectors      map[string]runtimestorage.VectorRecord
-	objects      map[string]runtimestorage.ObjectInfo
-	objectData   map[string][]byte
-	attachments  map[string]storedAttachment
-	indexQueue   chan runtimestorage.MemoryRecord
-	indexDone    chan struct{}
-	indexMu      *sync.RWMutex
-	closeOnce    *sync.Once
-	lifecycle    *backendLifecycle
+	mu               *sync.RWMutex
+	sessions         map[string]runtimestorage.Session
+	events           map[string]runtimestorage.MessageEvent
+	histories        map[string][]runtimestorage.EventPayload
+	messages         map[string]string
+	replies          map[string]runtimestorage.ReplyOutbox
+	materializations map[string]runtimestorage.ReplyMaterializationIntent
+	correlations     map[string]runtimestorage.ReplyCorrelation
+	memories         map[string]runtimestorage.MemoryRecord
+	summaries        map[string]runtimestorage.SummaryRecord
+	knowledge        map[string]runtimestorage.KnowledgeDocument
+	artifacts        map[string]runtimestorage.ArtifactRecord
+	audits           map[string][]runtimestorage.AuditRecord
+	vectors          map[string]runtimestorage.VectorRecord
+	objects          map[string]runtimestorage.ObjectInfo
+	objectData       map[string][]byte
+	attachments      map[string]storedAttachment
+	indexQueue       chan runtimestorage.MemoryRecord
+	indexDone        chan struct{}
+	indexMu          *sync.RWMutex
+	closeOnce        *sync.Once
+	lifecycle        *backendLifecycle
 }
 
 // Backend owns one in-memory state graph that can be shared by multiple
@@ -133,7 +135,7 @@ func newStore(lifecycle *backendLifecycle) *Store {
 		mu:       &sync.RWMutex{},
 		sessions: map[string]runtimestorage.Session{}, events: map[string]runtimestorage.MessageEvent{},
 		histories: map[string][]runtimestorage.EventPayload{}, messages: map[string]string{},
-		replies: map[string]runtimestorage.ReplyOutbox{}, correlations: map[string]runtimestorage.ReplyCorrelation{},
+		replies: map[string]runtimestorage.ReplyOutbox{}, materializations: map[string]runtimestorage.ReplyMaterializationIntent{}, correlations: map[string]runtimestorage.ReplyCorrelation{},
 		memories: map[string]runtimestorage.MemoryRecord{}, summaries: map[string]runtimestorage.SummaryRecord{},
 		knowledge: map[string]runtimestorage.KnowledgeDocument{}, artifacts: map[string]runtimestorage.ArtifactRecord{},
 		audits: map[string][]runtimestorage.AuditRecord{}, vectors: map[string]runtimestorage.VectorRecord{},
@@ -254,6 +256,7 @@ func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) e
 				delete(s.replies, replyKey)
 			}
 		}
+		delete(s.materializations, key(tenantID, event.EventID))
 		for attachmentKey, attachmentValue := range s.attachments {
 			if attachmentValue.eventID == event.EventID && strings.HasPrefix(attachmentKey, key(tenantID)) {
 				attachmentValue.eventID = ""
@@ -261,6 +264,76 @@ func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) e
 			}
 		}
 	}
+	return nil
+}
+
+// PutReplyMaterialization stores one idempotent durable reply recovery record.
+func (s *Store) PutReplyMaterialization(ctx context.Context, input runtimestorage.ReplyMaterializationIntent) (runtimestorage.ReplyMaterializationIntent, error) {
+	if err := check(ctx); err != nil {
+		return runtimestorage.ReplyMaterializationIntent{}, err
+	}
+	input, err := runtimestorage.NormalizeReplyMaterializationIntent(input)
+	if err != nil {
+		return runtimestorage.ReplyMaterializationIntent{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	event, ok := s.events[key(input.TenantID, input.EventID)]
+	if !ok {
+		return runtimestorage.ReplyMaterializationIntent{}, runtimestorage.ErrNotFound
+	}
+	if event.ReplyTarget != input.ReplyTarget {
+		return runtimestorage.ReplyMaterializationIntent{}, runtimestorage.ErrConflict
+	}
+	markerKey := key(input.TenantID, input.EventID)
+	if existing, ok := s.materializations[markerKey]; ok {
+		if !existing.SameContract(input) {
+			return runtimestorage.ReplyMaterializationIntent{}, runtimestorage.ErrConflict
+		}
+		return cloneMaterialization(existing), nil
+	}
+	now := time.Now().UTC()
+	input.CreatedAt, input.UpdatedAt = now, now
+	s.materializations[markerKey] = input
+	return cloneMaterialization(input), nil
+}
+
+// ListReplyMaterializations returns pending recovery records for a tenant.
+func (s *Store) ListReplyMaterializations(ctx context.Context, tenantID string) ([]runtimestorage.ReplyMaterializationIntent, error) {
+	if err := check(ctx); err != nil {
+		return nil, err
+	}
+	if err := runtimestorage.ValidateTenant(tenantID); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]runtimestorage.ReplyMaterializationIntent, 0)
+	for _, value := range s.materializations {
+		if value.TenantID == tenantID {
+			result = append(result, cloneMaterialization(value))
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].EventID < result[j].EventID
+		}
+		return result[i].CreatedAt.Before(result[j].CreatedAt)
+	})
+	return result, nil
+}
+
+// DeleteReplyMaterialization removes one recovery record idempotently.
+func (s *Store) DeleteReplyMaterialization(ctx context.Context, tenantID, eventID string) error {
+	if err := check(ctx); err != nil {
+		return err
+	}
+	if runtimestorage.ValidateTenant(tenantID) != nil || strings.TrimSpace(eventID) == "" {
+		return runtimestorage.ErrInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.materializations, key(tenantID, eventID))
 	return nil
 }
 
@@ -848,6 +921,11 @@ func cloneReply(value runtimestorage.ReplyOutbox) runtimestorage.ReplyOutbox {
 		copy := *value.LeaseExpiresAt
 		value.LeaseExpiresAt = &copy
 	}
+	return value
+}
+
+func cloneMaterialization(value runtimestorage.ReplyMaterializationIntent) runtimestorage.ReplyMaterializationIntent {
+	value.Segments = append([]runtimestorage.ReplyMaterializationSegment(nil), value.Segments...)
 	return value
 }
 

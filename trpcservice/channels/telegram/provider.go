@@ -292,6 +292,9 @@ func (p *Provider) Reconcile(_ context.Context, value runtimestorage.ReplyOutbox
 	if p == nil {
 		return outbox.DeliveryUnknown, "", nil
 	}
+	if value.ProviderMessageID != "" {
+		return outbox.DeliveryAccepted, value.ProviderMessageID, nil
+	}
 	if _, _, err := p.destination(value); err != nil {
 		return outbox.DeliveryUnknown, "", err
 	}
