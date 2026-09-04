@@ -33,7 +33,9 @@ permissions:
 jobs:
   telegram-e2e:
     name: Telegram live long-polling E2E
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # This job receives live bot credentials. Run only code from main; a PR
+    # checkout or manually selected branch must never execute with secrets.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: telegram-e2e
     timeout-minutes: 5

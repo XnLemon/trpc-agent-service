@@ -73,9 +73,11 @@ go test ./examples/telegram-e2e -run TestTelegramProviderMediaOutboxRunnerE2E -c
 
 ## CI run
 
-The live workflow runs automatically for pull requests from this repository
-and pushes to `main`, and remains manually dispatchable. It references a
-protected GitHub Environment named `telegram-e2e`:
+The live workflow runs automatically when code is pushed to `main`, and remains
+manually dispatchable only when `main` is selected. Pull request runs are
+intentionally skipped: the workflow never executes pull-request code with live
+bot credentials. It references a GitHub Environment named `telegram-e2e`, which
+is restricted to the `main` branch:
 
 - `TELEGRAM_BOT_TOKEN`: required secret for the receiving test Bot.
 - `TELEGRAM_SENDER_BOT_TOKEN`: required secret for a second controlled test Bot
@@ -90,7 +92,6 @@ secret, the example remains suitable for a local human-driven run but the CI
 job will eventually time out waiting for the marker.
 
 The workflow uses one concurrency group so two runs cannot poll the same test
-Bot at the same time. Pull requests from forks are skipped because GitHub does
-not provide these Environment secrets to them; use the manual workflow from a
-trusted branch when an external contributor's change needs a live check. The
-manual `media_e2e` input enables the separate protected image-upload check.
+Bot at the same time. A live check for a change must be run after it is merged
+to `main`, or against a separately provisioned test environment; the manual
+`media_e2e` input enables the separate protected image-upload check on `main`.

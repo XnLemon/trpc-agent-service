@@ -166,12 +166,13 @@ README 和 MkDocs 状态应明确区分已交付与后续能力：
 
 ## 7. 真实 Telegram E2E
 
-Issue #33 提供根目录 `examples/telegram-e2e/` 示例和手动触发的 CI 工作流，
-用于验证真实的 `getMe -> getUpdates -> sendMessage` 边界。示例内部使用确定性
-`DispatchService`，因此不会把模型供应商凭据和 Telegram 传输冒烟测试混在一起。
+Issue #33 提供根目录 `examples/telegram-e2e/` 示例和 CI 工作流，用于验证真实的
+`getMe -> getUpdates -> sendMessage` 边界。工作流只在 `main` 上执行 secret-bearing
+live job；PR 和手动选择其他分支时会跳过该 job，避免把 live Bot 凭据交给未合并代码。
+示例内部使用确定性 `DispatchService`，因此不会把模型供应商凭据和 Telegram 传输冒烟测试混在一起。
 
 本地运行只需要在进程环境中提供 `TELEGRAM_BOT_TOKEN`；Token 不得进入仓库、日志、
-trace 或错误。CI 使用受保护的 `telegram-e2e` Environment，至少配置接收 Bot 的
+trace 或错误。CI 使用限制到 `main` 分支的 `telegram-e2e` Environment，至少配置接收 Bot 的
 `TELEGRAM_BOT_TOKEN`，并在需要完全自动化入站消息时配置第二个受控测试 Bot 的
 `TELEGRAM_SENDER_BOT_TOKEN`。一个 Bot Token 不能模拟普通用户向自己发送入站消息，
 所以当前 workflow 必须显式配置第二个受控测试 Bot；本地人工运行可以不配置发送者。
