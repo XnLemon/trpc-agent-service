@@ -1,0 +1,26 @@
+CREATE TABLE IF NOT EXISTS agent_runtime_profile (
+    tenant_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    profile_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    runtime_key VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    runtime_kind VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    execution_mode VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    implementation_ref VARCHAR(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    runtime_version VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    schema_version INT NOT NULL,
+    implementation_digest VARCHAR(128) CHARACTER SET ascii NOT NULL,
+    config_digest VARCHAR(128) CHARACTER SET ascii NOT NULL,
+    config JSON NOT NULL,
+    capabilities JSON NOT NULL,
+    governance_mode VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    secret_ref VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    status VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    version BIGINT NOT NULL,
+    created_at DATETIME(6) NOT NULL,
+    updated_at DATETIME(6) NOT NULL,
+    PRIMARY KEY (tenant_id, profile_id), UNIQUE KEY runtime_profile_key (tenant_id, runtime_key),
+    CONSTRAINT runtime_profile_tenant_fk FOREIGN KEY (tenant_id) REFERENCES tenant(tenant_id),
+    CONSTRAINT runtime_profile_mode_ck CHECK (execution_mode IN ('builtin','in_process','remote')),
+    CONSTRAINT runtime_profile_governance_ck CHECK (governance_mode IN ('full','perimeter')),
+    CONSTRAINT runtime_profile_status_ck CHECK (status IN ('draft','active','disabled'))
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+ALTER TABLE agent_app_revision ADD COLUMN runtime_profile_id VARCHAR(64) NULL, ADD COLUMN runtime_kind VARCHAR(64) NULL, ADD COLUMN runtime_mode VARCHAR(16) NULL, ADD COLUMN runtime_version VARCHAR(64) NULL, ADD COLUMN runtime_digest VARCHAR(128) NULL, ADD COLUMN runtime_config_digest VARCHAR(128) NULL, ADD COLUMN runtime_governance VARCHAR(16) NULL;

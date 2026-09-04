@@ -61,7 +61,7 @@ func TestMySQLMigrationSetUsesBinaryIdentityAndRecoveryMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 3 || files[0].version != 1 || files[1].version != 2 || files[2].version != 3 {
+	if len(files) != 4 || files[0].version != 1 || files[1].version != 2 || files[2].version != 3 || files[3].version != 4 {
 		t.Fatalf("MySQL files = %#v", files)
 	}
 	script := files[0].statements
@@ -95,7 +95,7 @@ func TestMySQLHistoryAndArgumentHelpers(t *testing.T) {
 	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{0: {status: "applied"}}, files); !errors.Is(err, ErrInvalidHistory) {
 		t.Fatalf("zero history version error = %v", err)
 	}
-	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{4: {status: "applied"}}, files); !errors.Is(err, ErrInvalidHistory) {
+	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{5: {status: "applied"}}, files); !errors.Is(err, ErrInvalidHistory) {
 		t.Fatalf("future history version error = %v", err)
 	}
 	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{1: {status: "unknown"}}, files); !errors.Is(err, ErrInvalidHistory) {

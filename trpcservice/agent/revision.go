@@ -26,8 +26,12 @@ const (
 type Kind string
 
 const (
-	// KindLLM is the only executable kind supported by schema version 1.
-	KindLLM Kind = "llm"
+	// KindLLM identifies the built-in language-model Agent.
+	KindLLM      Kind = "llm"
+	KindChain    Kind = "chain"
+	KindParallel Kind = "parallel"
+	KindCycle    Kind = "cycle"
+	KindGraph    Kind = "graph"
 )
 
 const (
@@ -73,36 +77,62 @@ type ToolAuthorization struct {
 
 // DraftConfiguration is the complete executable content of one revision.
 type DraftConfiguration struct {
-	Description       string
-	Instruction       string
-	GlobalInstruction string
-	ModelProfileID    string
-	Generation        GenerationConfig
-	Runtime           RuntimePolicy
-	Tools             []ToolAuthorization
+	Description              string
+	Instruction              string
+	GlobalInstruction        string
+	ModelProfileID           string
+	Generation               GenerationConfig
+	Runtime                  RuntimePolicy
+	Tools                    []ToolAuthorization
+	RuntimeProfileID         string
+	RuntimeKind              string
+	RuntimeMode              string
+	RuntimeVersion           string
+	RuntimeDigest            string
+	RuntimeConfigDigest      string
+	RuntimeGovernance        string
+	RuntimeImplementationRef string
 }
 
 // Revision is one tenant-scoped version of an Agent App definition.
 // Published revisions are immutable and content-addressed.
 type Revision struct {
-	TenantID          string
-	AppID             string
-	Revision          int64
-	State             RevisionState
-	DraftVersion      int64
-	Kind              Kind
-	SchemaVersion     int
-	Description       string
-	Instruction       string
-	GlobalInstruction string
-	ModelProfileID    string
-	Generation        GenerationConfig
-	Runtime           RuntimePolicy
-	Tools             []ToolAuthorization
-	ContentDigest     string
-	PublishedAt       *time.Time
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	TenantID                 string
+	AppID                    string
+	Revision                 int64
+	State                    RevisionState
+	DraftVersion             int64
+	Kind                     Kind
+	SchemaVersion            int
+	Description              string
+	Instruction              string
+	GlobalInstruction        string
+	ModelProfileID           string
+	Generation               GenerationConfig
+	Runtime                  RuntimePolicy
+	Tools                    []ToolAuthorization
+	RuntimeProfileID         string
+	RuntimeKind              string
+	RuntimeMode              string
+	RuntimeVersion           string
+	RuntimeDigest            string
+	RuntimeConfigDigest      string
+	RuntimeGovernance        string
+	RuntimeImplementationRef string
+	ContentDigest            string
+	PublishedAt              *time.Time
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
+}
+
+// RuntimeIdentity returns the published runtime descriptor, mapping legacy
+// revisions without runtime metadata to builtin-llm v1.
+func (r Revision) RuntimeIdentity() (profileID, kind, mode, version, digest, configDigest, governance, implementationRef string) {
+	profileID, kind, mode, version, digest, configDigest, governance, implementationRef = r.RuntimeProfileID, r.RuntimeKind, r.RuntimeMode, r.RuntimeVersion, r.RuntimeDigest, r.RuntimeConfigDigest, r.RuntimeGovernance, r.RuntimeImplementationRef
+	if profileID == "" {
+		return "builtin-llm", "builtin-llm", "builtin", "v1", "builtin-llm@v1", "builtin-llm-config-v1", "full", "builtin-llm"
+	}
+	return
 }
 
 // CreateRevisionInput contains trusted identity and caller-selected content for
@@ -158,8 +188,13 @@ func NewRevision(input CreateRevisionInput) (*Revision, error) {
 		Generation:        cloneGenerationConfig(configuration.Generation),
 		Runtime:           configuration.Runtime,
 		Tools:             cloneTools(configuration.Tools),
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		RuntimeProfileID:  configuration.RuntimeProfileID, RuntimeKind: configuration.RuntimeKind,
+		RuntimeMode: configuration.RuntimeMode, RuntimeVersion: configuration.RuntimeVersion,
+		RuntimeDigest: configuration.RuntimeDigest, RuntimeConfigDigest: configuration.RuntimeConfigDigest,
+		RuntimeGovernance:        configuration.RuntimeGovernance,
+		RuntimeImplementationRef: configuration.RuntimeImplementationRef,
+		CreatedAt:                now,
+		UpdatedAt:                now,
 	}
 	return revision, nil
 }
@@ -175,7 +210,7 @@ func (r Revision) Clone() Revision {
 
 // Configuration returns a deep copy of the revision's executable definition.
 func (r Revision) Configuration() DraftConfiguration {
-	return DraftConfiguration{
+	configuration := DraftConfiguration{
 		Description:       r.Description,
 		Instruction:       r.Instruction,
 		GlobalInstruction: r.GlobalInstruction,
@@ -183,7 +218,12 @@ func (r Revision) Configuration() DraftConfiguration {
 		Generation:        cloneGenerationConfig(r.Generation),
 		Runtime:           r.Runtime,
 		Tools:             cloneTools(r.Tools),
+		RuntimeProfileID:  r.RuntimeProfileID, RuntimeKind: r.RuntimeKind, RuntimeMode: r.RuntimeMode,
+		RuntimeVersion: r.RuntimeVersion, RuntimeDigest: r.RuntimeDigest, RuntimeConfigDigest: r.RuntimeConfigDigest,
+		RuntimeGovernance:        r.RuntimeGovernance,
+		RuntimeImplementationRef: r.RuntimeImplementationRef,
 	}
+	return configuration
 }
 
 // Validate checks identity, schema, configuration, publication state, digest,
@@ -270,16 +310,42 @@ func (r Revision) ComputeContentDigest() (string, error) {
 	if err := validateRevisionDefinition(r.Kind, r.SchemaVersion, configuration); err != nil {
 		return "", err
 	}
+	if r.RuntimeProfileID == "" {
+		legacy := struct {
+			Kind              Kind                `json:"kind"`
+			SchemaVersion     int                 `json:"schema_version"`
+			Description       string              `json:"description"`
+			Instruction       string              `json:"instruction"`
+			GlobalInstruction string              `json:"global_instruction"`
+			ModelProfileID    string              `json:"model_profile_id"`
+			Generation        GenerationConfig    `json:"generation"`
+			Runtime           RuntimePolicy       `json:"runtime"`
+			Tools             []ToolAuthorization `json:"tools"`
+		}{r.Kind, r.SchemaVersion, configuration.Description, configuration.Instruction, configuration.GlobalInstruction, configuration.ModelProfileID, cloneGenerationConfig(configuration.Generation), configuration.Runtime, cloneTools(configuration.Tools)}
+		encoded, err := json.Marshal(legacy)
+		if err != nil {
+			return "", fmt.Errorf("encode agent app revision digest: %w", err)
+		}
+		sum := sha256.Sum256(encoded)
+		return hex.EncodeToString(sum[:]), nil
+	}
 	payload := struct {
-		Kind              Kind                `json:"kind"`
-		SchemaVersion     int                 `json:"schema_version"`
-		Description       string              `json:"description"`
-		Instruction       string              `json:"instruction"`
-		GlobalInstruction string              `json:"global_instruction"`
-		ModelProfileID    string              `json:"model_profile_id"`
-		Generation        GenerationConfig    `json:"generation"`
-		Runtime           RuntimePolicy       `json:"runtime"`
-		Tools             []ToolAuthorization `json:"tools"`
+		Kind                Kind                `json:"kind"`
+		SchemaVersion       int                 `json:"schema_version"`
+		Description         string              `json:"description"`
+		Instruction         string              `json:"instruction"`
+		GlobalInstruction   string              `json:"global_instruction"`
+		ModelProfileID      string              `json:"model_profile_id"`
+		Generation          GenerationConfig    `json:"generation"`
+		Runtime             RuntimePolicy       `json:"runtime"`
+		Tools               []ToolAuthorization `json:"tools"`
+		RuntimeProfileID    string              `json:"runtime_profile_id"`
+		RuntimeKind         string              `json:"runtime_kind"`
+		RuntimeMode         string              `json:"runtime_mode"`
+		RuntimeVersion      string              `json:"runtime_version"`
+		RuntimeDigest       string              `json:"runtime_digest"`
+		RuntimeConfigDigest string              `json:"runtime_config_digest"`
+		RuntimeGovernance   string              `json:"runtime_governance"`
 	}{
 		Kind:              r.Kind,
 		SchemaVersion:     r.SchemaVersion,
@@ -290,6 +356,9 @@ func (r Revision) ComputeContentDigest() (string, error) {
 		Generation:        cloneGenerationConfig(configuration.Generation),
 		Runtime:           configuration.Runtime,
 		Tools:             cloneTools(configuration.Tools),
+		RuntimeProfileID:  r.RuntimeProfileID, RuntimeKind: r.RuntimeKind, RuntimeMode: r.RuntimeMode,
+		RuntimeVersion: r.RuntimeVersion, RuntimeDigest: r.RuntimeDigest, RuntimeConfigDigest: r.RuntimeConfigDigest,
+		RuntimeGovernance: r.RuntimeGovernance,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -367,6 +436,19 @@ func validateRevisionDefinition(kind Kind, schemaVersion int, configuration Draf
 	if _, err := normalizeTools(configuration.Tools); err != nil {
 		return err
 	}
+	if configuration.RuntimeProfileID != "" {
+		for name, value := range map[string]string{"runtime kind": configuration.RuntimeKind, "runtime mode": configuration.RuntimeMode, "runtime version": configuration.RuntimeVersion, "runtime digest": configuration.RuntimeDigest, "runtime config digest": configuration.RuntimeConfigDigest, "runtime governance": configuration.RuntimeGovernance} {
+			if strings.TrimSpace(value) == "" || len([]rune(value)) > maxReferenceRunes {
+				return fmt.Errorf("%w: %s is required and must be at most %d characters", ErrInvalid, name, maxReferenceRunes)
+			}
+		}
+		if configuration.RuntimeMode != "builtin" && configuration.RuntimeMode != "in_process" && configuration.RuntimeMode != "remote" {
+			return fmt.Errorf("%w: unsupported runtime mode %q", ErrInvalid, configuration.RuntimeMode)
+		}
+		if configuration.RuntimeGovernance != "full" && configuration.RuntimeGovernance != "perimeter" {
+			return fmt.Errorf("%w: unsupported runtime governance %q", ErrInvalid, configuration.RuntimeGovernance)
+		}
+	}
 	return nil
 }
 
@@ -423,7 +505,7 @@ func normalizeTools(tools []ToolAuthorization) ([]ToolAuthorization, error) {
 }
 
 func sameDraftConfiguration(left, right DraftConfiguration) bool {
-	if left.Description != right.Description || left.Instruction != right.Instruction || left.GlobalInstruction != right.GlobalInstruction || left.ModelProfileID != right.ModelProfileID || left.Runtime != right.Runtime {
+	if left.Description != right.Description || left.Instruction != right.Instruction || left.GlobalInstruction != right.GlobalInstruction || left.ModelProfileID != right.ModelProfileID || left.Runtime != right.Runtime || left.RuntimeProfileID != right.RuntimeProfileID || left.RuntimeKind != right.RuntimeKind || left.RuntimeMode != right.RuntimeMode || left.RuntimeVersion != right.RuntimeVersion || left.RuntimeDigest != right.RuntimeDigest || left.RuntimeConfigDigest != right.RuntimeConfigDigest || left.RuntimeGovernance != right.RuntimeGovernance {
 		return false
 	}
 	if !sameGenerationConfig(left.Generation, right.Generation) || len(left.Tools) != len(right.Tools) {
