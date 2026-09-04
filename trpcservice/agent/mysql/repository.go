@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +20,153 @@ type AgentRepository struct {
 }
 
 var _ agent.Repository = (*AgentRepository)(nil)
+
+// List returns a stable page of Apps belonging to one tenant.
+func (r *AgentRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*agent.App, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	if r == nil || r.db == nil {
+		return nil, "", ErrStorage
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset, err := decodeListCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	rows, err := r.db.QueryContext(ctx, agentAppSelect+` WHERE tenant_id = ? ORDER BY app_id`, tenantID)
+	if err != nil {
+		return nil, "", mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
+	}
+	defer rows.Close()
+	query, status = strings.ToLower(strings.TrimSpace(query)), strings.TrimSpace(status)
+	items := make([]*agent.App, 0)
+	for rows.Next() {
+		var value agent.App
+		var state string
+		var current, canary sql.NullInt64
+		if err := rows.Scan(&value.TenantID, &value.AppID, &value.AppKey, &value.DisplayName, &value.Description, &state, &current, &canary, &value.Version, &value.CreatedAt, &value.UpdatedAt); err != nil {
+			return nil, "", ErrStorage
+		}
+		value.Status, value.CurrentRevision, value.CanaryRevision = agent.Status(state), nullableInt(current), nullableInt(canary)
+		if status != "" && string(value.Status) != status {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(value.AppID+" "+value.AppKey+" "+value.DisplayName), query) {
+			continue
+		}
+		if err := value.Validate(); err != nil {
+			return nil, "", ErrStorage
+		}
+		value.CreatedAt, value.UpdatedAt = asUTC(value.CreatedAt), asUTC(value.UpdatedAt)
+		clone := value.Clone()
+		items = append(items, &clone)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", ErrStorage
+	}
+	return pageApps(items, offset, limit)
+}
+
+// ListRevisions returns revisions for one App using stable numeric ordering.
+func (r *AgentRepository) ListRevisions(ctx context.Context, tenantID, appID, query, status, cursor string, limit int) ([]*agent.Revision, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	if r == nil || r.db == nil {
+		return nil, "", ErrStorage
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset, err := decodeListCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT revision FROM agent_app_revision WHERE tenant_id = ? AND app_id = ? ORDER BY revision`, tenantID, appID)
+	if err != nil {
+		return nil, "", mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
+	}
+	var revisions []int64
+	for rows.Next() {
+		var revision int64
+		if err := rows.Scan(&revision); err != nil {
+			_ = rows.Close()
+			return nil, "", ErrStorage
+		}
+		revisions = append(revisions, revision)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, "", ErrStorage
+	}
+	_ = rows.Close()
+	query, status = strings.ToLower(strings.TrimSpace(query)), strings.TrimSpace(status)
+	items := make([]*agent.Revision, 0)
+	for _, revision := range revisions {
+		value, err := loadAgentRevision(ctx, r.db, tenantID, appID, revision, false)
+		if err != nil {
+			return nil, "", mapDBError(ctx, err, agent.ErrNotFound, agent.ErrDuplicateKey, agent.ErrConflict, agent.ErrInvalid)
+		}
+		if status != "" && string(value.State) != status {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(value.Description+" "+value.Instruction+" "+value.GlobalInstruction), query) {
+			continue
+		}
+		items = append(items, value)
+	}
+	return pageRevisions(items, offset, limit)
+}
+
+func decodeListCursor(cursor string) (int, error) {
+	if cursor == "" {
+		return 0, nil
+	}
+	var offset int
+	if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+		return 0, fmt.Errorf("invalid cursor")
+	}
+	return offset, nil
+}
+func pageApps(items []*agent.App, offset, limit int) ([]*agent.App, string, error) {
+	sort.Slice(items, func(i, j int) bool { return items[i].AppID < items[j].AppID })
+	if offset >= len(items) {
+		return []*agent.App{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = fmt.Sprintf("%d", end)
+	}
+	return items[offset:end], next, nil
+}
+func pageRevisions(items []*agent.Revision, offset, limit int) ([]*agent.Revision, string, error) {
+	sort.Slice(items, func(i, j int) bool { return items[i].Revision < items[j].Revision })
+	if offset >= len(items) {
+		return []*agent.Revision{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = fmt.Sprintf("%d", end)
+	}
+	return items[offset:end], next, nil
+}
 
 // NewRepository creates an Agent App repository over a MySQL pool.
 func NewRepository(db *sql.DB) *AgentRepository { return &AgentRepository{db: db} }

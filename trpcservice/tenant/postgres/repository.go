@@ -6,11 +6,103 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
+
+// List returns a stable page of only the requested tenant scopes. Scope
+// filtering is part of the database query and therefore precedes pagination.
+func (r *TenantRepository) List(ctx context.Context, scopes []string, query, status, cursor string, limit int) ([]*tenant.Tenant, string, error) {
+	scopeClause, arguments, allowed := tenantScopeClause(scopes)
+	if !allowed {
+		return []*tenant.Tenant{}, "", nil
+	}
+	if r == nil || r.db == nil {
+		return nil, "", ErrStorage
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	offset := 0
+	if cursor != "" {
+		if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+			return nil, "", fmt.Errorf("invalid cursor")
+		}
+	}
+	rows, err := r.db.QueryContext(ctx, tenantSelect+scopeClause+` ORDER BY tenant_id`, arguments...)
+	if err != nil {
+		return nil, "", mapDBError(ctx, err, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid)
+	}
+	defer rows.Close()
+	q := strings.ToLower(strings.TrimSpace(query))
+	items := make([]*tenant.Tenant, 0)
+	for rows.Next() {
+		v, scanErr := scanTenant(rows)
+		if scanErr != nil {
+			return nil, "", ErrStorage
+		}
+		if status != "" && string(v.Status) != status {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(v.TenantID+" "+v.TenantKey+" "+v.DisplayName), q) {
+			continue
+		}
+		items = append(items, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", ErrStorage
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].TenantID < items[j].TenantID })
+	if offset >= len(items) {
+		return []*tenant.Tenant{}, "", nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	next := ""
+	if end < len(items) {
+		next = fmt.Sprintf("%d", end)
+	}
+	return items[offset:end], next, nil
+}
+
+// tenantScopeClause returns a deterministic SQL predicate and arguments for
+// the tenant IDs visible to one Admin principal. The wildcard is explicit;
+// an empty scope remains an empty result rather than an unrestricted query.
+func tenantScopeClause(scopes []string) (string, []any, bool) {
+	visible := make(map[string]struct{}, len(scopes))
+	for _, scope := range scopes {
+		scope = strings.TrimSpace(scope)
+		if scope == "*" {
+			return "", nil, true
+		}
+		if scope != "" {
+			visible[scope] = struct{}{}
+		}
+	}
+	if len(visible) == 0 {
+		return "", nil, false
+	}
+	scopeIDs := make([]string, 0, len(visible))
+	for scope := range visible {
+		scopeIDs = append(scopeIDs, scope)
+	}
+	sort.Strings(scopeIDs)
+	placeholders := make([]string, len(scopeIDs))
+	arguments := make([]any, len(scopeIDs))
+	for index, scope := range scopeIDs {
+		placeholders[index] = fmt.Sprintf("$%d", index+1)
+		arguments[index] = scope
+	}
+	return ` WHERE tenant_id IN (` + strings.Join(placeholders, ", ") + `) `, arguments, true
+}
 
 // TenantRepository persists Tenant roots in PostgreSQL.
 type TenantRepository struct {

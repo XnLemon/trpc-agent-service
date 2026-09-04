@@ -408,6 +408,26 @@ func TestEnvironmentBootstrapRequiresExplicitConfigurationAndBuildsDependencies(
 	assertEnvironmentRequiredValues(t)
 }
 
+func TestEnvironmentAdminWebCredentialsMustBeConfiguredTogether(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv(envAdminUsername, "operator")
+	t.Setenv(envAdminPassword, "")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("one-sided admin web credentials error = %v", err)
+	}
+	t.Setenv(envAdminUsername, "")
+	t.Setenv(envAdminPassword, "secret")
+	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("password-only admin web credentials error = %v", err)
+	}
+	t.Setenv(envAdminUsername, "operator")
+	t.Setenv(envAdminPassword, "secret")
+	config, err := loadEnvironment()
+	if err != nil || config.adminUsername != "operator" || config.adminPassword != "secret" {
+		t.Fatalf("paired admin web credentials = %+v, err=%v", config, err)
+	}
+}
+
 func setEnvironmentBootstrapTestVariables(t *testing.T) {
 	t.Helper()
 	t.Setenv(envPostgresDSN, "postgres://postgres:postgres@127.0.0.1:5432/control_plane")

@@ -21,6 +21,7 @@ import (
 	channelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	storagemysql "github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
@@ -106,6 +107,13 @@ func TestAdminMapsAuditFailureToServiceUnavailable(t *testing.T) {
 	}
 }
 
+func TestAdminMapsMySQLStorageFailureToServiceUnavailable(t *testing.T) {
+	status, code := mapError(storagemysql.ErrStorage)
+	if status != http.StatusServiceUnavailable || code != "storage_unavailable" {
+		t.Fatalf("status=%d code=%q", status, code)
+	}
+}
+
 func testHandler(t *testing.T) (*Handler, *StaticAuthenticator) {
 	t.Helper()
 	modelCatalog, err := modelprofile.NewProviderCatalog(modelprofile.ProviderSpec{Provider: "openai", Models: []string{"gpt-4o-mini"}, EndpointPolicy: modelprofile.FieldOptional, EndpointSchemes: []string{"https"}, EndpointHosts: []string{"api.openai.com"}, SecretRefPolicy: modelprofile.FieldRequired})
@@ -151,8 +159,8 @@ func TestAdminTenantCreateAndReadUseIndependentPrincipal(t *testing.T) {
 		t.Fatalf("created tenant = %+v", created)
 	}
 
-	// The platform wildcard is limited to first-tenant creation; subsequent
-	// resource access requires an explicit tenant-scoped principal.
+	// A platform wildcard can continue to access the created tenant. Keep a
+	// scoped principal check here to preserve the tenant-admin boundary too.
 	scopedAuth, err := NewStaticAuthenticator("admin-token", []string{created.TenantID})
 	if err != nil {
 		t.Fatal(err)
@@ -175,6 +183,86 @@ func TestAdminTenantCreateAndReadUseIndependentPrincipal(t *testing.T) {
 	handler.ServeHTTP(response, ordinary)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("ordinary token status = %d", response.Code)
+	}
+}
+
+func TestAdminMeAndCollectionListsUseScopedStablePagination(t *testing.T) {
+	handler, _ := testHandler(t)
+	create := func(key string) string {
+		req := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants", strings.NewReader(`{"tenant_key":"`+key+`","display_name":"`+key+`"}`))
+		req.Header.Set("Authorization", "Bearer admin-token")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create tenant status = %d", rec.Code)
+		}
+		var envelope struct {
+			Data struct{ TenantID string } `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		return envelope.Data.TenantID
+	}
+	first := create("first")
+	secondValue, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "second", DisplayName: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := secondValue.TenantID
+	hiddenValue, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "hidden", DisplayName: "hidden"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewStaticAuthenticator("admin-token", []string{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.config.Authenticator = auth
+	req := httptest.NewRequest(http.MethodGet, "/admin/v1/me", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), first) || !strings.Contains(rec.Body.String(), second) {
+		t.Fatalf("me response = %d %s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/admin/v1/tenants?limit=1", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tenant list = %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"items"`) {
+		t.Fatalf("tenant list missing items: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), first) && !strings.Contains(rec.Body.String(), second) {
+		t.Fatalf("tenant list missing scoped item: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), hiddenValue.TenantID) {
+		t.Fatalf("tenant list exposed out-of-scope tenant: %s", rec.Body.String())
+	}
+	// Filtering must happen before query matching and pagination. Otherwise a
+	// scoped administrator could discover an unauthorized tenant by searching
+	// for its known display name or key.
+	req = httptest.NewRequest(http.MethodGet, "/admin/v1/tenants?q=hidden&limit=1", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scoped tenant search = %d %s", rec.Code, rec.Body.String())
+	}
+	var searchEnvelope struct {
+		Data struct {
+			Items      []struct{ TenantID string }
+			NextCursor string
+		}
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &searchEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if len(searchEnvelope.Data.Items) != 0 || searchEnvelope.Data.NextCursor != "" {
+		t.Fatalf("scoped tenant search returned unauthorized result: %s", rec.Body.String())
 	}
 }
 
@@ -789,26 +877,45 @@ func TestAdminNormalizationAndBodyBoundaries(t *testing.T) {
 	}
 }
 
-func TestGlobalAdminIsFirstTenantOnlyAndCrossTenantReadsAreHidden(t *testing.T) {
+func TestGlobalAdminListsAndReadsAllTenants(t *testing.T) {
 	handler, _ := testHandler(t)
-	for _, key := range []string{"first", "second"} {
-		request := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants", strings.NewReader(`{"tenant_key":"`+key+`","display_name":"Tenant"}`))
-		request.Header.Set("Authorization", "Bearer admin-token")
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, request)
-		want := http.StatusCreated
-		if key == "second" {
-			want = http.StatusForbidden
-		}
-		if recorder.Code != want {
-			t.Fatalf("%s tenant status = %d, want %d", key, recorder.Code, want)
-		}
-	}
-	cross := httptest.NewRequest(http.MethodGet, "/admin/v1/tenants/t_01ARZ3NDEKTSV4RRFFQ69G5FAV", nil)
-	cross.Header.Set("Authorization", "Bearer admin-token")
+	request := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants", strings.NewReader(`{"tenant_key":"first","display_name":"First"}`))
+	request.Header.Set("Authorization", "Bearer admin-token")
 	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, cross)
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("cross-tenant read status = %d, want 404", recorder.Code)
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("first tenant status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	second, err := handler.config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "second", DisplayName: "Second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := httptest.NewRequest(http.MethodGet, "/admin/v1/tenants", nil)
+	list.Header.Set("Authorization", "Bearer admin-token")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, list)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), second.TenantID) {
+		t.Fatalf("global tenant list = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	me := httptest.NewRequest(http.MethodGet, "/admin/v1/me", nil)
+	me.Header.Set("Authorization", "Bearer admin-token")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, me)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"tenant_scopes":["*"]`) {
+		t.Fatalf("global principal response = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	read := httptest.NewRequest(http.MethodGet, "/admin/v1/tenants/"+second.TenantID, nil)
+	read.Header.Set("Authorization", "Bearer admin-token")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, read)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("global tenant read = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	app := httptest.NewRequest(http.MethodPost, "/admin/v1/tenants/"+second.TenantID+"/apps", strings.NewReader(`{"app_key":"support","display_name":"Support"}`))
+	app.Header.Set("Authorization", "Bearer admin-token")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, app)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("global app create = %d, body=%s", recorder.Code, recorder.Body.String())
 	}
 }

@@ -25,6 +25,8 @@ func TestAgentRepositoryRejectsCancelledContextsBeforeStorage(t *testing.T) {
 		{"create draft", func() error { _, err := r.CreateDraft(ctx, agent.CreateDraftInput{}); return err }},
 		{"update draft", func() error { _, err := r.UpdateDraft(ctx, agent.UpdateDraftInput{}); return err }},
 		{"get revision", func() error { _, err := r.GetRevision(ctx, "tenant", "app", 1); return err }},
+		{"list apps", func() error { _, _, err := r.List(ctx, "tenant", "", "", "", 1); return err }},
+		{"list revisions", func() error { _, _, err := r.ListRevisions(ctx, "tenant", "app", "", "", "", 1); return err }},
 		{"publish", func() error { _, _, _, err := r.Publish(ctx, agent.PublishInput{}); return err }},
 		{"set canary", func() error { _, _, err := r.SetCanary(ctx, agent.SetCanaryInput{}); return err }},
 		{"rollback", func() error { _, _, err := r.Rollback(ctx, agent.RollbackInput{}); return err }},
@@ -37,6 +39,233 @@ func TestAgentRepositoryRejectsCancelledContextsBeforeStorage(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAgentRepositoryListBoundaryBranches(t *testing.T) {
+	ctx := context.Background()
+	if _, _, err := NewRepository(nil).List(ctx, "tenant", "", "", "", 1); !errors.Is(err, ErrStorage) {
+		t.Fatalf("nil-storage List error = %v", err)
+	}
+	if _, _, err := NewRepository(nil).ListRevisions(ctx, "tenant", "app", "", "", "", 1); !errors.Is(err, ErrStorage) {
+		t.Fatalf("nil-storage ListRevisions error = %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		call func(*sql.DB, sqlmock.Sqlmock) error
+	}{
+		{"app invalid cursor", func(db *sql.DB, _ sqlmock.Sqlmock) error {
+			_, _, err := NewRepository(db).List(ctx, "tenant", "", "", "bad", 1)
+			return err
+		}},
+		{"revision invalid cursor", func(db *sql.DB, _ sqlmock.Sqlmock) error {
+			_, _, err := NewRepository(db).ListRevisions(ctx, "tenant", "app", "", "", "bad", 1)
+			return err
+		}},
+		{"app query error", func(db *sql.DB, mock sqlmock.Sqlmock) error {
+			mock.ExpectQuery("FROM agent_app WHERE tenant_id").WithArgs("tenant").WillReturnError(errors.New("list query"))
+			_, _, err := NewRepository(db).List(ctx, "tenant", "", "", "", 1)
+			return err
+		}},
+		{"revision query error", func(db *sql.DB, mock sqlmock.Sqlmock) error {
+			mock.ExpectQuery("SELECT revision FROM agent_app_revision").WithArgs("tenant", "app").WillReturnError(errors.New("list query"))
+			_, _, err := NewRepository(db).ListRevisions(ctx, "tenant", "app", "", "", "", 1)
+			return err
+		}},
+		{"app rows error", func(db *sql.DB, mock sqlmock.Sqlmock) error {
+			mock.ExpectQuery("FROM agent_app WHERE tenant_id").WithArgs("tenant").WillReturnRows(sqlmock.NewRows([]string{"app_id"}).AddRow("app").RowError(0, errors.New("rows")))
+			_, _, err := NewRepository(db).List(ctx, "tenant", "", "", "", 1)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			callErr := tc.call(db, mock)
+			if !errors.Is(callErr, ErrStorage) && tc.name != "app invalid cursor" && tc.name != "revision invalid cursor" {
+				t.Fatalf("error = %v", callErr)
+			}
+			if (tc.name == "app invalid cursor" || tc.name == "revision invalid cursor") && callErr == nil {
+				t.Fatal("invalid cursor was accepted")
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+//nolint:gocyclo // Exercises the complete SQL list contract in one fixture.
+func TestAgentRepositoryListCoversFilteringPagingAndScanReturns(t *testing.T) {
+	first := newStoredAgentApp(t)
+	first.AppKey, first.DisplayName = "primary", "Primary"
+	second := first.Clone()
+	second.AppID = "app_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	second.AppKey, second.DisplayName = "secondary", "Secondary"
+	disabled := first.Clone()
+	disabled.AppID = "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	disabled.AppKey, disabled.DisplayName, disabled.Status = "retired", "Retired", agent.StatusDisabled
+	ctx := context.Background()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`FROM agent_app WHERE tenant_id = \? ORDER BY app_id`).WithArgs(first.TenantID).
+		WillReturnRows(agentMySQLAppRows(first, &second, &disabled))
+	items, next, err := NewRepository(db).List(ctx, first.TenantID, "primary", string(agent.StatusDraft), "", 1)
+	if err != nil || len(items) != 1 || items[0].AppID != first.AppID || next != "" {
+		t.Fatalf("filtered app page = items=%+v next=%q err=%v", items, next, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, mock, err = sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`FROM agent_app WHERE tenant_id = \? ORDER BY app_id`).WithArgs(first.TenantID).
+		WillReturnRows(agentMySQLAppRows(first, &second))
+	items, next, err = NewRepository(db).List(ctx, first.TenantID, "", "", "", 201)
+	if err != nil || len(items) != 2 || next != "" {
+		t.Fatalf("maximum app page = items=%+v next=%q err=%v", items, next, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, mock, err = sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`FROM agent_app WHERE tenant_id = \? ORDER BY app_id`).WithArgs(first.TenantID).
+		WillReturnRows(agentMySQLAppRows(first))
+	items, next, err = NewRepository(db).List(ctx, first.TenantID, "", "", "1", 0)
+	if err != nil || items == nil || len(items) != 0 || next != "" {
+		t.Fatalf("past-end app page = items=%+v next=%q err=%v", items, next, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		rows *sqlmock.Rows
+	}{
+		{name: "scan", rows: sqlmock.NewRows([]string{"tenant_id"}).AddRow(nil)},
+		{name: "iteration", rows: agentMySQLAppRows(first).RowError(0, errors.New("iteration"))},
+		{name: "invalid stored app", rows: agentMySQLAppRows(func() *agent.App { value := first.Clone(); value.Status = agent.Status("unknown"); return &value }())},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			mock.ExpectQuery(`FROM agent_app WHERE tenant_id = \? ORDER BY app_id`).WithArgs(first.TenantID).WillReturnRows(tc.rows)
+			if _, _, err := NewRepository(db).List(ctx, first.TenantID, "", "", "", 1); !errors.Is(err, ErrStorage) {
+				t.Fatalf("error = %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	firstRevision := newStoredAgentRevision(t, first, 1, false)
+	secondRevision := newStoredAgentRevision(t, first, 2, false)
+	db, mock, err = sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`SELECT revision FROM agent_app_revision WHERE tenant_id = \? AND app_id = \? ORDER BY revision`).WithArgs(first.TenantID, first.AppID).
+		WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(firstRevision.Revision).AddRow(secondRevision.Revision))
+	expectAgentRevision(t, mock, firstRevision)
+	expectAgentRevision(t, mock, secondRevision)
+	itemsRevision, nextRevision, err := NewRepository(db).ListRevisions(ctx, first.TenantID, first.AppID, "answer", string(agent.RevisionStateDraft), "", 1)
+	if err != nil || len(itemsRevision) != 1 || itemsRevision[0].Revision != firstRevision.Revision || nextRevision == "" {
+		t.Fatalf("filtered revision page = items=%+v next=%q err=%v", itemsRevision, nextRevision, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, mock, err = sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`SELECT revision FROM agent_app_revision WHERE tenant_id = \? AND app_id = \? ORDER BY revision`).WithArgs(first.TenantID, first.AppID).
+		WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(firstRevision.Revision).AddRow(secondRevision.Revision))
+	expectAgentRevision(t, mock, firstRevision)
+	expectAgentRevision(t, mock, secondRevision)
+	itemsRevision, nextRevision, err = NewRepository(db).ListRevisions(ctx, first.TenantID, first.AppID, "", "", "", 201)
+	if err != nil || len(itemsRevision) != 2 || nextRevision != "" {
+		t.Fatalf("maximum revision page = items=%+v next=%q err=%v", itemsRevision, nextRevision, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, mock, err = sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`SELECT revision FROM agent_app_revision WHERE tenant_id = \? AND app_id = \? ORDER BY revision`).WithArgs(first.TenantID, first.AppID).
+		WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(firstRevision.Revision))
+	expectAgentRevision(t, mock, firstRevision)
+	if _, _, err = NewRepository(db).ListRevisions(ctx, first.TenantID, first.AppID, "", "", "1", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		rows *sqlmock.Rows
+	}{
+		{name: "revision scan", rows: sqlmock.NewRows([]string{"revision"}).AddRow(nil)},
+		{name: "revision iteration", rows: sqlmock.NewRows([]string{"revision"}).AddRow(int64(1)).RowError(0, errors.New("iteration"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			mock.ExpectQuery(`SELECT revision FROM agent_app_revision WHERE tenant_id = \? AND app_id = \? ORDER BY revision`).WithArgs(first.TenantID, first.AppID).WillReturnRows(tc.rows)
+			if _, _, err := NewRepository(db).ListRevisions(ctx, first.TenantID, first.AppID, "", "", "", 1); !errors.Is(err, ErrStorage) {
+				t.Fatalf("error = %v", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func agentMySQLAppRows(values ...*agent.App) *sqlmock.Rows {
+	rows := sqlmock.NewRows([]string{"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "canary_revision", "version", "created_at", "updated_at"})
+	for _, value := range values {
+		var current, canary any
+		if value.CurrentRevision != nil {
+			current = *value.CurrentRevision
+		}
+		if value.CanaryRevision != nil {
+			canary = *value.CanaryRevision
+		}
+		rows.AddRow(value.TenantID, value.AppID, value.AppKey, value.DisplayName, value.Description, string(value.Status), current, canary, value.Version, value.CreatedAt, value.UpdatedAt)
+	}
+	return rows
 }
 
 func TestSameAgentRevisionHandlesNilAndValuePairs(t *testing.T) {

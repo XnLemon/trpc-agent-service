@@ -50,14 +50,14 @@ PostgreSQL
 | TRPC_TENANT_ID | API token 固定的租户 | 是 |
 | TRPC_APP_ID | API token 固定的 Agent App | 是 |
 | TRPC_ADMIN_TOKEN | 独立 Admin principal 凭证；不能复用 TRPC_API_TOKEN | 是 |
-| TRPC_ADMIN_TENANTS | Admin principal 的租户范围，逗号分隔；* 仅表示受控的首租户/平台管理权限 | 是 |
+| TRPC_ADMIN_TENANTS | Admin principal 的租户范围，逗号分隔；显式 `*` 表示平台管理员全部租户权限 | 是 |
 | TRPC_MODEL_API_KEY | 仅在运行时交给 ModelFactory | 是 |
 | TRPC_MODEL_PROVIDER | 当前支持 openai | 否 |
 | TRPC_MODEL_NAMES | 受信 Model Catalog | 否 |
 | TRPC_MODEL_ENDPOINT_HOSTS | HTTPS endpoint host 白名单 | 否 |
 | TRPC_MODEL_SECRET_REF | 控制面中的 secret reference | 否 |
 
-TRPC_API_TOKEN 只用于普通对话 API，固定映射到一个已存在的 Tenant/App；它不能访问 /admin/v1/*。Admin API 必须使用独立的 TRPC_ADMIN_TOKEN，并由 Admin principal 携带 subject、role=admin 和 tenant scope。TRPC_ADMIN_TENANTS=* 只允许平台管理员创建首个 Tenant，创建后仍须通过显式租户范围校验；普通 API token 永远不能提权。所有 token 和模型 key 只能在进程启动配置或 SecretResolver 输入边界中出现，不能写入数据库、ExecutionPlan、Factory cache key、日志、trace 或错误响应。Issue #41 的 Admin API 只接收 secret_ref，不接收明文凭据。
+TRPC_API_TOKEN 只用于普通对话 API，固定映射到一个已存在的 Tenant/App；它不能访问 /admin/v1/*。Admin API 必须使用独立的 TRPC_ADMIN_TOKEN，并由 Admin principal 携带 subject、role=admin 和 tenant scope。TRPC_ADMIN_TENANTS=* 表示显式配置的平台管理员，可列出、读取和管理所有 Tenant 及其资源；首个 Tenant 创建仍通过受控的初始化门槛，普通 API token 永远不能提权。生产环境应按最小权限配置具体租户 ID。所有 token 和模型 key 只能在进程启动配置或 SecretResolver 输入边界中出现，不能写入数据库、ExecutionPlan、Factory cache key、日志、trace 或错误响应。Issue #41 的 Admin API 只接收 secret_ref，不接收明文凭据。
 
 ### 装配顺序
 

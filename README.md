@@ -53,6 +53,14 @@ IM / HTTP -> Channel Adapter -> Gateway -> Queue/Outbox -> Agent Worker
 - OpenTelemetry trace/metrics、Prometheus 导出路径、审计事件和脱敏错误；
 - Docker Compose 本地验证、Kubernetes Kustomize base，以及版本 tag 触发的 GHCR 镜像发布。
 
+## Admin Web UI
+
+管理端采用同源管理员账号密码登录，登录后直接进入租户控制面，集中管理租户及其 Agent 应用、模型、存储后端和渠道绑定。每类资源都提供列表、详情和配置页面，并适配桌面端与移动端视口。
+
+<p align="center">
+  <img src="docs/docs/assets/admin-login.png" alt="tRPC Agent 管理端登录页" width="920">
+</p>
+
 ## 真实渠道接入
 
 以下截图记录了服务通过同一 Gateway 执行链路完成的端到端 IM 对话验证。

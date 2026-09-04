@@ -41,6 +41,93 @@ func TestAgentRepositoryGetDecodesStoredApp(t *testing.T) {
 	}
 }
 
+func TestAgentRepositoryListsAppsAndRevisions(t *testing.T) {
+	app := newStoredAgentApp(t)
+	draft := newStoredAgentRevision(t, app, 1, false)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`SELECT tenant_id, app_id, app_key, display_name, description, status, current_revision, canary_revision, version, created_at, updated_at FROM agent_app WHERE tenant_id = \?`).WithArgs(app.TenantID).WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "canary_revision", "version", "created_at", "updated_at"}).AddRow(app.TenantID, app.AppID, app.AppKey, app.DisplayName, app.Description, string(app.Status), nil, nil, app.Version, app.CreatedAt, app.UpdatedAt))
+	items, next, err := NewRepository(db).List(context.Background(), app.TenantID, "workflow", string(app.Status), "", 50)
+	if err != nil || len(items) != 1 || items[0].AppID != app.AppID || next != "" {
+		t.Fatalf("listed apps = items=%+v next=%q err=%v", items, next, err)
+	}
+	mock.ExpectQuery(`SELECT revision FROM agent_app_revision WHERE tenant_id = \? AND app_id = \?`).WithArgs(app.TenantID, app.AppID).WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(draft.Revision))
+	expectAgentRevision(t, mock, draft)
+	revisions, next, err := NewRepository(db).ListRevisions(context.Background(), app.TenantID, app.AppID, "answer", string(draft.State), "", 50)
+	if err != nil || len(revisions) != 1 || revisions[0].Revision != draft.Revision || next != "" {
+		t.Fatalf("listed revisions = items=%+v next=%q err=%v", revisions, next, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAgentRepositoryRevisionSearchIncludesGlobalInstruction(t *testing.T) {
+	app := newStoredAgentApp(t)
+	revision := newStoredAgentRevision(t, app, 1, false)
+	revision.GlobalInstruction = "Follow the tenant policy"
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery(`SELECT revision FROM agent_app_revision WHERE tenant_id = \? AND app_id = \?`).
+		WithArgs(app.TenantID, app.AppID).
+		WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(revision.Revision))
+	expectAgentRevision(t, mock, revision)
+
+	items, next, err := NewRepository(db).ListRevisions(context.Background(), app.TenantID, app.AppID, "tenant policy", "", "", 50)
+	if err != nil || len(items) != 1 || items[0].Revision != revision.Revision || next != "" {
+		t.Fatalf("global instruction search = items=%+v next=%q err=%v", items, next, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAgentRepositoryListBoundaries(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := NewRepository(nil).List(ctx, "tenant", "", "", "", 50); err == nil {
+		t.Fatal("canceled app list was accepted")
+	}
+	if _, _, err := NewRepository(nil).List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+		t.Fatalf("nil app list error = %v", err)
+	}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	repository := NewRepository(db)
+	if _, _, err := repository.List(context.Background(), "tenant", "", "", "bad", 50); err == nil {
+		t.Fatal("invalid app cursor was accepted")
+	}
+	mock.ExpectQuery(`SELECT tenant_id, app_id, app_key, display_name, description, status, current_revision, canary_revision, version, created_at, updated_at FROM agent_app WHERE tenant_id = \? ORDER BY app_id`).WithArgs("tenant").WillReturnError(errors.New("query down"))
+	if _, _, err := repository.List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, agent.ErrNotFound) && !errors.Is(err, ErrStorage) {
+		t.Fatalf("app query error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := repository.ListRevisions(context.Background(), "tenant", "app", "", "", "bad", 50); err == nil {
+		t.Fatal("invalid revision cursor was accepted")
+	}
+	revisionDB, revisionMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = revisionDB.Close() })
+	revisionMock.ExpectQuery(`SELECT revision FROM agent_app_revision WHERE tenant_id = \? AND app_id = \? ORDER BY revision`).WithArgs("tenant", "app").WillReturnError(errors.New("query down"))
+	if _, _, err := NewRepository(revisionDB).ListRevisions(context.Background(), "tenant", "app", "", "", "", 50); !errors.Is(err, agent.ErrNotFound) && !errors.Is(err, ErrStorage) {
+		t.Fatalf("revision query error = %v", err)
+	}
+}
+
 func TestAgentRepositoryGetRevisionDecodesStoredDraft(t *testing.T) {
 	app := newStoredAgentApp(t)
 	draft := newStoredAgentRevision(t, app, 1, false)

@@ -23,3 +23,6 @@ deploy/*.env
 
 # MkDocs build output
 docs/site/
+
+# Local frontend smoke-test screenshots and artifacts
+admin-ui/.smoke/
