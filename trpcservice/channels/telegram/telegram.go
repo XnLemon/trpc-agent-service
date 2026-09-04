@@ -603,6 +603,10 @@ func (adapter *Adapter) handleClaimedUpdate(ctx context.Context, message *models
 		}
 		adapter.report(ErrorOperationDispatch, ErrDispatch)
 		if adapter.durableReplies && len(events) > 0 {
+			if dispatchEventsContain(events, gateway.ErrReplyMaterialization.Error()) {
+				_ = claim.Fail()
+				return ErrDispatch
+			}
 			if err := claim.Complete(events); err != nil {
 				return ErrDispatch
 			}
@@ -633,6 +637,15 @@ func (adapter *Adapter) handleClaimedUpdate(ctx context.Context, message *models
 		return ErrDispatch
 	}
 	return nil
+}
+
+func dispatchEventsContain(events []gateway.DispatchEvent, errorText string) bool {
+	for _, event := range events {
+		if event.Type == gateway.DispatchEventError && event.Error == errorText {
+			return true
+		}
+	}
+	return false
 }
 
 func (adapter *Adapter) sdkHandler() bot.HandlerFunc {

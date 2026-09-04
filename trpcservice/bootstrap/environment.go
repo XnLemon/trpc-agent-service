@@ -568,6 +568,13 @@ func environmentOutboxProvider(
 		providerCount++
 	}
 	leaseDuration := 30 * time.Second
+	if aiBotProvider != nil && leaseDuration < wecom_aibot.OutboxLeaseDuration {
+		// AI Bot delivery waits for the provider acknowledgement and then
+		// commits a fenced receipt. A mixed worker must retain that longer
+		// lease even when the selected reply targets are mostly Telegram or
+		// the legacy WeCom webhook.
+		leaseDuration = wecom_aibot.OutboxLeaseDuration
+	}
 	switch providerCount {
 	case 0:
 		return nil, "", "", 0, errors.New("no outbox provider is configured")

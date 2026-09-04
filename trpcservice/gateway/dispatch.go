@@ -35,6 +35,9 @@ var (
 	// ErrAuditWriteFailed is the stable redacted failure when a mandatory audit
 	// lifecycle fact cannot be durably written.
 	ErrAuditWriteFailed = errors.New("audit_write_failed")
+	// ErrReplyMaterialization reports a durable Channel reply that could not
+	// be persisted. The inbound execution must remain retryable in that case.
+	ErrReplyMaterialization = errors.New("durable reply materialization failed")
 )
 
 const (
@@ -222,6 +225,29 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		finishWithError(err)
 		return nil, err
 	}
+	finishImmediateFailure := func(cause error) (<-chan DispatchEvent, error) {
+		if durable == nil || IsContextCancellation(cause) {
+			if durable != nil {
+				dispatcher.failDurable(durable, cause)
+			}
+			finishWithError(cause)
+			if IsContextCancellation(cause) {
+				return nil, cause
+			}
+			if errors.Is(cause, ErrAuditWriteFailed) {
+				return nil, auditWriteFailure()
+			}
+			if errors.Is(cause, ErrRunnerUnavailable) {
+				return nil, ErrRunnerUnavailable
+			}
+			return nil, ErrExecution
+		}
+		if materializationErr := dispatcher.finishDurable(ctx, requestID, traceID, durable, cause, "", nil); materializationErr != nil {
+			cause = materializationErr
+		}
+		finishWithError(cause)
+		return immediateFailureStream(requestID, traceID, cause), nil
+	}
 	attachmentEventID := ""
 	if durable != nil {
 		attachmentEventID = durable.eventID
@@ -229,41 +255,27 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	if len(message.Attachments) > 0 {
 		binder, ok := dispatcher.attachments.(attachment.Binder)
 		if !ok || attachmentEventID == "" {
-			dispatcher.failDurable(durable, ErrExecution)
-			finishWithError(ErrExecution)
-			return nil, ErrExecution
+			return finishImmediateFailure(ErrExecution)
 		}
 		if err := binder.BindAttachments(ctx, request.Principal.TenantID(), attachmentEventID, message.Attachments); err != nil {
-			dispatcher.failDurable(durable, err)
-			finishWithError(err)
-			return nil, ErrExecution
+			return finishImmediateFailure(err)
 		}
 	}
 	userMessage, err := buildUserMessage(ctx, dispatcher.attachments, request.Principal.TenantID(), attachmentEventID, message)
 	if err != nil {
-		dispatcher.failDurable(durable, err)
-		finishWithError(err)
-		if IsContextCancellation(err) {
-			return nil, err
-		}
-		return nil, ErrExecution
+		return finishImmediateFailure(err)
 	}
 	if planApp.CanaryRevision != nil && planSnapshot.Revision().Revision == *planApp.CanaryRevision {
 		selectedRevision := planSnapshot.Revision().Revision
 		if err := dispatcher.writeExecutionAuditRevision(ctx, request.Principal, message, identity, requestID, traceID, audit.EventCanarySelected, "", &selectedRevision); err != nil {
-			dispatcher.failDurable(durable, err)
-			finishWithError(err)
-			return nil, auditWriteFailure()
+			return finishImmediateFailure(auditWriteFailure())
 		}
 	}
 	if err := dispatcher.writeExecutionAudit(ctx, request.Principal, message, identity, requestID, traceID, audit.EventExecutionStarted, ""); err != nil {
-		dispatcher.failDurable(durable, err)
-		finishWithError(err)
-		return nil, auditWriteFailure()
+		return finishImmediateFailure(auditWriteFailure())
 	}
 	if err := dispatcher.reserveHandoff(ctx, request.Principal, requestID, traceID); err != nil {
-		finishWithError(err)
-		return nil, auditWriteFailure()
+		return finishImmediateFailure(auditWriteFailure())
 	}
 	if request.Accepted != nil {
 		select {
@@ -273,27 +285,19 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	}
 	lease, err := dispatcher.registry.Acquire(ctx, plan)
 	if err != nil {
-		dispatcher.failDurable(durable, err)
 		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
-			dispatcher.failDurable(durable, auditErr)
-			finishWithError(auditErr)
-			return nil, auditWriteFailure()
+			return finishImmediateFailure(auditWriteFailure())
 		}
-		finishWithError(err)
-		return nil, err
+		return finishImmediateFailure(err)
 	}
 	runnerValue := lease.Runner()
 	if runnerValue == nil {
 		_ = lease.Release()
 		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
-		dispatcher.failDurable(durable, ErrRunnerUnavailable)
 		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
-			dispatcher.failDurable(durable, auditErr)
-			finishWithError(auditErr)
-			return nil, auditWriteFailure()
+			return finishImmediateFailure(auditWriteFailure())
 		}
-		finishWithError(ErrRunnerUnavailable)
-		return nil, ErrRunnerUnavailable
+		return finishImmediateFailure(ErrRunnerUnavailable)
 	}
 	_ = dispatcher.metrics.Lease(ctx, 1, map[string]string{"component": "runner", "status": "active"})
 	runnerStarted := time.Now()
@@ -313,36 +317,24 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		_ = dispatcher.metrics.Operation(runnerCtx, runnerStarted, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, err)
 		_ = lease.Release()
 		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
-		dispatcher.failDurable(durable, err)
 		eventType, errorType := audit.EventExecutionFailed, string(audit.ErrorUnavailable)
 		if IsContextCancellation(err) {
 			eventType, errorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
 		}
 		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, eventType, errorType); auditErr != nil {
-			dispatcher.failDurable(durable, auditErr)
-			finishWithError(auditErr)
-			return nil, auditWriteFailure()
+			return finishImmediateFailure(auditWriteFailure())
 		}
-		if IsContextCancellation(err) {
-			finishWithError(err)
-			return nil, err
-		}
-		finishWithError(err)
-		return nil, ErrExecution
+		return finishImmediateFailure(err)
 	}
 	if runnerEvents == nil {
 		finishRunner(ErrExecution)
 		_ = dispatcher.metrics.Operation(runnerCtx, runnerStarted, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, ErrExecution)
 		_ = lease.Release()
 		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
-		dispatcher.failDurable(durable, ErrExecution)
 		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
-			dispatcher.failDurable(durable, auditErr)
-			finishWithError(auditErr)
-			return nil, auditWriteFailure()
+			return finishImmediateFailure(auditWriteFailure())
 		}
-		finishWithError(ErrExecution)
-		return nil, ErrExecution
+		return finishImmediateFailure(ErrExecution)
 	}
 
 	output := make(chan DispatchEvent, 32)
@@ -531,9 +523,9 @@ func (dispatcher *Dispatcher) failDurable(durable *durableExecution, cause error
 	})
 }
 
-func (dispatcher *Dispatcher) finishDurable(ctx context.Context, requestID, traceID string, durable *durableExecution, terminalErr error, reply string, mediaReplies []servicetool.ReplyIntent) {
+func (dispatcher *Dispatcher) finishDurable(ctx context.Context, requestID, traceID string, durable *durableExecution, terminalErr error, reply string, mediaReplies []servicetool.ReplyIntent) error {
 	if durable == nil {
-		return
+		return nil
 	}
 	durableCtx := detachedCorrelationContext(ctx, requestID, traceID)
 	if terminalErr != nil && !IsContextCancellation(terminalErr) {
@@ -550,21 +542,28 @@ func (dispatcher *Dispatcher) finishDurable(ctx context.Context, requestID, trac
 			input.Payload = reply
 		}
 		if strings.TrimSpace(input.Payload) != "" || len(input.Segments) > 0 {
-			var err error
-			segments, err = dispatcher.materializer.Materialize(durableCtx, input)
-			if err != nil {
-				terminalErr = err
+			materializeErr := error(nil)
+			segments, materializeErr = dispatcher.materializer.Materialize(durableCtx, input)
+			if materializeErr != nil {
 				if len(mediaReplies) > 0 {
 					fallback := outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: requestID, TraceID: traceID, TraceParent: observability.TraceParentFromContext(durableCtx), Payload: durableFailureFallbackReply, ReplyTarget: durable.replyTarget}
-					segments, err = dispatcher.materializer.Materialize(durableCtx, fallback)
-					if err == nil {
+					segments, materializeErr = dispatcher.materializer.Materialize(durableCtx, fallback)
+					if materializeErr == nil {
 						replyID = durable.eventID
 					}
 				}
-			} else {
+			}
+			if materializeErr != nil {
+				// Keep the running event fenced and retryable. The current lease
+				// cannot be moved to execution_reconciling until it expires.
+				return ErrReplyMaterialization
+			}
+			if replyID == "" {
 				replyID = durable.eventID
 			}
 		}
+	} else if strings.TrimSpace(reply) != "" || len(mediaReplies) > 0 {
+		return ErrReplyMaterialization
 	}
 	to := runtimestorage.EventCompleted
 	if terminalErr != nil && replyID == "" {
@@ -577,6 +576,7 @@ func (dispatcher *Dispatcher) finishDurable(ctx context.Context, requestID, trac
 		})
 		return err
 	})
+	return nil
 }
 
 func mediaReplySegments(intents []servicetool.ReplyIntent) []outbox.ReplySegment {
@@ -743,7 +743,9 @@ func finishForwardOutput(ctx context.Context, output chan<- DispatchEvent, reque
 		return
 	}
 	if terminalErr != nil {
-		if !terminalErrorEmitted {
+		if errors.Is(terminalErr, ErrReplyMaterialization) {
+			trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventError, RequestID: requestID, TraceID: traceID, Error: ErrReplyMaterialization.Error()})
+		} else if !terminalErrorEmitted {
 			errorText := ErrExecution.Error()
 			if errors.Is(terminalErr, ErrAuditWriteFailed) {
 				errorText = ErrAuditWriteFailed.Error()
@@ -754,6 +756,20 @@ func finishForwardOutput(ctx context.Context, output chan<- DispatchEvent, reque
 		return
 	}
 	trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "complete", Done: true})
+}
+
+func immediateFailureStream(requestID, traceID string, cause error) <-chan DispatchEvent {
+	stream := make(chan DispatchEvent, 2)
+	errorText := ErrExecution.Error()
+	if errors.Is(cause, ErrAuditWriteFailed) {
+		errorText = ErrAuditWriteFailed.Error()
+	} else if errors.Is(cause, ErrReplyMaterialization) {
+		errorText = ErrReplyMaterialization.Error()
+	}
+	stream <- DispatchEvent{Type: DispatchEventError, RequestID: requestID, TraceID: traceID, Error: errorText}
+	stream <- DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "error", Done: true}
+	close(stream)
+	return stream
 }
 
 func (dispatcher *Dispatcher) handleForwardStreamClosed(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent, terminalCommitted *bool, finalizeAudit func(audit.EventType, string) error, finalizeHandoff func(audit.ExecutionResult, string) error) error {
@@ -857,7 +873,9 @@ func (dispatcher *Dispatcher) finalizeForward(ctx context.Context, requestID, tr
 	if err := finalizeAudit(eventType, errorType); err != nil && terminalErr == nil {
 		terminalErr = auditWriteFailure()
 	}
-	dispatcher.finishDurable(ctx, requestID, traceID, durable, terminalErr, reply, mediaReplies)
+	if durableErr := dispatcher.finishDurable(ctx, requestID, traceID, durable, terminalErr, reply, mediaReplies); durableErr != nil {
+		terminalErr = durableErr
+	}
 	return terminalErr
 }
 

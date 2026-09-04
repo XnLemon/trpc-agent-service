@@ -192,7 +192,11 @@ func (w *Worker) runLoop(runCtx context.Context, pollInterval time.Duration) err
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	for {
-		if _, err := w.RunOnce(runCtx); errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		_, _ = w.RunOnce(runCtx)
+		// Only cancellation of the worker's own context ends the loop. An
+		// operation may return a context error after an internal timeout or
+		// transient dependency failure; that item must not take down the worker.
+		if err := runCtx.Err(); err != nil {
 			return err
 		}
 		// A single storage, audit, or provider transition error must not

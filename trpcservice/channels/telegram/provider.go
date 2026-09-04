@@ -29,6 +29,13 @@ type Provider struct {
 	dynamic     bool
 	mu          sync.Mutex
 	receipts    map[string]string
+	inflight    map[string]*deliveryCall
+}
+
+type deliveryCall struct {
+	done    chan struct{}
+	receipt string
+	err     error
 }
 
 type telegramPhotoSender interface {
@@ -57,7 +64,7 @@ func NewProvider(client BotClient, chatID int64, threadID int, options ...Provid
 	if client == nil || chatID == 0 || threadID < 0 {
 		return nil, outbox.ErrInvalid
 	}
-	provider := &Provider{client: client, chatID: chatID, threadID: threadID, receipts: map[string]string{}}
+	provider := &Provider{client: client, chatID: chatID, threadID: threadID, receipts: map[string]string{}, inflight: map[string]*deliveryCall{}}
 	for _, option := range options {
 		if option != nil {
 			option(provider)
@@ -99,7 +106,7 @@ func NewBindingProvider(adapters ...*Adapter) (*BindingProvider, error) {
 		}
 		providers[target.BindingID] = &Provider{
 			client: client, attachments: attachments, tenantID: target.TenantID,
-			bindingID: target.BindingID, dynamic: true, receipts: map[string]string{},
+			bindingID: target.BindingID, dynamic: true, receipts: map[string]string{}, inflight: map[string]*deliveryCall{},
 		}
 	}
 	return &BindingProvider{providers: providers}, nil
@@ -150,19 +157,35 @@ func (p *Provider) Deliver(ctx context.Context, value runtimestorage.ReplyOutbox
 		p.mu.Unlock()
 		return receipt, nil
 	}
+	if call := p.inflight[key]; call != nil {
+		p.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.receipt, call.err
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	call := &deliveryCall{done: make(chan struct{})}
+	p.inflight[key] = call
 	p.mu.Unlock()
 	message, err := p.deliverMessage(ctx, value)
-	if err != nil {
-		return "", err
+	if err == nil && (message == nil || message.ID <= 0) {
+		err = &outbox.DeliveryError{Class: "provider_invalid_receipt", Retryable: false}
 	}
-	if message == nil || message.ID <= 0 {
-		return "", &outbox.DeliveryError{Class: "provider_invalid_receipt", Retryable: false}
+	receipt := ""
+	if err == nil {
+		receipt = strconv.Itoa(message.ID)
 	}
-	receipt := strconv.Itoa(message.ID)
 	p.mu.Lock()
-	p.receipts[key] = receipt
+	if err == nil {
+		p.receipts[key] = receipt
+	}
+	call.receipt, call.err = receipt, err
+	delete(p.inflight, key)
+	close(call.done)
 	p.mu.Unlock()
-	return receipt, nil
+	return receipt, err
 }
 
 func (p *Provider) deliverMessage(ctx context.Context, value runtimestorage.ReplyOutbox) (*models.Message, error) {

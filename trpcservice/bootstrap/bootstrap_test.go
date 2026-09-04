@@ -616,6 +616,7 @@ func TestEnvironmentWeComAIBotComponentsUseTrustedBindings(t *testing.T) {
 	if _, err := environmentAIBotOutboxProvider(runtimeStore, bindingIDs, []channels.PollingAdapter{manager, newBootstrapTelegram()}); err != nil {
 		t.Fatalf("AI Bot provider rejected a co-owned Telegram adapter: %v", err)
 	}
+	assertEnvironmentMixedAIBotLease(t, environment, runtimeStore, bindingIDs, manager)
 	if err := manager.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -631,6 +632,14 @@ func TestEnvironmentWeComAIBotComponentsUseTrustedBindings(t *testing.T) {
 	unavailable.wecomAIBots[0].BindingID = "missing-binding"
 	if _, _, err := environmentWeComAIBotComponents(context.Background(), unavailable, channelsRepo, tenants, apps); err == nil {
 		t.Fatal("unavailable AI Bot binding was accepted")
+	}
+}
+
+func assertEnvironmentMixedAIBotLease(t *testing.T, environment environmentConfig, runtimeStore runtimestorage.RuntimeStore, bindingIDs map[string]struct{}, manager channels.PollingAdapter) {
+	t.Helper()
+	mixed, channel, providerName, leaseDuration, err := environmentOutboxProvider(environment, runtimeStore, bootstrapStaticProvider{receipt: "legacy"}, bindingIDs, []channels.PollingAdapter{manager})
+	if err != nil || mixed == nil || channel != "mixed" || providerName != "mixed" || leaseDuration != wecom_aibot.OutboxLeaseDuration {
+		t.Fatalf("mixed AI Bot outbox = %T/%q/%q/%s/%v, want the AI Bot lease", mixed, channel, providerName, leaseDuration, err)
 	}
 }
 

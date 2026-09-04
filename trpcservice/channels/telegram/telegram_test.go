@@ -482,6 +482,31 @@ func TestDurableRepliesLeaveDeliveryToOutboxWorker(t *testing.T) {
 	if len(failureDispatcher.requests()) != 1 {
 		t.Fatalf("durable failed replay redispatched: %d", len(failureDispatcher.requests()))
 	}
+
+	materializationDispatcher := &dispatchStub{events: []gateway.DispatchEvent{
+		{Type: gateway.DispatchEventMessage, Text: "reply"},
+		{Type: gateway.DispatchEventError, Error: gateway.ErrReplyMaterialization.Error()},
+		{Type: gateway.DispatchEventDone, Done: true},
+	}}
+	materializationClient := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
+	materializationAdapter, err := New(context.Background(), Config{
+		BotToken: "12345:runtime-secret", Target: target, Dispatcher: materializationDispatcher,
+		DurableReplies: true, Factory: &fakeFactory{client: materializationClient}, AuditWriter: &telegramAuditWriter{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = materializationAdapter.Close() }()
+	materializationUpdate := textUpdate(72, models.ChatTypePrivate, 100, 42, "materialization failure", 0)
+	if err := materializationAdapter.HandleUpdate(context.Background(), materializationUpdate); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("materialization failure = %v", err)
+	}
+	if err := materializationAdapter.HandleUpdate(context.Background(), materializationUpdate); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("materialization retry = %v", err)
+	}
+	if len(materializationDispatcher.requests()) != 2 || len(materializationClient.sent()) != 0 {
+		t.Fatalf("materialization failure was cached or sent directly: dispatch=%d sends=%v", len(materializationDispatcher.requests()), materializationClient.sent())
+	}
 }
 
 func assertPrivateInboundRequest(t *testing.T, target channels.RoutingTarget, request gateway.DispatchRequest, contextValue any, key contextKey) {

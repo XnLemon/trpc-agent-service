@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -25,6 +27,34 @@ type providerBot struct {
 	calls          int
 	photoCalls     int
 	documentCalls  int
+}
+
+type blockingProviderBot struct {
+	started chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	calls   int
+}
+
+func (b *blockingProviderBot) Start(context.Context) {}
+func (b *blockingProviderBot) GetMe(context.Context) (*models.User, error) {
+	return &models.User{ID: 1, IsBot: true}, nil
+}
+func (b *blockingProviderBot) SendMessage(ctx context.Context, _ *bot.SendMessageParams) (*models.Message, error) {
+	b.mu.Lock()
+	b.calls++
+	b.mu.Unlock()
+	select {
+	case <-b.started:
+	default:
+		close(b.started)
+	}
+	select {
+	case <-b.release:
+		return &models.Message{ID: 99}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (b *providerBot) Start(context.Context) {}
@@ -87,6 +117,43 @@ func TestProviderUsesStableReceiptAndReconcile(t *testing.T) {
 	}
 	if botClient.params.ChatID != int64(99) || botClient.params.MessageThreadID != 7 || botClient.params.Text != "hello" {
 		t.Fatalf("send params = %+v", botClient.params)
+	}
+}
+
+func TestProviderCoalescesConcurrentDelivery(t *testing.T) {
+	client := &blockingProviderBot{started: make(chan struct{}), release: make(chan struct{})}
+	provider, err := NewProvider(client, 99, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "concurrent", SegmentIndex: 0, Payload: "hello"}
+	results := make(chan string, 2)
+	go func() {
+		receipt, err := provider.Deliver(context.Background(), reply)
+		if err != nil {
+			t.Errorf("first delivery = %q/%v", receipt, err)
+		}
+		results <- receipt
+	}()
+	<-client.started
+	go func() {
+		receipt, err := provider.Deliver(context.Background(), reply)
+		if err != nil {
+			t.Errorf("coalesced delivery = %q/%v", receipt, err)
+		}
+		results <- receipt
+	}()
+	time.Sleep(10 * time.Millisecond)
+	client.mu.Lock()
+	if client.calls != 1 {
+		t.Fatalf("concurrent delivery sent %d provider requests while the first was in flight", client.calls)
+	}
+	client.mu.Unlock()
+	close(client.release)
+	for index := 0; index < 2; index++ {
+		if receipt := <-results; receipt != "99" {
+			t.Fatalf("delivery receipt = %q, want 99", receipt)
+		}
 	}
 }
 
