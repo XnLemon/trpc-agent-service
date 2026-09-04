@@ -78,7 +78,7 @@ main() {
       require_tools
       local temp_dir
       temp_dir="$(mktemp -d)"
-      trap 'rm -rf "$temp_dir"' EXIT
+      trap 'rm -rf -- "${temp_dir:-}"' EXIT
       TRPC_BACKUP_FILE="$temp_dir/rehearsal.dump" backup
       TRPC_BACKUP_FILE="$temp_dir/rehearsal.dump" restore
       echo "backup and restore rehearsal passed"
