@@ -27,6 +27,18 @@ func TestAgentRepositoryListRejectsNilReceiver(t *testing.T) {
 	}
 }
 
+func TestAgentRepositoryListPrefersCanceledContextOverStorage(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	repository := NewRepository(nil)
+	if _, _, err := repository.List(ctx, "tenant", "", "", "", 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("List canceled-context error = %v", err)
+	}
+	if _, _, err := repository.ListRevisions(ctx, "tenant", "app", "", "", "", 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ListRevisions canceled-context error = %v", err)
+	}
+}
+
 func TestAgentRepositoryListAppliesPageBounds(t *testing.T) {
 	app := newStoredAgentApp(t)
 	for _, tc := range []struct {
