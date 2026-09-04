@@ -159,6 +159,64 @@ func TestStorePersistsMediaReplyContractAndDetectsConflicts(t *testing.T) {
 	}
 }
 
+func TestStoreReplyMaterializationLifecycle(t *testing.T) {
+	store := inmemory.New()
+	seedEvent(t, store, "tenant-a", "session-materialization", "event-materialization")
+	ctx := context.Background()
+	intent := runtimestorage.ReplyMaterializationIntent{
+		TenantID: "tenant-a", EventID: "event-materialization", ReplyID: "reply-materialization",
+		Segments: []runtimestorage.ReplyMaterializationSegment{{Kind: runtimestorage.ReplyKindText, Payload: "segment"}},
+	}
+	first, err := store.PutReplyMaterialization(ctx, intent)
+	if err != nil || len(first.Segments) != 1 || first.CreatedAt.IsZero() {
+		t.Fatalf("first materialization = %+v, %v", first, err)
+	}
+	first.Segments[0].Payload = "mutated"
+	second, err := store.PutReplyMaterialization(ctx, intent)
+	if err != nil || len(second.Segments) != 1 || second.Segments[0].Payload != "segment" {
+		t.Fatalf("idempotent materialization = %+v, %v", second, err)
+	}
+	conflict := intent
+	conflict.Segments = []runtimestorage.ReplyMaterializationSegment{{Kind: runtimestorage.ReplyKindText, Payload: "changed"}}
+	if _, err := store.PutReplyMaterialization(ctx, conflict); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("materialization conflict = %v", err)
+	}
+	if _, err := store.PutReplyMaterialization(ctx, runtimestorage.ReplyMaterializationIntent{
+		TenantID: "tenant-a", EventID: "event-materialization", ReplyID: "reply-other",
+		Payload: "payload", ReplyTarget: runtimestorage.ReplyTarget{BindingID: "binding", ConversationKind: "direct", ReceiverID: "user"},
+	}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("target conflict = %v", err)
+	}
+	if _, err := store.PutReplyMaterialization(ctx, runtimestorage.ReplyMaterializationIntent{TenantID: "tenant-a", EventID: "missing", ReplyID: "reply", Payload: "payload"}); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing event = %v", err)
+	}
+	markers, err := store.ListReplyMaterializations(ctx, "tenant-a")
+	if err != nil || len(markers) != 1 || markers[0].EventID != intent.EventID {
+		t.Fatalf("materializations = %+v, %v", markers, err)
+	}
+	if _, err := store.ListReplyMaterializations(ctx, ""); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid list tenant = %v", err)
+	}
+	if err := store.DeleteReplyMaterialization(ctx, "tenant-a", intent.EventID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteReplyMaterialization(ctx, "tenant-a", intent.EventID); err != nil {
+		t.Fatal(err)
+	}
+	markers, err = store.ListReplyMaterializations(ctx, "tenant-a")
+	if err != nil || len(markers) != 0 {
+		t.Fatalf("deleted materializations = %+v, %v", markers, err)
+	}
+	if err := store.DeleteReplyMaterialization(ctx, "", intent.EventID); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid delete tenant = %v", err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := store.PutReplyMaterialization(canceled, intent); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled put = %v", err)
+	}
+}
+
 func TestStoreDuplicateMessageAndConcurrentSequence(t *testing.T) {
 	store := inmemory.New()
 	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-1", nil); err != nil {

@@ -20,6 +20,7 @@ import (
 var eventColumns = []string{"tenant_id", "event_id", "session_id", "binding_id", "external_message_id", "idempotency_key", "event_seq", "status", "fencing_token", "lease_owner", "lease_expires_at", "reply_id", "segment_count", "reply_conversation_kind", "reply_receiver_id", "reply_thread_id", "created_at", "updated_at"}
 var replyColumns = []string{"tenant_id", "reply_id", "event_id", "segment_index", "segment_count", "payload", "reply_kind", "attachment_id", "attachment_kind", "attachment_mime_type", "attachment_name", "attachment_size", "attachment_sha256", "attachment_provider", "attachment_provider_id", "fallback", "reply_binding_id", "reply_conversation_kind", "reply_receiver_id", "reply_thread_id", "status", "attempts", "fencing_token", "lease_owner", "lease_expires_at", "provider_message_id", "last_error_class", "created_at", "updated_at"}
 var historyColumns = []string{"tenant_id", "session_id", "event_id", "payload", "history_seq", "created_at"}
+var materializationColumns = []string{"tenant_id", "event_id", "reply_id", "request_id", "trace_id", "trace_parent", "payload", "segments", "reply_binding_id", "reply_conversation_kind", "reply_receiver_id", "reply_thread_id", "created_at", "updated_at"}
 
 func eventRow(when time.Time) *sqlmock.Rows {
 	return sqlmock.NewRows(eventColumns).AddRow("tenant-a", "event-1", "session-1", "binding-1", "external-1", "idem-1", int64(2), "received", int64(0), "", nil, "", 1, "", "", "", when, when)
@@ -27,6 +28,10 @@ func eventRow(when time.Time) *sqlmock.Rows {
 
 func replyRow(when time.Time) *sqlmock.Rows {
 	return sqlmock.NewRows(replyColumns).AddRow(replyValues("reply-1", "event-1", 0, 1, "payload", "pending", 0, int64(0), "", nil, "", "", when)...)
+}
+
+func materializationRow(tenantID, eventID, replyID, requestID, traceID, traceParent, payload, segments string, target runtimestorage.ReplyTarget, when time.Time) *sqlmock.Rows {
+	return sqlmock.NewRows(materializationColumns).AddRow(tenantID, eventID, replyID, requestID, traceID, traceParent, payload, []byte(segments), target.BindingID, target.ConversationKind, target.ReceiverID, target.ThreadID, when, when)
 }
 
 func replyValues(replyID, eventID string, segmentIndex, segmentCount int, payload, status string, attempts, fencingToken any, leaseOwner string, leaseExpiresAt any, providerID, errorClass string, when time.Time) []driver.Value {
@@ -194,6 +199,85 @@ func TestRuntimeStoreCoversMessageAndReplyLifecycle(t *testing.T) {
 	mock.ExpectQuery("UPDATE public.reply_outbox SET status=\\$5").WithArgs("tenant-a", "reply-1", 0, "sending", "sent", "worker-a", int64(0), "provider-1", "", int64(1)).WillReturnRows(sqlmock.NewRows(replyColumns).AddRow(replyValues("reply-1", "event-1", 0, 1, "payload", "sent", 2, int64(2), "worker-a", nil, "provider-1", "", when)...))
 	if _, err := store.TransitionReply(context.Background(), runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply-1", SegmentIndex: 0, From: "sending", To: "sent", Owner: "worker-a", FencingToken: 1, ProviderID: "provider-1"}); err != nil {
 		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeStoreReplyMaterializationLifecycle(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := runtimepostgres.New(db)
+	ctx := context.Background()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	input := runtimestorage.ReplyMaterializationIntent{TenantID: "tenant-a", EventID: "event-1", ReplyID: "reply-1", RequestID: "request-1", TraceID: "trace-1", Payload: "payload"}
+
+	mock.ExpectQuery("SELECT tenant_id,event_id,session_id,binding_id,external_message_id").WithArgs("tenant-a", "event-1").WillReturnRows(eventRow(when))
+	mock.ExpectQuery("INSERT INTO public.runtime_reply_materialization").WillReturnRows(materializationRow("tenant-a", "event-1", "reply-1", "request-1", "trace-1", "", "payload", "[]", runtimestorage.ReplyTarget{}, when))
+	first, err := store.PutReplyMaterialization(ctx, input)
+	if err != nil || !first.SameContract(input) || first.CreatedAt.IsZero() {
+		t.Fatalf("first materialization = %+v, %v", first, err)
+	}
+
+	mock.ExpectQuery("SELECT tenant_id,event_id,session_id,binding_id,external_message_id").WithArgs("tenant-a", "event-1").WillReturnRows(eventRow(when))
+	mock.ExpectQuery("INSERT INTO public.runtime_reply_materialization").WillReturnRows(materializationRow("tenant-a", "event-1", "reply-1", "request-1", "trace-1", "", "payload", "[]", runtimestorage.ReplyTarget{}, when))
+	second, err := store.PutReplyMaterialization(ctx, input)
+	if err != nil || !second.SameContract(first) {
+		t.Fatalf("idempotent materialization = %+v, %v", second, err)
+	}
+
+	mock.ExpectQuery("SELECT tenant_id,event_id,session_id,binding_id,external_message_id").WithArgs("tenant-a", "event-1").WillReturnRows(eventRow(when))
+	mock.ExpectQuery("INSERT INTO public.runtime_reply_materialization").WillReturnError(sql.ErrNoRows)
+	conflict := input
+	conflict.Payload = "changed"
+	if _, err := store.PutReplyMaterialization(ctx, conflict); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("materialization conflict = %v", err)
+	}
+
+	mock.ExpectQuery("SELECT tenant_id,event_id,session_id,binding_id,external_message_id").WithArgs("tenant-a", "event-1").WillReturnRows(eventRow(when))
+	mock.ExpectQuery("INSERT INTO public.runtime_reply_materialization").WillReturnError(errors.New("database unavailable"))
+	if _, err := store.PutReplyMaterialization(ctx, input); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("materialization storage error = %v", err)
+	}
+
+	materializations := sqlmock.NewRows(materializationColumns).
+		AddRow("tenant-a", "event-1", "reply-1", "request-1", "trace-1", "", "payload", []byte("[]"), "", "", "", "", when, when).
+		AddRow("tenant-a", "event-2", "reply-2", "request-2", "trace-2", "", "payload-2", []byte("[]"), "", "", "", "", when.Add(time.Second), when.Add(time.Second))
+	mock.ExpectQuery("SELECT tenant_id,event_id,reply_id,request_id,trace_id,trace_parent,payload,segments::text").WithArgs("tenant-a").WillReturnRows(materializations)
+	items, err := store.ListReplyMaterializations(ctx, "tenant-a")
+	if err != nil || len(items) != 2 || items[0].EventID != "event-1" || items[1].ReplyID != "reply-2" {
+		t.Fatalf("materializations = %+v, %v", items, err)
+	}
+
+	mock.ExpectExec("DELETE FROM public.runtime_reply_materialization").WithArgs("tenant-a", "event-1").WillReturnResult(sqlmock.NewResult(0, 1))
+	if err := store.DeleteReplyMaterialization(ctx, "tenant-a", "event-1"); err != nil {
+		t.Fatal(err)
+	}
+	mock.ExpectExec("DELETE FROM public.runtime_reply_materialization").WithArgs("tenant-a", "event-2").WillReturnError(errors.New("delete failed"))
+	if err := store.DeleteReplyMaterialization(ctx, "tenant-a", "event-2"); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("delete storage error = %v", err)
+	}
+	if _, err := store.ListReplyMaterializations(ctx, ""); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid list tenant = %v", err)
+	}
+	if err := store.DeleteReplyMaterialization(ctx, "", "event-1"); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid delete tenant = %v", err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := store.PutReplyMaterialization(canceled, input); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled put = %v", err)
+	}
+
+	mock.ExpectQuery("SELECT tenant_id,event_id,reply_id,request_id,trace_id,trace_parent,payload,segments::text").WithArgs("tenant-a").WillReturnRows(
+		materializationRow("tenant-a", "event-bad", "reply-bad", "request-bad", "trace-bad", "", "payload", "not-json", runtimestorage.ReplyTarget{}, when),
+	)
+	if _, err := store.ListReplyMaterializations(ctx, "tenant-a"); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("invalid materialization JSON = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

@@ -53,6 +53,19 @@ func seedReply(t *testing.T, store *inmemory.Store, tenant, event, reply string)
 	}
 }
 
+func seedWorkerEvent(t *testing.T, store *inmemory.Store, tenant, event string) {
+	t.Helper()
+	if _, err := store.CreateSession(context.Background(), tenant, "session-"+event, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{
+		TenantID: tenant, EventID: event, SessionID: "session-" + event,
+		BindingID: "binding-" + event, ExternalMessageID: "external-" + event,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 type reverseCandidateStore struct{ *inmemory.Store }
 
 func failFirstSegmentOnce() func(runtimestorage.ReplyOutbox) error {
@@ -132,7 +145,9 @@ func TestWorkerRepairsInterruptedReplyMaterializationBeforeDelivery(t *testing.T
 	}
 	time.Sleep(5 * time.Millisecond)
 	if _, err := store.PutReplyMaterialization(context.Background(), runtimestorage.ReplyMaterializationIntent{
-		TenantID: "tenant-a", EventID: "event-repair", ReplyID: "reply-repair", RequestID: "request-repair", TraceID: "trace-repair", Payload: "recovered",
+		TenantID: "tenant-a", EventID: "event-repair", ReplyID: "reply-repair", RequestID: "request-repair", TraceID: "trace-repair",
+		TraceParent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+		Segments:    []runtimestorage.ReplyMaterializationSegment{{Kind: runtimestorage.ReplyKindText, Payload: "recovered"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -159,6 +174,54 @@ func TestWorkerRepairsInterruptedReplyMaterializationBeforeDelivery(t *testing.T
 	markers, err := store.ListReplyMaterializations(context.Background(), "tenant-a")
 	if err != nil || len(markers) != 0 {
 		t.Fatalf("recovery markers = %+v err=%v", markers, err)
+	}
+}
+
+func TestWorkerCleansTerminalAndWaitsForActiveMaterializations(t *testing.T) {
+	store := inmemory.New()
+	seedWorkerEvent(t, store, "tenant-a", "event-terminal-marker")
+	terminal, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{
+		TenantID: "tenant-a", EventID: "event-terminal-marker", From: runtimestorage.EventReceived, To: runtimestorage.EventRunning,
+		Owner: "runner", LeaseDuration: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{
+		TenantID: "tenant-a", EventID: "event-terminal-marker", From: runtimestorage.EventRunning, To: runtimestorage.EventCompleted,
+		Owner: "runner", FencingToken: terminal.FencingToken,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutReplyMaterialization(context.Background(), runtimestorage.ReplyMaterializationIntent{TenantID: "tenant-a", EventID: "event-terminal-marker", ReplyID: "reply-terminal-marker", Payload: "terminal"}); err != nil {
+		t.Fatal(err)
+	}
+	seedWorkerEvent(t, store, "tenant-a", "event-active-marker")
+	if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{
+		TenantID: "tenant-a", EventID: "event-active-marker", From: runtimestorage.EventReceived, To: runtimestorage.EventRunning,
+		Owner: "runner", LeaseDuration: time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutReplyMaterialization(context.Background(), runtimestorage.ReplyMaterializationIntent{TenantID: "tenant-a", EventID: "event-active-marker", ReplyID: "reply-active-marker", Payload: "active"}); err != nil {
+		t.Fatal(err)
+	}
+
+	provider := &providerStub{deliverID: "unexpected"}
+	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: store, SegmentSize: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, Materializer: materializer, TenantID: "tenant-a", Owner: "repair-worker", LeaseDuration: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := worker.RunOnce(context.Background()); err != nil || processed != 0 || provider.deliveries != 0 {
+		t.Fatalf("marker cleanup run = processed %d deliveries %d err=%v", processed, provider.deliveries, err)
+	}
+	markers, err := store.ListReplyMaterializations(context.Background(), "tenant-a")
+	if err != nil || len(markers) != 1 || markers[0].EventID != "event-active-marker" {
+		t.Fatalf("remaining materializations = %+v, %v", markers, err)
 	}
 }
 

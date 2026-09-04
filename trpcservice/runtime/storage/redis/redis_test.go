@@ -233,6 +233,80 @@ func TestRedisRecordsReplyReceiptWithinCurrentLease(t *testing.T) {
 	}
 }
 
+func TestRedisReplyMaterializationIdempotency(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	ctx := context.Background()
+	event := seedEvent(t, store, "tenant-a", "session-materialization", "event-materialization")
+	intent := runtimestorage.ReplyMaterializationIntent{TenantID: "tenant-a", EventID: event.EventID, ReplyID: "reply-materialization", Payload: "payload"}
+	first, err := store.PutReplyMaterialization(ctx, intent)
+	if err != nil || first.Payload != "payload" || first.CreatedAt.IsZero() {
+		t.Fatalf("first materialization = %+v, %v", first, err)
+	}
+	second, err := store.PutReplyMaterialization(ctx, intent)
+	if err != nil || !second.SameContract(first) {
+		t.Fatalf("idempotent materialization = %+v, %v", second, err)
+	}
+	conflict := intent
+	conflict.Payload = "changed"
+	if _, err := store.PutReplyMaterialization(ctx, conflict); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("materialization conflict = %v", err)
+	}
+	if _, err := store.PutReplyMaterialization(ctx, runtimestorage.ReplyMaterializationIntent{
+		TenantID: "tenant-a", EventID: event.EventID, ReplyID: "reply-target-conflict", Payload: "payload",
+		ReplyTarget: runtimestorage.ReplyTarget{BindingID: "binding", ConversationKind: "direct", ReceiverID: "user"},
+	}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("target conflict = %v", err)
+	}
+	if _, err := store.PutReplyMaterialization(ctx, runtimestorage.ReplyMaterializationIntent{TenantID: "tenant-a", EventID: "missing", ReplyID: "reply", Payload: "payload"}); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("missing event = %v", err)
+	}
+}
+
+func TestRedisReplyMaterializationListingAndDeletion(t *testing.T) {
+	server := miniredis.RunT(t)
+	store := newStore(t, server)
+	ctx := context.Background()
+	event := seedEvent(t, store, "tenant-a", "session-materialization", "event-materialization")
+	event2 := seedEvent(t, store, "tenant-a", "session-materialization-2", "event-materialization-2")
+	if _, err := store.PutReplyMaterialization(ctx, runtimestorage.ReplyMaterializationIntent{TenantID: "tenant-a", EventID: event.EventID, ReplyID: "reply-materialization", Payload: "payload"}); err != nil {
+		t.Fatal(err)
+	}
+	segmentIntent := runtimestorage.ReplyMaterializationIntent{
+		TenantID: "tenant-a", EventID: event2.EventID, ReplyID: "reply-materialization-2",
+		Segments: []runtimestorage.ReplyMaterializationSegment{{Kind: runtimestorage.ReplyKindText, Payload: "segment"}},
+	}
+	if _, err := store.PutReplyMaterialization(ctx, segmentIntent); err != nil {
+		t.Fatal(err)
+	}
+	markers, err := store.ListReplyMaterializations(ctx, "tenant-a")
+	if err != nil || len(markers) != 2 || markers[0].EventID != event.EventID || markers[1].EventID != event2.EventID {
+		t.Fatalf("materializations = %+v, %v", markers, err)
+	}
+	markers[1].Segments[0].Payload = "mutated"
+	markers, err = store.ListReplyMaterializations(ctx, "tenant-a")
+	if err != nil || markers[1].Segments[0].Payload != "segment" {
+		t.Fatalf("materialization copy = %+v, %v", markers, err)
+	}
+	if _, err := store.ListReplyMaterializations(ctx, ""); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid list tenant = %v", err)
+	}
+	if err := store.DeleteReplyMaterialization(ctx, "tenant-a", event.EventID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteReplyMaterialization(ctx, "tenant-a", event.EventID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteReplyMaterialization(ctx, "", event2.EventID); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid delete tenant = %v", err)
+	}
+	reopened := newStore(t, server)
+	markers, err = reopened.ListReplyMaterializations(ctx, "tenant-a")
+	if err != nil || len(markers) != 1 || markers[0].EventID != event2.EventID {
+		t.Fatalf("reopened materializations = %+v, %v", markers, err)
+	}
+}
+
 func TestRedisMemoryDurabilityAndIndexHandoff(t *testing.T) {
 	server := miniredis.RunT(t)
 	store := newStore(t, server)

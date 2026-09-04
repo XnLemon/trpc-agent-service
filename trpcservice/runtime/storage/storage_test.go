@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -96,6 +97,55 @@ func TestNormalizeReplyOutboxMediaContract(t *testing.T) {
 				t.Fatalf("NormalizeReplyOutbox accepted invalid value: %+v err=%v", test.value, err)
 			}
 		})
+	}
+}
+
+func TestReplyMaterializationIntentContract(t *testing.T) {
+	ctx := storage.ReplyMaterializationIntent{
+		TenantID: "tenant-a", EventID: " event-1 ", ReplyID: " reply-1 ", Payload: "reply",
+		ReplyTarget: storage.ReplyTarget{BindingID: "binding-1", ConversationKind: "direct", ReceiverID: "user-1"},
+	}
+	normalized, err := storage.NormalizeReplyMaterializationIntent(ctx)
+	if err != nil || normalized.EventID != "event-1" || normalized.ReplyID != "reply-1" || normalized.Segments != nil {
+		t.Fatalf("payload intent = %+v, %v", normalized, err)
+	}
+
+	media := storage.ReplyMaterializationIntent{
+		TenantID: "tenant-a", EventID: "event-media", ReplyID: "reply-media",
+		Segments: []storage.ReplyMaterializationSegment{
+			{Kind: storage.ReplyKindImage, Payload: "caption", Attachment: mediaReference(t, attachment.KindImage, "image/png", "chart.png", []byte("png")), Fallback: "[image]"},
+		},
+	}
+	normalized, err = storage.NormalizeReplyMaterializationIntent(media)
+	if err != nil || len(normalized.Segments) != 1 || normalized.Segments[0].Kind != storage.ReplyKindImage {
+		t.Fatalf("segment intent = %+v, %v", normalized, err)
+	}
+
+	for name, value := range map[string]storage.ReplyMaterializationIntent{
+		"missing payload and segments": {TenantID: "tenant-a", EventID: "event", ReplyID: "reply"},
+		"both payload and segments":    {TenantID: "tenant-a", EventID: "event", ReplyID: "reply", Payload: "reply", Segments: []storage.ReplyMaterializationSegment{{Payload: "segment"}}},
+		"blank text segment":           {TenantID: "tenant-a", EventID: "event", ReplyID: "reply", Segments: []storage.ReplyMaterializationSegment{{Payload: " "}}},
+		"invalid media segment":        {TenantID: "tenant-a", EventID: "event", ReplyID: "reply", Segments: []storage.ReplyMaterializationSegment{{Kind: storage.ReplyKindImage, Attachment: attachment.Reference{ID: "missing"}, Fallback: "[image]"}}},
+		"invalid identity":             {TenantID: "", EventID: "event", ReplyID: "reply", Payload: "reply"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := storage.NormalizeReplyMaterializationIntent(value); !errors.Is(err, storage.ErrInvalid) {
+				t.Fatalf("invalid intent accepted: %+v, err=%v", value, err)
+			}
+		})
+	}
+
+	left := normalized
+	right := normalized
+	right.Segments = append([]storage.ReplyMaterializationSegment(nil), normalized.Segments...)
+	left.CreatedAt = time.Now().UTC()
+	right.UpdatedAt = left.CreatedAt.Add(time.Minute)
+	if !left.SameContract(right) {
+		t.Fatal("persistence timestamps changed the materialization contract")
+	}
+	right.Segments[0].Payload = "changed"
+	if left.SameContract(right) {
+		t.Fatal("different segment payloads shared a materialization contract")
 	}
 }
 
