@@ -62,6 +62,9 @@ func ValidateComposition(root string, graph map[string]CompositionConfig) error 
 		if !validKind {
 			return fmt.Errorf("%w: unsupported composition kind %q", ErrInvalid, cfg.Kind)
 		}
+		if cfg.Kind == "builtin-llm" && len(cfg.Children) > 0 {
+			return fmt.Errorf("%w: leaf runtime cannot have children", ErrInvalid)
+		}
 		state[node] = 1
 		seen := map[string]bool{}
 		for _, child := range cfg.Children {

@@ -28,3 +28,8 @@ func TestInMemoryRepositoryLifecycle(t *testing.T) {
 		t.Fatalf("list=%v %v", items, err)
 	}
 }
+
+func TestProfileRejectsSecretBearingConfig(t *testing.T) {
+	p := profile(); p.Config = map[string]any{"api_token": "value"}
+	if err := p.Validate(); err == nil { t.Fatal("expected secret config rejection") }
+}
