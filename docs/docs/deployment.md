@@ -53,7 +53,7 @@ demo 仅支持 PostgreSQL、本地开发使用，遇到部分或多租户歧义�
 
 ### Compose 验收契约
 
-- `postgres` 使用 PostgreSQL 16，并以 `pg_isready` 作为依赖健康条件。
+- `postgres` 使用带 pgvector 扩展的 PostgreSQL 16 镜像，并以 `pg_isready` 作为依赖健康条件。
 - `service` 只有在数据库健康后才启动，启动时自动应用并验证控制面 migration。
 - 容器健康检查使用静态 `/app/trpc-healthcheck`，不会依赖 distroless 镜像中的 shell。
 - `/healthz` 用于存活和 startup probe；`/readyz` 用于流量接入前的 readiness。

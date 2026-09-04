@@ -50,6 +50,7 @@ nav:
       - "Issue #111 Tool-driven Media Reply": issue-111-tool-driven-media.md
       - Tenant 运行时持久化: runtime-storage.md
       - Runtime Capabilities (#75): runtime-capabilities.md
+      - "Issue #114 PostgreSQL/pgvector Knowledge": issue-114-pgvector.md
       - "Issue #76 Stateless Worker and Migration": issue-76-stateless-worker.md
       - PostgreSQL 控制面与启动装配: postgresql-control-plane.md
       - "Issue #81 MySQL 控制面 Repository": issue-81-mysql-control-plane.md

@@ -60,6 +60,7 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 		"0014_wecom_aibot_channel.up.sql",
 		"0015_runtime_attachments.up.sql",
 		"0016_runtime_reply_media.up.sql",
+		"0017_runtime_pgvector_knowledge.up.sql",
 	} {
 		path := filepath.Join(migrationDir, name)
 		contents, err := os.ReadFile(path) // #nosec G304 -- names are fixed migration files under the repository root.

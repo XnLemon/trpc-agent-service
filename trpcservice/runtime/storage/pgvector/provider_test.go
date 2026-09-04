@@ -1,0 +1,127 @@
+package pgvector_test
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	pgvector "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/pgvector"
+)
+
+func TestDeterministicEmbedderIsStableAndBounded(t *testing.T) {
+	embedder := pgvector.NewDeterministicEmbedder(4)
+	first, err := embedder.Embed(context.Background(), "same text")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := embedder.Embed(context.Background(), "same text")
+	if err != nil || len(first) != 4 || len(second) != 4 {
+		t.Fatalf("vectors = %v, %v, err=%v", first, second, err)
+	}
+	for index := range first {
+		if first[index] != second[index] || first[index] < -1 || first[index] > 1 {
+			t.Fatalf("unstable or unbounded vector = %v, %v", first, second)
+		}
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := embedder.Embed(canceled, "text"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled embed = %v", err)
+	}
+}
+
+func TestNewRejectsUnsafeConfiguration(t *testing.T) {
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	cases := []pgvector.Config{
+		{Schema: "public;drop"},
+		{Collection: "knowledge-name"},
+		{Dimension: 4097},
+		{Workers: 33},
+	}
+	for _, config := range cases {
+		if store, err := pgvector.New(db, "tenant-a", config); !errors.Is(err, runtimestorage.ErrInvalid) || store != nil {
+			t.Fatalf("unsafe config = store %v, err %v", store, err)
+		}
+	}
+	if store, err := pgvector.New(db, "", pgvector.Config{}); !errors.Is(err, runtimestorage.ErrInvalid) || store != nil {
+		t.Fatalf("unsafe tenant = store %v, err %v", store, err)
+	}
+}
+
+func TestUpsertPersistsBeforeAsynchronousIndexAndRejectsModelChanges(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var embedCalled sync.Once
+	embedDone := make(chan struct{})
+	embedder := pgvector.EmbeddingFunc(func(context.Context, string) ([]float64, error) {
+		embedCalled.Do(func() { close(embedDone) })
+		return []float64{1, 0}, nil
+	})
+	store, err := pgvector.New(db, "tenant-a", pgvector.Config{Dimension: 2, Embedder: embedder})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rows := sqlmock.NewRows([]string{"tenant_id", "knowledge_id", "document_id", "chunk_id", "source", "source_version", "content", "content_ref", "metadata", "embedding_model", "embedding_version", "embedding_dimension", "checksum", "version", "index_status", "attempts", "last_error_class", "deleted_at", "created_at", "updated_at"}).AddRow("tenant-a", "knowledge", "doc", "chunk", "", "", "text", "", []byte(`{"scope":"allowed"}`), "deterministic", "v1", 2, "checksum", int64(1), "pending", 0, "", nil, when, when)
+	mock.ExpectQuery("INSERT INTO public\\.runtime_pgvector_documents").WithArgs("tenant-a", "knowledge", "knowledge", "doc", "chunk", "", "", "text", "", []byte(`{"scope":"allowed"}`), "deterministic", "v1", 2, "checksum", "pending", "").WillReturnRows(rows)
+	mock.ExpectQuery("SELECT content,embedding_model,embedding_version").WithArgs("tenant-a", "knowledge", "knowledge", "doc", "chunk").WillReturnRows(sqlmock.NewRows([]string{"content", "embedding_model", "embedding_version", "embedding_dimension", "version", "index_status", "embedding"}).AddRow("text", "deterministic", "v1", 2, 1, "pending", ""))
+	mock.ExpectExec("UPDATE public\\.runtime_pgvector_documents SET embedding=").WithArgs("tenant-a", "knowledge", "knowledge", "doc", "chunk", "[1,0]", 1).WillReturnResult(sqlmock.NewResult(0, 1))
+	value, err := store.Upsert(context.Background(), pgvector.DocumentInput{KnowledgeID: "knowledge", DocumentID: "doc", ChunkID: "chunk", Content: "text", Metadata: map[string]any{"scope": "allowed"}, Checksum: "checksum"})
+	if err != nil || value.IndexStatus != pgvector.IndexPending {
+		t.Fatalf("upsert = %+v, %v", value, err)
+	}
+	select {
+	case <-embedDone:
+	case <-time.After(time.Second):
+		t.Fatal("embedding worker did not run")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Upsert(context.Background(), pgvector.DocumentInput{KnowledgeID: "knowledge", DocumentID: "other", ChunkID: "chunk", Content: "text", EmbeddingModel: "other-model"}); !errors.Is(err, pgvector.ErrIncompatible) {
+		t.Fatalf("model mismatch = %v", err)
+	}
+}
+
+func TestSearchFiltersBeforeRankingAndCopiesResults(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store, err := pgvector.New(db, "tenant-a", pgvector.Config{Dimension: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	when := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rows := sqlmock.NewRows([]string{"tenant_id", "knowledge_id", "document_id", "chunk_id", "source", "source_version", "content", "content_ref", "metadata", "embedding_model", "embedding_version", "embedding_dimension", "checksum", "version", "index_status", "attempts", "last_error_class", "deleted_at", "created_at", "updated_at", "embedding"})
+	rows.AddRow("tenant-a", "k", "secret", "c", "", "", "secret", "", []byte(`{"scope":"denied"}`), "deterministic", "v1", 2, "secret", 1, "ready", 0, "", nil, when, when, "[1,0]")
+	rows.AddRow("tenant-a", "k", "allowed", "c", "", "", "allowed", "", []byte(`{"scope":"allowed"}`), "deterministic", "v1", 2, "allowed", 1, "ready", 0, "", nil, when, when, "[0.8,0.6]")
+	rows.AddRow("tenant-b", "k", "foreign", "c", "", "", "foreign", "", []byte(`{"scope":"allowed"}`), "deterministic", "v1", 2, "foreign", 1, "ready", 0, "", nil, when, when, "[1,0]")
+	mock.ExpectQuery("SELECT tenant_id,knowledge_id,document_id,chunk_id").WithArgs("tenant-a", "knowledge").WillReturnRows(rows)
+	values, err := store.Search(context.Background(), []float64{1, 0}, pgvector.SearchOptions{Limit: 1, Metadata: map[string]string{"scope": "allowed"}})
+	if err != nil || len(values) != 1 || values[0].Document.DocumentID != "allowed" {
+		t.Fatalf("filtered search = %+v, %v", values, err)
+	}
+	values[0].Document.Metadata["scope"] = "mutated"
+	if values[0].Document.Metadata["scope"] != "mutated" {
+		t.Fatal("result metadata was not writable by caller")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -2,7 +2,7 @@ name: trpc-agent-service
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-trpc_agent}
       POSTGRES_USER: ${POSTGRES_USER:-trpc}

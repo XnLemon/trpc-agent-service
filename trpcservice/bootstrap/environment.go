@@ -40,6 +40,7 @@ import (
 	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	runtimestoragepgvector "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/pgvector"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	runtimestorageredis "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
 	runtimestorages3 "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/s3"
@@ -204,6 +205,7 @@ type environmentRuntimeStores struct {
 	primary   runtimestorage.RuntimeStore
 	providers map[string]runtimestorage.RuntimeStore
 	owned     []runtimestorage.RuntimeStore
+	database  *sql.DB
 }
 
 func (stores environmentRuntimeStores) Close() error {
@@ -576,6 +578,7 @@ type environmentRuntimeProviderSpec struct {
 	name         string
 	capabilities []backend.Capability
 	store        runtimestorage.RuntimeStore
+	database     *sql.DB
 }
 
 func environmentRegistriesForStores(config environmentConfig, delegateSessions session.Service, runtimeStores environmentRuntimeStores) (*modelprofile.SecretRegistry, *modelprofile.ModelProviderRegistry, *backend.ProviderRegistry, error) {
@@ -632,7 +635,7 @@ func environmentRuntimeProviders(config environmentConfig, stores environmentRun
 	if primary == nil {
 		return nil, fmt.Errorf("%w: primary runtime provider is unavailable", ErrInvalidConfig)
 	}
-	providers := []environmentRuntimeProviderSpec{{name: providerName, capabilities: environmentRuntimeCapabilities(config.runtimeStorage), store: primary}}
+	providers := []environmentRuntimeProviderSpec{{name: providerName, capabilities: environmentRuntimeCapabilities(config.runtimeStorage), store: primary, database: stores.database}}
 	if config.runtimeStorage != "redis" {
 		return providers, nil
 	}
@@ -640,13 +643,13 @@ func environmentRuntimeProviders(config environmentConfig, stores environmentRun
 	if fallback == nil {
 		return nil, fmt.Errorf("%w: in-memory runtime provider is unavailable", ErrInvalidConfig)
 	}
-	return append(providers, environmentRuntimeProviderSpec{name: "inmemory", capabilities: environmentRuntimeCapabilities("inmemory"), store: fallback}), nil
+	return append(providers, environmentRuntimeProviderSpec{name: "inmemory", capabilities: environmentRuntimeCapabilities("inmemory"), store: fallback, database: stores.database}), nil
 }
 
 func registerEnvironmentRuntimeProviders(registry *backend.ProviderRegistry, tenantID string, delegateSessions session.Service, config environmentConfig, runtimeProviders []environmentRuntimeProviderSpec) error {
 	for _, runtimeProvider := range runtimeProviders {
 		for _, capability := range runtimeProvider.capabilities {
-			provider := environmentRuntimeCapabilityProvider{capability: capability, delegate: delegateSessions, store: runtimeProvider.store, telemetry: config.telemetry, backend: runtimeProvider.name}
+			provider := environmentRuntimeCapabilityProvider{capability: capability, delegate: delegateSessions, store: runtimeProvider.store, database: runtimeProvider.database, telemetry: config.telemetry, backend: runtimeProvider.name}
 			if runtimeProvider.name == "redis" {
 				provider.redisEndpoint = config.redisEndpoint
 				provider.redisSecretRef = config.redisSecretRef
@@ -655,6 +658,15 @@ func registerEnvironmentRuntimeProviders(registry *backend.ProviderRegistry, ten
 			if err := registry.Register(tenantID, capability, runtimeProvider.name, provider); err != nil {
 				return err
 			}
+		}
+	}
+	if config.runtimeStorage == "postgres" {
+		var database *sql.DB
+		if len(runtimeProviders) > 0 {
+			database = runtimeProviders[0].database
+		}
+		if err := registry.Register(tenantID, backend.CapabilityKnowledge, "pgvector", environmentRuntimeCapabilityProvider{capability: backend.CapabilityKnowledge, database: database, backend: "pgvector", pgvectorEndpoint: config.dsn}); err != nil {
+			return err
 		}
 	}
 	if err := registry.Register(tenantID, backend.CapabilityArtifact, "s3", environmentS3CapabilityProvider{tenantID: tenantID, secretRef: config.s3SecretRef}); err != nil {
@@ -1110,6 +1122,7 @@ func newEnvironmentRuntimeStoresForConfig(ctx context.Context, config environmen
 		primary:   primary,
 		providers: map[string]runtimestorage.RuntimeStore{providerName: primary},
 		owned:     []runtimestorage.RuntimeStore{primary},
+		database:  db,
 	}
 	if config.runtimeStorage != "redis" {
 		return stores, nil
@@ -1215,11 +1228,36 @@ func newEnvironmentBackendCatalog(runtimeStorage string) (*backend.ProviderCatal
 		}
 		return backendCatalog, nil
 	}
-	backendCatalog, err := backend.NewProviderCatalog(s3BackendProviderSpec(), inMemory)
+	providers := []backend.ProviderSpec{s3BackendProviderSpec(), inMemory}
+	if runtimeStorage == "postgres" {
+		providers = append(providers, pgvectorBackendProviderSpec())
+	}
+	backendCatalog, err := backend.NewProviderCatalog(providers...)
 	if err != nil {
 		return nil, fmt.Errorf("%w: backend catalog is invalid", ErrInvalidConfig)
 	}
 	return backendCatalog, nil
+}
+
+func pgvectorBackendProviderSpec() backend.ProviderSpec {
+	return backend.ProviderSpec{
+		Provider: "pgvector", Capabilities: []backend.Capability{backend.CapabilityKnowledge},
+		EndpointPolicy: backend.FieldRequired, EndpointSchemes: []string{"postgres", "postgresql"},
+		SecretRefPolicy: backend.FieldForbidden,
+		Options: map[string]backend.OptionSpec{
+			"schema":            {Kind: backend.OptionString, DefaultValue: stringOption("public")},
+			"collection":        {Kind: backend.OptionString, DefaultValue: stringOption("knowledge")},
+			"embedding_model":   {Kind: backend.OptionString, DefaultValue: stringOption("deterministic")},
+			"embedding_version": {Kind: backend.OptionString, DefaultValue: stringOption("v1")},
+			"dimension":         {Kind: backend.OptionInteger, DefaultValue: stringOption("32"), MinInteger: int64Option(1), MaxInteger: int64Option(4096)},
+			"queue_size":        {Kind: backend.OptionInteger, DefaultValue: stringOption("128"), MinInteger: int64Option(1), MaxInteger: int64Option(10000)},
+			"workers":           {Kind: backend.OptionInteger, DefaultValue: stringOption("1"), MinInteger: int64Option(1), MaxInteger: int64Option(32)},
+			"max_attempts":      {Kind: backend.OptionInteger, DefaultValue: stringOption("3"), MinInteger: int64Option(1), MaxInteger: int64Option(100)},
+		},
+		ValidateBinding: func(binding backend.CapabilityBinding) bool {
+			return validEnvironmentPGVectorEndpoint(binding.Endpoint)
+		},
+	}
 }
 
 func s3BackendProviderSpec() backend.ProviderSpec {
@@ -1400,8 +1438,10 @@ type environmentRuntimeCapabilityProvider struct {
 	capability            backend.Capability
 	delegate              session.Service
 	store                 runtimestorage.RuntimeStore
+	database              *sql.DB
 	telemetry             observability.Provider
 	backend               string
+	pgvectorEndpoint      string
 	redisEndpoint         string
 	redisSecretRef        string
 	redisPasswordRequired bool
@@ -1559,7 +1599,109 @@ func (provider environmentRuntimeCapabilityProvider) New(ctx context.Context, in
 	if err := provider.validateRedisBinding(binding, secret); err != nil {
 		return nil, err
 	}
+	if strings.EqualFold(strings.TrimSpace(binding.Provider), "pgvector") {
+		if provider.capability != backend.CapabilityKnowledge || provider.database == nil || binding.SecretRef != "" || !validEnvironmentPGVectorEndpoint(binding.Endpoint) || (provider.pgvectorEndpoint != "" && !samePostgresEndpoint(binding.Endpoint, provider.pgvectorEndpoint)) {
+			return nil, backend.ErrStorageFactory
+		}
+		options, err := parseEnvironmentPGVectorOptions(binding.Options)
+		if err != nil {
+			return nil, backend.ErrStorageFactory
+		}
+		store, err := runtimestoragepgvector.New(provider.database, input.TenantID, runtimestoragepgvector.Config{
+			Schema: options.schema, Collection: options.collection, EmbeddingModel: options.model,
+			EmbeddingVersion: options.version, Dimension: options.dimension, QueueSize: options.queueSize,
+			Workers: options.workers, MaxAttempts: options.maxAttempts,
+		})
+		if err != nil {
+			return nil, backend.ErrStorageFactory
+		}
+		return store, nil
+	}
 	return provider.newCapability(ctx, input)
+}
+
+type environmentPGVectorOptions struct {
+	schema, collection, model, version         string
+	dimension, queueSize, workers, maxAttempts int
+}
+
+func parseEnvironmentPGVectorOptions(raw map[string]string) (environmentPGVectorOptions, error) {
+	allowed := map[string]bool{"schema": true, "collection": true, "embedding_model": true, "embedding_version": true, "dimension": true, "queue_size": true, "workers": true, "max_attempts": true}
+	for key := range raw {
+		if !allowed[key] {
+			return environmentPGVectorOptions{}, backend.ErrStorageFactory
+		}
+	}
+	value := func(key, fallback string) string {
+		if item := strings.TrimSpace(raw[key]); item != "" {
+			return item
+		}
+		return fallback
+	}
+	result := environmentPGVectorOptions{schema: value("schema", "public"), collection: value("collection", "knowledge"), model: value("embedding_model", "deterministic"), version: value("embedding_version", "v1")}
+	for index, item := range []string{result.schema, result.collection, result.model, result.version} {
+		maxLength := 63
+		if index >= 2 {
+			maxLength = 256
+		}
+		if len(item) == 0 || len(item) > maxLength {
+			return environmentPGVectorOptions{}, backend.ErrStorageFactory
+		}
+		for _, character := range item {
+			if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune("_-.:/", character) {
+				continue
+			}
+			return environmentPGVectorOptions{}, backend.ErrStorageFactory
+		}
+	}
+	parse := func(key string, fallback string, min, max int) (int, error) {
+		parsed, err := strconv.Atoi(value(key, fallback))
+		if err != nil || parsed < min || parsed > max {
+			return 0, backend.ErrStorageFactory
+		}
+		return parsed, nil
+	}
+	var err error
+	if result.dimension, err = parse("dimension", "32", 1, 4096); err != nil {
+		return environmentPGVectorOptions{}, err
+	}
+	if result.queueSize, err = parse("queue_size", "128", 1, 10000); err != nil {
+		return environmentPGVectorOptions{}, err
+	}
+	if result.workers, err = parse("workers", "1", 1, 32); err != nil {
+		return environmentPGVectorOptions{}, err
+	}
+	if result.maxAttempts, err = parse("max_attempts", "3", 1, 100); err != nil {
+		return environmentPGVectorOptions{}, err
+	}
+	return result, nil
+}
+
+func validEnvironmentPGVectorEndpoint(endpoint string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || parsed == nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	return parsed.Scheme == "postgres" || parsed.Scheme == "postgresql"
+}
+
+func samePostgresEndpoint(binding, configured string) bool {
+	left, leftErr := url.Parse(strings.TrimSpace(binding))
+	right, rightErr := url.Parse(strings.TrimSpace(configured))
+	if leftErr != nil || rightErr != nil || left == nil || right == nil {
+		return false
+	}
+	return (left.Scheme == "postgres" || left.Scheme == "postgresql") && (right.Scheme == "postgres" || right.Scheme == "postgresql") && strings.EqualFold(left.Hostname(), right.Hostname()) && effectivePort(left) == effectivePort(right)
+}
+
+func effectivePort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	if value.Scheme == "postgresql" || value.Scheme == "postgres" {
+		return "5432"
+	}
+	return ""
 }
 
 func (provider environmentRuntimeCapabilityProvider) validateRedisBinding(binding backend.CapabilityBinding, secret modelprofile.SecretValue) error {
