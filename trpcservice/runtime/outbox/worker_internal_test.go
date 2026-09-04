@@ -78,6 +78,224 @@ func (s *branchStore) TransitionReply(_ context.Context, transition runtimestora
 	return runtimestorage.ReplyOutbox{}, s.transitionErr
 }
 
+type materializationBranchStore struct {
+	runtimestorage.RuntimeStore
+	intents          []runtimestorage.ReplyMaterializationIntent
+	listErr          error
+	deleteErr        error
+	deleted          int
+	event            runtimestorage.MessageEvent
+	getErr           error
+	transitionEvents []runtimestorage.MessageEvent
+	transitionErrs   []error
+	enqueueErr       error
+	transitions      []runtimestorage.MessageTransition
+}
+
+func (s *materializationBranchStore) PutReplyMaterialization(_ context.Context, intent runtimestorage.ReplyMaterializationIntent) (runtimestorage.ReplyMaterializationIntent, error) {
+	return intent, nil
+}
+
+func (s *materializationBranchStore) ListReplyMaterializations(context.Context, string) ([]runtimestorage.ReplyMaterializationIntent, error) {
+	return s.intents, s.listErr
+}
+
+func (s *materializationBranchStore) DeleteReplyMaterialization(context.Context, string, string) error {
+	s.deleted++
+	return s.deleteErr
+}
+
+func (s *materializationBranchStore) GetMessage(context.Context, string, string) (runtimestorage.MessageEvent, error) {
+	return s.event, s.getErr
+}
+
+func (s *materializationBranchStore) TransitionMessage(_ context.Context, transition runtimestorage.MessageTransition) (runtimestorage.MessageEvent, error) {
+	index := len(s.transitions)
+	s.transitions = append(s.transitions, transition)
+	value := s.event
+	if index < len(s.transitionEvents) {
+		value = s.transitionEvents[index]
+	}
+	if index < len(s.transitionErrs) {
+		return value, s.transitionErrs[index]
+	}
+	return value, nil
+}
+
+func (s *materializationBranchStore) EnqueueReplies(_ context.Context, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	return values, s.enqueueErr
+}
+
+func (s *materializationBranchStore) EnqueueRepliesWithCorrelation(_ context.Context, _ runtimestorage.ReplyCorrelation, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	return values, s.enqueueErr
+}
+
+func newMaterializationWorker(t *testing.T, store runtimestorage.RuntimeStore, materializationStore *materializationBranchStore) *Worker {
+	t.Helper()
+	m, err := NewMaterializer(MaterializerConfig{Store: store, SegmentSize: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := &Worker{store: materializationStore, materializer: m, tenantID: "tenant-a", owner: "worker", leaseDuration: time.Second}
+	return worker
+}
+
+func materializationIntent() runtimestorage.ReplyMaterializationIntent {
+	return runtimestorage.ReplyMaterializationIntent{TenantID: "tenant-a", EventID: "event", ReplyID: "reply", Payload: "payload"}
+}
+
+func TestRepairMaterializationsSkipsUnsupportedStoreAndRecordsFailures(t *testing.T) {
+	base := inmemory.New()
+	unsupported := &branchStore{RuntimeStore: base}
+	m, err := NewMaterializer(MaterializerConfig{Store: base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Worker{store: unsupported, materializer: m}).repairMaterializations(context.Background()); err != nil {
+		t.Fatalf("unsupported marker store = %v", err)
+	}
+
+	failure := errors.New("marker list failed")
+	store := &materializationBranchStore{listErr: failure}
+	worker := newMaterializationWorker(t, store, store)
+	if err := worker.repairMaterializations(context.Background()); !errors.Is(err, failure) {
+		t.Fatalf("marker list error = %v, want %v", err, failure)
+	}
+
+	first := errors.New("first repair failed")
+	store = &materializationBranchStore{
+		intents: []runtimestorage.ReplyMaterializationIntent{materializationIntent(), materializationIntent()},
+		getErr:  first,
+	}
+	worker = newMaterializationWorker(t, store, store)
+	if err := worker.repairMaterializations(context.Background()); !errors.Is(err, first) {
+		t.Fatalf("first repair error = %v, want %v", err, first)
+	}
+}
+
+func TestRepairMaterializationHandlesMissingEvent(t *testing.T) {
+	store := &materializationBranchStore{intents: []runtimestorage.ReplyMaterializationIntent{materializationIntent()}, getErr: runtimestorage.ErrNotFound}
+	worker := newMaterializationWorker(t, store, store)
+	if err := worker.repairMaterializations(context.Background()); err != nil {
+		t.Fatalf("missing event repair = %v", err)
+	}
+	if store.deleted != 1 {
+		t.Fatalf("deleted markers = %d, want 1", store.deleted)
+	}
+}
+
+func TestRepairMaterializationReturnsMaterializeAndTransitionErrors(t *testing.T) {
+	materializeFailure := errors.New("enqueue failed")
+	store := &materializationBranchStore{
+		event:            runtimestorage.MessageEvent{Status: runtimestorage.EventReceived},
+		transitionEvents: []runtimestorage.MessageEvent{{Status: runtimestorage.EventRunning, FencingToken: 3}},
+		transitionErrs:   []error{nil},
+		enqueueErr:       materializeFailure,
+	}
+	worker := newMaterializationWorker(t, store, store)
+	if err := worker.repairMaterialization(context.Background(), store, materializationIntent()); !errors.Is(err, ErrMaterialization) {
+		t.Fatalf("materialization error = %v, want ErrMaterialization", err)
+	}
+
+	completionFailure := errors.New("completion transition failed")
+	for _, tc := range []struct {
+		name    string
+		err     error
+		wantErr error
+	}{
+		{name: "conflict", err: runtimestorage.ErrConflict},
+		{name: "storage error", err: completionFailure, wantErr: completionFailure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &materializationBranchStore{
+				event:            runtimestorage.MessageEvent{Status: runtimestorage.EventReceived},
+				transitionEvents: []runtimestorage.MessageEvent{{Status: runtimestorage.EventRunning, FencingToken: 3}},
+				transitionErrs:   []error{nil, tc.err},
+			}
+			worker := newMaterializationWorker(t, store, store)
+			err := worker.repairMaterialization(context.Background(), store, materializationIntent())
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("repair error = %v, want nil", err)
+				}
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("repair error = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestPrepareMaterializationIgnoresCompetingRecoveryClaims(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		event runtimestorage.MessageEvent
+	}{
+		{name: "expired running", event: runtimestorage.MessageEvent{Status: runtimestorage.EventRunning, LeaseExpiresAt: ptrTime(time.Now().Add(-time.Second))}},
+		{name: "received", event: runtimestorage.MessageEvent{Status: runtimestorage.EventReceived}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &materializationBranchStore{event: tc.event, transitionErrs: []error{runtimestorage.ErrConflict}}
+			worker := newMaterializationWorker(t, store, store)
+			if err := worker.repairMaterialization(context.Background(), store, materializationIntent()); err != nil {
+				t.Fatalf("competing recovery = %v", err)
+			}
+		})
+	}
+}
+
+func TestPrepareMaterializationReturnsStorageErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		event runtimestorage.MessageEvent
+		err   error
+	}{
+		{name: "expired running", event: runtimestorage.MessageEvent{Status: runtimestorage.EventRunning, LeaseExpiresAt: ptrTime(time.Now().Add(-time.Second))}, err: errors.New("reconcile failed")},
+		{name: "received", event: runtimestorage.MessageEvent{Status: runtimestorage.EventReceived}, err: errors.New("claim failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &materializationBranchStore{event: tc.event, transitionErrs: []error{tc.err}}
+			worker := newMaterializationWorker(t, store, store)
+			if err := worker.repairMaterialization(context.Background(), store, materializationIntent()); !errors.Is(err, tc.err) {
+				t.Fatalf("storage error = %v, want %v", err, tc.err)
+			}
+		})
+	}
+}
+
+type receiptFailureStore struct {
+	*inmemory.Store
+	err error
+}
+
+func (s *receiptFailureStore) RecordReplyReceipt(context.Context, runtimestorage.ReplyReceipt) (runtimestorage.ReplyOutbox, error) {
+	return runtimestorage.ReplyOutbox{}, s.err
+}
+
+func TestWorkerLeavesSendingReplyWhenReceiptPersistenceFails(t *testing.T) {
+	base := inmemory.New()
+	if _, err := base.CreateSession(context.Background(), "tenant-a", "session-receipt", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := base.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", EventID: "event-receipt", SessionID: "session-receipt", BindingID: "binding", ExternalMessageID: "external"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := base.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-receipt", EventID: "event-receipt", SegmentIndex: 0, SegmentCount: 1, Payload: "payload"}); err != nil {
+		t.Fatal(err)
+	}
+	store := &receiptFailureStore{Store: base, err: errors.New("receipt persistence failed")}
+	worker, err := New(Config{Store: store, Provider: branchProvider{id: "provider"}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := worker.RunOnce(context.Background()); processed != 1 || !errors.Is(err, store.err) {
+		t.Fatalf("receipt failure run = %d/%v", processed, err)
+	}
+	value, err := base.GetReply(context.Background(), "tenant-a", "reply-receipt", 0)
+	if err != nil || value.Status != runtimestorage.ReplySending || value.ProviderMessageID != "" {
+		t.Fatalf("reply after receipt failure = %+v/%v", value, err)
+	}
+}
+
 type branchProvider struct {
 	status DeliveryStatus
 	id     string
