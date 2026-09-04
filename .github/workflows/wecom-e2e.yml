@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 5
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: trpc_agent_wecom_e2e

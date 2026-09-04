@@ -16,6 +16,12 @@ class; after the bounded attempt budget they become `dead_letter`. `Retry` and
 `Reindex` replay the stable document key. `Delete` marks the
 source `deleted` and clears its vector, so stale rows cannot be returned.
 
+Provider construction requeues durable pending rows up to the configured queue
+capacity, allowing accepted writes to resume indexing after a restart. Worker
+updates are fenced by the source version, and `Close` cancels the owned worker
+context before waiting for shutdown. A blocking embedder must honor context
+cancellation to release its own resources.
+
 The default embedder is deterministic and local, which keeps normal CI free of
 external credentials. Deployments may inject an `Embedder` implementation, but
 tenant document data never selects its endpoint or credentials. A model or

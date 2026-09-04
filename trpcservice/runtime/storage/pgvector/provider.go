@@ -185,25 +185,34 @@ type SearchResult struct {
 // Store implements the existing tenant-scoped KnowledgeStore and VectorStore
 // contracts while exposing richer document lifecycle methods.
 type Store struct {
-	db          *sql.DB
-	tenantID    string
-	schema      string
-	collection  string
-	model       string
-	modelVer    string
-	dimension   int
-	embedder    Embedder
-	queue       chan indexJob
-	stop        chan struct{}
-	done        chan struct{}
-	closeOnce   sync.Once
-	closeErr    error
-	workers     int
-	maxAttempts int
+	db           *sql.DB
+	tenantID     string
+	collection   string
+	model        string
+	modelVer     string
+	dimension    int
+	embedder     Embedder
+	queries      documentQueries
+	workerCtx    context.Context
+	workerCancel context.CancelFunc
+	queue        chan indexJob
+	stop         chan struct{}
+	done         chan struct{}
+	closeOnce    sync.Once
+	closeErr     error
+	workers      int
+	maxAttempts  int
 }
 
 type indexJob struct{ key documentKey }
 type documentKey struct{ knowledgeID, documentID, chunkID string }
+
+// documentQueries are composed once from the validated schema identifier.
+// Values supplied by document callers remain positional PostgreSQL arguments.
+type documentQueries struct {
+	upsert, get, search, delete, retry, reconcile                   string
+	loadIndex, recoverPending, markReady, markFailed, deleteVectors string
+}
 
 // New creates a tenant-bound provider and starts its bounded index workers.
 // The caller retains ownership of db and owns Store.Close.
@@ -211,6 +220,17 @@ func New(db *sql.DB, tenantID string, config Config) (*Store, error) {
 	if db == nil || runtimestorage.ValidateTenant(tenantID) != nil {
 		return nil, runtimestorage.ErrInvalid
 	}
+	config, err := normalizeConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store := newStore(db, tenantID, config)
+	store.recoverPending()
+	store.startWorkers()
+	return store, nil
+}
+
+func normalizeConfig(config Config) (Config, error) {
 	config.Schema = strings.TrimSpace(config.Schema)
 	if config.Schema == "" {
 		config.Schema = defaultSchema
@@ -220,58 +240,68 @@ func New(db *sql.DB, tenantID string, config Config) (*Store, error) {
 		config.Collection = defaultCollection
 	}
 	if !validIdentifier(config.Schema) || !validIdentifier(config.Collection) {
-		return nil, runtimestorage.ErrInvalid
+		return Config{}, runtimestorage.ErrInvalid
 	}
-	if config.EmbeddingModel == "" {
-		config.EmbeddingModel = defaultModel
-	}
-	if config.EmbeddingVersion == "" {
-		config.EmbeddingVersion = defaultModelVersion
-	}
+	config.EmbeddingModel = defaultString(config.EmbeddingModel, defaultModel)
+	config.EmbeddingVersion = defaultString(config.EmbeddingVersion, defaultModelVersion)
 	if !validModelValue(config.EmbeddingModel) || !validModelValue(config.EmbeddingVersion) {
-		return nil, runtimestorage.ErrInvalid
+		return Config{}, runtimestorage.ErrInvalid
 	}
-	if config.Dimension <= 0 {
-		config.Dimension = defaultDimension
+	var err error
+	if config.Dimension, err = positiveSetting(config.Dimension, defaultDimension, 4096); err != nil {
+		return Config{}, err
 	}
-	if config.Dimension > 4096 {
-		return nil, runtimestorage.ErrInvalid
+	if config.QueueSize, err = positiveSetting(config.QueueSize, defaultQueueSize, 10000); err != nil {
+		return Config{}, err
 	}
-	if config.QueueSize <= 0 {
-		config.QueueSize = defaultQueueSize
-	}
-	if config.QueueSize > 10000 {
-		return nil, runtimestorage.ErrInvalid
-	}
-	if config.Workers <= 0 {
-		config.Workers = defaultWorkers
-	}
-	if config.Workers > 32 {
-		return nil, runtimestorage.ErrInvalid
+	if config.Workers, err = positiveSetting(config.Workers, defaultWorkers, 32); err != nil {
+		return Config{}, err
 	}
 	if config.Embedder == nil {
 		config.Embedder = NewDeterministicEmbedder(config.Dimension)
 	}
-	if config.MaxAttempts <= 0 {
-		config.MaxAttempts = 3
+	if config.MaxAttempts, err = positiveSetting(config.MaxAttempts, 3, 100); err != nil {
+		return Config{}, err
 	}
-	if config.MaxAttempts > 100 {
-		return nil, runtimestorage.ErrInvalid
+	return config, nil
+}
+
+func defaultString(value, fallback string) string {
+	if value == "" {
+		return fallback
 	}
-	store := &Store{db: db, tenantID: tenantID, schema: config.Schema, collection: config.Collection, model: config.EmbeddingModel, modelVer: config.EmbeddingVersion, dimension: config.Dimension, embedder: config.Embedder, queue: make(chan indexJob, config.QueueSize), stop: make(chan struct{}), done: make(chan struct{}), workers: config.Workers, maxAttempts: config.MaxAttempts}
+	return value
+}
+
+func positiveSetting(value, fallback, maximum int) (int, error) {
+	if value <= 0 {
+		value = fallback
+	}
+	if value > maximum {
+		return 0, runtimestorage.ErrInvalid
+	}
+	return value, nil
+}
+
+func newStore(db *sql.DB, tenantID string, config Config) *Store {
+	table := config.Schema + ".runtime_pgvector_documents"
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	return &Store{db: db, tenantID: tenantID, collection: config.Collection, model: config.EmbeddingModel, modelVer: config.EmbeddingVersion, dimension: config.Dimension, embedder: config.Embedder, queries: newDocumentQueries(table), workerCtx: workerCtx, workerCancel: workerCancel, queue: make(chan indexJob, config.QueueSize), stop: make(chan struct{}), done: make(chan struct{}), workers: config.Workers, maxAttempts: config.MaxAttempts}
+}
+
+func (s *Store) startWorkers() {
 	var wg sync.WaitGroup
-	for index := 0; index < config.Workers; index++ {
+	for index := 0; index < s.workers; index++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			store.worker()
+			s.worker()
 		}()
 	}
 	go func() {
 		wg.Wait()
-		close(store.done)
+		close(s.done)
 	}()
-	return store, nil
 }
 
 // Close stops owned workers. It does not close the caller-owned database.
@@ -280,6 +310,7 @@ func (s *Store) Close() error {
 		return nil
 	}
 	s.closeOnce.Do(func() {
+		s.workerCancel()
 		close(s.stop)
 		<-s.done
 	})
@@ -349,7 +380,41 @@ func validKey(value string, required bool) bool {
 	return len([]rune(value)) <= 256 && !strings.ContainsAny(value, "\x00\r\n")
 }
 
-func (s *Store) table(name string) string { return s.schema + ".runtime_pgvector_" + name }
+func newDocumentQueries(table string) documentQueries {
+	const columns = "tenant_id,knowledge_id,document_id,chunk_id,source,source_version,content,content_ref,metadata,embedding_model,embedding_version,embedding_dimension,checksum,version,index_status,attempts,last_error_class,deleted_at,created_at,updated_at"
+	return documentQueries{
+		upsert:         "INSERT INTO " + table + " (tenant_id,collection,knowledge_id,document_id,chunk_id,source,source_version,content,content_ref,metadata,embedding_model,embedding_version,embedding_dimension,checksum,index_status,embedding,version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NULLIF($16,'' )::vector,1) ON CONFLICT (tenant_id,collection,knowledge_id,document_id,chunk_id) DO UPDATE SET source=EXCLUDED.source,source_version=EXCLUDED.source_version,content=EXCLUDED.content,content_ref=EXCLUDED.content_ref,metadata=EXCLUDED.metadata,embedding_model=EXCLUDED.embedding_model,embedding_version=EXCLUDED.embedding_version,embedding_dimension=EXCLUDED.embedding_dimension,checksum=EXCLUDED.checksum,index_status=$15,embedding=NULLIF($16,'')::vector,version=" + table + ".version+1,attempts=0,last_error_class='',deleted_at=NULL,updated_at=now() RETURNING " + columns,
+		get:            "SELECT " + columns + " FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5",
+		search:         "SELECT " + columns + ",embedding::text FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND embedding_model=$3 AND embedding_version=$4 AND embedding_dimension=$5 AND index_status='ready' AND deleted_at IS NULL AND embedding IS NOT NULL",
+		delete:         "UPDATE " + table + " SET index_status='deleted',deleted_at=now(),embedding=NULL,version=version+1,updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL",
+		retry:          "UPDATE " + table + " SET index_status='pending',attempts=0,last_error_class='',updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL AND index_status IN ('failed','pending','ready','dead_letter')",
+		reconcile:      "SELECT knowledge_id,document_id,chunk_id FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND deleted_at IS NULL AND index_status IN ('failed','dead_letter') ORDER BY updated_at,knowledge_id,document_id,chunk_id",
+		loadIndex:      "SELECT content,embedding_model,embedding_version,embedding_dimension,version,index_status,COALESCE(embedding::text,'') FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL",
+		recoverPending: "SELECT knowledge_id,document_id,chunk_id FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND index_status='pending' AND deleted_at IS NULL ORDER BY updated_at,knowledge_id,document_id,chunk_id",
+		markReady:      "UPDATE " + table + " SET embedding=$6::vector,index_status='ready',attempts=attempts+1,last_error_class='',updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND version=$7 AND index_status='pending' AND deleted_at IS NULL",
+		markFailed:     "UPDATE " + table + " SET index_status=CASE WHEN attempts+1 >= $7 THEN 'dead_letter' ELSE 'failed' END,attempts=attempts+1,last_error_class=$8,updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND version=$6 AND index_status='pending' AND deleted_at IS NULL",
+		deleteVectors:  "UPDATE " + table + " SET index_status='deleted',deleted_at=now(),embedding=NULL,version=version+1,updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND document_id=$3 AND deleted_at IS NULL",
+	}
+}
+
+func (s *Store) recoverPending() {
+	rows, err := s.db.QueryContext(s.workerCtx, s.queries.recoverPending, s.tenantID, s.collection)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key documentKey
+		if rows.Scan(&key.knowledgeID, &key.documentID, &key.chunkID) != nil {
+			continue
+		}
+		select {
+		case s.queue <- indexJob{key: key}:
+		default:
+			return
+		}
+	}
+}
 
 func encodeVector(values []float64) (string, error) {
 	if len(values) == 0 || !runtimestorage.ValidateEmbedding(values) {
@@ -425,74 +490,69 @@ func (s *Store) Upsert(ctx context.Context, input DocumentInput) (Document, erro
 	if err := s.check(ctx); err != nil {
 		return Document{}, err
 	}
-	if !validKey(input.KnowledgeID, true) || !validKey(input.DocumentID, true) || !validKey(input.ChunkID, true) || !validKey(input.Source, false) || !validKey(input.SourceVersion, false) || strings.TrimSpace(input.Content) == "" || len(input.Content) > 16<<20 || !validKey(input.ContentRef, false) || !runtimestorage.ValidateEmbedding(input.Embedding) {
+	if !validDocumentInput(input) {
 		return Document{}, runtimestorage.ErrInvalid
 	}
-	metadata := cloneMap(input.Metadata)
-	if metadata == nil {
-		return Document{}, runtimestorage.ErrInvalid
-	}
-	model, modelVersion := input.EmbeddingModel, input.EmbeddingVersion
-	if model != "" && model != s.model || modelVersion != "" && modelVersion != s.modelVer {
-		return Document{}, ErrIncompatible
-	}
-	if model == "" {
-		model = s.model
-	}
-	if modelVersion == "" {
-		modelVersion = s.modelVer
-	}
-	if !validModelValue(model) || !validModelValue(modelVersion) {
-		return Document{}, runtimestorage.ErrInvalid
-	}
-	if len(input.Embedding) > 0 && len(input.Embedding) != s.dimension {
-		return Document{}, ErrIncompatible
-	}
-	checksum := strings.TrimSpace(input.Checksum)
-	if checksum == "" {
-		digest := sha256.Sum256([]byte(input.Content))
-		checksum = hex.EncodeToString(digest[:])
-	}
-	if !validKey(checksum, true) {
-		return Document{}, runtimestorage.ErrInvalid
-	}
-	metadataJSON, err := json.Marshal(metadata)
+	input, metadataJSON, vector, err := s.prepareUpsert(input)
 	if err != nil {
-		return Document{}, runtimestorage.ErrInvalid
-	}
-	status := string(IndexPending)
-	if len(input.Embedding) > 0 {
-		status = string(IndexPending)
-	}
-	vector := ""
-	if len(input.Embedding) > 0 {
-		vector, err = encodeVector(input.Embedding)
-		if err != nil {
-			return Document{}, err
-		}
+		return Document{}, err
 	}
 	key := documentKey{knowledgeID: input.KnowledgeID, documentID: input.DocumentID, chunkID: input.ChunkID}
-	query := fmt.Sprintf("INSERT INTO %s (tenant_id,collection,knowledge_id,document_id,chunk_id,source,source_version,content,content_ref,metadata,embedding_model,embedding_version,embedding_dimension,checksum,index_status,embedding,version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NULLIF($16,'' )::vector,1) ON CONFLICT (tenant_id,collection,knowledge_id,document_id,chunk_id) DO UPDATE SET source=EXCLUDED.source,source_version=EXCLUDED.source_version,content=EXCLUDED.content,content_ref=EXCLUDED.content_ref,metadata=EXCLUDED.metadata,embedding_model=EXCLUDED.embedding_model,embedding_version=EXCLUDED.embedding_version,embedding_dimension=EXCLUDED.embedding_dimension,checksum=EXCLUDED.checksum,index_status=$15,embedding=NULLIF($16,'')::vector,version=%s.version+1,attempts=0,last_error_class='',deleted_at=NULL,updated_at=now() RETURNING tenant_id,knowledge_id,document_id,chunk_id,source,source_version,content,content_ref,metadata,embedding_model,embedding_version,embedding_dimension,checksum,version,index_status,attempts,last_error_class,deleted_at,created_at,updated_at", s.table("documents"), s.table("documents"))
-	var value Document
-	var metadataRaw []byte
-	var embeddingDimension int
-	var deletedAt sql.NullTime
-	var embeddingModel, embeddingVersion string
-	err = s.db.QueryRowContext(ctx, query, s.tenantID, s.collection, key.knowledgeID, key.documentID, key.chunkID, input.Source, input.SourceVersion, input.Content, input.ContentRef, metadataJSON, model, modelVersion, s.dimension, checksum, status, vector).Scan(&value.TenantID, &value.KnowledgeID, &value.DocumentID, &value.ChunkID, &value.Source, &value.SourceVersion, &value.Content, &value.ContentRef, &metadataRaw, &embeddingModel, &embeddingVersion, &embeddingDimension, &value.Checksum, &value.Version, &value.IndexStatus, &value.Attempts, &value.LastErrorClass, &deletedAt, &value.CreatedAt, &value.UpdatedAt)
+	value, err := s.saveDocument(ctx, input, metadataJSON, vector)
 	if err != nil {
-		return Document{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
-	}
-	if err := json.Unmarshal(metadataRaw, &value.Metadata); err != nil {
-		return Document{}, runtimestorage.ErrStorage
-	}
-	value.EmbeddingModel, value.EmbeddingVersion, value.EmbeddingDimension = embeddingModel, embeddingVersion, embeddingDimension
-	if deletedAt.Valid {
-		value.DeletedAt = &deletedAt.Time
+		return Document{}, err
 	}
 	if err := s.enqueue(ctx, key); err != nil {
 		return cloneDocument(value), err
 	}
 	return cloneDocument(value), nil
+}
+
+func validDocumentInput(input DocumentInput) bool {
+	return validKey(input.KnowledgeID, true) && validKey(input.DocumentID, true) && validKey(input.ChunkID, true) && validKey(input.Source, false) && validKey(input.SourceVersion, false) && strings.TrimSpace(input.Content) != "" && len(input.Content) <= 16<<20 && validKey(input.ContentRef, false) && runtimestorage.ValidateEmbedding(input.Embedding)
+}
+
+func (s *Store) prepareUpsert(input DocumentInput) (DocumentInput, []byte, string, error) {
+	metadata := cloneMap(input.Metadata)
+	if metadata == nil {
+		return DocumentInput{}, nil, "", runtimestorage.ErrInvalid
+	}
+	if input.EmbeddingModel != "" && input.EmbeddingModel != s.model || input.EmbeddingVersion != "" && input.EmbeddingVersion != s.modelVer || len(input.Embedding) > 0 && len(input.Embedding) != s.dimension {
+		return DocumentInput{}, nil, "", ErrIncompatible
+	}
+	input.EmbeddingModel = defaultString(input.EmbeddingModel, s.model)
+	input.EmbeddingVersion = defaultString(input.EmbeddingVersion, s.modelVer)
+	if !validModelValue(input.EmbeddingModel) || !validModelValue(input.EmbeddingVersion) {
+		return DocumentInput{}, nil, "", runtimestorage.ErrInvalid
+	}
+	if strings.TrimSpace(input.Checksum) == "" {
+		digest := sha256.Sum256([]byte(input.Content))
+		input.Checksum = hex.EncodeToString(digest[:])
+	}
+	if !validKey(input.Checksum, true) {
+		return DocumentInput{}, nil, "", runtimestorage.ErrInvalid
+	}
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return DocumentInput{}, nil, "", runtimestorage.ErrInvalid
+	}
+	vector, err := optionalVector(input.Embedding)
+	if err != nil {
+		return DocumentInput{}, nil, "", err
+	}
+	return input, metadataJSON, vector, nil
+}
+
+func optionalVector(values []float64) (string, error) {
+	if len(values) == 0 {
+		return "", nil
+	}
+	return encodeVector(values)
+}
+
+func (s *Store) saveDocument(ctx context.Context, input DocumentInput, metadataJSON []byte, vector string) (Document, error) {
+	row := s.db.QueryRowContext(ctx, s.queries.upsert, s.tenantID, s.collection, input.KnowledgeID, input.DocumentID, input.ChunkID, input.Source, input.SourceVersion, input.Content, input.ContentRef, metadataJSON, input.EmbeddingModel, input.EmbeddingVersion, s.dimension, input.Checksum, string(IndexPending), vector)
+	return s.scanDocument(ctx, row)
 }
 
 // PutDocument is the explicit document-oriented name for Upsert.
@@ -508,8 +568,7 @@ func (s *Store) Get(ctx context.Context, knowledgeID, documentID, chunkID string
 	if !validKey(knowledgeID, true) || !validKey(documentID, true) || !validKey(chunkID, true) {
 		return Document{}, runtimestorage.ErrInvalid
 	}
-	query := fmt.Sprintf("SELECT tenant_id,knowledge_id,document_id,chunk_id,source,source_version,content,content_ref,metadata,embedding_model,embedding_version,embedding_dimension,checksum,version,index_status,attempts,last_error_class,deleted_at,created_at,updated_at FROM %s WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5", s.table("documents"))
-	return s.scanDocument(ctx, s.db.QueryRowContext(ctx, query, s.tenantID, s.collection, knowledgeID, documentID, chunkID))
+	return s.scanDocument(ctx, s.db.QueryRowContext(ctx, s.queries.get, s.tenantID, s.collection, knowledgeID, documentID, chunkID))
 }
 
 // GetDocument is the explicit document-oriented name for Get.
@@ -523,47 +582,78 @@ func (s *Store) Search(ctx context.Context, embedding []float64, options SearchO
 	if err := s.check(ctx); err != nil {
 		return nil, err
 	}
-	if len(embedding) != s.dimension || !runtimestorage.ValidateEmbedding(embedding) || options.Limit < 0 || options.Limit > maxLimit || math.IsNaN(options.MinScore) || math.IsInf(options.MinScore, 0) {
-		return nil, runtimestorage.ErrInvalid
+	if err := validateSearchOptions(embedding, options, s.dimension); err != nil {
+		return nil, err
 	}
-	for key, value := range options.Metadata {
-		if !validKey(key, true) || !validKey(value, false) {
-			return nil, runtimestorage.ErrInvalid
-		}
-	}
-	query := fmt.Sprintf("SELECT tenant_id,knowledge_id,document_id,chunk_id,source,source_version,content,content_ref,metadata,embedding_model,embedding_version,embedding_dimension,checksum,version,index_status,attempts,last_error_class,deleted_at,created_at,updated_at,embedding::text FROM %s WHERE tenant_id=$1 AND collection=$2 AND index_status='ready' AND deleted_at IS NULL AND embedding IS NOT NULL", s.table("documents"))
-	rows, err := s.db.QueryContext(ctx, query, s.tenantID, s.collection)
+	rows, err := s.db.QueryContext(ctx, s.queries.search, s.tenantID, s.collection, s.model, s.modelVer, s.dimension)
 	if err != nil {
 		return nil, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer rows.Close()
+	values, err := s.collectSearchResults(rows, embedding, options)
+	if err != nil {
+		return nil, err
+	}
+	sortSearchResults(values)
+	return limitSearchResults(values, options.Limit), nil
+}
+
+func validateSearchOptions(embedding []float64, options SearchOptions, dimension int) error {
+	if len(embedding) != dimension || !runtimestorage.ValidateEmbedding(embedding) || options.Limit < 0 || options.Limit > maxLimit || math.IsNaN(options.MinScore) || math.IsInf(options.MinScore, 0) {
+		return runtimestorage.ErrInvalid
+	}
+	for key, value := range options.Metadata {
+		if !validKey(key, true) || !validKey(value, false) {
+			return runtimestorage.ErrInvalid
+		}
+	}
+	return nil
+}
+
+func (s *Store) collectSearchResults(rows *sql.Rows, embedding []float64, options SearchOptions) ([]SearchResult, error) {
 	values := make([]SearchResult, 0)
 	for rows.Next() {
-		var value Document
-		var metadataRaw []byte
-		var deletedAt sql.NullTime
-		var vectorRaw string
-		if err := rows.Scan(&value.TenantID, &value.KnowledgeID, &value.DocumentID, &value.ChunkID, &value.Source, &value.SourceVersion, &value.Content, &value.ContentRef, &metadataRaw, &value.EmbeddingModel, &value.EmbeddingVersion, &value.EmbeddingDimension, &value.Checksum, &value.Version, &value.IndexStatus, &value.Attempts, &value.LastErrorClass, &deletedAt, &value.CreatedAt, &value.UpdatedAt, &vectorRaw); err != nil || json.Unmarshal(metadataRaw, &value.Metadata) != nil {
-			return nil, runtimestorage.ErrStorage
+		value, ok, err := scanSearchResult(rows, embedding, options.MinScore)
+		if err != nil {
+			return nil, err
 		}
-		if deletedAt.Valid {
-			value.DeletedAt = &deletedAt.Time
-		}
-		if value.TenantID != s.tenantID || !metadataMatches(value.Metadata, options.Metadata) || (options.Authorize != nil && !options.Authorize(cloneDocument(value))) {
-			continue
-		}
-		vector, err := decodeVector(vectorRaw)
-		if err != nil || len(vector) != s.dimension {
-			continue
-		}
-		score, ok := cosine(embedding, vector)
-		if ok && score >= options.MinScore {
-			values = append(values, SearchResult{Document: cloneDocument(value), Score: score})
+		if ok && s.authorizeSearchResult(value.Document, options) {
+			values = append(values, value)
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, runtimestorage.ErrStorage
 	}
+	return values, nil
+}
+
+func scanSearchResult(rows *sql.Rows, embedding []float64, minScore float64) (SearchResult, bool, error) {
+	var value Document
+	var metadataRaw []byte
+	var deletedAt sql.NullTime
+	var vectorRaw string
+	if err := rows.Scan(&value.TenantID, &value.KnowledgeID, &value.DocumentID, &value.ChunkID, &value.Source, &value.SourceVersion, &value.Content, &value.ContentRef, &metadataRaw, &value.EmbeddingModel, &value.EmbeddingVersion, &value.EmbeddingDimension, &value.Checksum, &value.Version, &value.IndexStatus, &value.Attempts, &value.LastErrorClass, &deletedAt, &value.CreatedAt, &value.UpdatedAt, &vectorRaw); err != nil || json.Unmarshal(metadataRaw, &value.Metadata) != nil {
+		return SearchResult{}, false, runtimestorage.ErrStorage
+	}
+	if deletedAt.Valid {
+		value.DeletedAt = &deletedAt.Time
+	}
+	vector, err := decodeVector(vectorRaw)
+	if err != nil || len(vector) != value.EmbeddingDimension {
+		return SearchResult{}, false, nil
+	}
+	score, ok := cosine(embedding, vector)
+	if !ok || score < minScore {
+		return SearchResult{}, false, nil
+	}
+	return SearchResult{Document: cloneDocument(value), Score: score}, true, nil
+}
+
+func (s *Store) authorizeSearchResult(value Document, options SearchOptions) bool {
+	return value.TenantID == s.tenantID && value.EmbeddingModel == s.model && value.EmbeddingVersion == s.modelVer && value.EmbeddingDimension == s.dimension && metadataMatches(value.Metadata, options.Metadata) && (options.Authorize == nil || options.Authorize(cloneDocument(value)))
+}
+
+func sortSearchResults(values []SearchResult) {
 	sort.Slice(values, func(i, j int) bool {
 		if values[i].Score == values[j].Score {
 			if values[i].Document.DocumentID == values[j].Document.DocumentID {
@@ -573,10 +663,13 @@ func (s *Store) Search(ctx context.Context, embedding []float64, options SearchO
 		}
 		return values[i].Score > values[j].Score
 	})
-	if options.Limit > 0 && len(values) > options.Limit {
-		values = values[:options.Limit]
+}
+
+func limitSearchResults(values []SearchResult, limit int) []SearchResult {
+	if limit > 0 && len(values) > limit {
+		return values[:limit]
 	}
-	return values, nil
+	return values
 }
 
 // SearchDocuments is the explicit document-oriented name for Search.
@@ -634,8 +727,7 @@ func (s *Store) Delete(ctx context.Context, knowledgeID, documentID, chunkID str
 	if !validKey(knowledgeID, true) || !validKey(documentID, true) || !validKey(chunkID, true) {
 		return runtimestorage.ErrInvalid
 	}
-	query := fmt.Sprintf("UPDATE %s SET index_status='deleted',deleted_at=now(),embedding=NULL,version=version+1,updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL", s.table("documents"))
-	result, err := s.db.ExecContext(ctx, query, s.tenantID, s.collection, knowledgeID, documentID, chunkID)
+	result, err := s.db.ExecContext(ctx, s.queries.delete, s.tenantID, s.collection, knowledgeID, documentID, chunkID)
 	if err != nil {
 		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
@@ -655,8 +747,7 @@ func (s *Store) Retry(ctx context.Context, knowledgeID, documentID, chunkID stri
 		return runtimestorage.ErrInvalid
 	}
 	key := documentKey{knowledgeID: knowledgeID, documentID: documentID, chunkID: chunkID}
-	query := fmt.Sprintf("UPDATE %s SET index_status='pending',attempts=0,last_error_class='',updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL AND index_status IN ('failed','pending','ready','dead_letter')", s.table("documents"))
-	result, err := s.db.ExecContext(ctx, query, s.tenantID, s.collection, knowledgeID, documentID, chunkID)
+	result, err := s.db.ExecContext(ctx, s.queries.retry, s.tenantID, s.collection, knowledgeID, documentID, chunkID)
 	if err != nil {
 		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
@@ -678,8 +769,7 @@ func (s *Store) Reconcile(ctx context.Context) (int, error) {
 	if err := s.check(ctx); err != nil {
 		return 0, err
 	}
-	query := fmt.Sprintf("SELECT knowledge_id,document_id,chunk_id FROM %s WHERE tenant_id=$1 AND collection=$2 AND deleted_at IS NULL AND index_status IN ('failed','dead_letter') ORDER BY updated_at,knowledge_id,document_id,chunk_id", s.table("documents"))
-	rows, err := s.db.QueryContext(ctx, query, s.tenantID, s.collection)
+	rows, err := s.db.QueryContext(ctx, s.queries.reconcile, s.tenantID, s.collection)
 	if err != nil {
 		return 0, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
@@ -710,7 +800,16 @@ func (s *Store) worker() {
 		case <-s.stop:
 			return
 		case job := <-s.queue:
-			s.index(context.Background(), job.key)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				s.index(s.workerCtx, job.key)
+			}()
+			select {
+			case <-done:
+			case <-s.workerCtx.Done():
+				return
+			}
 		}
 	}
 }
@@ -718,12 +817,11 @@ func (s *Store) worker() {
 func (s *Store) index(ctx context.Context, key documentKey) {
 	var content, model, modelVersion, status, vectorRaw string
 	var dimension, version int
-	query := fmt.Sprintf("SELECT content,embedding_model,embedding_version,embedding_dimension,version,index_status,COALESCE(embedding::text,'') FROM %s WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL", s.table("documents"))
-	if err := s.db.QueryRowContext(ctx, query, s.tenantID, s.collection, key.knowledgeID, key.documentID, key.chunkID).Scan(&content, &model, &modelVersion, &dimension, &version, &status, &vectorRaw); err != nil {
+	if err := s.db.QueryRowContext(ctx, s.queries.loadIndex, s.tenantID, s.collection, key.knowledgeID, key.documentID, key.chunkID).Scan(&content, &model, &modelVersion, &dimension, &version, &status, &vectorRaw); err != nil {
 		return
 	}
 	if status == string(IndexDeleted) || model != s.model || modelVersion != s.modelVer || dimension != s.dimension {
-		s.markFailed(ctx, key, ErrIncompatible)
+		s.markFailed(ctx, key, version, ErrIncompatible)
 		return
 	}
 	var vector []float64
@@ -736,28 +834,29 @@ func (s *Store) index(ctx context.Context, key documentKey) {
 	if err == nil && len(vector) != s.dimension {
 		err = ErrIncompatible
 	}
+	if ctx.Err() != nil {
+		return
+	}
 	if err != nil {
-		s.markFailed(ctx, key, err)
+		s.markFailed(ctx, key, version, err)
 		return
 	}
 	encoded, err := encodeVector(vector)
 	if err != nil {
-		s.markFailed(ctx, key, err)
+		s.markFailed(ctx, key, version, err)
 		return
 	}
-	query = fmt.Sprintf("UPDATE %s SET embedding=$6::vector,index_status='ready',attempts=attempts+1,last_error_class='',updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND version=$7 AND index_status='pending' AND deleted_at IS NULL", s.table("documents"))
-	if _, err := s.db.ExecContext(ctx, query, s.tenantID, s.collection, key.knowledgeID, key.documentID, key.chunkID, encoded, version); err != nil {
-		s.markFailed(ctx, key, err)
+	if _, err := s.db.ExecContext(ctx, s.queries.markReady, s.tenantID, s.collection, key.knowledgeID, key.documentID, key.chunkID, encoded, version); err != nil {
+		s.markFailed(ctx, key, version, err)
 	}
 }
 
-func (s *Store) markFailed(ctx context.Context, key documentKey, cause error) {
+func (s *Store) markFailed(ctx context.Context, key documentKey, version int, cause error) {
 	class := "provider_error"
 	if errors.Is(cause, ErrIncompatible) {
 		class = "incompatible_embedding"
 	}
-	query := fmt.Sprintf("UPDATE %s SET index_status=CASE WHEN attempts+1 >= $6 THEN 'dead_letter' ELSE 'failed' END,attempts=attempts+1,last_error_class=$7,updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL", s.table("documents"))
-	_, _ = s.db.ExecContext(ctx, query, s.tenantID, s.collection, key.knowledgeID, key.documentID, key.chunkID, s.maxAttempts, class)
+	_, _ = s.db.ExecContext(ctx, s.queries.markFailed, s.tenantID, s.collection, key.knowledgeID, key.documentID, key.chunkID, version, s.maxAttempts, class)
 }
 
 // PutKnowledge adapts the legacy document contract to one default chunk.
@@ -845,8 +944,7 @@ func (s *Store) DeleteVector(ctx context.Context, tenantID, documentID string) e
 	if !validKey(documentID, true) {
 		return runtimestorage.ErrInvalid
 	}
-	query := fmt.Sprintf("UPDATE %s SET index_status='deleted',deleted_at=now(),embedding=NULL,version=version+1,updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND document_id=$3 AND deleted_at IS NULL", s.table("documents"))
-	result, err := s.db.ExecContext(ctx, query, s.tenantID, s.collection, documentID)
+	result, err := s.db.ExecContext(ctx, s.queries.deleteVectors, s.tenantID, s.collection, documentID)
 	if err != nil {
 		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}

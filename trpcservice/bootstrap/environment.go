@@ -1626,55 +1626,69 @@ type environmentPGVectorOptions struct {
 }
 
 func parseEnvironmentPGVectorOptions(raw map[string]string) (environmentPGVectorOptions, error) {
-	allowed := map[string]bool{"schema": true, "collection": true, "embedding_model": true, "embedding_version": true, "dimension": true, "queue_size": true, "workers": true, "max_attempts": true}
-	for key := range raw {
-		if !allowed[key] {
-			return environmentPGVectorOptions{}, backend.ErrStorageFactory
-		}
+	if !pgvectorOptionKeysAllowed(raw) {
+		return environmentPGVectorOptions{}, backend.ErrStorageFactory
 	}
-	value := func(key, fallback string) string {
-		if item := strings.TrimSpace(raw[key]); item != "" {
-			return item
-		}
-		return fallback
+	result := environmentPGVectorOptions{
+		schema: valueOr(raw, "schema", "public"), collection: valueOr(raw, "collection", "knowledge"),
+		model: valueOr(raw, "embedding_model", "deterministic"), version: valueOr(raw, "embedding_version", "v1"),
 	}
-	result := environmentPGVectorOptions{schema: value("schema", "public"), collection: value("collection", "knowledge"), model: value("embedding_model", "deterministic"), version: value("embedding_version", "v1")}
-	for index, item := range []string{result.schema, result.collection, result.model, result.version} {
-		maxLength := 63
-		if index >= 2 {
-			maxLength = 256
-		}
-		if len(item) == 0 || len(item) > maxLength {
-			return environmentPGVectorOptions{}, backend.ErrStorageFactory
-		}
-		for _, character := range item {
-			if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune("_-.:/", character) {
-				continue
-			}
-			return environmentPGVectorOptions{}, backend.ErrStorageFactory
-		}
-	}
-	parse := func(key string, fallback string, min, max int) (int, error) {
-		parsed, err := strconv.Atoi(value(key, fallback))
-		if err != nil || parsed < min || parsed > max {
-			return 0, backend.ErrStorageFactory
-		}
-		return parsed, nil
+	if !validPGVectorOptionText(result.schema, 63) || !validPGVectorOptionText(result.collection, 63) || !validPGVectorOptionText(result.model, 256) || !validPGVectorOptionText(result.version, 256) {
+		return environmentPGVectorOptions{}, backend.ErrStorageFactory
 	}
 	var err error
-	if result.dimension, err = parse("dimension", "32", 1, 4096); err != nil {
+	if result.dimension, err = parsePGVectorInt(raw, "dimension", "32", 1, 4096); err != nil {
 		return environmentPGVectorOptions{}, err
 	}
-	if result.queueSize, err = parse("queue_size", "128", 1, 10000); err != nil {
+	if result.queueSize, err = parsePGVectorInt(raw, "queue_size", "128", 1, 10000); err != nil {
 		return environmentPGVectorOptions{}, err
 	}
-	if result.workers, err = parse("workers", "1", 1, 32); err != nil {
+	if result.workers, err = parsePGVectorInt(raw, "workers", "1", 1, 32); err != nil {
 		return environmentPGVectorOptions{}, err
 	}
-	if result.maxAttempts, err = parse("max_attempts", "3", 1, 100); err != nil {
+	if result.maxAttempts, err = parsePGVectorInt(raw, "max_attempts", "3", 1, 100); err != nil {
 		return environmentPGVectorOptions{}, err
 	}
 	return result, nil
+}
+
+func pgvectorOptionKeysAllowed(raw map[string]string) bool {
+	for key := range raw {
+		switch key {
+		case "schema", "collection", "embedding_model", "embedding_version", "dimension", "queue_size", "workers", "max_attempts":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func valueOr(raw map[string]string, key, fallback string) string {
+	if value := strings.TrimSpace(raw[key]); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func validPGVectorOptionText(value string, maxLength int) bool {
+	if len(value) == 0 || len(value) > maxLength {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune("_-.:/", character) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func parsePGVectorInt(raw map[string]string, key, fallback string, min, max int) (int, error) {
+	parsed, err := strconv.Atoi(valueOr(raw, key, fallback))
+	if err != nil || parsed < min || parsed > max {
+		return 0, backend.ErrStorageFactory
+	}
+	return parsed, nil
 }
 
 func validEnvironmentPGVectorEndpoint(endpoint string) bool {
