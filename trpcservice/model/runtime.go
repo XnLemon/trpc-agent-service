@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/resilience"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -238,6 +239,17 @@ type ModelFactory interface {
 // ModelFactory. Resolver and Factory errors are intentionally sanitized so
 // provider credentials cannot escape through an error chain.
 func ResolveAndBuild(ctx context.Context, input ModelFactoryInput, resolver SecretResolver, factory ModelFactory) (trpcmodel.Model, error) {
+	return resolveAndBuild(ctx, input, resolver, factory, nil)
+}
+
+// ResolveAndBuildWithPolicy resolves and constructs a model through an
+// explicit bounded policy. The policy applies separately to secret resolution
+// and model construction; errors remain redacted using the existing contract.
+func ResolveAndBuildWithPolicy(ctx context.Context, input ModelFactoryInput, resolver SecretResolver, factory ModelFactory, policy *resilience.Policy) (trpcmodel.Model, error) {
+	return resolveAndBuild(ctx, input, resolver, factory, policy)
+}
+
+func resolveAndBuild(ctx context.Context, input ModelFactoryInput, resolver SecretResolver, factory ModelFactory, policy *resilience.Policy) (trpcmodel.Model, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
@@ -247,30 +259,86 @@ func ResolveAndBuild(ctx context.Context, input ModelFactoryInput, resolver Secr
 	if err := validateFactoryInput(input); err != nil {
 		return nil, err
 	}
-	secret := SecretValue{}
-	if input.SecretRef != "" {
-		if resolver == nil {
-			return nil, fmt.Errorf("%w: secret resolver is required", ErrInvalid)
-		}
-		scope := SecretScope{TenantID: input.TenantID, SecretRef: input.SecretRef}
-		if err := scope.Validate(); err != nil {
+	if policy != nil && policy.Validate() != nil {
+		return nil, fmt.Errorf("%w: resilience policy is invalid", ErrInvalid)
+	}
+	secret, err := resolveModelSecret(ctx, input, resolver, policy)
+	if err != nil {
+		if errors.Is(err, ErrInvalid) {
 			return nil, err
 		}
-		resolved, err := resolver.Resolve(ctx, scope)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, ErrSecretResolution
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		secret = resolved
+		return nil, ErrSecretResolution
 	}
-	model, err := factory.New(ctx, input.Clone(), secret)
+	model, err := buildModel(ctx, input, secret, factory, policy)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		return nil, ErrModelFactory
+	}
+	return model, nil
+}
+
+func resolveModelSecret(ctx context.Context, input ModelFactoryInput, resolver SecretResolver, policy *resilience.Policy) (SecretValue, error) {
+	if input.SecretRef == "" {
+		return SecretValue{}, nil
+	}
+	if resolver == nil {
+		return SecretValue{}, fmt.Errorf("%w: secret resolver is required", ErrInvalid)
+	}
+	scope := SecretScope{TenantID: input.TenantID, SecretRef: input.SecretRef}
+	if err := scope.Validate(); err != nil {
+		return SecretValue{}, err
+	}
+	var resolved SecretValue
+	resolve := func(resolveCtx context.Context) error {
+		candidate, err := resolver.Resolve(resolveCtx, scope)
+		if err != nil {
+			// Resolver failures are deliberately collapsed at this boundary so
+			// provider details and credential-bearing messages cannot escape.
+			return ErrSecretResolution
+		}
+		if candidate.Value() == "" {
+			return ErrSecretResolution
+		}
+		resolved = candidate
+		return nil
+	}
+	if policy == nil {
+		if err := resolve(ctx); err != nil {
+			return SecretValue{}, err
+		}
+	} else if err := policy.Execute(ctx, resolve); err != nil {
+		return SecretValue{}, err
+	}
+	if resolved.Value() == "" {
+		return SecretValue{}, ErrSecretResolution
+	}
+	return resolved, nil
+}
+
+func buildModel(ctx context.Context, input ModelFactoryInput, secret SecretValue, factory ModelFactory, policy *resilience.Policy) (trpcmodel.Model, error) {
+	var model trpcmodel.Model
+	build := func(buildCtx context.Context) error {
+		candidate, err := factory.New(buildCtx, input.Clone(), secret)
+		if err != nil {
+			return err
+		}
+		if candidate == nil {
+			return ErrModelFactory
+		}
+		model = candidate
+		return nil
+	}
+	if policy == nil {
+		if err := build(ctx); err != nil {
+			return nil, err
+		}
+	} else if err := policy.Execute(ctx, build); err != nil {
+		return nil, err
 	}
 	if model == nil {
 		return nil, fmt.Errorf("%w: returned nil model", ErrModelFactory)

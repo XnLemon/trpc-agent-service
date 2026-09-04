@@ -50,6 +50,8 @@
   与 telemetry 边界、事件 schema、append-only/重复语义、失败策略、聚合和运维 ledger。
 - [Issue #79：生产可观测性、Dashboard 与告警](issue-79-observability.md)：trace/metrics 链路、
   低基数标签、租户授权查询以及 Prometheus/Grafana 资源契约。
+- [Issue #80：可靠性、备份与容量门禁](issue-80-reliability.md)：统一 timeout/retry/circuit/fallback、
+  PostgreSQL 备份恢复演练、发布回滚和可重复容量测试。
 
 ## 快速开始
 

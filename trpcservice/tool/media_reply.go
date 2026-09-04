@@ -14,6 +14,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/resilience"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
@@ -212,6 +213,89 @@ func (registry *Registry) Resolve(authorizations []agent.ToolAuthorization) ([]t
 		tools = append(tools, tool)
 	}
 	return tools, nil
+}
+
+// ResilientTool applies an explicit timeout, retry, circuit-breaker, and
+// optional fallback policy to a callable tool.
+type ResilientTool struct {
+	delegate trpctool.CallableTool
+	policy   *resilience.Policy
+}
+
+// NewResilientTool wraps a callable tool with a shared execution policy.
+func NewResilientTool(delegate trpctool.CallableTool, policy *resilience.Policy) (*ResilientTool, error) {
+	if delegate == nil || delegate.Declaration() == nil || policy == nil || policy.Validate() != nil {
+		return nil, ErrUnavailable
+	}
+	return &ResilientTool{delegate: delegate, policy: policy}, nil
+}
+
+// Declaration returns the delegated tool declaration unchanged.
+func (tool *ResilientTool) Declaration() *trpctool.Declaration {
+	if tool == nil || tool.delegate == nil {
+		return nil
+	}
+	return tool.delegate.Declaration()
+}
+
+// Call invokes the delegated tool through the bounded policy.
+func (tool *ResilientTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
+	if tool == nil || tool.delegate == nil || tool.policy == nil {
+		return nil, ErrUnavailable
+	}
+	var result any
+	completed := false
+	err := tool.policy.Execute(ctx, func(callCtx context.Context) error {
+		candidate, err := tool.delegate.Call(callCtx, jsonArgs)
+		if err != nil {
+			return err
+		}
+		result = candidate
+		completed = true
+		return nil
+	})
+	if err == nil && !completed {
+		return nil, ErrUnavailable
+	}
+	return result, err
+}
+
+// ResolveWithPolicy resolves authorized tools and wraps only the explicitly
+// listed retry-safe callable tools with a bounded execution policy. Callers
+// must list a tool only when its external side effects are idempotent under
+// repeated calls. Non-callable and unlisted tools remain unchanged.
+func (registry *Registry) ResolveWithPolicy(authorizations []agent.ToolAuthorization, policy *resilience.Policy, retrySafeToolIDs ...string) ([]trpctool.Tool, error) {
+	tools, err := registry.Resolve(authorizations)
+	if err != nil || policy == nil {
+		return tools, err
+	}
+	if err := policy.Validate(); err != nil {
+		return nil, ErrUnavailable
+	}
+	retrySafe := make(map[string]struct{}, len(retrySafeToolIDs))
+	for _, id := range retrySafeToolIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			retrySafe[id] = struct{}{}
+		}
+	}
+	wrapped := make([]trpctool.Tool, 0, len(tools))
+	for _, tool := range tools {
+		callable, ok := tool.(trpctool.CallableTool)
+		if !ok || tool.Declaration() == nil {
+			wrapped = append(wrapped, tool)
+			continue
+		}
+		if _, ok := retrySafe[tool.Declaration().Name]; !ok {
+			wrapped = append(wrapped, tool)
+			continue
+		}
+		resilient, err := NewResilientTool(callable, policy)
+		if err != nil {
+			return nil, err
+		}
+		wrapped = append(wrapped, resilient)
+	}
+	return wrapped, nil
 }
 
 type sendTestImageFactory struct{}

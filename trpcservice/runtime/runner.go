@@ -12,6 +12,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/resilience"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
@@ -46,7 +47,7 @@ func NewRunnerWithObservability(
 	telemetry observability.Provider,
 	storageFactories ...backend.StorageFactory,
 ) (trpcrunner.Runner, error) {
-	return NewRunnerWithToolRegistry(ctx, plan, resolver, factory, sessions, telemetry, servicetool.DefaultRegistry(), storageFactories...)
+	return newRunnerWithToolRegistry(ctx, plan, resolver, factory, sessions, telemetry, servicetool.DefaultRegistry(), ResiliencePolicies{}, storageFactories...)
 }
 
 // NewRunnerWithToolRegistry is NewRunnerWithObservability with an explicit
@@ -64,8 +65,66 @@ func NewRunnerWithToolRegistry(
 	toolRegistry *servicetool.Registry,
 	storageFactories ...backend.StorageFactory,
 ) (trpcrunner.Runner, error) {
+	return newRunnerWithToolRegistry(ctx, plan, resolver, factory, sessions, telemetry, toolRegistry, ResiliencePolicies{}, storageFactories...)
+}
+
+// ResiliencePolicies keeps circuit state scoped to the dependencies a Runner
+// builds. Tools are retried only when their IDs are listed by the caller.
+type ResiliencePolicies struct {
+	Model            *resilience.Policy
+	Storage          *resilience.Policy
+	Tools            *resilience.Policy
+	RetrySafeToolIDs []string
+}
+
+// Validate reports whether every configured policy is ready for use.
+func (policies ResiliencePolicies) Validate() error {
+	for _, policy := range []*resilience.Policy{policies.Model, policies.Storage, policies.Tools} {
+		if policy != nil && policy.Validate() != nil {
+			return resilience.ErrInvalid
+		}
+	}
+	return nil
+}
+
+// Enabled reports whether any dependency has a resilience policy.
+func (policies ResiliencePolicies) Enabled() bool {
+	return policies.Model != nil || policies.Storage != nil || policies.Tools != nil
+}
+
+// NewRunnerWithToolRegistryAndResilience is NewRunnerWithToolRegistry with
+// explicit, dependency-scoped policies for model, storage, and tools.
+func NewRunnerWithToolRegistryAndResilience(
+	ctx context.Context,
+	plan ExecutionPlan,
+	resolver modelprofile.SecretResolver,
+	factory modelprofile.ModelFactory,
+	sessions session.Service,
+	telemetry observability.Provider,
+	toolRegistry *servicetool.Registry,
+	policies ResiliencePolicies,
+	storageFactories ...backend.StorageFactory,
+) (trpcrunner.Runner, error) {
+	return newRunnerWithToolRegistry(ctx, plan, resolver, factory, sessions, telemetry, toolRegistry, policies, storageFactories...)
+}
+
+//nolint:gocyclo // Runner construction validates and wires several independent capability boundaries.
+func newRunnerWithToolRegistry(
+	ctx context.Context,
+	plan ExecutionPlan,
+	resolver modelprofile.SecretResolver,
+	factory modelprofile.ModelFactory,
+	sessions session.Service,
+	telemetry observability.Provider,
+	toolRegistry *servicetool.Registry,
+	policies ResiliencePolicies,
+	storageFactories ...backend.StorageFactory,
+) (trpcrunner.Runner, error) {
 	if ctx == nil {
 		return nil, errors.New("invalid runner: context is required")
+	}
+	if err := policies.Validate(); err != nil {
+		return nil, errors.New("invalid runner: resilience policy is required")
 	}
 	if sessions == nil && len(storageFactories) == 0 {
 		return nil, errors.New("invalid runner: session service is required")
@@ -88,7 +147,18 @@ func NewRunnerWithToolRegistry(
 	if len(storageFactories) == 1 && storageFactories[0] == nil {
 		return nil, errors.New("invalid runner: storage factory is required")
 	}
+	storageFactory := backend.StorageFactory(nil)
 	if len(storageFactories) == 1 {
+		storageFactory = storageFactories[0]
+	}
+	if policies.Storage != nil && storageFactory != nil {
+		resilientFactory, err := backend.NewResilientStorageFactory(storageFactory, policies.Storage)
+		if err != nil {
+			return nil, fmt.Errorf("build runner: resilience storage: %w", err)
+		}
+		storageFactory = resilientFactory
+	}
+	if storageFactory != nil {
 		storageCtx := ctx
 		started := time.Now()
 		var finishStorage func(error)
@@ -97,7 +167,7 @@ func NewRunnerWithToolRegistry(
 			storageCtx, _, finishStorage = observability.StartOperation(ctx, telemetry, observability.OperationStorageOperation, "storage")
 			_ = storageMetrics.Request(storageCtx, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": "other", "status": "started"})
 		}
-		capabilities, err = storageFactories[0].New(storageCtx, mustStorageInput(plan))
+		capabilities, err = storageFactory.New(storageCtx, mustStorageInput(plan))
 		if finishStorage != nil {
 			finishStorage(err)
 			_ = storageMetrics.Operation(storageCtx, started, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": "other"}, err)
@@ -129,7 +199,12 @@ func NewRunnerWithToolRegistry(
 	if err != nil {
 		return nil, fmt.Errorf("build runner: session scope: %w", err)
 	}
-	model, err := modelprofile.ResolveAndBuild(ctx, modelInput, resolver, factory)
+	var model trpcmodel.Model
+	if policies.Model == nil {
+		model, err = modelprofile.ResolveAndBuild(ctx, modelInput, resolver, factory)
+	} else {
+		model, err = modelprofile.ResolveAndBuildWithPolicy(ctx, modelInput, resolver, factory, policies.Model)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("build runner: model: %w", err)
 	}
@@ -139,7 +214,12 @@ func NewRunnerWithToolRegistry(
 	if toolRegistry == nil {
 		toolRegistry = servicetool.DefaultRegistry()
 	}
-	tools, err := toolRegistry.Resolve(agentInput.Tools)
+	var tools []trpctool.Tool
+	if policies.Tools == nil {
+		tools, err = toolRegistry.Resolve(agentInput.Tools)
+	} else {
+		tools, err = toolRegistry.ResolveWithPolicy(agentInput.Tools, policies.Tools, policies.RetrySafeToolIDs...)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("build runner: tools: %w", err)
 	}

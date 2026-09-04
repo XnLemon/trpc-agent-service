@@ -33,6 +33,7 @@ import (
 	modelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/model/mysql"
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	runtimeservice "github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -97,6 +98,9 @@ type Config struct {
 	// ToolRegistry resolves published revision authorizations to installed,
 	// context-bound platform tools. A nil value uses the built-in registry.
 	ToolRegistry *servicetool.Registry
+	// Resilience keeps circuit state scoped to model, storage, and retry-safe
+	// tool dependencies. Outbox workers receive their own policy through Config.
+	Resilience runtimeservice.ResiliencePolicies
 	// RuntimeStore is the tenant-scoped Session/Event/Outbox capability. It is
 	// separate from upstream session.Service while the runtime adapter evolves.
 	RuntimeStore runtimestorage.RuntimeStore
@@ -325,6 +329,9 @@ func validateConfig(config Config) error {
 	if config.Sessions == nil && config.StorageFactory == nil {
 		return ErrInvalidConfig
 	}
+	if err := config.Resilience.Validate(); err != nil {
+		return ErrInvalidConfig
+	}
 	return nil
 }
 
@@ -355,6 +362,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 		Registry: config.Registry, SecretResolver: config.SecretResolver,
 		ModelFactory: config.ModelFactory, Sessions: config.Sessions, StorageFactory: config.StorageFactory,
 		Observability: config.Observability, ToolRegistry: config.ToolRegistry,
+		Resilience: config.Resilience,
 	})
 	if err != nil {
 		return nil, ErrInvalidConfig

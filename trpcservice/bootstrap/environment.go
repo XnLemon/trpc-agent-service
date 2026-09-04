@@ -36,6 +36,8 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/resilience"
+	runtimeservice "github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -180,6 +182,8 @@ type environmentConfig struct {
 	wecomAIBots    []environmentWeComAIBotConfig
 	telemetry      observability.Provider
 	otlp           observability.OTLPConfig
+	resilience     runtimeservice.ResiliencePolicies
+	outboxPolicy   *resilience.Policy
 }
 
 type environmentWeComConfig struct {
@@ -232,6 +236,10 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, fmt.Errorf("%w: telemetry exporter configuration is invalid", ErrInvalidConfig)
 	}
 	config.telemetry = telemetry
+	config.resilience = runtimeservice.ResiliencePolicies{
+		Model: resilience.NewDefault(), Storage: resilience.NewDefault(), Tools: resilience.NewDefault(),
+	}
+	config.outboxPolicy = resilience.NewDefault()
 	telemetryOwned := true
 	defer func() {
 		if telemetryOwned {
@@ -327,6 +335,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		SecretResolver:      secretRegistry,
 		ModelFactory:        modelRegistry,
 		StorageFactory:      storageFactory,
+		Resilience:          config.resilience,
 		Sessions:            delegateSessions,
 		RuntimeStore:        runtimeStore,
 		RuntimeTenantID:     "",
@@ -540,7 +549,7 @@ func environmentOutboxWorkerFactory(config environmentConfig, runtimeStore runti
 		if err != nil {
 			return nil, err
 		}
-		return newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: provider, Channel: channel, ProviderName: providerName, TenantID: config.tenantID, Owner: owner, LeaseDuration: leaseDuration, AuditWriter: auditWriter, Observability: config.telemetry})
+		return newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: provider, Channel: channel, ProviderName: providerName, TenantID: config.tenantID, Owner: owner, LeaseDuration: leaseDuration, AuditWriter: auditWriter, Observability: config.telemetry, Resilience: config.outboxPolicy})
 	}
 }
 

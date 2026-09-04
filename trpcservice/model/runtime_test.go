@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/resilience"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -149,10 +151,106 @@ func TestResolveAndBuildRedactsResolverAndFactoryErrors(t *testing.T) {
 	if _, err := ResolveAndBuild(context.Background(), input, resolver, &recordingFactory{}); !errors.Is(err, ErrSecretResolution) || strings.Contains(err.Error(), "super-secret") {
 		t.Fatalf("resolver error was not redacted/classified: %v", err)
 	}
+	resolver.err = fmt.Errorf("provider rejected super-secret: %w", ErrInvalid)
+	if _, err := ResolveAndBuild(context.Background(), input, resolver, &recordingFactory{}); !errors.Is(err, ErrSecretResolution) || strings.Contains(err.Error(), "super-secret") || errors.Is(err, ErrInvalid) {
+		t.Fatalf("wrapped resolver error was not redacted/classified: %v", err)
+	}
 	resolver.err = nil
+	resolver.value, err = NewSecretValue("super-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
 	factory := &recordingFactory{err: errors.New("provider rejected super-secret")}
 	if _, err := ResolveAndBuild(context.Background(), input, resolver, factory); !errors.Is(err, ErrModelFactory) || strings.Contains(err.Error(), "super-secret") {
 		t.Fatalf("factory error was not redacted/classified: %v", err)
+	}
+}
+
+func TestResolveAndBuildWithPolicyRetriesModelConstruction(t *testing.T) {
+	_, tenantSnapshot, profile, catalog := modelExecutionFixture(t, "")
+	snapshot, err := NewModelExecutionSnapshot(tenantSnapshot, profile, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := snapshot.FactoryInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := resilience.New(resilience.Config{
+		Timeout: time.Second, MaxAttempts: 3, FailureThreshold: 3, OpenTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := &retryingFactory{}
+	if _, err := ResolveAndBuildWithPolicy(context.Background(), input, nil, factory, policy); err != nil {
+		t.Fatalf("ResolveAndBuildWithPolicy() = %v", err)
+	}
+	if factory.calls != 3 {
+		t.Fatalf("factory calls = %d, want three bounded attempts", factory.calls)
+	}
+	if policy.State() != resilience.StateClosed {
+		t.Fatalf("policy state = %q, want closed", policy.State())
+	}
+}
+
+func TestResolveAndBuildWithPolicyRejectsSuccessfulSecretFallback(t *testing.T) {
+	_, tenantSnapshot, profile, catalog := modelExecutionFixture(t, "secret://tenant/model")
+	snapshot, err := NewModelExecutionSnapshot(tenantSnapshot, profile, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := snapshot.FactoryInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name          string
+		openCircuit   bool
+		resolverCalls int
+	}{
+		{name: "exhausted attempts", resolverCalls: 1},
+		{name: "open circuit", openCircuit: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			policy, err := resilience.New(resilience.Config{
+				Timeout: time.Second, MaxAttempts: 1, FailureThreshold: 1, OpenTimeout: time.Minute,
+				Fallback: func(context.Context, error) error { return nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.openCircuit {
+				if err := policy.Execute(context.Background(), func(context.Context) error { return errors.New("dependency unavailable") }); err != nil {
+					t.Fatalf("open circuit setup = %v", err)
+				}
+			}
+			resolver := &recordingResolver{err: errors.New("secret unavailable")}
+			factory := &recordingFactory{}
+			model, err := ResolveAndBuildWithPolicy(context.Background(), input, resolver, factory, policy)
+			if model != nil || !errors.Is(err, ErrSecretResolution) {
+				t.Fatalf("ResolveAndBuildWithPolicy() model=%v err=%v, want secret resolution error", model, err)
+			}
+			if resolver.calls != test.resolverCalls || factory.calls != 0 {
+				t.Fatalf("resolver calls=%d factory calls=%d, want %d and 0", resolver.calls, factory.calls, test.resolverCalls)
+			}
+		})
+	}
+}
+
+func TestResolveAndBuildWithPolicyRejectsZeroPolicy(t *testing.T) {
+	_, tenantSnapshot, profile, catalog := modelExecutionFixture(t, "")
+	snapshot, err := NewModelExecutionSnapshot(tenantSnapshot, profile, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := snapshot.FactoryInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var policy resilience.Policy
+	if _, err := ResolveAndBuildWithPolicy(context.Background(), input, nil, &recordingFactory{}, &policy); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("ResolveAndBuildWithPolicy() = %v, want ErrInvalid", err)
 	}
 }
 
@@ -337,6 +435,16 @@ type recordingFactory struct {
 	secret    SecretValue
 	err       error
 	returnNil bool
+}
+
+type retryingFactory struct{ calls int }
+
+func (factory *retryingFactory) New(_ context.Context, _ ModelFactoryInput, _ SecretValue) (trpcmodel.Model, error) {
+	factory.calls++
+	if factory.calls < 3 {
+		return nil, errors.New("temporary provider failure")
+	}
+	return fakeModel{}, nil
 }
 
 func (factory *recordingFactory) New(_ context.Context, input ModelFactoryInput, secret SecretValue) (trpcmodel.Model, error) {
