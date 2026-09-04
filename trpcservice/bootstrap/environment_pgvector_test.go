@@ -13,7 +13,7 @@ import (
 
 func TestEnvironmentRegistersTenantBoundPGVectorProvider(t *testing.T) {
 	const tenantID = "t_00000000000000000000000000"
-	db, _, err := sqlmock.New()
+	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,6 +30,7 @@ func TestEnvironmentRegistersTenantBoundPGVectorProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mock.ExpectQuery("SELECT knowledge_id,document_id,chunk_id FROM public\\.runtime_pgvector_documents WHERE tenant_id=\\$1").WithArgs(tenantID, "knowledge").WillReturnRows(sqlmock.NewRows([]string{"knowledge_id", "document_id", "chunk_id"}))
 	value, err := provider.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantID}, backend.CapabilityBinding{Capability: backend.CapabilityKnowledge, Provider: "pgvector", Endpoint: "postgres://db.example:5432"}, modelprofile.SecretValue{})
 	if err != nil {
 		t.Fatal(err)

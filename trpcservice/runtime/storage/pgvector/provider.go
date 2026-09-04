@@ -228,7 +228,10 @@ func New(db *sql.DB, tenantID string, config Config) (*Store, error) {
 	}
 	store := newStore(db, tenantID, config)
 	store.startWorkers()
-	store.recoverPending()
+	if err := store.recoverPending(); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	return store, nil
 }
 
@@ -386,11 +389,11 @@ func newDocumentQueries(table string) documentQueries {
 	const columns = "tenant_id,knowledge_id,document_id,chunk_id,source,source_version,content,content_ref,metadata,embedding_model,embedding_version,embedding_dimension,checksum,version,index_status,attempts,last_error_class,deleted_at,created_at,updated_at"
 	return documentQueries{
 		upsert:          "INSERT INTO " + table + " (tenant_id,collection,knowledge_id,document_id,chunk_id,source,source_version,content,content_ref,metadata,embedding_model,embedding_version,embedding_dimension,checksum,index_status,embedding,version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NULLIF($16,'' )::vector,1) ON CONFLICT (tenant_id,collection,knowledge_id,document_id,chunk_id) DO UPDATE SET source=EXCLUDED.source,source_version=EXCLUDED.source_version,content=EXCLUDED.content,content_ref=EXCLUDED.content_ref,metadata=EXCLUDED.metadata,embedding_model=EXCLUDED.embedding_model,embedding_version=EXCLUDED.embedding_version,embedding_dimension=EXCLUDED.embedding_dimension,checksum=EXCLUDED.checksum,index_status=$15,embedding=NULLIF($16,'')::vector,version=" + table + ".version+1,attempts=0,last_error_class='',deleted_at=NULL,updated_at=now() RETURNING " + columns,
-		get:             "SELECT " + columns + " FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5",
+		get:             "SELECT " + columns + " FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL",
 		search:          "SELECT " + columns + ",embedding::text FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND embedding_model=$3 AND embedding_version=$4 AND embedding_dimension=$5 AND index_status='ready' AND deleted_at IS NULL AND embedding IS NOT NULL",
 		searchKnowledge: "SELECT " + columns + ",embedding::text FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND embedding_model=$3 AND embedding_version=$4 AND embedding_dimension=$5 AND source=$6 AND index_status='ready' AND deleted_at IS NULL AND embedding IS NOT NULL",
 		delete:          "UPDATE " + table + " SET index_status='deleted',deleted_at=now(),embedding=NULL,version=version+1,updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL",
-		retry:           "UPDATE " + table + " SET index_status='pending',attempts=0,last_error_class='',updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL AND index_status IN ('failed','pending','ready','dead_letter')",
+		retry:           "UPDATE " + table + " SET index_status='pending',last_error_class='',updated_at=now() WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL AND index_status IN ('failed','pending','ready','dead_letter')",
 		reconcile:       "SELECT knowledge_id,document_id,chunk_id FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND deleted_at IS NULL AND index_status IN ('failed','dead_letter') ORDER BY updated_at,knowledge_id,document_id,chunk_id",
 		loadIndex:       "SELECT content,embedding_model,embedding_version,embedding_dimension,version,index_status,COALESCE(embedding::text,'') FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND knowledge_id=$3 AND document_id=$4 AND chunk_id=$5 AND deleted_at IS NULL",
 		recoverPending:  "SELECT knowledge_id,document_id,chunk_id FROM " + table + " WHERE tenant_id=$1 AND collection=$2 AND index_status='pending' AND deleted_at IS NULL ORDER BY updated_at,knowledge_id,document_id,chunk_id",
@@ -400,23 +403,27 @@ func newDocumentQueries(table string) documentQueries {
 	}
 }
 
-func (s *Store) recoverPending() {
+func (s *Store) recoverPending() error {
 	rows, err := s.db.QueryContext(s.workerCtx, s.queries.recoverPending, s.tenantID, s.collection)
 	if err != nil {
-		return
+		return runtimestorage.ErrStorage
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var key documentKey
 		if rows.Scan(&key.knowledgeID, &key.documentID, &key.chunkID) != nil {
-			continue
+			return runtimestorage.ErrStorage
 		}
 		select {
 		case s.queue <- indexJob{key: key}:
 		case <-s.workerCtx.Done():
-			return
+			return s.workerCtx.Err()
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return runtimestorage.ErrStorage
+	}
+	return nil
 }
 
 func encodeVector(values []float64) (string, error) {
@@ -835,7 +842,13 @@ func (s *Store) index(ctx context.Context, key documentKey) bool {
 	var content, model, modelVersion, status, vectorRaw string
 	var dimension, version int
 	if err := s.db.QueryRowContext(ctx, s.queries.loadIndex, s.tenantID, s.collection, key.knowledgeID, key.documentID, key.chunkID).Scan(&content, &model, &modelVersion, &dimension, &version, &status, &vectorRaw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false
+		}
 		return ctx.Err() == nil
+	}
+	if status != string(IndexPending) {
+		return false
 	}
 	if status == string(IndexDeleted) || model != s.model || modelVersion != s.modelVer || dimension != s.dimension {
 		return s.markFailed(ctx, key, version, ErrIncompatible) != nil && ctx.Err() == nil
@@ -954,7 +967,10 @@ func (s *Store) SearchVectors(ctx context.Context, tenantID string, embedding []
 
 // DeleteVector deletes every source projection for the requested document.
 func (s *Store) DeleteVector(ctx context.Context, tenantID, documentID string) error {
-	if s == nil || tenantID != s.tenantID {
+	if err := s.check(ctx); err != nil {
+		return err
+	}
+	if tenantID != s.tenantID {
 		return runtimestorage.ErrInvalid
 	}
 	if !validKey(documentID, true) {

@@ -130,6 +130,9 @@ func TestPureLifecycleBoundaries(t *testing.T) {
 	if err := closed.check(context.Background()); !errors.Is(err, ErrClosed) {
 		t.Fatalf("closed check = %v", err)
 	}
+	if err := closed.DeleteVector(context.Background(), "tenant-a", "doc"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("closed vector delete = %v", err)
+	}
 	db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
 	if err != nil {
 		t.Fatal(err)
@@ -157,7 +160,9 @@ func TestRecoveryAndReconcileBoundaries(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	store := &Store{db: db, tenantID: "tenant-a", collection: "knowledge", queue: make(chan indexJob, 2), stop: make(chan struct{}), workerCtx: context.Background(), queries: newDocumentQueries("public.runtime_pgvector_documents")}
 	mock.ExpectQuery("SELECT knowledge_id,document_id,chunk_id FROM public\\.runtime_pgvector_documents WHERE tenant_id=\\$1 AND collection=\\$2 AND index_status='pending'").WillReturnError(errors.New("database unavailable"))
-	store.recoverPending()
+	if err := store.recoverPending(); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("recovery error = %v", err)
+	}
 	mock.ExpectQuery("SELECT knowledge_id,document_id,chunk_id FROM public\\.runtime_pgvector_documents WHERE tenant_id=\\$1 AND collection=\\$2.*index_status IN").WithArgs("tenant-a", "knowledge").WillReturnRows(sqlmock.NewRows([]string{"knowledge_id", "document_id", "chunk_id"}).AddRow("knowledge", "repair", "chunk"))
 	mock.ExpectExec("UPDATE public\\.runtime_pgvector_documents SET index_status='pending'").WithArgs("tenant-a", "knowledge", "knowledge", "repair", "chunk").WillReturnResult(sqlmock.NewResult(0, 1))
 	if count, err := store.Reconcile(context.Background()); err != nil || count != 1 {
@@ -190,6 +195,22 @@ func TestRetryDeleteAndGetErrorsMapToStorageContracts(t *testing.T) {
 	mock.ExpectQuery("SELECT knowledge_id,document_id,chunk_id FROM public\\.runtime_pgvector_documents WHERE tenant_id=\\$1 AND collection=\\$2.*index_status IN").WithArgs("tenant-a", "knowledge").WillReturnError(errors.New("down"))
 	if _, err := store.Reconcile(context.Background()); !errors.Is(err, runtimestorage.ErrStorage) {
 		t.Fatalf("failed reconcile = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGetExcludesDeletedRows(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := &Store{db: db, tenantID: "tenant-a", collection: "knowledge", stop: make(chan struct{}), queries: newDocumentQueries("public.runtime_pgvector_documents")}
+	mock.ExpectQuery("SELECT tenant_id,knowledge_id,document_id,chunk_id.*deleted_at IS NULL").WithArgs("tenant-a", "knowledge", "deleted", "deleted", "default").WillReturnError(sql.ErrNoRows)
+	if _, err := store.GetKnowledge(context.Background(), "tenant-a", "deleted"); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("deleted knowledge get = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -232,6 +253,10 @@ func TestIndexClassifiesCompatibilityAndRetriesStorageFailures(t *testing.T) {
 	if store.index(context.Background(), documentKey{knowledgeID: "k", documentID: "d", chunkID: "c"}) {
 		t.Fatal("incompatible row was requeued")
 	}
+	mock.ExpectQuery("SELECT content,embedding_model,embedding_version").WillReturnRows(sqlmock.NewRows([]string{"content", "embedding_model", "embedding_version", "embedding_dimension", "version", "index_status", "embedding"}).AddRow("text", "other", "v1", 2, 1, "dead_letter", ""))
+	if store.index(context.Background(), documentKey{knowledgeID: "k", documentID: "d", chunkID: "c"}) {
+		t.Fatal("dead-letter row was requeued")
+	}
 	mock.ExpectQuery("SELECT content,embedding_model,embedding_version").WillReturnRows(row("deterministic", 2, "[1,0]"))
 	mock.ExpectExec("UPDATE public\\.runtime_pgvector_documents SET embedding=").WillReturnResult(sqlmock.NewResult(0, 1))
 	if store.index(context.Background(), documentKey{knowledgeID: "k", documentID: "d", chunkID: "c"}) {
@@ -246,6 +271,10 @@ func TestIndexClassifiesCompatibilityAndRetriesStorageFailures(t *testing.T) {
 	mock.ExpectQuery("SELECT content,embedding_model,embedding_version").WillReturnError(errors.New("temporary"))
 	if !store.index(context.Background(), documentKey{knowledgeID: "k", documentID: "d", chunkID: "c"}) {
 		t.Fatal("load failure was not requeued")
+	}
+	mock.ExpectQuery("SELECT content,embedding_model,embedding_version").WillReturnError(sql.ErrNoRows)
+	if store.index(context.Background(), documentKey{knowledgeID: "k", documentID: "d", chunkID: "c"}) {
+		t.Fatal("missing row was requeued")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
