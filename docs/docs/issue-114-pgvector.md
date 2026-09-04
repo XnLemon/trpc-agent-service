@@ -4,7 +4,9 @@ The `pgvector` Backend Profile provider is the first durable knowledge
 retrieval implementation. It binds one PostgreSQL pool to one trusted tenant
 and validates the profile endpoint, schema, collection, embedding model,
 embedding version, vector dimension, queue size, and worker count before a
-runtime capability is materialized.
+runtime capability is materialized. Schema and collection are unquoted
+PostgreSQL identifiers (`[A-Za-z_][A-Za-z0-9_]*`, at most 63 bytes), and the
+vector dimension is bounded to `1..2000`, matching PostgreSQL `vector` support.
 
 ## Lifecycle
 
@@ -45,4 +47,6 @@ The local Compose PostgreSQL service is the intended opt-in validation target.
 Set a Backend Profile binding with `Provider: "pgvector"` and an endpoint such
 as `postgresql://postgres:5432` plus the validated namespace options. The
 runtime reuses the already authenticated control-plane pool; credentials stay
-in the operator-managed DSN and Secret boundary.
+in the operator-managed DSN and Secret boundary. When the operator DSN names a
+database path, the binding must name the same path in addition to matching
+host and port.

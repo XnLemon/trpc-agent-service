@@ -129,12 +129,26 @@ func TestSearchFiltersBeforeRankingAndCopiesResults(t *testing.T) {
 	rows := sqlmock.NewRows([]string{"tenant_id", "knowledge_id", "document_id", "chunk_id", "source", "source_version", "content", "content_ref", "metadata", "embedding_model", "embedding_version", "embedding_dimension", "checksum", "version", "index_status", "attempts", "last_error_class", "deleted_at", "created_at", "updated_at", "embedding"})
 	rows.AddRow("tenant-a", "k", "secret", "c", "", "", "secret", "", []byte(`{"scope":"denied"}`), "deterministic", "v1", 2, "secret", 1, "ready", 0, "", nil, when, when, "[1,0]")
 	rows.AddRow("tenant-a", "k", "allowed", "c", "", "", "allowed", "", []byte(`{"scope":"allowed"}`), "deterministic", "v1", 2, "allowed", 1, "ready", 0, "", nil, when, when, "[0.8,0.6]")
+	rows.AddRow("tenant-a", "k", "malformed", "c", "", "", "malformed", "", []byte(`{"scope":"allowed"}`), "deterministic", "v1", 2, "malformed", 1, "ready", 0, "", nil, when, when, "not-a-vector")
 	rows.AddRow("tenant-a", "k", "incompatible", "c", "", "", "incompatible", "", []byte(`{"scope":"allowed"}`), "other-model", "v1", 2, "incompatible", 1, "ready", 0, "", nil, when, when, "[1,0]")
 	rows.AddRow("tenant-b", "k", "foreign", "c", "", "", "foreign", "", []byte(`{"scope":"allowed"}`), "deterministic", "v1", 2, "foreign", 1, "ready", 0, "", nil, when, when, "[1,0]")
 	mock.ExpectQuery("SELECT tenant_id,knowledge_id,document_id,chunk_id").WithArgs("tenant-a", "knowledge", "deterministic", "v1", 2).WillReturnRows(rows)
-	values, err := store.Search(context.Background(), []float64{1, 0}, pgvector.SearchOptions{Limit: 1, Metadata: map[string]string{"scope": "allowed"}})
+	var authorized []string
+	values, err := store.Search(context.Background(), []float64{1, 0}, pgvector.SearchOptions{Limit: 1, Metadata: map[string]string{"scope": "allowed"}, Authorize: func(value pgvector.Document) bool {
+		authorized = append(authorized, value.DocumentID)
+		return value.DocumentID == "allowed"
+	}})
 	if err != nil || len(values) != 1 || values[0].Document.DocumentID != "allowed" {
 		t.Fatalf("filtered search = %+v, %v", values, err)
+	}
+	seenMalformed := false
+	for _, documentID := range authorized {
+		if documentID == "malformed" {
+			seenMalformed = true
+		}
+	}
+	if !seenMalformed {
+		t.Fatalf("authorization did not run before vector scoring: %v", authorized)
 	}
 	values[0].Document.Metadata["scope"] = "mutated"
 	if values[0].Document.Metadata["scope"] != "mutated" {

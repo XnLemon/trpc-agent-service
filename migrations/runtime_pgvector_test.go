@@ -17,6 +17,7 @@ func TestRuntimePGVectorMigrationDefinesTenantScopedLifecycle(t *testing.T) {
 		"CREATE TABLE public.runtime_pgvector_documents",
 		"tenant_id           TEXT NOT NULL",
 		"collection          TEXT NOT NULL",
+		"embedding_dimension INTEGER NOT NULL CHECK (embedding_dimension BETWEEN 1 AND 2000)",
 		"index_status        TEXT NOT NULL DEFAULT 'pending'",
 		"'pending','ready','failed','dead_letter','deleted'",
 		"CHECK (embedding IS NULL OR vector_dims(embedding) = embedding_dimension)",

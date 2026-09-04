@@ -72,9 +72,9 @@ func TestPureSearchAndQueueBoundaries(t *testing.T) {
 	if metadataMatches(map[string]any{"scope": "allowed"}, map[string]string{"scope": "denied"}) {
 		t.Fatal("metadata mismatch was accepted")
 	}
-	values := []SearchResult{{Document: Document{DocumentID: "b", ChunkID: "z"}, Score: 0.5}, {Document: Document{DocumentID: "a", ChunkID: "z"}, Score: 0.5}, {Document: Document{DocumentID: "a", ChunkID: "a"}, Score: 0.5}}
+	values := []SearchResult{{Document: Document{KnowledgeID: "z", DocumentID: "same", ChunkID: "a"}, Score: 0.5}, {Document: Document{KnowledgeID: "a", DocumentID: "same", ChunkID: "z"}, Score: 0.5}, {Document: Document{KnowledgeID: "a", DocumentID: "same", ChunkID: "a"}, Score: 0.5}}
 	sortSearchResults(values)
-	if values[0].Document.ChunkID != "a" || len(limitSearchResults(values, 2)) != 2 {
+	if values[0].Document.KnowledgeID != "a" || values[0].Document.ChunkID != "a" || len(limitSearchResults(values, 2)) != 2 {
 		t.Fatalf("search ordering/limit = %+v", values)
 	}
 	store := &Store{queue: make(chan indexJob, 1), stop: make(chan struct{})}
@@ -96,6 +96,7 @@ func TestPureSearchAndQueueBoundaries(t *testing.T) {
 func TestNormalizeConfigRejectsInvalidLimits(t *testing.T) {
 	cases := []Config{
 		{EmbeddingModel: "bad model"},
+		{Dimension: 2001},
 		{QueueSize: 10001},
 		{MaxAttempts: 101},
 	}

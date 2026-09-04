@@ -31,7 +31,7 @@ func TestEnvironmentRegistersTenantBoundPGVectorProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	mock.ExpectQuery("SELECT knowledge_id,document_id,chunk_id FROM public\\.runtime_pgvector_documents WHERE tenant_id=\\$1").WithArgs(tenantID, "knowledge").WillReturnRows(sqlmock.NewRows([]string{"knowledge_id", "document_id", "chunk_id"}))
-	value, err := provider.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantID}, backend.CapabilityBinding{Capability: backend.CapabilityKnowledge, Provider: "pgvector", Endpoint: "postgres://db.example:5432"}, modelprofile.SecretValue{})
+	value, err := provider.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantID}, backend.CapabilityBinding{Capability: backend.CapabilityKnowledge, Provider: "pgvector", Endpoint: "postgres://db.example:5432/runtime"}, modelprofile.SecretValue{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +72,11 @@ func TestEnvironmentPGVectorCatalogValidatesNamespaceAndEndpoint(t *testing.T) {
 			t.Fatalf("unsafe pgvector endpoint %q was accepted", endpoint)
 		}
 	}
+	for _, options := range []map[string]string{{"schema": "runtime/schema"}, {"collection": "bad-name"}} {
+		if _, err := catalog.NormalizeBindings([]backend.CapabilityBinding{{Capability: backend.CapabilityKnowledge, Provider: "pgvector", Endpoint: "postgres://db.example:5432/runtime", Options: options}}); err == nil {
+			t.Fatalf("unsafe pgvector namespace options were accepted: %#v", options)
+		}
+	}
 	if _, err := newEnvironmentBackendCatalog("inmemory"); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +96,10 @@ func TestEnvironmentPGVectorOptionParsingIsBounded(t *testing.T) {
 	for _, raw := range []map[string]string{
 		{"unknown": "value"},
 		{"schema": "bad value"},
+		{"schema": "runtime/schema"},
+		{"collection": "bad-name"},
 		{"dimension": "0"},
+		{"dimension": "2001"},
 		{"queue_size": "10001"},
 		{"workers": "nope"},
 		{"max_attempts": "101"},
@@ -116,7 +124,7 @@ func TestEnvironmentPGVectorEndpointValidation(t *testing.T) {
 			t.Fatalf("invalid endpoint accepted: %s", endpoint)
 		}
 	}
-	if !samePostgresEndpoint("postgres://db.example", "postgresql://DB.EXAMPLE:5432") || samePostgresEndpoint("postgres://one", "postgres://two") || samePostgresEndpoint("not a URL", "postgres://db.example") {
+	if !samePostgresEndpoint("postgres://db.example", "postgresql://DB.EXAMPLE:5432") || !samePostgresEndpoint("postgres://db.example/runtime", "postgresql://DB.EXAMPLE:5432/runtime") || samePostgresEndpoint("postgres://db.example", "postgresql://DB.EXAMPLE:5432/runtime") || samePostgresEndpoint("postgres://db.example/other", "postgresql://DB.EXAMPLE:5432/runtime") || samePostgresEndpoint("postgres://one", "postgres://two") || samePostgresEndpoint("not a URL", "postgres://db.example") {
 		t.Fatal("PostgreSQL endpoint equivalence is incorrect")
 	}
 }

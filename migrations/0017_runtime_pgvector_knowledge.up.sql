@@ -16,7 +16,7 @@ CREATE TABLE public.runtime_pgvector_documents (
     metadata            JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
     embedding_model     TEXT NOT NULL CHECK (length(btrim(embedding_model)) BETWEEN 1 AND 256),
     embedding_version   TEXT NOT NULL CHECK (length(btrim(embedding_version)) BETWEEN 1 AND 256),
-    embedding_dimension INTEGER NOT NULL CHECK (embedding_dimension BETWEEN 1 AND 4096),
+    embedding_dimension INTEGER NOT NULL CHECK (embedding_dimension BETWEEN 1 AND 2000),
     checksum            TEXT NOT NULL CHECK (length(btrim(checksum)) BETWEEN 1 AND 256),
     index_status        TEXT NOT NULL DEFAULT 'pending' CHECK (index_status IN ('pending','ready','failed','dead_letter','deleted')),
     embedding           vector,

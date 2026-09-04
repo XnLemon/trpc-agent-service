@@ -30,6 +30,7 @@ const (
 	defaultDimension    = 32
 	defaultQueueSize    = 128
 	defaultWorkers      = 1
+	maxDimension        = 2000
 	maxLimit            = 100
 	indexRetryDelay     = 10 * time.Millisecond
 )
@@ -253,7 +254,7 @@ func normalizeConfig(config Config) (Config, error) {
 		return Config{}, runtimestorage.ErrInvalid
 	}
 	var err error
-	if config.Dimension, err = positiveSetting(config.Dimension, defaultDimension, 4096); err != nil {
+	if config.Dimension, err = positiveSetting(config.Dimension, defaultDimension, maxDimension); err != nil {
 		return Config{}, err
 	}
 	if config.QueueSize, err = positiveSetting(config.QueueSize, defaultQueueSize, 10000); err != nil {
@@ -636,12 +637,20 @@ func validateSearchOptions(embedding []float64, options SearchOptions, dimension
 func (s *Store) collectSearchResults(rows *sql.Rows, embedding []float64, options SearchOptions) ([]SearchResult, error) {
 	values := make([]SearchResult, 0)
 	for rows.Next() {
-		value, ok, err := scanSearchResult(rows, embedding, options.MinScore)
+		value, vectorRaw, err := scanSearchResult(rows)
 		if err != nil {
 			return nil, err
 		}
-		if ok && s.authorizeSearchResult(value.Document, options) {
-			values = append(values, value)
+		if !s.authorizeSearchResult(value, options) {
+			continue
+		}
+		vector, err := decodeVector(vectorRaw)
+		if err != nil || len(vector) != value.EmbeddingDimension {
+			continue
+		}
+		score, ok := cosine(embedding, vector)
+		if ok && score >= options.MinScore {
+			values = append(values, SearchResult{Document: cloneDocument(value), Score: score})
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -650,26 +659,18 @@ func (s *Store) collectSearchResults(rows *sql.Rows, embedding []float64, option
 	return values, nil
 }
 
-func scanSearchResult(rows *sql.Rows, embedding []float64, minScore float64) (SearchResult, bool, error) {
+func scanSearchResult(rows *sql.Rows) (Document, string, error) {
 	var value Document
 	var metadataRaw []byte
 	var deletedAt sql.NullTime
 	var vectorRaw string
 	if err := rows.Scan(&value.TenantID, &value.KnowledgeID, &value.DocumentID, &value.ChunkID, &value.Source, &value.SourceVersion, &value.Content, &value.ContentRef, &metadataRaw, &value.EmbeddingModel, &value.EmbeddingVersion, &value.EmbeddingDimension, &value.Checksum, &value.Version, &value.IndexStatus, &value.Attempts, &value.LastErrorClass, &deletedAt, &value.CreatedAt, &value.UpdatedAt, &vectorRaw); err != nil || json.Unmarshal(metadataRaw, &value.Metadata) != nil {
-		return SearchResult{}, false, runtimestorage.ErrStorage
+		return Document{}, "", runtimestorage.ErrStorage
 	}
 	if deletedAt.Valid {
 		value.DeletedAt = &deletedAt.Time
 	}
-	vector, err := decodeVector(vectorRaw)
-	if err != nil || len(vector) != value.EmbeddingDimension {
-		return SearchResult{}, false, nil
-	}
-	score, ok := cosine(embedding, vector)
-	if !ok || score < minScore {
-		return SearchResult{}, false, nil
-	}
-	return SearchResult{Document: cloneDocument(value), Score: score}, true, nil
+	return value, vectorRaw, nil
 }
 
 func (s *Store) authorizeSearchResult(value Document, options SearchOptions) bool {
@@ -679,6 +680,9 @@ func (s *Store) authorizeSearchResult(value Document, options SearchOptions) boo
 func sortSearchResults(values []SearchResult) {
 	sort.Slice(values, func(i, j int) bool {
 		if values[i].Score == values[j].Score {
+			if values[i].Document.KnowledgeID != values[j].Document.KnowledgeID {
+				return values[i].Document.KnowledgeID < values[j].Document.KnowledgeID
+			}
 			if values[i].Document.DocumentID == values[j].Document.DocumentID {
 				return values[i].Document.ChunkID < values[j].Document.ChunkID
 			}

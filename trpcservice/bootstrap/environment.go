@@ -1249,13 +1249,13 @@ func pgvectorBackendProviderSpec() backend.ProviderSpec {
 			"collection":        {Kind: backend.OptionString, DefaultValue: stringOption("knowledge")},
 			"embedding_model":   {Kind: backend.OptionString, DefaultValue: stringOption("deterministic")},
 			"embedding_version": {Kind: backend.OptionString, DefaultValue: stringOption("v1")},
-			"dimension":         {Kind: backend.OptionInteger, DefaultValue: stringOption("32"), MinInteger: int64Option(1), MaxInteger: int64Option(4096)},
+			"dimension":         {Kind: backend.OptionInteger, DefaultValue: stringOption("32"), MinInteger: int64Option(1), MaxInteger: int64Option(2000)},
 			"queue_size":        {Kind: backend.OptionInteger, DefaultValue: stringOption("128"), MinInteger: int64Option(1), MaxInteger: int64Option(10000)},
 			"workers":           {Kind: backend.OptionInteger, DefaultValue: stringOption("1"), MinInteger: int64Option(1), MaxInteger: int64Option(32)},
 			"max_attempts":      {Kind: backend.OptionInteger, DefaultValue: stringOption("3"), MinInteger: int64Option(1), MaxInteger: int64Option(100)},
 		},
 		ValidateBinding: func(binding backend.CapabilityBinding) bool {
-			return validEnvironmentPGVectorEndpoint(binding.Endpoint)
+			return validEnvironmentPGVectorEndpoint(binding.Endpoint) && validEnvironmentPGVectorIdentifier(binding.Options["schema"]) && validEnvironmentPGVectorIdentifier(binding.Options["collection"])
 		},
 	}
 }
@@ -1633,11 +1633,11 @@ func parseEnvironmentPGVectorOptions(raw map[string]string) (environmentPGVector
 		schema: valueOr(raw, "schema", "public"), collection: valueOr(raw, "collection", "knowledge"),
 		model: valueOr(raw, "embedding_model", "deterministic"), version: valueOr(raw, "embedding_version", "v1"),
 	}
-	if !validPGVectorOptionText(result.schema, 63) || !validPGVectorOptionText(result.collection, 63) || !validPGVectorOptionText(result.model, 256) || !validPGVectorOptionText(result.version, 256) {
+	if !validEnvironmentPGVectorIdentifier(result.schema) || !validEnvironmentPGVectorIdentifier(result.collection) || !validPGVectorOptionText(result.model, 256) || !validPGVectorOptionText(result.version, 256) {
 		return environmentPGVectorOptions{}, backend.ErrStorageFactory
 	}
 	var err error
-	if result.dimension, err = parsePGVectorInt(raw, "dimension", "32", 1, 4096); err != nil {
+	if result.dimension, err = parsePGVectorInt(raw, "dimension", "32", 1, 2000); err != nil {
 		return environmentPGVectorOptions{}, err
 	}
 	if result.queueSize, err = parsePGVectorInt(raw, "queue_size", "128", 1, 10000); err != nil {
@@ -1683,6 +1683,19 @@ func validPGVectorOptionText(value string, maxLength int) bool {
 	return true
 }
 
+func validEnvironmentPGVectorIdentifier(value string) bool {
+	if len(value) == 0 || len(value) > 63 {
+		return false
+	}
+	for index, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (index > 0 && character >= '0' && character <= '9') || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func parsePGVectorInt(raw map[string]string, key, fallback string, min, max int) (int, error) {
 	parsed, err := strconv.Atoi(valueOr(raw, key, fallback))
 	if err != nil || parsed < min || parsed > max {
@@ -1705,7 +1718,14 @@ func samePostgresEndpoint(binding, configured string) bool {
 	if leftErr != nil || rightErr != nil || left == nil || right == nil {
 		return false
 	}
-	return (left.Scheme == "postgres" || left.Scheme == "postgresql") && (right.Scheme == "postgres" || right.Scheme == "postgresql") && strings.EqualFold(left.Hostname(), right.Hostname()) && effectivePort(left) == effectivePort(right)
+	return (left.Scheme == "postgres" || left.Scheme == "postgresql") && (right.Scheme == "postgres" || right.Scheme == "postgresql") && strings.EqualFold(left.Hostname(), right.Hostname()) && effectivePort(left) == effectivePort(right) && postgresDatabasePath(left) == postgresDatabasePath(right)
+}
+
+func postgresDatabasePath(value *url.URL) string {
+	if value == nil || value.Path == "/" {
+		return ""
+	}
+	return value.Path
 }
 
 func effectivePort(value *url.URL) string {
