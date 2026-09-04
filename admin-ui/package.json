@@ -6,7 +6,7 @@
   "description": "Admin Web UI for trpc-agent-service control plane (deep-link editor, see docs/docs/admin-web-ui.md)",
   "scripts": {
     "dev": "vite",
-    "test": "node scripts/check-resource-list-pagination.mjs && node scripts/check-app-draft-initialization.mjs && node scripts/check-admin-base-path.mjs",
+    "test": "node scripts/check-resource-list-pagination.mjs && node scripts/check-app-draft-initialization.mjs && node scripts/check-admin-base-path.mjs && node scripts/check-pgvector-binding.mjs",
     "build": "vite build",
     "preview": "vite preview"
   },

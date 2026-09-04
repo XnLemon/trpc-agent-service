@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Button, Card, Descriptions, Form, Input, MessagePlugin, Space, Textarea } from 'tdesign-react';
 import { useParams } from 'react-router-dom';
 import { AuditFields } from '@/components/AuditFields';
-import { BindingsEditor, serializeBindings, type CapabilityBindingForm } from '@/components/BindingsEditor';
+import { BindingsEditor, bindingsReady, serializeBindings, type CapabilityBindingForm } from '@/components/BindingsEditor';
 import { LoadState } from '@/components/LoadState';
 import { StatusActions } from '@/components/StatusActions';
 import { StatusTag } from '@/components/StatusTag';
@@ -119,6 +119,9 @@ export function BackendDetailPage() {
     return false;
   };
 
+  const knowledgeBinding = profile?.Bindings?.find((binding) => binding.Capability === 'knowledge');
+  const knowledgeOptions = knowledgeBinding?.Options ?? {};
+
   return (
     <LoadState loading={loading} error={error} onRetry={load}>
       {profile && form ? (
@@ -153,7 +156,7 @@ export function BackendDetailPage() {
                   profile.Status === 'disabled' ||
                   !form.displayName.trim() ||
                   !form.reason.trim() ||
-                  serializeBindings(form.bindings).length === 0
+                  !bindingsReady(form.bindings)
                 }
                 onClick={save}
               >
@@ -174,6 +177,26 @@ export function BackendDetailPage() {
               <AuditFields reason={form.reason} correlationId={correlationId} onReasonChange={(reason) => setForm({ ...form, reason })} />
             </Form>
           </Card>
+
+          {knowledgeBinding?.Provider === 'pgvector' ? (
+            <Card title="Knowledge / pgvector" bordered>
+              <Descriptions
+                size="small"
+                colon
+                items={[
+                  { label: '索引状态', content: '异步 pending → ready；失败后按重试上限进入 dead-letter' },
+                  { label: '命名空间', content: `${knowledgeOptions.schema ?? 'public'}.${knowledgeOptions.collection ?? 'knowledge'}` },
+                  { label: 'Embedding', content: `${knowledgeOptions.embedding_model ?? 'deterministic'} / ${knowledgeOptions.embedding_version ?? 'v1'}` },
+                  { label: '向量维度', content: knowledgeOptions.dimension ?? '32' },
+                  { label: '索引队列', content: `${knowledgeOptions.queue_size ?? '128'} / ${knowledgeOptions.workers ?? '1'} worker` },
+                  { label: '最大尝试', content: knowledgeOptions.max_attempts ?? '3' },
+                ]}
+              />
+              <div className="admin-page-subtitle admin-space-top">
+                检索只返回当前租户、ready 且未删除的数据，并在相似度排序前应用授权过滤。更换模型或维度需要新 Profile 版本并执行显式重建。
+              </div>
+            </Card>
+          ) : null}
 
           <Card title="状态操作" bordered>
             <Space direction="vertical" size="small" className="admin-stack-full">
