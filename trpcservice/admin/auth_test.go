@@ -222,6 +222,128 @@ func TestSessionAuthenticatorNilRequestDoesNotPanic(t *testing.T) {
 	}
 }
 
+func TestSessionAuthenticatorRejectsUnsupportedAuthRoutes(t *testing.T) {
+	static, err := NewStaticAuthenticator("service-token", []string{"tenant-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewSessionAuthenticator("operator", "secret", static)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		allow  string
+	}{
+		{name: "login", method: http.MethodGet, path: "/admin/auth/login", allow: http.MethodPost},
+		{name: "session", method: http.MethodPost, path: "/admin/auth/session", allow: http.MethodGet},
+		{name: "logout", method: http.MethodGet, path: "/admin/auth/logout", allow: http.MethodPost},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(tc.method, "http://admin.test"+tc.path, nil)
+			request.Header.Set("X-Request-ID", tc.name+"-method")
+			recorder := httptest.NewRecorder()
+
+			auth.ServeHTTP(recorder, request)
+
+			if recorder.Header().Get("Allow") != tc.allow {
+				t.Fatalf("Allow = %q, want %q", recorder.Header().Get("Allow"), tc.allow)
+			}
+			assertAuthError(t, recorder, http.StatusMethodNotAllowed, tc.name+"-method", "method_not_allowed")
+		})
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "http://admin.test/admin/auth/unknown", nil)
+	request.Header.Set("X-Request-ID", "unknown-route")
+	recorder := httptest.NewRecorder()
+	auth.ServeHTTP(recorder, request)
+	assertAuthError(t, recorder, http.StatusNotFound, "unknown-route", "not_found")
+}
+
+func TestSessionAuthenticatorLoginFailureCases(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		body    string
+		origin  string
+		prepare func(*SessionAuthenticator)
+		status  int
+		error   string
+	}{
+		{
+			name:   "cross origin",
+			body:   `{"username":"operator","password":"secret"}`,
+			origin: "http://evil.test",
+			status: http.StatusForbidden,
+			error:  "forbidden",
+		},
+		{
+			name:   "malformed body",
+			body:   `{`,
+			status: http.StatusBadRequest,
+			error:  "invalid_request",
+		},
+		{
+			name:   "invalid credentials",
+			body:   `{"username":"operator","password":"wrong"}`,
+			status: http.StatusUnauthorized,
+			error:  "unauthorized",
+		},
+		{
+			name: "session randomness failure",
+			body: `{"username":"operator","password":"secret"}`,
+			prepare: func(auth *SessionAuthenticator) {
+				auth.rand = func([]byte) error { return errors.New("randomness unavailable") }
+			},
+			status: http.StatusInternalServerError,
+			error:  "internal_error",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			static, err := NewStaticAuthenticator("service-token", []string{"tenant-a"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			auth, err := NewSessionAuthenticator("operator", "secret", static)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.prepare != nil {
+				tc.prepare(auth)
+			}
+			requestID := "login-" + tc.name
+			request := httptest.NewRequest(http.MethodPost, "http://admin.test/admin/auth/login", bytes.NewBufferString(tc.body))
+			request.Header.Set("X-Request-ID", requestID)
+			if tc.origin != "" {
+				request.Header.Set("Origin", tc.origin)
+			}
+			recorder := httptest.NewRecorder()
+
+			auth.ServeHTTP(recorder, request)
+
+			assertAuthError(t, recorder, tc.status, requestID, tc.error)
+		})
+	}
+}
+
+func assertAuthError(t *testing.T, recorder *httptest.ResponseRecorder, wantStatus int, wantRequestID, wantError string) {
+	t.Helper()
+	if recorder.Code != wantStatus {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, wantStatus, recorder.Body.String())
+	}
+	var envelope struct {
+		RequestID string `json:"request_id"`
+		Error     string `json:"error"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if envelope.RequestID != wantRequestID || envelope.Error != wantError {
+		t.Fatalf("error envelope = %+v, want request ID %q and error %q", envelope, wantRequestID, wantError)
+	}
+}
+
 func TestStaticAuthenticatorConfigurationAndBoundary(t *testing.T) {
 	for _, token := range []string{"", "bad\n-token"} {
 		if _, err := NewStaticAuthenticator(token, []string{"tenant"}); !errors.Is(err, ErrUnauthenticated) {
