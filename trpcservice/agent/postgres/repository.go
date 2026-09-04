@@ -14,11 +14,8 @@ import (
 
 // List returns a stable page of Apps belonging to one tenant.
 func (r *AgentRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*agent.App, string, error) {
-	if err := ctx.Err(); err != nil {
+	if err := r.checkList(ctx); err != nil {
 		return nil, "", err
-	}
-	if r == nil || r.db == nil {
-		return nil, "", ErrStorage
 	}
 	if limit <= 0 {
 		limit = 50
@@ -82,11 +79,8 @@ func (r *AgentRepository) List(ctx context.Context, tenantID, query, status, cur
 
 // ListRevisions returns a stable page of revisions belonging to one App.
 func (r *AgentRepository) ListRevisions(ctx context.Context, tenantID, appID, query, status, cursor string, limit int) ([]*agent.Revision, string, error) {
-	if err := ctx.Err(); err != nil {
+	if err := r.checkList(ctx); err != nil {
 		return nil, "", err
-	}
-	if r == nil || r.db == nil {
-		return nil, "", ErrStorage
 	}
 	if limit <= 0 {
 		limit = 50
@@ -164,6 +158,16 @@ var _ agent.Repository = (*AgentRepository)(nil)
 
 // NewRepository creates an Agent App repository over a PostgreSQL pool.
 func NewRepository(db *sql.DB) *AgentRepository { return &AgentRepository{db: db} }
+
+func (r *AgentRepository) checkList(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if r == nil || r.db == nil {
+		return ErrStorage
+	}
+	return nil
+}
 
 // Create persists a new agent application.
 func (r *AgentRepository) Create(ctx context.Context, input agent.CreateInput) (*agent.App, error) {
