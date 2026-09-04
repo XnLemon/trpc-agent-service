@@ -421,6 +421,9 @@ func configureRuntimeChannels(config *Config, dispatcher gateway.DispatchService
 	if config.TelegramPollingFactory != nil {
 		telegramAdapter, telegramErr := config.TelegramPollingFactory(dispatcher)
 		if telegramErr != nil || telegramAdapter == nil || telegramAdapter.Channel() != channels.ChannelTelegram {
+			if telegramAdapter != nil {
+				_ = telegramAdapter.Close()
+			}
 			_ = closePollingAdapters(pollingAdapters)
 			closeCallbackLifecycle(config.WeComHandler)
 			return nil, nil, ErrInvalidConfig

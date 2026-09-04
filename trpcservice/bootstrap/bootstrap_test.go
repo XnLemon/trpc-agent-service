@@ -639,18 +639,34 @@ func TestEnvironmentOutboxWorkerFactoryRoutesAIBotBindings(t *testing.T) {
 	defer func() { _ = store.Close() }()
 	legacy := bootstrapStaticProvider{receipt: "legacy"}
 	aiBot := bootstrapStaticProvider{receipt: "aibot"}
-	router := environmentReplyProvider{legacy: legacy, aiBot: aiBot, aiBotBindingIDs: map[string]struct{}{"aibot-binding": {}}}
+	telegramProvider := bootstrapStaticProvider{receipt: "telegram"}
+	router := environmentReplyProvider{
+		legacy: legacy, aiBot: aiBot, telegram: telegramProvider,
+		aiBotBindingIDs: map[string]struct{}{"aibot-binding": {}}, telegramBindingIDs: map[string]struct{}{"telegram-binding": {}},
+	}
 	for _, test := range []struct {
 		binding string
 		want    string
-	}{{binding: "aibot-binding", want: "aibot"}, {binding: "wecom-binding", want: "legacy"}} {
+	}{{binding: "telegram-binding", want: "telegram"}, {binding: "aibot-binding", want: "aibot"}, {binding: "wecom-binding", want: "legacy"}} {
 		receipt, err := router.Deliver(context.Background(), runtimestorage.ReplyOutbox{ReplyTarget: runtimestorage.ReplyTarget{BindingID: test.binding}})
 		if err != nil || receipt != test.want {
 			t.Fatalf("binding %s receipt = %q, %v", test.binding, receipt, err)
 		}
 	}
+	if status, receipt, err := router.Reconcile(context.Background(), runtimestorage.ReplyOutbox{ReplyTarget: runtimestorage.ReplyTarget{BindingID: "telegram-binding"}}); err != nil || status != outbox.DeliveryAccepted || receipt != "telegram" {
+		t.Fatalf("Telegram reconcile = %q %q %v", status, receipt, err)
+	}
 	if status, receipt, err := router.Reconcile(context.Background(), runtimestorage.ReplyOutbox{ReplyTarget: runtimestorage.ReplyTarget{BindingID: "aibot-binding"}}); err != nil || status != outbox.DeliveryAccepted || receipt != "aibot" {
 		t.Fatalf("AI Bot reconcile = %q %q %v", status, receipt, err)
+	}
+	for name, broken := range []environmentReplyProvider{
+		{telegramBindingIDs: map[string]struct{}{"telegram-binding": {}}},
+		{aiBotBindingIDs: map[string]struct{}{"aibot-binding": {}}},
+		{},
+	} {
+		if _, err := broken.Deliver(context.Background(), runtimestorage.ReplyOutbox{ReplyTarget: runtimestorage.ReplyTarget{BindingID: []string{"telegram-binding", "aibot-binding", "unknown"}[name]}}); err == nil {
+			t.Fatalf("broken provider %d unexpectedly delivered", name)
+		}
 	}
 
 	const tenantID = "t_00000000000000000000000000"
@@ -749,6 +765,62 @@ func TestRuntimeOwnsTelegramPollingLifecycle(t *testing.T) {
 	case <-adapter.stopped:
 	case <-time.After(time.Second):
 		t.Fatal("Telegram polling adapter did not stop")
+	}
+}
+
+func TestConfigureRuntimeChannelsClosesRejectedTelegramAdapter(t *testing.T) {
+	rejectedAdapter := newBootstrapAIBot()
+	config := Config{TelegramPollingFactory: func(gateway.DispatchService) (channels.PollingAdapter, error) {
+		return rejectedAdapter, nil
+	}}
+	if _, _, err := configureRuntimeChannels(&config, bootstrapNoopDispatcher{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("wrong Telegram adapter error = %v", err)
+	}
+	if got := rejectedAdapter.closed.Load(); got != 1 {
+		t.Fatalf("rejected Telegram adapter close count = %d, want 1", got)
+	}
+
+	config.TelegramPollingFactory = func(gateway.DispatchService) (channels.PollingAdapter, error) {
+		return nil, errors.New("telegram factory failure")
+	}
+	if _, _, err := configureRuntimeChannels(&config, bootstrapNoopDispatcher{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("Telegram factory error = %v", err)
+	}
+}
+
+func TestConfigureRuntimeChannelsClosesAdaptersOnWorkerFailure(t *testing.T) {
+	adapter := newBootstrapTelegram()
+	config := Config{
+		TelegramPollingFactory: func(gateway.DispatchService) (channels.PollingAdapter, error) { return adapter, nil },
+		OutboxWorkerFactory: func([]channels.PollingAdapter) (*outbox.Worker, error) {
+			return nil, errors.New("worker construction failure")
+		},
+	}
+	if _, _, err := configureRuntimeChannels(&config, bootstrapNoopDispatcher{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("worker construction error = %v", err)
+	}
+	if adapter.closed.Load() != 1 {
+		t.Fatalf("worker failure Telegram close count = %d, want 1", adapter.closed.Load())
+	}
+}
+
+func TestNewWeComAIBotsClosesPartiallyConstructedAdapters(t *testing.T) {
+	first := newBootstrapAIBot()
+	factories := []func(gateway.DispatchService) (channels.PollingAdapter, error){
+		func(gateway.DispatchService) (channels.PollingAdapter, error) { return first, nil },
+		nil,
+	}
+	if _, err := newWeComAIBots(factories, bootstrapNoopDispatcher{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("partial AI Bot construction error = %v", err)
+	}
+	if first.closed.Load() != 1 {
+		t.Fatalf("partial AI Bot close count = %d, want 1", first.closed.Load())
+	}
+	withoutHealth := &bootstrapNoHealthAdapter{}
+	if _, err := newWeComAIBots([]func(gateway.DispatchService) (channels.PollingAdapter, error){
+		func(gateway.DispatchService) (channels.PollingAdapter, error) { return withoutHealth, nil },
+	}, bootstrapNoopDispatcher{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("AI Bot without readiness error = %v", err)
 	}
 }
 
@@ -1761,6 +1833,12 @@ func (adapter *bootstrapTelegram) Run(ctx context.Context) error {
 }
 func (adapter *bootstrapTelegram) BeginShutdown() { adapter.beginShutdown.Add(1) }
 func (adapter *bootstrapTelegram) Close() error   { adapter.closed.Add(1); return nil }
+
+type bootstrapNoHealthAdapter struct{}
+
+func (*bootstrapNoHealthAdapter) Channel() channels.Channel { return channels.ChannelWeComAIBot }
+func (*bootstrapNoHealthAdapter) Run(context.Context) error { return nil }
+func (*bootstrapNoHealthAdapter) Close() error              { return nil }
 
 func (handler *bootstrapWeComLifecycle) ServeHTTP(writer http.ResponseWriter, _ *http.Request) {
 	handler.calls.Add(1)

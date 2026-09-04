@@ -81,6 +81,46 @@ func TestEnvironmentTelegramConfigurationRequiresOneSafePollingBinding(t *testin
 			base:    environmentConfig{tenantID: tenantID, demoMode: true, apiIdentities: base.apiIdentities},
 			wantErr: true,
 		},
+		{
+			name: "token contains a newline",
+			configure: func() {
+				t.Setenv(envTelegramBotToken, "bot-token\nsecret")
+				t.Setenv(envTelegramBindingID, "cb_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+				t.Setenv(envTelegramSecretRef, "env/telegram")
+				t.Setenv(envTelegramMode, "polling")
+			},
+			wantErr: true,
+		},
+		{
+			name: "binding contains a newline",
+			configure: func() {
+				t.Setenv(envTelegramBotToken, "bot-token")
+				t.Setenv(envTelegramBindingID, "binding\nsecret")
+				t.Setenv(envTelegramSecretRef, "env/telegram")
+				t.Setenv(envTelegramMode, "polling")
+			},
+			wantErr: true,
+		},
+		{
+			name: "secret reference is outside the tenant scope",
+			configure: func() {
+				t.Setenv(envTelegramBotToken, "bot-token")
+				t.Setenv(envTelegramBindingID, "cb_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+				t.Setenv(envTelegramSecretRef, "other\ntelegram")
+				t.Setenv(envTelegramMode, "polling")
+			},
+			wantErr: true,
+		},
+		{
+			name: "polling mode is case insensitive",
+			configure: func() {
+				t.Setenv(envTelegramBotToken, "bot-token")
+				t.Setenv(envTelegramBindingID, "cb_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+				t.Setenv(envTelegramSecretRef, "env/telegram")
+				t.Setenv(envTelegramMode, "POLLING")
+			},
+			wantMode: "polling",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -192,10 +232,69 @@ func TestEnvironmentTelegramComponentsSealBindingAndPassAttachmentStore(t *testi
 	if _, err := provider.Deliver(context.Background(), runtimestorage.ReplyOutbox{TenantID: root.TenantID, ReplyID: "reply", SegmentIndex: 0, Payload: "hello", ReplyTarget: runtimestorage.ReplyTarget{BindingID: binding.BindingID, ConversationKind: "direct", ReceiverID: "42"}}); err != nil {
 		t.Fatalf("Telegram binding provider delivery = %v", err)
 	}
+	telegramProvider, bindingIDs, err := environmentTelegramOutboxProvider(config, []channels.PollingAdapter{adapter})
+	if err != nil || telegramProvider == nil || len(bindingIDs) != 1 {
+		t.Fatalf("Telegram outbox provider = %v, %v, %v", telegramProvider, bindingIDs, err)
+	}
+	selected, channel, providerName, leaseDuration, err := environmentOutboxProvider(config, runtimeStore, nil, nil, []channels.PollingAdapter{adapter})
+	if err != nil || selected == nil || channel != "telegram" || providerName != "telegram" || leaseDuration <= 0 {
+		t.Fatalf("Telegram outbox selection = %T/%q/%q/%s/%v", selected, channel, providerName, leaseDuration, err)
+	}
+	legacy := bootstrapStaticProvider{receipt: "legacy"}
+	mixed, channel, providerName, _, err := environmentOutboxProvider(config, runtimeStore, legacy, nil, []channels.PollingAdapter{adapter})
+	if err != nil || channel != "mixed" || providerName != "mixed" {
+		t.Fatalf("mixed outbox selection = %q/%q/%v", channel, providerName, err)
+	}
+	if receipt, err := mixed.Deliver(context.Background(), runtimestorage.ReplyOutbox{TenantID: root.TenantID, ReplyID: "mixed-reply", SegmentIndex: 0, Payload: "mixed", ReplyTarget: runtimestorage.ReplyTarget{BindingID: binding.BindingID, ConversationKind: "direct", ReceiverID: "42"}}); err != nil || receipt != "1" {
+		t.Fatalf("mixed Telegram delivery = %q, %v", receipt, err)
+	}
+	if _, _, err := environmentTelegramOutboxProvider(config, nil); err == nil {
+		t.Fatal("Telegram outbox provider accepted a missing adapter")
+	}
+	if _, _, _, _, err := environmentOutboxProvider(environmentConfig{}, runtimeStore, nil, nil, nil); err == nil {
+		t.Fatal("empty outbox provider selection unexpectedly succeeded")
+	}
+	if _, channel, providerName, leaseDuration, err := environmentOutboxProvider(environmentConfig{}, runtimeStore, legacy, nil, nil); err != nil || channel != "wecom" || providerName != "wecom" || leaseDuration <= 0 {
+		t.Fatalf("legacy outbox selection = %q/%q/%s/%v", channel, providerName, leaseDuration, err)
+	}
 	bad := config
 	bad.telegram = &environmentTelegramConfig{bindingID: binding.BindingID, secretRef: "env/other", botToken: "bot-token", mode: "polling"}
 	if _, err := environmentTelegramComponents(context.Background(), bad, channelsRepo, tenants, apps, runtimeStore, nil); err == nil {
 		t.Fatal("Telegram binding with mismatched SecretRef was accepted")
+	}
+	if _, err := factory(nil); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("Telegram factory accepted a nil dispatcher: %v", err)
+	}
+	if noStoreFactory, err := environmentTelegramComponents(context.Background(), config, channelsRepo, tenants, apps, nil, nil); err != nil {
+		t.Fatal(err)
+	} else if noStoreAdapter, err := noStoreFactory(bootstrapNoopDispatcher{}); err != nil {
+		t.Fatal(err)
+	} else {
+		if received.Attachments != nil {
+			t.Fatal("Telegram factory passed an attachment store that was not configured")
+		}
+		_ = noStoreAdapter.Close()
+	}
+	badMode := config
+	badMode.telegram = &environmentTelegramConfig{bindingID: binding.BindingID, secretRef: binding.SecretRef, botToken: "bot-token", mode: "webhook"}
+	badModeFactory, err := environmentTelegramComponents(context.Background(), badMode, channelsRepo, tenants, apps, runtimeStore, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := badModeFactory(bootstrapNoopDispatcher{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("Telegram factory accepted unsupported mode: %v", err)
+	}
+	newEnvironmentTelegramAdapter = func(context.Context, telegram.Config) (*telegram.Adapter, error) {
+		return nil, errors.New("secret constructor failure")
+	}
+	if _, err := factory(bootstrapNoopDispatcher{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("Telegram factory exposed adapter construction error: %v", err)
+	}
+	if _, err := environmentTelegramComponents(context.Background(), config, nil, tenants, apps, runtimeStore, nil); err == nil {
+		t.Fatal("Telegram components accepted missing channel dependencies")
+	}
+	if disabledFactory, err := environmentTelegramComponents(context.Background(), environmentConfig{}, channelsRepo, tenants, apps, runtimeStore, nil); err != nil || disabledFactory != nil {
+		t.Fatalf("disabled Telegram components factory-nil=%t, err=%v", disabledFactory == nil, err)
 	}
 }
 
