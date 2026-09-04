@@ -259,6 +259,9 @@ func resolveAndBuild(ctx context.Context, input ModelFactoryInput, resolver Secr
 	if err := validateFactoryInput(input); err != nil {
 		return nil, err
 	}
+	if policy != nil && policy.Validate() != nil {
+		return nil, fmt.Errorf("%w: resilience policy is invalid", ErrInvalid)
+	}
 	secret := SecretValue{}
 	if input.SecretRef != "" {
 		if resolver == nil {
@@ -270,9 +273,15 @@ func resolveAndBuild(ctx context.Context, input ModelFactoryInput, resolver Secr
 		}
 		var resolved SecretValue
 		resolve := func(resolveCtx context.Context) error {
-			var err error
-			resolved, err = resolver.Resolve(resolveCtx, scope)
-			return err
+			candidate, err := resolver.Resolve(resolveCtx, scope)
+			if err != nil {
+				return err
+			}
+			if candidate.Value() == "" {
+				return ErrSecretResolution
+			}
+			resolved = candidate
+			return nil
 		}
 		var err error
 		if policy == nil {
@@ -286,13 +295,22 @@ func resolveAndBuild(ctx context.Context, input ModelFactoryInput, resolver Secr
 			}
 			return nil, ErrSecretResolution
 		}
+		if resolved.Value() == "" {
+			return nil, ErrSecretResolution
+		}
 		secret = resolved
 	}
 	var model trpcmodel.Model
 	build := func(buildCtx context.Context) error {
-		var err error
-		model, err = factory.New(buildCtx, input.Clone(), secret)
-		return err
+		candidate, err := factory.New(buildCtx, input.Clone(), secret)
+		if err != nil {
+			return err
+		}
+		if candidate == nil {
+			return ErrModelFactory
+		}
+		model = candidate
+		return nil
 	}
 	var err error
 	if policy == nil {

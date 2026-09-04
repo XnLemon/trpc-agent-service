@@ -152,6 +152,10 @@ func TestResolveAndBuildRedactsResolverAndFactoryErrors(t *testing.T) {
 		t.Fatalf("resolver error was not redacted/classified: %v", err)
 	}
 	resolver.err = nil
+	resolver.value, err = NewSecretValue("super-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
 	factory := &recordingFactory{err: errors.New("provider rejected super-secret")}
 	if _, err := ResolveAndBuild(context.Background(), input, resolver, factory); !errors.Is(err, ErrModelFactory) || strings.Contains(err.Error(), "super-secret") {
 		t.Fatalf("factory error was not redacted/classified: %v", err)
@@ -183,6 +187,66 @@ func TestResolveAndBuildWithPolicyRetriesModelConstruction(t *testing.T) {
 	}
 	if policy.State() != resilience.StateClosed {
 		t.Fatalf("policy state = %q, want closed", policy.State())
+	}
+}
+
+func TestResolveAndBuildWithPolicyRejectsSuccessfulSecretFallback(t *testing.T) {
+	_, tenantSnapshot, profile, catalog := modelExecutionFixture(t, "secret://tenant/model")
+	snapshot, err := NewModelExecutionSnapshot(tenantSnapshot, profile, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := snapshot.FactoryInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name          string
+		openCircuit   bool
+		resolverCalls int
+	}{
+		{name: "exhausted attempts", resolverCalls: 1},
+		{name: "open circuit", openCircuit: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			policy, err := resilience.New(resilience.Config{
+				Timeout: time.Second, MaxAttempts: 1, FailureThreshold: 1, OpenTimeout: time.Minute,
+				Fallback: func(context.Context, error) error { return nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.openCircuit {
+				if err := policy.Execute(context.Background(), func(context.Context) error { return errors.New("dependency unavailable") }); err != nil {
+					t.Fatalf("open circuit setup = %v", err)
+				}
+			}
+			resolver := &recordingResolver{err: errors.New("secret unavailable")}
+			factory := &recordingFactory{}
+			model, err := ResolveAndBuildWithPolicy(context.Background(), input, resolver, factory, policy)
+			if model != nil || !errors.Is(err, ErrSecretResolution) {
+				t.Fatalf("ResolveAndBuildWithPolicy() model=%v err=%v, want secret resolution error", model, err)
+			}
+			if resolver.calls != test.resolverCalls || factory.calls != 0 {
+				t.Fatalf("resolver calls=%d factory calls=%d, want %d and 0", resolver.calls, factory.calls, test.resolverCalls)
+			}
+		})
+	}
+}
+
+func TestResolveAndBuildWithPolicyRejectsZeroPolicy(t *testing.T) {
+	_, tenantSnapshot, profile, catalog := modelExecutionFixture(t, "")
+	snapshot, err := NewModelExecutionSnapshot(tenantSnapshot, profile, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := snapshot.FactoryInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var policy resilience.Policy
+	if _, err := ResolveAndBuildWithPolicy(context.Background(), input, nil, &recordingFactory{}, &policy); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("ResolveAndBuildWithPolicy() = %v, want ErrInvalid", err)
 	}
 }
 

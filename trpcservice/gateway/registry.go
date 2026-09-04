@@ -132,6 +132,9 @@ type RuntimeRunnerRegistryConfig struct {
 	StorageFactory backend.StorageFactory
 	Observability  observability.Provider
 	ToolRegistry   *servicetool.Registry
+	// Resilience keeps circuit state scoped to model, storage, and tool
+	// dependencies. Tools are retried only when their IDs are explicitly named.
+	Resilience runtime.ResiliencePolicies
 }
 
 // NewRuntimeRunnerRegistry creates a registry backed by runtime.NewRunner.
@@ -139,9 +142,18 @@ func NewRuntimeRunnerRegistry(config RuntimeRunnerRegistryConfig) (*RunnerRegist
 	if config.ModelFactory == nil || (config.Sessions == nil && config.StorageFactory == nil) {
 		return nil, fmt.Errorf("%w: runtime Runner dependencies are required", ErrInvalid)
 	}
+	if err := config.Resilience.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: resilience policy is invalid", ErrInvalid)
+	}
 	config.Registry.Factory = func(ctx context.Context, plan runtime.ExecutionPlan) (Runner, error) {
 		if config.StorageFactory != nil {
+			if config.Resilience.Enabled() {
+				return runtime.NewRunnerWithToolRegistryAndResilience(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability, config.ToolRegistry, config.Resilience, config.StorageFactory)
+			}
 			return runtime.NewRunnerWithToolRegistry(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability, config.ToolRegistry, config.StorageFactory)
+		}
+		if config.Resilience.Enabled() {
+			return runtime.NewRunnerWithToolRegistryAndResilience(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability, config.ToolRegistry, config.Resilience)
 		}
 		return runtime.NewRunnerWithToolRegistry(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability, config.ToolRegistry)
 	}

@@ -244,11 +244,19 @@ func (tool *ResilientTool) Call(ctx context.Context, jsonArgs []byte) (any, erro
 		return nil, ErrUnavailable
 	}
 	var result any
+	completed := false
 	err := tool.policy.Execute(ctx, func(callCtx context.Context) error {
-		var err error
-		result, err = tool.delegate.Call(callCtx, jsonArgs)
-		return err
+		candidate, err := tool.delegate.Call(callCtx, jsonArgs)
+		if err != nil {
+			return err
+		}
+		result = candidate
+		completed = true
+		return nil
 	})
+	if err == nil && !completed {
+		return nil, ErrUnavailable
+	}
 	return result, err
 }
 

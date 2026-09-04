@@ -120,6 +120,23 @@ func TestNewResilientToolRejectsZeroPolicy(t *testing.T) {
 	}
 }
 
+func TestResilientToolRejectsSuccessfulFallbackWithoutToolResult(t *testing.T) {
+	policy, err := resilience.New(resilience.Config{
+		Timeout: time.Second, MaxAttempts: 1, FailureThreshold: 1, OpenTimeout: time.Second,
+		Fallback: func(context.Context, error) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewResilientTool(&callableTool{remainingFailures: 1}, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := tool.Call(context.Background(), []byte(`{}`)); result != nil || !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Call() result=%v err=%v, want unavailable without a tool result", result, err)
+	}
+}
+
 type callableFactory struct {
 	delegate trpctool.CallableTool
 }

@@ -26,6 +26,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/resilience"
 	runtimeservice "github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -603,8 +604,9 @@ func TestEnvironmentWeComAIBotComponentsUseTrustedBindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	environment := environmentConfig{
-		tenantID:    root.TenantID,
-		wecomAIBots: []environmentWeComAIBotConfig{{BindingID: binding.BindingID, SecretRef: binding.SecretRef, BotSecret: "bot-secret"}},
+		tenantID:     root.TenantID,
+		wecomAIBots:  []environmentWeComAIBotConfig{{BindingID: binding.BindingID, SecretRef: binding.SecretRef, BotSecret: "bot-secret"}},
+		outboxPolicy: resilience.NewDefault(),
 	}
 	factories, bindingIDs, err := environmentWeComAIBotComponents(context.Background(), environment, channelsRepo, tenants, apps)
 	if err != nil || len(factories) != 1 || len(bindingIDs) != 1 {
@@ -632,6 +634,9 @@ func TestEnvironmentWeComAIBotComponentsUseTrustedBindings(t *testing.T) {
 	}
 	if workerConfig.LeaseDuration != wecom_aibot.OutboxLeaseDuration {
 		t.Fatalf("AI Bot outbox lease duration = %s, want %s", workerConfig.LeaseDuration, wecom_aibot.OutboxLeaseDuration)
+	}
+	if workerConfig.Resilience != environment.outboxPolicy {
+		t.Fatal("AI Bot outbox worker did not receive the environment resilience policy")
 	}
 	if err := manager.Close(); err != nil {
 		t.Fatal(err)

@@ -498,6 +498,9 @@ func (w *Worker) reconcile(ctx context.Context, claimed runtimestorage.ReplyOutb
 	if err != nil {
 		return false
 	}
+	if status == DeliveryAccepted && providerID == "" {
+		return false
+	}
 	switch status {
 	case DeliveryAccepted, DeliveryRejected:
 	case DeliveryUnknown, "":
@@ -522,13 +525,26 @@ func (w *Worker) deliver(ctx context.Context, value runtimestorage.ReplyOutbox) 
 		return "", ErrProvider
 	}
 	if w.resilience == nil {
-		return w.provider.Deliver(ctx, value)
+		providerID, err := w.provider.Deliver(ctx, value)
+		if err != nil {
+			return "", err
+		}
+		if providerID == "" {
+			return "", &DeliveryError{Class: "provider_error", Retryable: false}
+		}
+		return providerID, nil
 	}
 	var providerID string
 	err := w.resilience.Execute(ctx, func(callCtx context.Context) error {
-		var err error
-		providerID, err = w.provider.Deliver(callCtx, value)
-		return err
+		candidate, err := w.provider.Deliver(callCtx, value)
+		if err != nil {
+			return err
+		}
+		if candidate == "" {
+			return &DeliveryError{Class: "provider_error", Retryable: false}
+		}
+		providerID = candidate
+		return nil
 	})
 	if err == nil && providerID == "" {
 		// A fallback can report success without having contacted the provider.
@@ -548,9 +564,15 @@ func (w *Worker) reconcileProvider(ctx context.Context, value runtimestorage.Rep
 	var status DeliveryStatus
 	var providerID string
 	err := w.resilience.Execute(ctx, func(callCtx context.Context) error {
-		var err error
-		status, providerID, err = w.provider.Reconcile(callCtx, value)
-		return err
+		candidateStatus, candidateProviderID, err := w.provider.Reconcile(callCtx, value)
+		if err != nil {
+			return err
+		}
+		if candidateStatus == DeliveryAccepted && candidateProviderID == "" {
+			return &DeliveryError{Class: "provider_error", Retryable: false}
+		}
+		status, providerID = candidateStatus, candidateProviderID
+		return nil
 	})
 	return status, providerID, err
 }

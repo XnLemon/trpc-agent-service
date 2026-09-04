@@ -5,10 +5,14 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
+	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/resilience"
+	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
@@ -43,6 +47,42 @@ func TestNewRunnerMaterializesPlanStorageCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := sessions.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewRunnerWithToolRegistryAndResilienceRetriesModelAndStorage(t *testing.T) {
+	fixture := runtimeFixture(t)
+	plan := newExecutionPlanForRunner(t, fixture)
+	modelPolicy, err := resilience.New(resilience.Config{Timeout: time.Second, MaxAttempts: 2, FailureThreshold: 2, OpenTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storagePolicy, err := resilience.New(resilience.Config{Timeout: time.Second, MaxAttempts: 2, FailureThreshold: 2, OpenTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := inmemory.NewSessionService()
+	modelFactory := &retryingRuntimeModelFactory{failures: 1}
+	storageBuilds := 0
+	storageFactory := backend.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+		storageBuilds++
+		if storageBuilds == 1 {
+			return nil, errors.New("storage unavailable")
+		}
+		return backend.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: sessions})
+	})
+	runner, err := NewRunnerWithToolRegistryAndResilience(context.Background(), plan, nil, modelFactory, nil, nil, nil, ResiliencePolicies{Model: modelPolicy, Storage: storagePolicy}, storageFactory)
+	if err != nil {
+		_ = sessions.Close()
+		t.Fatal(err)
+	}
+	if modelFactory.calls != 2 || storageBuilds != 2 {
+		_ = runner.Close()
+		_ = sessions.Close()
+		t.Fatalf("model calls=%d storage builds=%d, want two each", modelFactory.calls, storageBuilds)
+	}
+	if err := runner.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -110,6 +150,20 @@ func TestNewRunnerWithObservabilityRecordsStorageFactoryFailure(t *testing.T) {
 type closeCountingSession struct {
 	session.Service
 	closes *atomic.Int32
+}
+
+type retryingRuntimeModelFactory struct {
+	failures int
+	calls    int
+}
+
+func (factory *retryingRuntimeModelFactory) New(context.Context, modelprofile.ModelFactoryInput, modelprofile.SecretValue) (trpcmodel.Model, error) {
+	factory.calls++
+	if factory.failures > 0 {
+		factory.failures--
+		return nil, errors.New("model unavailable")
+	}
+	return runtimeFakeModel{}, nil
 }
 
 func (service *closeCountingSession) Close() error {

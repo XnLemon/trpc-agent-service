@@ -34,6 +34,8 @@ policy, err := resilience.New(resilience.Config{
 - `tool.NewResilientTool` 与 `Registry.ResolveWithPolicy` 只包装显式列入 `retrySafeToolIDs` 的 `CallableTool`，保留工具声明和参数边界；没有外部幂等证明的副作用工具不会自动重试。
 - `outbox.Config.Resilience` 包住 IM Provider 的 `Deliver`/`Reconcile`。只有 Provider 支持 `ReplyID + SegmentIndex` 外部幂等键时，才允许对 `Deliver` 开启重试。
 
+`bootstrap.NewFromEnvironment` 会为 model、backend、tool 和 outbox 分别创建默认策略，避免一个依赖的熔断状态阻断其他依赖；手动组装的 `bootstrap.Config` 保持原有行为，只有显式提供 `Resilience` 时才启用。`RetrySafeToolIDs` 仍默认为空，必须由调用方证明幂等后再逐项启用 Tool 重试。
+
 Fallback 必须返回一个安全的成功结果或明确错误，不能把原始 provider 错误、凭据、用户内容或 DSN 写入响应、日志、审计或持久化状态。副作用 Tool 不应配置自动重试；应使用外部幂等键、人工审批或补偿流程。
 
 ## 备份、恢复与灾备演练
