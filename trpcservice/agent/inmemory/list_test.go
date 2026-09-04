@@ -2,7 +2,9 @@ package inmemory
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 )
 
 //nolint:gocyclo // Exercises the complete list contract in one focused fixture.
@@ -38,5 +40,93 @@ func TestListScopesFiltersAndPaginatesAppsAndRevisions(t *testing.T) {
 	filteredRevisions, _, err := repository.ListRevisions(context.Background(), tenantOne, first.AppID, "second", "", "", 50)
 	if err != nil || len(filteredRevisions) != 1 || filteredRevisions[0].Revision != secondDraft.Revision {
 		t.Fatalf("filtered revisions = items=%+v err=%v", filteredRevisions, err)
+	}
+}
+
+func TestListBoundaryReturnsContextCursorAndEmptyPageErrors(t *testing.T) {
+	repository := NewRepository()
+	app := createApp(t, repository, tenantOne, "boundary")
+	firstDraft := createDraft(t, repository, app, draftConfiguration("boundary"))
+	if _, _, err := repository.List(context.Background(), tenantOne, "", "active", "", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := repository.ListRevisions(context.Background(), tenantOne, app.AppID, "", "published", "", 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range []func(context.Context) error{
+		func(ctx context.Context) error {
+			_, _, err := repository.List(ctx, tenantOne, "", "", "bad", 1)
+			return err
+		},
+		func(ctx context.Context) error {
+			_, _, err := repository.ListRevisions(ctx, tenantOne, app.AppID, "", "", "bad", 1)
+			return err
+		},
+	} {
+		if err := call(context.Background()); err == nil {
+			t.Fatal("invalid cursor was accepted")
+		}
+	}
+	if items, next, err := repository.List(context.Background(), tenantOne, "", "", "0", 0); err != nil || len(items) != 1 || next != "" {
+		t.Fatalf("default app limit = items=%+v next=%q err=%v", items, next, err)
+	}
+	if items, next, err := repository.List(context.Background(), tenantOne, "", "", "99", 201); err != nil || items == nil || len(items) != 0 || next != "" {
+		t.Fatalf("past-end app page = items=%+v next=%q err=%v", items, next, err)
+	}
+	if items, next, err := repository.List(context.Background(), tenantOne, "", "", "", 201); err != nil || len(items) != 1 || next != "" {
+		t.Fatalf("maximum app limit = items=%+v next=%q err=%v", items, next, err)
+	}
+	if items, next, err := repository.ListRevisions(context.Background(), tenantOne, app.AppID, "", "", "0", 0); err != nil || len(items) != 1 || next != "" || items[0].Revision != firstDraft.Revision {
+		t.Fatalf("default revision limit = items=%+v next=%q err=%v", items, next, err)
+	}
+
+	if err := repository.mu.lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := repository.List(ctx, tenantOne, "", "", "", 1)
+		done <- err
+	}()
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("waiting List error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("List did not observe cancellation while waiting for lock")
+	}
+	repository.mu.unlock()
+	if err := repository.mu.lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel = context.WithCancel(context.Background())
+	done = make(chan error, 1)
+	go func() {
+		_, _, err := repository.ListRevisions(ctx, tenantOne, app.AppID, "", "", "", 1)
+		done <- err
+	}()
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("waiting ListRevisions error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ListRevisions did not observe cancellation while waiting for lock")
+	}
+	repository.mu.unlock()
+
+	ctx, cancel = context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := repository.List(ctx, tenantOne, "", "", "", 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled List error = %v", err)
+	}
+	if _, _, err := repository.ListRevisions(ctx, tenantOne, app.AppID, "", "", "", 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled ListRevisions error = %v", err)
 	}
 }

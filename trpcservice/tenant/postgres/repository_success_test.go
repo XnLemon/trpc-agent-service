@@ -382,13 +382,17 @@ func TestTenantRepositoryCreateFirstRejectsLockAndContextFailures(t *testing.T) 
 	}
 }
 
-func testTenantRows(value *tenant.Tenant) *sqlmock.Rows {
-	return sqlmock.NewRows([]string{
+func testTenantRows(values ...*tenant.Tenant) *sqlmock.Rows {
+	rows := sqlmock.NewRows([]string{
 		"tenant_id", "tenant_key", "display_name", "status", "rate_limit_rpm", "max_concurrent_executions", "monthly_token_budget",
 		"monthly_spend_limit_minor", "billing_currency", "audit_retention_days", "log_masking_level", "trace_sampling_rate", "default_agent_app_id",
 		"default_backend_profile_id", "version", "created_at", "updated_at",
-	}).AddRow(
-		value.TenantID, value.TenantKey, value.DisplayName, string(value.Status), nil, nil, nil, nil, nil,
-		value.AuditRetentionDays, string(value.LogMaskingLevel), value.TraceSamplingRate, nil, nil, value.Version, value.CreatedAt, value.UpdatedAt,
-	)
+	})
+	for _, value := range values {
+		rows.AddRow(
+			value.TenantID, value.TenantKey, value.DisplayName, string(value.Status), nil, nil, nil, nil, nil,
+			value.AuditRetentionDays, string(value.LogMaskingLevel), value.TraceSamplingRate, nil, nil, value.Version, value.CreatedAt, value.UpdatedAt,
+		)
+	}
+	return rows
 }

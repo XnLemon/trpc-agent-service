@@ -512,11 +512,15 @@ func TestBackendRepositoryScannersRejectShortRows(t *testing.T) {
 	}
 }
 
-func testBackendRootRows(t *testing.T, profile *backend.Profile) *sqlmock.Rows {
+func testBackendRootRows(t *testing.T, profiles ...*backend.Profile) *sqlmock.Rows {
 	t.Helper()
-	return sqlmock.NewRows([]string{
+	rows := sqlmock.NewRows([]string{
 		"tenant_id", "profile_id", "profile_key", "display_name", "description", "status", "schema_version", "content_digest", "version", "created_at", "updated_at",
-	}).AddRow(profile.TenantID, profile.ProfileID, profile.ProfileKey, profile.DisplayName, profile.Description, string(profile.Status), profile.SchemaVersion, profile.ContentDigest, profile.Version, profile.CreatedAt, profile.UpdatedAt)
+	})
+	for _, profile := range profiles {
+		rows.AddRow(profile.TenantID, profile.ProfileID, profile.ProfileKey, profile.DisplayName, profile.Description, string(profile.Status), profile.SchemaVersion, profile.ContentDigest, profile.Version, profile.CreatedAt, profile.UpdatedAt)
+	}
+	return rows
 }
 
 func testBackendBindingRows(t *testing.T, profile *backend.Profile) *sqlmock.Rows {

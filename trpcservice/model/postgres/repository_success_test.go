@@ -234,18 +234,22 @@ func TestModelRepositoryRequiresStorage(t *testing.T) {
 	}
 }
 
-func testModelProfileRows(t *testing.T, profile *model.Profile) *sqlmock.Rows {
+func testModelProfileRows(t *testing.T, profiles ...*model.Profile) *sqlmock.Rows {
 	t.Helper()
-	options, generation, err := encodeModelJSON(profile.Configuration)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return sqlmock.NewRows([]string{
+	rows := sqlmock.NewRows([]string{
 		"tenant_id", "profile_id", "profile_key", "display_name", "description", "status", "schema_version", "provider", "model", "endpoint",
 		"options", "secret_ref", "generation", "content_digest", "version", "created_at", "updated_at",
-	}).AddRow(
-		profile.TenantID, profile.ProfileID, profile.ProfileKey, profile.DisplayName, profile.Description, string(profile.Status), profile.SchemaVersion,
-		profile.Configuration.Provider, profile.Configuration.Model, profile.Configuration.Endpoint, options, profile.Configuration.SecretRef, generation,
-		profile.ContentDigest, profile.Version, profile.CreatedAt, profile.UpdatedAt,
-	)
+	})
+	for _, profile := range profiles {
+		options, generation, err := encodeModelJSON(profile.Configuration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows.AddRow(
+			profile.TenantID, profile.ProfileID, profile.ProfileKey, profile.DisplayName, profile.Description, string(profile.Status), profile.SchemaVersion,
+			profile.Configuration.Provider, profile.Configuration.Model, profile.Configuration.Endpoint, options, profile.Configuration.SecretRef, generation,
+			profile.ContentDigest, profile.Version, profile.CreatedAt, profile.UpdatedAt,
+		)
+	}
+	return rows
 }
