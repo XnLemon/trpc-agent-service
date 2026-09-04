@@ -151,6 +151,10 @@ func TestResolveAndBuildRedactsResolverAndFactoryErrors(t *testing.T) {
 	if _, err := ResolveAndBuild(context.Background(), input, resolver, &recordingFactory{}); !errors.Is(err, ErrSecretResolution) || strings.Contains(err.Error(), "super-secret") {
 		t.Fatalf("resolver error was not redacted/classified: %v", err)
 	}
+	resolver.err = fmt.Errorf("provider rejected super-secret: %w", ErrInvalid)
+	if _, err := ResolveAndBuild(context.Background(), input, resolver, &recordingFactory{}); !errors.Is(err, ErrSecretResolution) || strings.Contains(err.Error(), "super-secret") || errors.Is(err, ErrInvalid) {
+		t.Fatalf("wrapped resolver error was not redacted/classified: %v", err)
+	}
 	resolver.err = nil
 	resolver.value, err = NewSecretValue("super-secret")
 	if err != nil {

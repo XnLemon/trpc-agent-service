@@ -297,7 +297,9 @@ func resolveModelSecret(ctx context.Context, input ModelFactoryInput, resolver S
 	resolve := func(resolveCtx context.Context) error {
 		candidate, err := resolver.Resolve(resolveCtx, scope)
 		if err != nil {
-			return err
+			// Resolver failures are deliberately collapsed at this boundary so
+			// provider details and credential-bearing messages cannot escape.
+			return ErrSecretResolution
 		}
 		if candidate.Value() == "" {
 			return ErrSecretResolution
