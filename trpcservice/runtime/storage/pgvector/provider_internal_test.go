@@ -106,6 +106,22 @@ func TestNormalizeConfigRejectsInvalidLimits(t *testing.T) {
 	}
 }
 
+func TestPrepareUpsertRejectsInvalidMetadataAndCompatibility(t *testing.T) {
+	store := &Store{model: "deterministic", modelVer: "v1", dimension: 2}
+	if _, _, _, err := store.prepareUpsert(DocumentInput{KnowledgeID: "k", DocumentID: "d", ChunkID: "c", Content: "text", Metadata: map[string]any{"unsupported": func() {}}}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("unsupported metadata error = %v", err)
+	}
+	if _, _, _, err := store.prepareUpsert(DocumentInput{KnowledgeID: "k", DocumentID: "d", ChunkID: "c", Content: "text", EmbeddingModel: "other", Metadata: map[string]any{}}); !errors.Is(err, ErrIncompatible) {
+		t.Fatalf("model mismatch error = %v", err)
+	}
+	if _, _, _, err := store.prepareUpsert(DocumentInput{KnowledgeID: "k", DocumentID: "d", ChunkID: "c", Content: "text", Checksum: "line\nbreak", Metadata: map[string]any{}}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("checksum error = %v", err)
+	}
+	if _, _, _, err := store.prepareUpsert(DocumentInput{KnowledgeID: "k", DocumentID: "d", ChunkID: "c", Content: "text", Embedding: []float64{1, 2, 3}, Metadata: map[string]any{}}); !errors.Is(err, ErrIncompatible) {
+		t.Fatalf("dimension mismatch error = %v", err)
+	}
+}
+
 func TestPureLifecycleBoundaries(t *testing.T) {
 	if _, err := (DeterministicEmbedder{}).Embed(context.Background(), "text"); err != nil {
 		t.Fatal(err)
@@ -237,6 +253,33 @@ func TestScanBoundariesRejectMalformedRows(t *testing.T) {
 	}
 }
 
+func TestSearchAndMutationErrorsAreMapped(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := &Store{db: db, tenantID: "tenant-a", collection: "knowledge", model: "deterministic", modelVer: "v1", dimension: 2, stop: make(chan struct{}), queue: make(chan indexJob, 1), queries: newDocumentQueries("public.runtime_pgvector_documents")}
+	if _, err := store.Search(context.Background(), []float64{1, 0}, SearchOptions{Metadata: map[string]string{"": "value"}}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid search filter = %v", err)
+	}
+	mock.ExpectQuery("SELECT tenant_id,knowledge_id,document_id,chunk_id").WillReturnError(errors.New("query down"))
+	if _, err := store.Search(context.Background(), []float64{1, 0}, SearchOptions{}); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("failed search = %v", err)
+	}
+	mock.ExpectExec("UPDATE public\\.runtime_pgvector_documents SET index_status='deleted'").WillReturnError(errors.New("delete down"))
+	if err := store.Delete(context.Background(), "knowledge", "doc", "chunk"); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("failed delete = %v", err)
+	}
+	mock.ExpectExec("UPDATE public\\.runtime_pgvector_documents SET index_status='pending'").WillReturnError(errors.New("retry down"))
+	if err := store.Retry(context.Background(), "knowledge", "doc", "chunk"); !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("failed retry = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestIndexClassifiesCompatibilityAndRetriesStorageFailures(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -275,6 +318,24 @@ func TestIndexClassifiesCompatibilityAndRetriesStorageFailures(t *testing.T) {
 	mock.ExpectQuery("SELECT content,embedding_model,embedding_version").WillReturnError(sql.ErrNoRows)
 	if store.index(context.Background(), documentKey{knowledgeID: "k", documentID: "d", chunkID: "c"}) {
 		t.Fatal("missing row was requeued")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIndexRetriesWhenFailureStateCannotBePersisted(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := &Store{db: db, tenantID: "tenant-a", collection: "knowledge", model: "deterministic", modelVer: "v1", dimension: 2, maxAttempts: 2, queries: newDocumentQueries("public.runtime_pgvector_documents")}
+	mock.ExpectQuery("SELECT content,embedding_model,embedding_version").WillReturnRows(sqlmock.NewRows([]string{"content", "embedding_model", "embedding_version", "embedding_dimension", "version", "index_status", "embedding"}).AddRow("text", "deterministic", "v1", 2, 1, "pending", "[1,0]"))
+	mock.ExpectExec("UPDATE public\\.runtime_pgvector_documents SET embedding=").WillReturnError(errors.New("index down"))
+	mock.ExpectExec("UPDATE public\\.runtime_pgvector_documents SET index_status=CASE").WillReturnError(errors.New("state down"))
+	if !store.index(context.Background(), documentKey{knowledgeID: "k", documentID: "d", chunkID: "c"}) {
+		t.Fatal("failed state persistence was not retried")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

@@ -56,6 +56,22 @@ func TestNewRejectsUnsafeConfiguration(t *testing.T) {
 	}
 }
 
+func TestNewFailsClosedWhenRecoveryStorageIsUnavailable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	mock.ExpectQuery("SELECT knowledge_id,document_id,chunk_id FROM public\\.runtime_pgvector_documents WHERE tenant_id=\\$1").WithArgs("tenant-a", "knowledge").WillReturnError(errors.New("database unavailable"))
+	store, err := pgvector.New(db, "tenant-a", pgvector.Config{})
+	if store != nil || !errors.Is(err, runtimestorage.ErrStorage) {
+		t.Fatalf("recovery failure = store %v, err %v", store, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUpsertPersistsBeforeAsynchronousIndexAndRejectsModelChanges(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
