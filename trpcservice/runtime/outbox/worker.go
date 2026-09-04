@@ -13,6 +13,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/resilience"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 )
 
@@ -68,6 +69,7 @@ type Worker struct {
 	telemetry     observability.Provider
 	metrics       metrics.Catalog
 	audit         audit.Recorder
+	resilience    *resilience.Policy
 	mu            sync.Mutex
 	runCancel     context.CancelFunc
 	runDone       chan struct{}
@@ -99,6 +101,10 @@ type Config struct {
 	Observability observability.Provider
 	// AuditWriter receives durable delivery, retry, and dead-letter facts.
 	AuditWriter audit.Writer
+	// Resilience optionally bounds provider Deliver/Reconcile calls. The
+	// provider contract must support the stable ReplyID/SegmentIndex idempotency
+	// key before enabling retries around Deliver.
+	Resilience *resilience.Policy
 }
 
 // New creates a reply worker after validating delivery and lease settings.
@@ -130,7 +136,7 @@ func New(config Config) (*Worker, error) {
 	if config.ProviderName == "" {
 		config.ProviderName = "other"
 	}
-	return &Worker{store: config.Store, provider: config.Provider, channel: config.Channel, providerName: config.ProviderName, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, jitter: config.Jitter, telemetry: config.Observability, metrics: metrics.New(config.Observability), audit: audit.Recorder{Writer: config.AuditWriter, TenantID: config.TenantID}}, nil
+	return &Worker{store: config.Store, provider: config.Provider, channel: config.Channel, providerName: config.ProviderName, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, jitter: config.Jitter, telemetry: config.Observability, metrics: metrics.New(config.Observability), audit: audit.Recorder{Writer: config.AuditWriter, TenantID: config.TenantID}, resilience: config.Resilience}, nil
 }
 
 // Run polls until ctx is canceled. It owns no goroutine after returning.
@@ -333,7 +339,7 @@ func (w *Worker) processClaimed(ctx context.Context, candidate, claimed runtimes
 		}
 		return nil
 	}
-	providerID, deliveryErr := w.provider.Deliver(operationCtx, claimed)
+	providerID, deliveryErr := w.deliver(operationCtx, claimed)
 	operationErr = deliveryErr
 	if deliveryErr == nil {
 		return w.acceptDelivery(ctx, operationCtx, claimed, providerID)
@@ -488,7 +494,7 @@ func (w *Worker) advanceEvent(ctx context.Context, eventID string) {
 }
 
 func (w *Worker) reconcile(ctx context.Context, claimed runtimestorage.ReplyOutbox) bool {
-	status, providerID, err := w.provider.Reconcile(ctx, claimed)
+	status, providerID, err := w.reconcileProvider(ctx, claimed)
 	if err != nil || status == DeliveryUnknown {
 		return false
 	}
@@ -502,6 +508,39 @@ func (w *Worker) reconcile(ctx context.Context, claimed runtimestorage.ReplyOutb
 		return w.store.TransitionReply(operationCtx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: to, Owner: w.owner, FencingToken: claimed.FencingToken, ProviderID: providerID, ErrorClass: class})
 	})
 	return transitionErr == nil
+}
+
+func (w *Worker) deliver(ctx context.Context, value runtimestorage.ReplyOutbox) (string, error) {
+	if w == nil || w.provider == nil {
+		return "", ErrProvider
+	}
+	if w.resilience == nil {
+		return w.provider.Deliver(ctx, value)
+	}
+	var providerID string
+	err := w.resilience.Execute(ctx, func(callCtx context.Context) error {
+		var err error
+		providerID, err = w.provider.Deliver(callCtx, value)
+		return err
+	})
+	return providerID, err
+}
+
+func (w *Worker) reconcileProvider(ctx context.Context, value runtimestorage.ReplyOutbox) (DeliveryStatus, string, error) {
+	if w == nil || w.provider == nil {
+		return DeliveryUnknown, "", ErrProvider
+	}
+	if w.resilience == nil {
+		return w.provider.Reconcile(ctx, value)
+	}
+	var status DeliveryStatus
+	var providerID string
+	err := w.resilience.Execute(ctx, func(callCtx context.Context) error {
+		var err error
+		status, providerID, err = w.provider.Reconcile(callCtx, value)
+		return err
+	})
+	return status, providerID, err
 }
 
 func observeStorage[T any](worker *Worker, ctx context.Context, operation func(context.Context) (T, error)) (T, error) {

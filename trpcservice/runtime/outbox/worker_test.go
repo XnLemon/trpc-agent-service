@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/resilience"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
@@ -110,6 +111,40 @@ func TestWorkerDeliversAndFencesProviderReceipt(t *testing.T) {
 	event, err = store.GetMessage(context.Background(), "tenant-a", "event-1")
 	if err != nil || event.Status != runtimestorage.EventReplied {
 		t.Fatalf("event lifecycle = %+v err=%v", event, err)
+	}
+}
+
+func TestWorkerAppliesExplicitProviderResiliencePolicy(t *testing.T) {
+	store := inmemory.New()
+	seedReply(t, store, "tenant-a", "event-resilience", "reply-resilience")
+	provider := &providerStub{deliverID: "provider-resilience", deliverFn: failThenSuccess(1)}
+	policy, err := resilience.New(resilience.Config{Timeout: time.Second, MaxAttempts: 2, FailureThreshold: 2, OpenTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, Resilience: policy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := worker.RunOnce(context.Background()); err != nil || processed != 1 {
+		t.Fatalf("RunOnce() processed=%d err=%v", processed, err)
+	}
+	if provider.deliveries != 2 {
+		t.Fatalf("provider deliveries=%d, want two bounded attempts", provider.deliveries)
+	}
+	reply, err := store.GetReply(context.Background(), "tenant-a", "reply-resilience", 0)
+	if err != nil || reply.Status != runtimestorage.ReplySent {
+		t.Fatalf("reply=%+v err=%v, want sent", reply, err)
+	}
+}
+
+func failThenSuccess(failures int) func(runtimestorage.ReplyOutbox) error {
+	return func(runtimestorage.ReplyOutbox) error {
+		if failures > 0 {
+			failures--
+			return &outbox.DeliveryError{Class: "unavailable", Retryable: true}
+		}
+		return nil
 	}
 }
 

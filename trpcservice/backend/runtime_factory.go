@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/resilience"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 )
@@ -241,6 +242,43 @@ type StorageFactoryFunc func(context.Context, StorageFactoryInput) (*CapabilityS
 // New implements StorageFactory.
 func (factory StorageFactoryFunc) New(ctx context.Context, input StorageFactoryInput) (*CapabilitySet, error) {
 	return factory(ctx, input)
+}
+
+// ResilientStorageFactory applies an explicit bounded policy to capability
+// materialization. The delegate is retried only when the policy classifies its
+// error as retryable; the returned CapabilitySet remains owned by the caller.
+type ResilientStorageFactory struct {
+	delegate StorageFactory
+	policy   *resilience.Policy
+}
+
+// NewResilientStorageFactory wraps a StorageFactory with a shared policy.
+func NewResilientStorageFactory(delegate StorageFactory, policy *resilience.Policy) (*ResilientStorageFactory, error) {
+	if delegate == nil || policy == nil {
+		return nil, fmt.Errorf("%w: storage factory and resilience policy are required", ErrStorageFactory)
+	}
+	return &ResilientStorageFactory{delegate: delegate, policy: policy}, nil
+}
+
+// New materializes capabilities through the configured policy.
+func (factory *ResilientStorageFactory) New(ctx context.Context, input StorageFactoryInput) (*CapabilitySet, error) {
+	if factory == nil || factory.delegate == nil || factory.policy == nil {
+		return nil, ErrStorageFactory
+	}
+	var result *CapabilitySet
+	err := factory.policy.Execute(ctx, func(callCtx context.Context) error {
+		candidate, err := factory.delegate.New(callCtx, input)
+		if err != nil {
+			_ = candidate.Close()
+			return err
+		}
+		if candidate == nil {
+			return ErrStorageFactory
+		}
+		result = candidate
+		return err
+	})
+	return result, err
 }
 
 // RegistryStorageFactory materializes backend capabilities from the tenant

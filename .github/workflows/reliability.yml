@@ -1,0 +1,97 @@
+name: Reliability Gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: reliability-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  resilience:
+    name: Resilience contract tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run resilience tests
+        run: go test ./trpcservice/resilience ./trpcservice/model ./trpcservice/backend ./trpcservice/tool ./trpcservice/runtime/outbox -count=1
+
+      - name: Run resilience race tests
+        run: go test -race ./trpcservice/resilience ./trpcservice/model ./trpcservice/backend ./trpcservice/tool ./trpcservice/runtime/outbox -count=1
+
+  load-capacity:
+    name: Deterministic load and capacity gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run capacity contract
+        run: go test ./examples/load-test -count=1 -v
+
+      - name: Run capacity benchmark
+        run: go test ./examples/load-test -run '^$' -bench . -benchmem -count=1
+
+  backup-restore:
+    name: PostgreSQL backup and restore rehearsal
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: trpc_backup_source
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d trpc_backup_source"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TRPC_BACKUP_DSN: postgres://postgres:postgres@127.0.0.1:5432/trpc_backup_source
+      TRPC_RESTORE_DSN: postgres://postgres:postgres@127.0.0.1:5432/trpc_backup_restore
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client tools
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+
+      - name: Create deterministic source and restore databases
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql "$TRPC_BACKUP_DSN" -v ON_ERROR_STOP=1 -c 'CREATE TABLE rehearsal_marker (id integer PRIMARY KEY, value text NOT NULL); INSERT INTO rehearsal_marker VALUES (1, '\''reliability-gate'\'');'
+          createdb --host 127.0.0.1 --username postgres trpc_backup_restore
+
+      - name: Validate backup and restore tools
+        run: ./scripts/backup-restore-smoke.sh --check
+
+      - name: Run backup and restore rehearsal
+        run: ./scripts/backup-restore-smoke.sh --rehearse
+
+      - name: Verify restored marker
+        run: test "$(psql "$TRPC_RESTORE_DSN" -Atqc 'SELECT value FROM rehearsal_marker WHERE id = 1')" = reliability-gate

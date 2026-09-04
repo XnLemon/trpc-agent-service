@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/resilience"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -238,6 +239,17 @@ type ModelFactory interface {
 // ModelFactory. Resolver and Factory errors are intentionally sanitized so
 // provider credentials cannot escape through an error chain.
 func ResolveAndBuild(ctx context.Context, input ModelFactoryInput, resolver SecretResolver, factory ModelFactory) (trpcmodel.Model, error) {
+	return resolveAndBuild(ctx, input, resolver, factory, nil)
+}
+
+// ResolveAndBuildWithPolicy resolves and constructs a model through an
+// explicit bounded policy. The policy applies separately to secret resolution
+// and model construction; errors remain redacted using the existing contract.
+func ResolveAndBuildWithPolicy(ctx context.Context, input ModelFactoryInput, resolver SecretResolver, factory ModelFactory, policy *resilience.Policy) (trpcmodel.Model, error) {
+	return resolveAndBuild(ctx, input, resolver, factory, policy)
+}
+
+func resolveAndBuild(ctx context.Context, input ModelFactoryInput, resolver SecretResolver, factory ModelFactory, policy *resilience.Policy) (trpcmodel.Model, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
@@ -256,7 +268,18 @@ func ResolveAndBuild(ctx context.Context, input ModelFactoryInput, resolver Secr
 		if err := scope.Validate(); err != nil {
 			return nil, err
 		}
-		resolved, err := resolver.Resolve(ctx, scope)
+		var resolved SecretValue
+		resolve := func(resolveCtx context.Context) error {
+			var err error
+			resolved, err = resolver.Resolve(resolveCtx, scope)
+			return err
+		}
+		var err error
+		if policy == nil {
+			err = resolve(ctx)
+		} else {
+			err = policy.Execute(ctx, resolve)
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -265,7 +288,18 @@ func ResolveAndBuild(ctx context.Context, input ModelFactoryInput, resolver Secr
 		}
 		secret = resolved
 	}
-	model, err := factory.New(ctx, input.Clone(), secret)
+	var model trpcmodel.Model
+	build := func(buildCtx context.Context) error {
+		var err error
+		model, err = factory.New(buildCtx, input.Clone(), secret)
+		return err
+	}
+	var err error
+	if policy == nil {
+		err = build(ctx)
+	} else {
+		err = policy.Execute(ctx, build)
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

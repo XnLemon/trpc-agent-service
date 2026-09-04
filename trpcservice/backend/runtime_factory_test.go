@@ -5,8 +5,10 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/resilience"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimeinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/session"
@@ -38,6 +40,33 @@ func TestRegistryStorageFactoryMaterializesTenantSession(t *testing.T) {
 	}
 	if _, err := set.Session(); !errors.Is(err, ErrCapabilityUnavailable) {
 		t.Fatalf("Session after Close() = %v", err)
+	}
+}
+
+func TestResilientStorageFactoryRetriesAndClosesFailedCapability(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	var calls int
+	delegate := StorageFactoryFunc(func(context.Context, StorageFactoryInput) (*CapabilitySet, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("temporary backend failure")
+		}
+		return NewCapabilitySet(tenantID, map[Capability]any{CapabilitySession: inmemory.NewSessionService()})
+	})
+	policy, err := resilience.New(resilience.Config{Timeout: time.Second, MaxAttempts: 2, FailureThreshold: 2, OpenTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory, err := NewResilientStorageFactory(delegate, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID})
+	if err != nil || set == nil || calls != 2 {
+		t.Fatalf("New() set=%v err=%v calls=%d", set, err, calls)
+	}
+	if err := set.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

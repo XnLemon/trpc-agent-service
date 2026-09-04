@@ -51,6 +51,7 @@ IM / HTTP -> Channel Adapter -> Gateway -> Queue/Outbox -> Agent Worker
 - InMemory、PostgreSQL 与 tenant-scoped Redis runtime storage；Redis 当前覆盖 Session/Event、Memory、Reply Outbox 和租约恢复；
 - 普通及流式 HTTP Chat API，企业微信自建应用文本 webhook，Telegram 文本 long polling；
 - OpenTelemetry trace/metrics、Prometheus 导出路径、审计事件和脱敏错误；
+- 依赖级 timeout/retry/circuit-breaker/fallback 策略、PostgreSQL 备份恢复演练和确定性容量门禁；
 - Docker Compose 本地验证、Kubernetes Kustomize base，以及版本 tag 触发的 GHCR 镜像发布。
 
 ## Admin Web UI

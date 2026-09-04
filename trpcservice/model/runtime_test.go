@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/resilience"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -153,6 +155,34 @@ func TestResolveAndBuildRedactsResolverAndFactoryErrors(t *testing.T) {
 	factory := &recordingFactory{err: errors.New("provider rejected super-secret")}
 	if _, err := ResolveAndBuild(context.Background(), input, resolver, factory); !errors.Is(err, ErrModelFactory) || strings.Contains(err.Error(), "super-secret") {
 		t.Fatalf("factory error was not redacted/classified: %v", err)
+	}
+}
+
+func TestResolveAndBuildWithPolicyRetriesModelConstruction(t *testing.T) {
+	_, tenantSnapshot, profile, catalog := modelExecutionFixture(t, "")
+	snapshot, err := NewModelExecutionSnapshot(tenantSnapshot, profile, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := snapshot.FactoryInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := resilience.New(resilience.Config{
+		Timeout: time.Second, MaxAttempts: 3, FailureThreshold: 3, OpenTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := &retryingFactory{}
+	if _, err := ResolveAndBuildWithPolicy(context.Background(), input, nil, factory, policy); err != nil {
+		t.Fatalf("ResolveAndBuildWithPolicy() = %v", err)
+	}
+	if factory.calls != 3 {
+		t.Fatalf("factory calls = %d, want three bounded attempts", factory.calls)
+	}
+	if policy.State() != resilience.StateClosed {
+		t.Fatalf("policy state = %q, want closed", policy.State())
 	}
 }
 
@@ -337,6 +367,16 @@ type recordingFactory struct {
 	secret    SecretValue
 	err       error
 	returnNil bool
+}
+
+type retryingFactory struct{ calls int }
+
+func (factory *retryingFactory) New(_ context.Context, _ ModelFactoryInput, _ SecretValue) (trpcmodel.Model, error) {
+	factory.calls++
+	if factory.calls < 3 {
+		return nil, errors.New("temporary provider failure")
+	}
+	return fakeModel{}, nil
 }
 
 func (factory *recordingFactory) New(_ context.Context, input ModelFactoryInput, secret SecretValue) (trpcmodel.Model, error) {
