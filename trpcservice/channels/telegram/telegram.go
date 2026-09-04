@@ -238,6 +238,9 @@ type Config struct {
 	Target channels.RoutingTarget
 	// Dispatcher is the existing protocol-neutral Gateway execution service.
 	Dispatcher gateway.DispatchService
+	// DurableReplies delegates final delivery to the configured Reply Outbox
+	// worker. When false, the adapter keeps its legacy direct-send behavior.
+	DurableReplies bool
 	// Idempotency optionally supplies a shared process-local store. When nil,
 	// the adapter owns a new process-local store.
 	Idempotency *gateway.IdempotencyStore
@@ -273,6 +276,7 @@ type Config struct {
 type Adapter struct {
 	client             BotClient
 	dispatcher         gateway.DispatchService
+	durableReplies     bool
 	principal          gateway.Principal
 	target             channels.RoutingTarget
 	idempotency        *gateway.IdempotencyStore
@@ -324,7 +328,7 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 		factory = sdkBotFactory{}
 	}
 	adapter := &Adapter{
-		dispatcher: config.Dispatcher, principal: normalized.principal, target: normalized.target,
+		dispatcher: config.Dispatcher, durableReplies: config.DurableReplies, principal: normalized.principal, target: normalized.target,
 		idempotency: idempotency, ownIdempotency: ownIdempotency, errorHook: config.ErrorHook,
 		audit:       audit.Recorder{Writer: config.AuditWriter, TenantID: normalized.target.TenantID},
 		attachments: config.Attachments, maxAttachmentBytes: normalized.maxAttachmentBytes,
@@ -572,6 +576,9 @@ func (adapter *Adapter) handleReplay(ctx context.Context, message *models.Messag
 	if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressAccepted, inbound.ExternalMessageID, "", inbound.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
 		return ErrDispatch
 	}
+	if adapter.durableReplies {
+		return nil
+	}
 	if err := adapter.sendEvents(ctx, message, replay); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
@@ -590,11 +597,18 @@ func (adapter *Adapter) handleClaimedUpdate(ctx context.Context, message *models
 
 	events, dispatchErr := adapter.dispatch(ctx, inbound)
 	if dispatchErr != nil {
-		_ = claim.Fail()
 		if errors.Is(dispatchErr, context.Canceled) || errors.Is(dispatchErr, context.DeadlineExceeded) {
+			_ = claim.Fail()
 			return dispatchErr
 		}
 		adapter.report(ErrorOperationDispatch, ErrDispatch)
+		if adapter.durableReplies && len(events) > 0 {
+			if err := claim.Complete(events); err != nil {
+				return ErrDispatch
+			}
+			return ErrDispatch
+		}
+		_ = claim.Fail()
 		if sendErr := adapter.sendText(ctx, message, failureReply); sendErr != nil {
 			if !errors.Is(sendErr, context.Canceled) && !errors.Is(sendErr, context.DeadlineExceeded) {
 				adapter.report(ErrorOperationSend, ErrSendMessage)
@@ -604,6 +618,9 @@ func (adapter *Adapter) handleClaimedUpdate(ctx context.Context, message *models
 	}
 	if err := claim.Complete(events); err != nil {
 		return ErrDispatch
+	}
+	if adapter.durableReplies {
+		return nil
 	}
 	if err := adapter.sendEvents(ctx, message, events); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -647,7 +664,7 @@ func (adapter *Adapter) dispatch(ctx context.Context, message gateway.InboundMes
 		case event, ok := <-stream:
 			if !ok {
 				if !done || failed {
-					return nil, ErrDispatch
+					return events, ErrDispatch
 				}
 				return events, nil
 			}

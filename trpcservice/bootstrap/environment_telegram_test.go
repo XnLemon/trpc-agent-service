@@ -224,7 +224,7 @@ func TestEnvironmentTelegramComponentsSealBindingAndPassAttachmentStore(t *testi
 		t.Fatalf("Telegram adapter type = %T", value)
 	}
 	defer adapter.Close()
-	if received.BotToken != "bot-token" || received.Target.BindingID != binding.BindingID || received.Target.TenantID != root.TenantID || received.APIBaseURL != "https://api.telegram.org" || received.Attachments == nil {
+	if received.BotToken != "bot-token" || received.Target.BindingID != binding.BindingID || received.Target.TenantID != root.TenantID || received.APIBaseURL != "https://api.telegram.org" || !received.DurableReplies || received.Attachments == nil {
 		t.Fatalf("Telegram adapter config = %+v", received)
 	}
 	provider, err := telegram.NewBindingProvider(adapter)

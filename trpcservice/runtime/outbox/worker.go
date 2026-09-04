@@ -192,9 +192,13 @@ func (w *Worker) runLoop(runCtx context.Context, pollInterval time.Duration) err
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	for {
-		if _, err := w.RunOnce(runCtx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		if _, err := w.RunOnce(runCtx); errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
+		// A single storage, audit, or provider transition error must not
+		// permanently stop the process-owned worker. RunOnce has already
+		// fenced the affected item where possible; the next poll retries the
+		// remaining eligible work and lets expired leases be reconciled.
 		select {
 		case <-runCtx.Done():
 			return runCtx.Err()

@@ -427,6 +427,63 @@ func TestHandleUpdateMapsPrivateTextAndAggregatesDispatchEvents(t *testing.T) {
 	assertPrivateReply(t, sent, aw.events)
 }
 
+func TestDurableRepliesLeaveDeliveryToOutboxWorker(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "durable-replies", "12345")
+	dispatcher := &dispatchStub{events: []gateway.DispatchEvent{
+		{Type: gateway.DispatchEventMessage, Text: "reply"},
+		{Type: gateway.DispatchEventDone, Done: true},
+	}}
+	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
+	adapter, err := New(context.Background(), Config{
+		BotToken: "12345:runtime-secret", Target: target, Dispatcher: dispatcher,
+		DurableReplies: true, Factory: &fakeFactory{client: client}, AuditWriter: &telegramAuditWriter{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = adapter.Close() }()
+	update := textUpdate(70, models.ChatTypePrivate, 100, 42, "input", 0)
+	if err := adapter.HandleUpdate(context.Background(), update); err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatcher.requests()) != 1 || len(client.sent()) != 0 {
+		t.Fatalf("durable reply was sent from the inbound handler: dispatch=%d sends=%v", len(dispatcher.requests()), client.sent())
+	}
+	if err := adapter.HandleUpdate(context.Background(), update); err != nil {
+		t.Fatalf("durable replay returned an error: %v", err)
+	}
+	if len(dispatcher.requests()) != 1 || len(client.sent()) != 0 {
+		t.Fatalf("durable replay redispatched or sent a reply: dispatch=%d sends=%v", len(dispatcher.requests()), client.sent())
+	}
+
+	failureDispatcher := &dispatchStub{events: []gateway.DispatchEvent{
+		{Type: gateway.DispatchEventError, Error: "redacted"},
+		{Type: gateway.DispatchEventDone, Done: true},
+	}}
+	failureClient := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
+	failureAdapter, err := New(context.Background(), Config{
+		BotToken: "12345:runtime-secret", Target: target, Dispatcher: failureDispatcher,
+		DurableReplies: true, Factory: &fakeFactory{client: failureClient}, AuditWriter: &telegramAuditWriter{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = failureAdapter.Close() }()
+	failureUpdate := textUpdate(71, models.ChatTypePrivate, 100, 42, "failure", 0)
+	if err := failureAdapter.HandleUpdate(context.Background(), failureUpdate); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("durable dispatch failure = %v", err)
+	}
+	if len(failureClient.sent()) != 0 {
+		t.Fatalf("durable dispatch failure used a direct fallback: %v", failureClient.sent())
+	}
+	if err := failureAdapter.HandleUpdate(context.Background(), failureUpdate); err != nil {
+		t.Fatalf("durable failed replay returned an error: %v", err)
+	}
+	if len(failureDispatcher.requests()) != 1 {
+		t.Fatalf("durable failed replay redispatched: %d", len(failureDispatcher.requests()))
+	}
+}
+
 func assertPrivateInboundRequest(t *testing.T, target channels.RoutingTarget, request gateway.DispatchRequest, contextValue any, key contextKey) {
 	t.Helper()
 	if request.Principal.Kind() != gateway.PrincipalChannel || request.Principal.TenantID() != target.TenantID || request.Principal.AppID() != target.AppID {

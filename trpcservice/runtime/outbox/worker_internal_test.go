@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -185,6 +186,40 @@ func TestWorkerRunAndRetryDueBoundaryBranches(t *testing.T) {
 	cancel()
 	if err := worker.Run(ctx, 0); !errors.Is(err, context.Canceled) {
 		t.Fatalf("default poll interval cancellation = %v", err)
+	}
+}
+
+type failOnceListStore struct {
+	*inmemory.Store
+	calls atomic.Int32
+}
+
+func (store *failOnceListStore) ListReplyCandidates(ctx context.Context, tenantID string) ([]runtimestorage.ReplyOutbox, error) {
+	if store.calls.Add(1) == 1 {
+		return nil, errors.New("temporary list failure")
+	}
+	return store.Store.ListReplyCandidates(ctx, tenantID)
+}
+
+func TestWorkerRunContinuesAfterPollError(t *testing.T) {
+	store := &failOnceListStore{Store: inmemory.New()}
+	worker, err := New(Config{Store: store, Provider: branchProvider{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx, time.Millisecond) }()
+	deadline := time.Now().Add(time.Second)
+	for store.calls.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("worker stopped on a poll error: %v", err)
+	}
+	if calls := store.calls.Load(); calls < 2 {
+		t.Fatalf("worker poll calls = %d, want it to continue after the first error", calls)
 	}
 }
 

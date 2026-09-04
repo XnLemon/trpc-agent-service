@@ -100,13 +100,14 @@ func environmentTelegramComponents(
 			return nil, ErrInvalidConfig
 		}
 		adapter, err := newEnvironmentTelegramAdapter(ctx, telegram.Config{
-			BotToken:      telegramConfig.botToken,
-			Target:        target,
-			Dispatcher:    dispatcher,
-			APIBaseURL:    apiBaseURL,
-			AuditWriter:   auditWriter,
-			Observability: config.telemetry,
-			Attachments:   attachments,
+			BotToken:       telegramConfig.botToken,
+			Target:         target,
+			Dispatcher:     dispatcher,
+			DurableReplies: true,
+			APIBaseURL:     apiBaseURL,
+			AuditWriter:    auditWriter,
+			Observability:  config.telemetry,
+			Attachments:    attachments,
 		})
 		if err != nil || adapter == nil {
 			return nil, ErrInvalidConfig

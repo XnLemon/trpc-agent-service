@@ -176,7 +176,8 @@ duplicate ingress、delivery 成功/重试/dead-letter，以及 channel/error cl
 - direct text/media 到 Gateway/Runner/Outbox；WeCom group callback 按 `ChatId` 规范化为 group；
 - duplicate、并发、乱序和跨 Tenant/Binding identity；
 - Context cancellation、retry/dead-letter、stale fence 和 restart recovery；
-- Telegram Adapter 仍维持现有 long-polling、直接回复和 lifecycle 行为；
+- Telegram Adapter 仍维持现有 long-polling 和 lifecycle 行为；standalone 兼容构造可直接回复，
+  environment deployment 由 durable Reply Outbox worker 投递；
 - 历史 CorpID-only `wecom` Binding 通过读取/更新迁移保持可管理，但在补齐
   `AgentID` 与组合 `ProviderAccountID` 前拒绝 ingress；
 - InMemory/PostgreSQL conformance、migration、`go test ./...`、race、vet、lint、build 和

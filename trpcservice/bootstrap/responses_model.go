@@ -92,6 +92,11 @@ func (m *responsesModel) stream(ctx context.Context, request *trpcmodel.Request,
 	terminal := &trpcmodel.Response{Object: "response", Done: true, Usage: state.usage}
 	if len(state.toolCalls) > 0 {
 		terminal.Choices = []trpcmodel.Choice{{Message: trpcmodel.Message{Role: trpcmodel.RoleAssistant, ToolCalls: state.toolCalls}}}
+	} else if state.emittedText {
+		// trpc-agent-go treats Done as terminal only when a response contains a
+		// choice or an error. The text was already emitted as deltas, so keep
+		// this final choice empty to avoid replaying the accumulated text.
+		terminal.Choices = []trpcmodel.Choice{{Index: 0, Message: trpcmodel.Message{Role: trpcmodel.RoleAssistant}}}
 	}
 	if !state.emittedText && len(state.toolCalls) == 0 {
 		terminal.Error = &trpcmodel.ResponseError{Message: "responses API completed without output text", Type: trpcmodel.ErrorTypeAPIError}
@@ -148,7 +153,23 @@ func responsesTextMessage(message trpcmodel.Message) responsesInputItem {
 	if role == "" {
 		role = string(trpcmodel.RoleUser)
 	}
-	return responsesInputItem{Role: role, Content: responsesContent(message)}
+	content := responsesContent(message)
+	if role == string(trpcmodel.RoleAssistant) {
+		content = responsesAssistantContent(message)
+	}
+	return responsesInputItem{Role: role, Content: content}
+}
+
+func responsesAssistantContent(message trpcmodel.Message) []responsesContentPart {
+	text := message.Content
+	if text == "" {
+		for _, part := range message.ContentParts {
+			if part.Text != nil {
+				text += *part.Text
+			}
+		}
+	}
+	return []responsesContentPart{{Type: "output_text", Text: text}}
 }
 
 func responsesTools(request *trpcmodel.Request) []responsesTool {
