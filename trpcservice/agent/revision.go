@@ -26,8 +26,12 @@ const (
 type Kind string
 
 const (
-	// KindLLM is the only executable kind supported by schema version 1.
-	KindLLM Kind = "llm"
+	// KindLLM identifies the built-in language-model Agent.
+	KindLLM      Kind = "llm"
+	KindChain    Kind = "chain"
+	KindParallel Kind = "parallel"
+	KindCycle    Kind = "cycle"
+	KindGraph    Kind = "graph"
 )
 
 const (
@@ -73,58 +77,60 @@ type ToolAuthorization struct {
 
 // DraftConfiguration is the complete executable content of one revision.
 type DraftConfiguration struct {
-	Description         string
-	Instruction         string
-	GlobalInstruction   string
-	ModelProfileID      string
-	Generation          GenerationConfig
-	Runtime             RuntimePolicy
-	Tools               []ToolAuthorization
-	RuntimeProfileID    string
-	RuntimeKind         string
-	RuntimeMode         string
-	RuntimeVersion      string
-	RuntimeDigest       string
-	RuntimeConfigDigest string
-	RuntimeGovernance   string
+	Description              string
+	Instruction              string
+	GlobalInstruction        string
+	ModelProfileID           string
+	Generation               GenerationConfig
+	Runtime                  RuntimePolicy
+	Tools                    []ToolAuthorization
+	RuntimeProfileID         string
+	RuntimeKind              string
+	RuntimeMode              string
+	RuntimeVersion           string
+	RuntimeDigest            string
+	RuntimeConfigDigest      string
+	RuntimeGovernance        string
+	RuntimeImplementationRef string
 }
 
 // Revision is one tenant-scoped version of an Agent App definition.
 // Published revisions are immutable and content-addressed.
 type Revision struct {
-	TenantID            string
-	AppID               string
-	Revision            int64
-	State               RevisionState
-	DraftVersion        int64
-	Kind                Kind
-	SchemaVersion       int
-	Description         string
-	Instruction         string
-	GlobalInstruction   string
-	ModelProfileID      string
-	Generation          GenerationConfig
-	Runtime             RuntimePolicy
-	Tools               []ToolAuthorization
-	RuntimeProfileID    string
-	RuntimeKind         string
-	RuntimeMode         string
-	RuntimeVersion      string
-	RuntimeDigest       string
-	RuntimeConfigDigest string
-	RuntimeGovernance   string
-	ContentDigest       string
-	PublishedAt         *time.Time
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	TenantID                 string
+	AppID                    string
+	Revision                 int64
+	State                    RevisionState
+	DraftVersion             int64
+	Kind                     Kind
+	SchemaVersion            int
+	Description              string
+	Instruction              string
+	GlobalInstruction        string
+	ModelProfileID           string
+	Generation               GenerationConfig
+	Runtime                  RuntimePolicy
+	Tools                    []ToolAuthorization
+	RuntimeProfileID         string
+	RuntimeKind              string
+	RuntimeMode              string
+	RuntimeVersion           string
+	RuntimeDigest            string
+	RuntimeConfigDigest      string
+	RuntimeGovernance        string
+	RuntimeImplementationRef string
+	ContentDigest            string
+	PublishedAt              *time.Time
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
 }
 
 // RuntimeIdentity returns the published runtime descriptor, mapping legacy
 // revisions without runtime metadata to builtin-llm v1.
-func (r Revision) RuntimeIdentity() (profileID, kind, mode, version, digest, configDigest, governance string) {
-	profileID, kind, mode, version, digest, configDigest, governance = r.RuntimeProfileID, r.RuntimeKind, r.RuntimeMode, r.RuntimeVersion, r.RuntimeDigest, r.RuntimeConfigDigest, r.RuntimeGovernance
+func (r Revision) RuntimeIdentity() (profileID, kind, mode, version, digest, configDigest, governance, implementationRef string) {
+	profileID, kind, mode, version, digest, configDigest, governance, implementationRef = r.RuntimeProfileID, r.RuntimeKind, r.RuntimeMode, r.RuntimeVersion, r.RuntimeDigest, r.RuntimeConfigDigest, r.RuntimeGovernance, r.RuntimeImplementationRef
 	if profileID == "" {
-		return "builtin-llm", "builtin-llm", "builtin", "v1", "builtin-llm@v1", "builtin-llm-config-v1", "full"
+		return "builtin-llm", "builtin-llm", "builtin", "v1", "builtin-llm@v1", "builtin-llm-config-v1", "full", "builtin-llm"
 	}
 	return
 }
@@ -185,9 +191,10 @@ func NewRevision(input CreateRevisionInput) (*Revision, error) {
 		RuntimeProfileID:  configuration.RuntimeProfileID, RuntimeKind: configuration.RuntimeKind,
 		RuntimeMode: configuration.RuntimeMode, RuntimeVersion: configuration.RuntimeVersion,
 		RuntimeDigest: configuration.RuntimeDigest, RuntimeConfigDigest: configuration.RuntimeConfigDigest,
-		RuntimeGovernance: configuration.RuntimeGovernance,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		RuntimeGovernance:        configuration.RuntimeGovernance,
+		RuntimeImplementationRef: configuration.RuntimeImplementationRef,
+		CreatedAt:                now,
+		UpdatedAt:                now,
 	}
 	return revision, nil
 }
@@ -213,7 +220,8 @@ func (r Revision) Configuration() DraftConfiguration {
 		Tools:             cloneTools(r.Tools),
 		RuntimeProfileID:  r.RuntimeProfileID, RuntimeKind: r.RuntimeKind, RuntimeMode: r.RuntimeMode,
 		RuntimeVersion: r.RuntimeVersion, RuntimeDigest: r.RuntimeDigest, RuntimeConfigDigest: r.RuntimeConfigDigest,
-		RuntimeGovernance: r.RuntimeGovernance,
+		RuntimeGovernance:        r.RuntimeGovernance,
+		RuntimeImplementationRef: r.RuntimeImplementationRef,
 	}
 	return configuration
 }

@@ -157,8 +157,8 @@ func NewRuntimeRunnerRegistry(config RuntimeRunnerRegistryConfig) (*RunnerRegist
 			if err != nil {
 				return nil, err
 			}
-			if input.RuntimeProfileID != "" && input.RuntimeProfileID != "builtin-llm" {
-				factory, resolveErr := config.RuntimeFactories.Resolve(input.RuntimeProfileID)
+			if input.RuntimeImplementationRef != "" && input.RuntimeImplementationRef != "builtin-llm" {
+				factory, resolveErr := config.RuntimeFactories.Resolve(input.RuntimeImplementationRef)
 				if resolveErr != nil {
 					return nil, resolveErr
 				}

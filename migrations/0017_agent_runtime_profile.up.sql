@@ -9,7 +9,7 @@ CREATE TABLE public.agent_runtime_profile (
     schema_version INT NOT NULL CHECK (schema_version >= 1),
     implementation_digest TEXT NOT NULL,
     config_digest TEXT NOT NULL,
-    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    config JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (public.jsonb_has_safe_keys(config)),
     capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
     governance_mode TEXT NOT NULL CHECK (governance_mode IN ('full','perimeter')),
     secret_ref TEXT NOT NULL DEFAULT '',

@@ -63,6 +63,12 @@ func (p RuntimeProfile) Validate() error {
 	if p.SecretRef != "" && strings.ContainsAny(p.SecretRef, "\r\n") {
 		return ErrInvalid
 	}
+	for key := range p.Config {
+		k := strings.ToLower(key)
+		if strings.Contains(k, "secret") || strings.Contains(k, "token") || strings.Contains(k, "password") || strings.Contains(k, "credential") {
+			return fmt.Errorf("%w: secret-bearing config key", ErrInvalid)
+		}
+	}
 	return nil
 }
 
