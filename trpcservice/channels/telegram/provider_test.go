@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/go-telegram/bot"
@@ -86,6 +87,38 @@ func TestProviderUsesStableReceiptAndReconcile(t *testing.T) {
 	}
 	if botClient.params.ChatID != int64(99) || botClient.params.MessageThreadID != 7 || botClient.params.Text != "hello" {
 		t.Fatalf("send params = %+v", botClient.params)
+	}
+}
+
+func TestBindingProviderRoutesDurableTelegramTargets(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "binding-provider", "12345")
+	botClient := &providerBot{message: &models.Message{ID: 43}}
+	adapter := &Adapter{client: botClient, target: target}
+	provider, err := NewBindingProvider(adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := runtimestorage.ReplyOutbox{
+		TenantID: target.TenantID, ReplyID: "reply-binding", SegmentIndex: 0, Payload: "hello",
+		ReplyTarget: runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: "group", ReceiverID: "-10042", ThreadID: "7"},
+	}
+	receipt, err := provider.Deliver(context.Background(), reply)
+	if err != nil || receipt != "43" {
+		t.Fatalf("binding delivery = %q, %v", receipt, err)
+	}
+	if botClient.params == nil || botClient.params.ChatID != int64(-10042) || botClient.params.MessageThreadID != 7 || botClient.params.Text != "hello" {
+		t.Fatalf("binding send params = %+v", botClient.params)
+	}
+	if _, err := provider.Deliver(context.Background(), reply); err != nil || botClient.calls != 1 {
+		t.Fatalf("binding duplicate delivery calls=%d err=%v", botClient.calls, err)
+	}
+	if status, receipt, err := provider.Reconcile(context.Background(), reply); err != nil || status != outbox.DeliveryAccepted || receipt != "43" {
+		t.Fatalf("binding reconcile = %s/%q err=%v", status, receipt, err)
+	}
+	invalid := reply
+	invalid.ReplyTarget.BindingID = "other-binding"
+	if _, err := provider.Deliver(context.Background(), invalid); err == nil {
+		t.Fatal("binding provider accepted an unregistered binding")
 	}
 }
 

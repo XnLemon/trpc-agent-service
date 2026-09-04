@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strconv"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	agentinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -80,6 +83,74 @@ func TestTelegramProviderOutboxRunnerE2EDeterministic(t *testing.T) {
 	runTelegramOutboxScenario(t, ctx, provider, "99", "42")
 	if got := client.sendCalls.Load(); got != 1 {
 		t.Fatalf("provider send calls = %d, want 1", got)
+	}
+}
+
+// TestTelegramProviderMediaOutboxRunnerE2E is an explicit opt-in check that
+// uploads an actual image to Telegram through the durable attachment reader.
+//
+//nolint:gocyclo // The opt-in E2E keeps credential, storage, and provider checks in one scenario.
+func TestTelegramProviderMediaOutboxRunnerE2E(t *testing.T) {
+	if strings.TrimSpace(os.Getenv("TELEGRAM_MEDIA_E2E")) != "true" {
+		t.Skip("set TELEGRAM_MEDIA_E2E=true to send one protected Telegram image")
+	}
+	receiverToken := strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
+	senderToken := strings.TrimSpace(os.Getenv("TELEGRAM_SENDER_BOT_TOKEN"))
+	if receiverToken == "" || senderToken == "" {
+		t.Skip("requires TELEGRAM_BOT_TOKEN and TELEGRAM_SENDER_BOT_TOKEN")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	receiver, err := bot.New(receiverToken, bot.WithSkipGetMe())
+	if err != nil {
+		t.Fatal("receiver bot initialization failed")
+	}
+	sender, err := bot.New(senderToken, bot.WithSkipGetMe())
+	if err != nil {
+		t.Fatal("sender bot initialization failed")
+	}
+	receiverIdentity, err := receiver.GetMe(ctx)
+	if err != nil || receiverIdentity == nil || !receiverIdentity.IsBot || receiverIdentity.ID <= 0 {
+		t.Fatal("receiver bot identity check failed")
+	}
+	senderIdentity, err := sender.GetMe(ctx)
+	if err != nil || senderIdentity == nil || !senderIdentity.IsBot || senderIdentity.ID <= 0 || senderIdentity.ID == receiverIdentity.ID {
+		t.Fatal("sender bot identity check failed")
+	}
+
+	fixture := newDurableTelegramFixture(t, strconv.FormatInt(receiverIdentity.ID, 10))
+	store := inmemory.New()
+	defer func() { _ = store.Close() }()
+	eventID := fmt.Sprintf("telegram-media-event-%d", time.Now().UTC().UnixNano())
+	if _, err := store.CreateSession(ctx, fixture.target.TenantID, "telegram-media-session", nil); err != nil {
+		t.Fatal(err)
+	}
+	const imageData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	data, err := base64.StdEncoding.DecodeString(imageData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := runtimestorage.ReplyTarget{BindingID: fixture.target.BindingID, ConversationKind: "direct", ReceiverID: strconv.FormatInt(senderIdentity.ID, 10)}
+	if _, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: fixture.target.TenantID, SessionID: "telegram-media-session", BindingID: fixture.target.BindingID, ExternalMessageID: eventID, EventID: eventID, ReplyTarget: target}); err != nil {
+		t.Fatal(err)
+	}
+	reference, err := store.PutAttachment(ctx, fixture.target.TenantID, attachment.Upload{ID: "telegram-media-image", Kind: attachment.KindImage, MIMEType: "image/png", Name: "telegram-e2e.png", Size: int64(len(data))}, bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindAttachments(ctx, fixture.target.TenantID, eventID, []attachment.Reference{reference}); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := telegram.NewProvider(receiver, senderIdentity.ID, 0, telegram.WithAttachmentReader(store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := provider.Deliver(ctx, runtimestorage.ReplyOutbox{
+		TenantID: fixture.target.TenantID, EventID: eventID, ReplyID: eventID, SegmentIndex: 0, SegmentCount: 1,
+		Kind: runtimestorage.ReplyKindImage, Payload: "telegram media e2e", Attachment: reference, Fallback: "[image attachment]", ReplyTarget: target,
+	})
+	if err != nil || receipt == "" {
+		t.Fatalf("Telegram image delivery = %q, %v", receipt, err)
 	}
 }
 

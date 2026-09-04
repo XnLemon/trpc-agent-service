@@ -370,6 +370,34 @@ func TestPollingErrorsUseStableRedactedHook(t *testing.T) {
 	}
 }
 
+func TestBeginShutdownCancelsPollingRun(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "polling-shutdown", "12345")
+	started, stopped := make(chan struct{}), make(chan struct{})
+	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}, startFn: func(ctx context.Context) {
+		close(started)
+		<-ctx.Done()
+		close(stopped)
+	}}
+	adapter := newTestAdapter(t, target, &dispatchStub{}, client)
+	defer func() { _ = adapter.Close() }()
+	runErr := make(chan error, 1)
+	go func() { runErr <- adapter.Run(context.Background()) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("polling run did not start")
+	}
+	adapter.BeginShutdown()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("BeginShutdown did not cancel polling")
+	}
+	if err := <-runErr; err != nil {
+		t.Fatalf("polling run returned error = %v", err)
+	}
+}
+
 func TestHandleUpdateMapsPrivateTextAndAggregatesDispatchEvents(t *testing.T) {
 	target := newTrustedTarget(t, channels.ChannelTelegram, "private", "12345")
 	dispatcher := &dispatchStub{events: []gateway.DispatchEvent{

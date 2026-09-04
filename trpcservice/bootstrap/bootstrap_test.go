@@ -613,6 +613,9 @@ func TestEnvironmentWeComAIBotComponentsUseTrustedBindings(t *testing.T) {
 	if workerConfig.LeaseDuration != wecom_aibot.OutboxLeaseDuration {
 		t.Fatalf("AI Bot outbox lease duration = %s, want %s", workerConfig.LeaseDuration, wecom_aibot.OutboxLeaseDuration)
 	}
+	if _, err := environmentAIBotOutboxProvider(runtimeStore, bindingIDs, []channels.PollingAdapter{manager, newBootstrapTelegram()}); err != nil {
+		t.Fatalf("AI Bot provider rejected a co-owned Telegram adapter: %v", err)
+	}
 	if err := manager.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -713,6 +716,39 @@ func TestRuntimeOwnsAllWeComAIBotConnectionsAndReadiness(t *testing.T) {
 	}
 	if first.beginShutdown.Load() != 1 || first.closed.Load() != 1 || second.beginShutdown.Load() != 1 || second.closed.Load() != 1 {
 		t.Fatalf("AI Bot lifecycle was not owned: first=%d/%d second=%d/%d", first.beginShutdown.Load(), first.closed.Load(), second.beginShutdown.Load(), second.closed.Load())
+	}
+}
+
+func TestRuntimeOwnsTelegramPollingLifecycle(t *testing.T) {
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	adapter := newBootstrapTelegram()
+	var factoryCalls int
+	config.TelegramPollingFactory = func(dispatcher gateway.DispatchService) (channels.PollingAdapter, error) {
+		if dispatcher == nil {
+			t.Fatal("Telegram factory received nil dispatcher")
+		}
+		factoryCalls++
+		return adapter, nil
+	}
+	graph, err := New(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-adapter.started
+	if factoryCalls != 1 {
+		t.Fatalf("Telegram factory calls = %d, want 1", factoryCalls)
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.beginShutdown.Load() != 1 || adapter.closed.Load() != 1 {
+		t.Fatalf("Telegram lifecycle = begin %d close %d", adapter.beginShutdown.Load(), adapter.closed.Load())
+	}
+	select {
+	case <-adapter.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("Telegram polling adapter did not stop")
 	}
 }
 
@@ -1703,6 +1739,28 @@ func (bot *bootstrapAIBot) Run(ctx context.Context) error {
 }
 func (bot *bootstrapAIBot) BeginShutdown() { bot.beginShutdown.Add(1) }
 func (bot *bootstrapAIBot) Close() error   { bot.closed.Add(1); return nil }
+
+type bootstrapTelegram struct {
+	started       chan struct{}
+	stopped       chan struct{}
+	startOnce     sync.Once
+	beginShutdown atomic.Int32
+	closed        atomic.Int32
+}
+
+func newBootstrapTelegram() *bootstrapTelegram {
+	return &bootstrapTelegram{started: make(chan struct{}), stopped: make(chan struct{})}
+}
+
+func (*bootstrapTelegram) Channel() channels.Channel { return channels.ChannelTelegram }
+func (adapter *bootstrapTelegram) Run(ctx context.Context) error {
+	adapter.startOnce.Do(func() { close(adapter.started) })
+	<-ctx.Done()
+	close(adapter.stopped)
+	return ctx.Err()
+}
+func (adapter *bootstrapTelegram) BeginShutdown() { adapter.beginShutdown.Add(1) }
+func (adapter *bootstrapTelegram) Close() error   { adapter.closed.Add(1); return nil }
 
 func (handler *bootstrapWeComLifecycle) ServeHTTP(writer http.ResponseWriter, _ *http.Request) {
 	handler.calls.Add(1)

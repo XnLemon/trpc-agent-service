@@ -36,8 +36,9 @@ go run ./examples/telegram-e2e
 ```
 
 The command prints a unique ordinary-text marker. Open the receiver Bot in
-Telegram, send that marker, and confirm the `telegram-e2e-ok:<run-correlation>` reply. Commands,
-media, and rich updates are intentionally outside this live E2E; media behavior is covered by deterministic fake tests. Press
+Telegram, send that marker, and confirm the `telegram-e2e-ok:<run-correlation>` reply. Commands and
+rich updates are intentionally outside this text live E2E. Media behavior is covered by deterministic
+fake tests; an explicit protected media check is available when a real Telegram image upload is needed. Press
 `Ctrl+C` to stop the local polling process cleanly.
 
 If PowerShell can reach `api.telegram.org` but this command reports
@@ -61,6 +62,15 @@ Optional local settings:
 | `TELEGRAM_DELETE_WEBHOOK` | Delete an existing webhook | `false` |
 | `TELEGRAM_DROP_PENDING_UPDATES` | Drop queued updates when deleting webhook | `false` |
 
+To manually validate native image delivery with the protected two-Bot setup,
+run the opt-in test below. It uploads a tiny PNG through the durable attachment
+reader and the real `sendPhoto` API; it is skipped unless the flag is explicit.
+
+```powershell
+$env:TELEGRAM_MEDIA_E2E = 'true'
+go test ./examples/telegram-e2e -run TestTelegramProviderMediaOutboxRunnerE2E -count=1 -v
+```
+
 ## CI run
 
 The live workflow runs automatically for pull requests from this repository
@@ -82,4 +92,5 @@ job will eventually time out waiting for the marker.
 The workflow uses one concurrency group so two runs cannot poll the same test
 Bot at the same time. Pull requests from forks are skipped because GitHub does
 not provide these Environment secrets to them; use the manual workflow from a
-trusted branch when an external contributor's change needs a live check.
+trusted branch when an external contributor's change needs a live check. The
+manual `media_e2e` input enables the separate protected image-upload check.

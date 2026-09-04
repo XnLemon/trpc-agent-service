@@ -1,0 +1,210 @@
+package bootstrap
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
+	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	channelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/telegram"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
+	"github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
+)
+
+func TestEnvironmentTelegramConfigurationRequiresOneSafePollingBinding(t *testing.T) {
+	const tenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	identity := gateway.APIIdentity{TenantID: tenantID, AppID: "app_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+	base := environmentConfig{tenantID: tenantID, apiIdentities: map[string]gateway.APIIdentity{"api-token": identity}}
+	tests := []struct {
+		name      string
+		configure func()
+		base      environmentConfig
+		wantErr   bool
+		wantMode  string
+	}{
+		{name: "disabled"},
+		{
+			name: "valid polling",
+			configure: func() {
+				t.Setenv(envTelegramBotToken, "bot-token")
+				t.Setenv(envTelegramBindingID, "cb_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+				t.Setenv(envTelegramSecretRef, "env/telegram")
+				t.Setenv(envTelegramMode, "polling")
+			},
+			wantMode: "polling",
+		},
+		{
+			name:      "partial credentials",
+			configure: func() { t.Setenv(envTelegramBotToken, "bot-token") },
+			wantErr:   true,
+		},
+		{
+			name: "webhook mode is not an environment transport",
+			configure: func() {
+				t.Setenv(envTelegramBotToken, "bot-token")
+				t.Setenv(envTelegramBindingID, "cb_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+				t.Setenv(envTelegramSecretRef, "env/telegram")
+				t.Setenv(envTelegramMode, "webhook")
+			},
+			wantErr: true,
+		},
+		{
+			name: "multiple identities",
+			configure: func() {
+				t.Setenv(envTelegramBotToken, "bot-token")
+				t.Setenv(envTelegramBindingID, "cb_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+				t.Setenv(envTelegramSecretRef, "env/telegram")
+			},
+			base: environmentConfig{tenantID: tenantID, apiIdentities: map[string]gateway.APIIdentity{
+				"api-one": identity, "api-two": {TenantID: tenantID, AppID: "app_01ARZ3NDEKTSV4RRFFQ69G5FAV"},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "demo mode",
+			configure: func() {
+				t.Setenv(envTelegramBotToken, "bot-token")
+				t.Setenv(envTelegramBindingID, "cb_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+				t.Setenv(envTelegramSecretRef, "env/telegram")
+			},
+			base:    environmentConfig{tenantID: tenantID, demoMode: true, apiIdentities: base.apiIdentities},
+			wantErr: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, name := range []string{envTelegramBotToken, envTelegramBindingID, envTelegramSecretRef, envTelegramMode} {
+				t.Setenv(name, "")
+			}
+			if test.configure != nil {
+				test.configure()
+			}
+			config := test.base
+			if config.apiIdentities == nil {
+				config = base
+			}
+			err := config.loadTelegram()
+			if test.wantErr {
+				if !errors.Is(err, ErrInvalidConfig) {
+					t.Fatalf("loadTelegram() error = %v", err)
+				}
+				if strings.Contains(err.Error(), "bot-token") {
+					t.Fatal("Telegram token was echoed in configuration error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.wantMode == "" {
+				if config.telegram != nil {
+					t.Fatalf("disabled Telegram configuration = %+v", config.telegram)
+				}
+				return
+			}
+			if config.telegram == nil || config.telegram.mode != test.wantMode || config.telegram.botToken != "bot-token" {
+				t.Fatalf("Telegram configuration = %+v", config.telegram)
+			}
+		})
+	}
+}
+
+func TestEnvironmentTelegramComponentsSealBindingAndPassAttachmentStore(t *testing.T) {
+	modelCatalog, err := modelprofile.NewProviderCatalog(modelprofile.ProviderSpec{
+		Provider: "fake", Models: []string{"test-model"}, EndpointPolicy: modelprofile.FieldForbidden, SecretRefPolicy: modelprofile.FieldOptional,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backendCatalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
+		Provider: "memory", Capabilities: []backend.Capability{backend.CapabilitySession}, EndpointPolicy: backend.FieldForbidden, SecretRefPolicy: backend.FieldForbidden, Options: map[string]backend.OptionSpec{"namespace": {Kind: backend.OptionString}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenants := tenantmemory.NewRepository()
+	apps := agentmemory.NewRepository()
+	models := modelmemory.NewRepository(modelCatalog)
+	backends := backendmemory.NewRepository(backendCatalog)
+	channelsRepo := channelmemory.NewRepository()
+	root, app := createBootstrapTenantExecutionState(t, tenants, apps, models, backends, "telegram-components", "telegram-components", "test-model", "secret/model")
+	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelTelegram, "telegram-components")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, _, err := channelsRepo.Create(context.Background(), channels.CreateInput{
+		TenantID: root.TenantID, BindingKey: "telegram-components", Channel: channels.ChannelTelegram,
+		ProviderAccountID: "12345", PublicRouteKeyDigest: routeDigest, AppID: app.AppID,
+		SecretRef: "env/telegram", Status: channels.StatusActive,
+		Protocol: channels.ProtocolConfiguration{Telegram: &channels.TelegramProtocolConfiguration{APIBaseURL: "https://api.telegram.org"}},
+		Metadata: channels.ChangeMetadata{ActorType: "test", ActorID: "bootstrap", Reason: "fixture", CorrelationID: "telegram-components"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeStore := runtimestorageinmemory.New()
+	defer func() { _ = runtimeStore.Close() }()
+	config := environmentConfig{
+		tenantID: root.TenantID, telemetry: nil,
+		telegram: &environmentTelegramConfig{bindingID: binding.BindingID, secretRef: binding.SecretRef, botToken: "bot-token", mode: "polling"},
+	}
+	previous := newEnvironmentTelegramAdapter
+	defer func() { newEnvironmentTelegramAdapter = previous }()
+	var received telegram.Config
+	newEnvironmentTelegramAdapter = func(ctx context.Context, receivedConfig telegram.Config) (*telegram.Adapter, error) {
+		received = receivedConfig
+		receivedConfig.Factory = telegram.BotFactoryFunc(func(string, telegram.BotFactoryConfig) (telegram.BotClient, error) {
+			return environmentTelegramBot{}, nil
+		})
+		return telegram.New(ctx, receivedConfig)
+	}
+	factory, err := environmentTelegramComponents(context.Background(), config, channelsRepo, tenants, apps, runtimeStore, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := factory(bootstrapNoopDispatcher{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, ok := value.(*telegram.Adapter)
+	if !ok {
+		t.Fatalf("Telegram adapter type = %T", value)
+	}
+	defer adapter.Close()
+	if received.BotToken != "bot-token" || received.Target.BindingID != binding.BindingID || received.Target.TenantID != root.TenantID || received.APIBaseURL != "https://api.telegram.org" || received.Attachments == nil {
+		t.Fatalf("Telegram adapter config = %+v", received)
+	}
+	provider, err := telegram.NewBindingProvider(adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.Deliver(context.Background(), runtimestorage.ReplyOutbox{TenantID: root.TenantID, ReplyID: "reply", SegmentIndex: 0, Payload: "hello", ReplyTarget: runtimestorage.ReplyTarget{BindingID: binding.BindingID, ConversationKind: "direct", ReceiverID: "42"}}); err != nil {
+		t.Fatalf("Telegram binding provider delivery = %v", err)
+	}
+	bad := config
+	bad.telegram = &environmentTelegramConfig{bindingID: binding.BindingID, secretRef: "env/other", botToken: "bot-token", mode: "polling"}
+	if _, err := environmentTelegramComponents(context.Background(), bad, channelsRepo, tenants, apps, runtimeStore, nil); err == nil {
+		t.Fatal("Telegram binding with mismatched SecretRef was accepted")
+	}
+}
+
+type environmentTelegramBot struct{}
+
+func (environmentTelegramBot) Start(context.Context) {}
+func (environmentTelegramBot) GetMe(context.Context) (*models.User, error) {
+	return &models.User{ID: 12345, IsBot: true}, nil
+}
+func (environmentTelegramBot) SendMessage(context.Context, *bot.SendMessageParams) (*models.Message, error) {
+	return &models.Message{ID: 1}, nil
+}

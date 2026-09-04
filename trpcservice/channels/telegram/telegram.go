@@ -466,6 +466,20 @@ func (adapter *Adapter) Run(ctx context.Context) error {
 // Channel identifies the protocol owned by this Adapter.
 func (*Adapter) Channel() channels.Channel { return channels.ChannelTelegram }
 
+// BeginShutdown cancels the current polling run while keeping the adapter
+// closeable for the runtime's ownership cleanup.
+func (adapter *Adapter) BeginShutdown() {
+	if adapter == nil {
+		return
+	}
+	adapter.mu.RLock()
+	cancel := adapter.runCancel
+	adapter.mu.RUnlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // Close closes only idempotency state owned by the adapter. Injected stores and
 // HTTP clients remain owned by their callers; polling is stopped by canceling
 // the Context passed to Run.
