@@ -196,6 +196,16 @@ declare module 'tdesign-react' {
     width?: string | number;
   }
 
+  interface DrawerProps extends BaseProps {
+    visible?: boolean;
+    header?: React.ReactNode;
+    footer?: React.ReactNode | false;
+    placement?: 'left' | 'right' | 'top' | 'bottom';
+    size?: string | number;
+    destroyOnClose?: boolean;
+    onClose?: () => void;
+  }
+
   interface DialogPluginOptions {
     header?: React.ReactNode;
     body?: React.ReactNode;
@@ -216,6 +226,7 @@ declare module 'tdesign-react' {
   export const Card: (props: CardProps) => React.ReactElement | null;
   export const Descriptions: (props: DescriptionsProps) => React.ReactElement | null;
   export const Dialog: (props: DialogProps) => React.ReactElement | null;
+  export const Drawer: (props: DrawerProps) => React.ReactElement | null;
   export const Empty: (props: EmptyProps) => React.ReactElement | null;
   export const Form: FormComponent;
   export const Input: (props: InputProps) => React.ReactElement | null;
