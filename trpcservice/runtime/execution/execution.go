@@ -96,6 +96,18 @@ type Coordinator struct {
 	metrics      metrics.Catalog
 }
 
+// executionStream contains the resources owned by one asynchronous Runner
+// invocation. The context remains an explicit argument to keep cancellation
+// ownership visible at the forwarding boundary.
+type executionStream struct {
+	request      Request
+	runnerEvents <-chan *trpcevent.Event
+	lease        *runtimerunner.RunnerLease
+	output       chan<- Event
+	finishRunner func(error)
+	started      time.Time
+}
+
 // NewCoordinator validates and creates a runtime execution coordinator.
 func NewCoordinator(config Config) (*Coordinator, error) {
 	if config.Registry == nil {
@@ -178,12 +190,15 @@ func (coordinator *Coordinator) Execute(ctx context.Context, request Request) (<
 
 	output := make(chan Event, 32)
 	_ = coordinator.metrics.Active(ctx, 1, map[string]string{"component": "runner"})
-	go coordinator.forward(runnerCtx, request, runnerEvents, lease, output, finishRunner, started)
+	go coordinator.forward(runnerCtx, executionStream{
+		request: request, runnerEvents: runnerEvents, lease: lease, output: output,
+		finishRunner: finishRunner, started: started,
+	})
 	return output, nil
 }
 
-func (coordinator *Coordinator) forward(ctx context.Context, request Request, runnerEvents <-chan *trpcevent.Event, lease *runtimerunner.RunnerLease, output chan<- Event, finishRunner func(error), started time.Time) {
-	defer close(output)
+func (coordinator *Coordinator) forward(ctx context.Context, stream executionStream) {
+	defer close(stream.output)
 
 	var terminalState atomic.Uint32
 	terminalState.Store(terminalPending)
@@ -203,14 +218,14 @@ func (coordinator *Coordinator) forward(ctx context.Context, request Request, ru
 		if !terminalCommitted {
 			if coordinator.canceled(ctx, &terminalState) {
 				terminalErr = cancellationError(ctx)
-				coordinator.emitCancellation(output, request, terminalErr)
+				coordinator.emitCancellation(stream.output, stream.request, terminalErr)
 			} else {
-				coordinator.emitDone(output, request, "complete")
+				coordinator.emitDone(stream.output, stream.request, "complete")
 			}
 		}
-		finishRunner(terminalErr)
-		_ = coordinator.metrics.Operation(ctx, started, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, terminalErr)
-		_ = lease.Release()
+		stream.finishRunner(terminalErr)
+		_ = coordinator.metrics.Operation(ctx, stream.started, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, terminalErr)
+		_ = stream.lease.Release()
 		_ = coordinator.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
 		_ = coordinator.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
 	}()
@@ -218,38 +233,38 @@ func (coordinator *Coordinator) forward(ctx context.Context, request Request, ru
 	for {
 		if coordinator.canceled(ctx, &terminalState) {
 			terminalErr = cancellationError(ctx)
-			coordinator.drain(runnerEvents)
-			coordinator.emitCancellation(output, request, terminalErr)
+			coordinator.drain(stream.runnerEvents)
+			coordinator.emitCancellation(stream.output, stream.request, terminalErr)
 			terminalCommitted = true
 			return
 		}
 		select {
-		case event, ok := <-runnerEvents:
+		case event, ok := <-stream.runnerEvents:
 			if coordinator.canceled(ctx, &terminalState) {
 				terminalErr = cancellationError(ctx)
-				coordinator.drain(runnerEvents)
-				coordinator.emitCancellation(output, request, terminalErr)
+				coordinator.drain(stream.runnerEvents)
+				coordinator.emitCancellation(stream.output, stream.request, terminalErr)
 				terminalCommitted = true
 				return
 			}
 			if !ok {
 				if coordinator.canceled(ctx, &terminalState) {
 					terminalErr = cancellationError(ctx)
-					coordinator.emitCancellation(output, request, terminalErr)
+					coordinator.emitCancellation(stream.output, stream.request, terminalErr)
 				} else {
-					coordinator.emitDone(output, request, "complete")
+					coordinator.emitDone(stream.output, stream.request, "complete")
 				}
 				terminalCommitted = true
 				return
 			}
-			mapped, done := mapRunnerEvent(event, request.RequestID, request.TraceID)
+			mapped, done := mapRunnerEvent(event, stream.request.RequestID, stream.request.TraceID)
 			var terminalEvent Event
 			hasTerminalEvent := false
 			for _, item := range mapped {
 				if coordinator.canceled(ctx, &terminalState) {
 					terminalErr = cancellationError(ctx)
-					coordinator.drain(runnerEvents)
-					coordinator.emitCancellation(output, request, terminalErr)
+					coordinator.drain(stream.runnerEvents)
+					coordinator.emitCancellation(stream.output, stream.request, terminalErr)
 					terminalCommitted = true
 					return
 				}
@@ -261,32 +276,32 @@ func (coordinator *Coordinator) forward(ctx context.Context, request Request, ru
 					hasTerminalEvent = true
 					continue
 				}
-				if !sendEvent(ctx, output, item) {
+				if !sendEvent(ctx, stream.output, item) {
 					terminalErr = cancellationError(ctx)
-					coordinator.drain(runnerEvents)
-					coordinator.emitCancellation(output, request, terminalErr)
+					coordinator.drain(stream.runnerEvents)
+					coordinator.emitCancellation(stream.output, stream.request, terminalErr)
 					terminalCommitted = true
 					return
 				}
 			}
 			if done {
-				coordinator.drain(runnerEvents)
+				coordinator.drain(stream.runnerEvents)
 				if coordinator.canceled(ctx, &terminalState) {
 					terminalErr = cancellationError(ctx)
-					coordinator.emitCancellation(output, request, terminalErr)
+					coordinator.emitCancellation(stream.output, stream.request, terminalErr)
 					terminalCommitted = true
 					return
 				}
 				if hasTerminalEvent {
-					trySend(output, terminalEvent)
+					trySend(stream.output, terminalEvent)
 				}
 				terminalCommitted = true
 				return
 			}
 		case <-ctx.Done():
 			terminalErr = cancellationError(ctx)
-			coordinator.drain(runnerEvents)
-			coordinator.emitCancellation(output, request, terminalErr)
+			coordinator.drain(stream.runnerEvents)
+			coordinator.emitCancellation(stream.output, stream.request, terminalErr)
 			terminalCommitted = true
 			return
 		}

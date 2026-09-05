@@ -436,7 +436,10 @@ func TestCoordinatorForwardCancellationCheckpoints(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := &executionStagedContext{Context: context.Background(), done: make(chan struct{}), errAfter: tt.errAfter}
 			output := make(chan Event, 4)
-			coordinator.forward(ctx, request, tt.runner(), &runtimerunner.RunnerLease{}, output, func(error) {}, time.Now())
+			coordinator.forward(ctx, executionStream{
+				request: request, runnerEvents: tt.runner(), lease: &runtimerunner.RunnerLease{}, output: output,
+				finishRunner: func(error) {}, started: time.Now(),
+			})
 			events := collectExecutionEvents(output)
 			if len(events) != 2 || events[0].Type != EventError || !errors.Is(events[0].Err, context.Canceled) || events[1].Status != "canceled" || !events[1].Done {
 				t.Fatalf("events=%+v", events)
@@ -454,7 +457,10 @@ func TestCoordinatorForwardSelectCancellation(t *testing.T) {
 	output := make(chan Event, 4)
 	finished := make(chan struct{})
 	go func() {
-		coordinator.forward(ctx, Request{RequestID: "request-select-cancel"}, make(chan *trpcevent.Event), &runtimerunner.RunnerLease{}, output, func(error) {}, time.Now())
+		coordinator.forward(ctx, executionStream{
+			request: Request{RequestID: "request-select-cancel"}, runnerEvents: make(chan *trpcevent.Event),
+			lease: &runtimerunner.RunnerLease{}, output: output, finishRunner: func(error) {}, started: time.Now(),
+		})
 		close(finished)
 	}()
 	<-ctx.checked
