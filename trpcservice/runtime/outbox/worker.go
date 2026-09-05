@@ -52,9 +52,14 @@ type DeliveryError struct {
 
 func (e *DeliveryError) Error() string { return ErrProvider.Error() }
 
+type workerStore interface {
+	runtimestorage.MessageStore
+	runtimestorage.ReplyStore
+}
+
 // Worker delivers durable reply segments with lease fencing.
 type Worker struct {
-	store         runtimestorage.RuntimeStore
+	store         workerStore
 	provider      Provider
 	channel       string
 	providerName  string
@@ -345,7 +350,7 @@ func (w *Worker) processClaimed(ctx context.Context, candidate, claimed runtimes
 	return w.rejectDelivery(ctx, operationCtx, claimed, deliveryErr)
 }
 
-func restoreCorrelationContext(ctx context.Context, store runtimestorage.RuntimeStore, value runtimestorage.ReplyOutbox) context.Context {
+func restoreCorrelationContext(ctx context.Context, store runtimestorage.ReplyStore, value runtimestorage.ReplyOutbox) context.Context {
 	ctx = observability.ContextWithoutTraceParent(ctx)
 	correlations, ok := store.(runtimestorage.ReplyCorrelationStore)
 	if !ok {

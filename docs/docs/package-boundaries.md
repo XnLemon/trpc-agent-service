@@ -45,6 +45,11 @@ bootstrap 负责把 app、agent、runtime、storage 和 Gateway 的具体实现�
 边界；`runtime` 使用这些能力完成一次服务内部执行，但不反向拥有上游
 Agent 的实现。
 
+`runtime/storage` 的基础持久化契约已经按能力拆成
+`SessionStateStore`、`EventHistoryStore`、`MessageStore` 和 `ReplyStore`。
+`RuntimeStore` 暂时保留为兼容性组合接口；新的消费者应依赖自己需要的最窄
+接口，而不是继续接收完整存储聚合。
+
 ## 允许的依赖
 
 当前实现和目标演进遵守以下规则：
@@ -108,7 +113,7 @@ Outbox 负责回复投递资源。Context 始终由调用链显式传递，不�
 
 ## 后续重构规则
 
-- 先维持本页契约，再拆 `runtime/storage`、`runtime/outbox` 和
+- 先维持本页契约，再继续拆 `runtime/storage`、`runtime/outbox` 和
   `runtime/migration` 的实现边界。
 - 移动代码时优先移动所有权和测试，不为了包名创建重复类型或兼容层。
 - 任何跨租户存储能力都必须携带显式 `tenant_id`；字符串前缀不能替代

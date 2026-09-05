@@ -1,4 +1,4 @@
-// Package sessionstore adapts the tenant-scoped RuntimeStore to the
+// Package sessionstore adapts tenant-scoped session persistence to the
 // upstream session.Service capability used by Runner.
 package sessionstore
 
@@ -17,13 +17,21 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/session"
 )
 
+// sessionPersistence is the storage capability required by the session
+// adapter. It intentionally excludes inbound message and reply delivery
+// concerns.
+type sessionPersistence interface {
+	runtimestorage.SessionStateStore
+	runtimestorage.EventHistoryStore
+}
+
 // Service keeps the upstream session behavior for summaries, tracks, and
 // transient state while making Session metadata, state versions, and events
-// durable through a tenant-scoped RuntimeStore.
+// durable through tenant-scoped Persistence.
 type Service struct {
 	tenantID  string
 	delegate  session.Service
-	store     runtimestorage.RuntimeStore
+	store     sessionPersistence
 	mu        sync.Mutex
 	versions  map[string]int64
 	telemetry observability.Provider
@@ -38,7 +46,7 @@ func New(tenantID string, delegate session.Service, store runtimestorage.Runtime
 }
 
 // NewWithObservability creates a fixed-tenant session capability and records
-// actual RuntimeStore operation latency under the supplied provider. The
+// actual persistence operation latency under the supplied provider. The
 // optional backend name is normalized to the bounded metric provider bucket.
 func NewWithObservability(tenantID string, delegate session.Service, store runtimestorage.RuntimeStore, telemetry observability.Provider, backendName ...string) (*Service, error) {
 	if runtimestorage.ValidateTenant(tenantID) != nil || delegate == nil || store == nil {

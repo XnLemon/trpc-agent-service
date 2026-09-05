@@ -261,6 +261,23 @@ func TestMaterializerValidationBranches(t *testing.T) {
 	}
 }
 
+type legacyRuntimeStore struct {
+	runtimestorage.RuntimeStore
+}
+
+func TestMaterializerRejectsMissingBatchCapability(t *testing.T) {
+	m, err := NewMaterializer(MaterializerConfig{Store: legacyRuntimeStore{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = m.Materialize(context.Background(), MaterializeInput{
+		TenantID: "tenant-a", EventID: "event", ReplyID: "reply", Payload: "reply",
+	})
+	if !errors.Is(err, ErrMaterialization) || !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("missing batch capability error = %v", err)
+	}
+}
+
 func TestRedactedMaterializationErrorDropsUnknownDetails(t *testing.T) {
 	if redactedMaterializationError(nil) != nil {
 		t.Fatal("nil materialization error was not preserved")

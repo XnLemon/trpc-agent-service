@@ -114,7 +114,7 @@ type Dispatcher struct {
 	executor        *execution.Coordinator
 	telemetry       observability.Provider
 	metrics         metrics.Catalog
-	runtimeStore    runtimestorage.RuntimeStore
+	runtimeStore    dispatchStore
 	materializer    *outbox.Materializer
 	auditWriter     audit.Writer
 	handoffStore    audit.HandoffStore
@@ -122,8 +122,13 @@ type Dispatcher struct {
 	attachmentStore runtimestorage.AttachmentStore
 }
 
+type dispatchStore interface {
+	runtimestorage.SessionStateStore
+	runtimestorage.MessageStore
+}
+
 type durableExecution struct {
-	store        runtimestorage.RuntimeStore
+	store        runtimestorage.MessageStore
 	tenantID     string
 	eventID      string
 	owner        string
@@ -475,7 +480,7 @@ func replyTarget(target channels.RoutingTarget, message InboundMessage) (runtime
 	return reply, nil
 }
 
-func ensureInboundSession(ctx context.Context, store runtimestorage.RuntimeStore, tenantID, sessionID string) error {
+func ensureInboundSession(ctx context.Context, store runtimestorage.SessionStateStore, tenantID, sessionID string) error {
 	if _, err := store.GetSession(ctx, tenantID, sessionID); err == nil {
 		return nil
 	} else if !errors.Is(err, runtimestorage.ErrNotFound) {
@@ -495,7 +500,7 @@ type inboundEventPreparation struct {
 	owner     string
 }
 
-func prepareInboundEvent(ctx context.Context, store runtimestorage.RuntimeStore, preparation inboundEventPreparation) (runtimestorage.MessageEvent, error) {
+func prepareInboundEvent(ctx context.Context, store runtimestorage.MessageStore, preparation inboundEventPreparation) (runtimestorage.MessageEvent, error) {
 	if !preparation.duplicate {
 		return preparation.event, nil
 	}

@@ -22,7 +22,7 @@ const defaultSegmentRunes = 512
 // Materializer turns one completed Runner reply into durable, idempotent
 // segments. It is deliberately independent of any channel SDK.
 type Materializer struct {
-	store       runtimestorage.RuntimeStore
+	store       runtimestorage.ReplyBatchEnqueuer
 	segmentSize int
 	telemetry   observability.Provider
 	metrics     metrics.Catalog
@@ -65,6 +65,7 @@ func NewMaterializer(config MaterializerConfig) (*Materializer, error) {
 	if config.Store == nil {
 		return nil, ErrInvalid
 	}
+	batchStore, _ := config.Store.(runtimestorage.ReplyBatchEnqueuer)
 	if config.SegmentSize <= 0 {
 		config.SegmentSize = defaultSegmentRunes
 	}
@@ -74,7 +75,7 @@ func NewMaterializer(config MaterializerConfig) (*Materializer, error) {
 	if config.Backend == "" {
 		config.Backend = "other"
 	}
-	return &Materializer{store: config.Store, segmentSize: config.SegmentSize, telemetry: config.Observability, metrics: metrics.New(config.Observability), backend: config.Backend}, nil
+	return &Materializer{store: batchStore, segmentSize: config.SegmentSize, telemetry: config.Observability, metrics: metrics.New(config.Observability), backend: config.Backend}, nil
 }
 
 // Materialize writes all segments under the stable reply identity. A repeated
@@ -87,10 +88,10 @@ func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) 
 	if err != nil {
 		return 0, ErrInvalid
 	}
-	batchStore, ok := m.store.(runtimestorage.ReplyBatchEnqueuer)
-	if !ok {
+	if m.store == nil {
 		return 0, errors.Join(ErrMaterialization, runtimestorage.ErrInvalid)
 	}
+	batchStore := m.store
 	started := time.Now()
 	operationCtx, _, finish := observability.StartOperation(ctx, m.telemetry, observability.OperationStorageOperation, "storage")
 	labels := map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": m.backend}
