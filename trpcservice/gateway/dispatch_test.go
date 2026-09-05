@@ -636,7 +636,8 @@ func TestWriteExecutionAuditUsesVerifiedChannelRoute(t *testing.T) {
 	}
 	dispatcher.auditWriter = writer
 	identity := tenant.RunnerIdentity{SessionID: "session"}
-	if err := dispatcher.writeExecutionAudit(context.Background(), principal, InboundMessage{Content: "hello", ExternalUserID: "user"}, identity, "request", "trace", audit.EventExecutionStarted, ""); err != nil {
+	metadata := dispatchMetadata{principal: principal, message: InboundMessage{Content: "hello", ExternalUserID: "user"}, identity: identity, requestID: "request", traceID: "trace"}
+	if err := dispatcher.writeExecutionAudit(context.Background(), metadata, audit.EventExecutionStarted, ""); err != nil {
 		t.Fatal(err)
 	}
 	events, err := writer.List(context.Background(), audit.Query{})
@@ -699,7 +700,8 @@ func TestAuditHelpers(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	output := make(chan DispatchEvent, 2)
-	finishForwardOutput(ctx, output, "request-1", "trace-1", context.Canceled, false, false)
+	run := &dispatchExecution{metadata: dispatchMetadata{requestID: "request-1", traceID: "trace-1"}, output: output}
+	run.finishForwardOutput(ctx, context.Canceled, false)
 	close(output)
 	events := collectDispatchEvents(output)
 	if len(events) != 2 || events[0].RequestID != "request-1" || events[0].TraceID != "trace-1" || events[1].RequestID != "request-1" {
@@ -1385,7 +1387,7 @@ func assertDurableClaimReclaimsReconcilingAndValidatesIDs(t *testing.T, dispatch
 	if err != nil || recoveredReconciling == nil {
 		t.Fatalf("reconciling reclaim = %+v err=%v", recoveredReconciling, err)
 	}
-	dispatcher.finishDurable(context.Background(), "", "", recoveredReconciling, errors.New("execution failed"), "", nil)
+	dispatcher.finishDurable(context.Background(), dispatchMetadata{}, recoveredReconciling, errors.New("execution failed"), "", nil)
 	message.ExternalMessageID = ""
 	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing external ID error = %v", err)
