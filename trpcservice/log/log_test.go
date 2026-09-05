@@ -164,7 +164,7 @@ func TestPackageFatalExits(t *testing.T) {
 		return
 	}
 
-	command := exec.Command(os.Args[0], "-test.run=^TestPackageFatalExits$")
+	command := exec.Command("go", "test", ".", "-run=^TestPackageFatalExits$", "-count=1")
 	command.Env = append(os.Environ(), "TRPC_LOG_FATAL_TEST=1")
 	if err := command.Run(); err == nil {
 		t.Fatal("Fatal() did not exit")
