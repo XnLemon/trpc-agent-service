@@ -12,8 +12,8 @@ Issue #28 实现第一条可离线运行的网络执行链：
 HTTP/API principal 或 Verified Channel principal
   -> InboundMessage
   -> ExecutionPlanResolver
-  -> RunnerRegistry
-  -> Dispatch
+  -> Runtime Execution Coordinator
+  -> RunnerRegistry / Runner
   -> tRPC-Agent-Go Runner Event
   -> JSON 或 SSE
 ```
@@ -94,19 +94,21 @@ Model Factory 等共享依赖，不在关闭时关闭借用资源。
 - 关闭错误不能泄露 provider endpoint 或 Secret；重复 `Close` 安全。
 
 Registry 失效接口保留未来接入分布式配置事件的边界，但本阶段只提供进程内实现；其实现归属
-`trpcservice/runtime/runner/registry.go`，Gateway 只依赖它的 Acquire/lease 接口。
+`trpcservice/runtime/runner/registry.go`。`trpcservice/runtime/execution` 消费 Registry 的
+Acquire/lease 接口并拥有一次执行的 Runner 生命周期，Gateway 不直接持有 lease。
 
 ## 5. Dispatch
 
 Dispatch 是与 HTTP/IM 协议无关的执行边界：
 
-1. 校验可信 principal、规范化消息和执行 Context。
-2. 生成 Binding-aware 或 API-aware Runner user/session identity。
-3. Resolve 固定 `ExecutionPlan`，Acquire Registry lease。
-4. 调用 `runner.Run`，以 Revision runtime policy 和请求 deadline 约束执行。
-5. 将 Event 转为受控文本/状态/错误事件；不把 Repository、Secret、Plan 可变对象暴露给
-   Handler。
-6. 在正常完成、错误、调用方取消或 server shutdown 时，停止消费新事件、以有界时间排空
+1. Gateway 校验可信 principal、规范化消息和执行 Context。
+2. Gateway 生成 Binding-aware 或 API-aware Runner user/session identity。
+3. Gateway Resolve 固定 `ExecutionPlan`，交给 `runtime/execution.Coordinator`。
+4. Coordinator Acquire Registry lease，调用 `runner.Run`，并以 Revision runtime policy
+   和请求 deadline 约束执行。
+5. Coordinator 将 Runner Event 转为中立文本/状态/错误事件；Gateway 再映射为 JSON/SSE
+   事件，不把 Repository、Secret、Plan 可变对象暴露给 Handler。
+6. Coordinator 在正常完成、错误、调用方取消或 server shutdown 时，以有界时间排空
    Event channel、Release lease，并让 Registry 负责旧 Runner 的最终关闭。
 
 请求取消必须传入 Runner。Handler 断开不能遗留 event consumer、Registry 引用或后台
@@ -214,6 +216,7 @@ disconnect 验收仍必须保持未勾选，不能用 fake 就绪状态替代。
 | Tenant 并发/窗口限流和稳定拒绝错误 | `trpcservice/gateway/limits.go` | `trpcservice/gateway/limits_test.go` |
 | principal + external message ID 的进程内幂等接口 | `trpcservice/gateway/idempotency.go` | `trpcservice/gateway/idempotency_test.go` |
 | Runner 缓存、lease、精确失效与有界关闭 | `trpcservice/runtime/runner/registry.go` | `trpcservice/runtime/runner/registry_test.go`、`trpcservice/gateway/runner_integration_test.go` |
+| 单次 Runner 执行、取消、事件 drain 和 lease 生命周期 | `trpcservice/runtime/execution/execution.go` | `trpcservice/runtime/execution/execution_test.go`、`trpcservice/gateway/dispatch_test.go` |
 | 持续 HTTP Server、signal shutdown、readiness 摘流与有界退出 | `cmd/trpc-service/main.go` | `cmd/trpc-service/main_test.go` |
 
 ### 11.2 HTTP 与关联 ID 验收项

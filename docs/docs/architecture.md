@@ -39,10 +39,11 @@
 | Registry / Config Cache | 按租户和版本路由 Model、Backend、Channel provider，传播精确失效 | 缓存键包含版本与摘要；不缓存明文 Secret |
 | Secret Resolver | 在固定租户和用途范围内解析短时 Secret 或 verifier handle | 不参与租户选择；错误和日志脱敏 |
 | Channel Adapter | 解析供应商协议、验签/解密、统一消息格式、发送回复 | 不直接调用 Runner；不创建未验证的租户上下文 |
-| Agent Gateway | 限流、可信主体建立、幂等、快照装配和任务投递 | 只把已授权的 `ExecutionPlan` 交给 Worker |
+| Agent Gateway | 限流、可信主体建立、幂等、快照装配和协议适配；把固定 plan 交给 Runtime Execution | 不持有 Runner lease，不实现 Runner 执行生命周期 |
 | Queue / Outbox | 承载执行任务、回复发送、重试和死信 | 使用幂等键、租约和退避；不改变执行语义 |
-| Agent Worker | 消费固定 plan，驱动 Runner、Tool、Model 和 Storage，产出回复事件 | 无状态；不枚举控制面，不自行选择租户 |
-| Runner / Agent / Tool | Agent 编排、模型调用、工具/MCP、取消和事件 | 复用 tRPC-Agent-Go 能力，受平台策略链约束 |
+| Agent Worker | 消费固定 plan，管理任务生命周期并调用 Runtime Execution，产出回复事件 | 无状态；不枚举控制面，不自行选择租户 |
+| Runtime Execution / Runner | 获取 Runner lease、驱动一次 Runner 执行、取消、事件 drain 和 lease 释放 | 只接收固定 `ExecutionPlan`，向 Gateway/Worker 发出中立事件 |
+| Agent / Tool | Agent 编排、模型调用、工具/MCP | 复用 tRPC-Agent-Go 能力，受平台策略链约束 |
 | Storage Adapter | 为 Session、Event、State、Memory、Knowledge、Artifact、Audit 提供租户分区 | 访问必须带租户和能力范围；后端可替换 |
 | Policy / Guardrail | 输入、工具、输出和资源使用治理 | 策略结果可审计，不能绕过身份和快照边界 |
 | Telemetry | 统一 trace、metric、log、采样和脱敏 | 低基数标签；不承载合规审计真相 |
@@ -81,6 +82,7 @@ Adapter 只负责协议适配和出站能力探测；租户路由、幂等、重
   -> Gateway: 可信主体、限流、幂等
   -> PlanResolver: Tenant/App/Revision/Model/Backend 快照
   -> Queue 或 Worker: 固定 ExecutionPlan
+  -> Runtime Execution: Runner lease、执行、取消、drain、释放
   -> Runner: Agent / Model / Tool / Guardrail
   -> Storage Adapter: Session / Event / Memory / Artifact / Audit
   -> Reply Event
@@ -188,7 +190,7 @@ flowchart LR
 OTel Collector 使用各自的高可用部署。
 
 启动顺序是“配置校验 -> 数据库与 migration -> Repository/Registry -> Resolver/Factory ->
-PlanResolver -> RunnerRegistry/Dispatcher -> HTTP 服务 -> readiness”。依赖不完整时不接收
+PlanResolver -> Runtime Execution/RunnerRegistry -> HTTP 服务 -> readiness”。依赖不完整时不接收
 流量；关闭顺序是“摘除入口 -> 停止领取新任务 -> 等待有界执行和 Outbox 收尾 -> 释放 Runner
 与连接池”。`/healthz` 只表示进程存活，`/readyz` 才是业务流量闸门。
 
