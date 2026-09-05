@@ -354,6 +354,20 @@ func (fixture controlPlaneFixture) publishDraft(ctx context.Context, root *tenan
 	return published, nil
 }
 
+func (fixture controlPlaneFixture) createDeterministicModelProfile(ctx context.Context, tenantID string) (*model.Profile, error) {
+	profile, _, err := fixture.models.Create(ctx, model.CreateInput{
+		TenantID: tenantID, ProfileKey: "deterministic", DisplayName: "Deterministic",
+		Configuration: model.Configuration{Provider: "fake", Model: "deterministic"},
+		Metadata: model.ChangeMetadata{
+			ActorType: "example", ActorID: "fault-e2e", Reason: "fixture", CorrelationID: "fault-e2e",
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create deterministic model profile: %w", err)
+	}
+	return profile, nil
+}
+
 func (fixture controlPlaneFixture) createTenant(t *testing.T, suffix string) (*tenant.Tenant, *appmodel.App) {
 	t.Helper()
 	ctx := context.Background()
@@ -361,7 +375,7 @@ func (fixture controlPlaneFixture) createTenant(t *testing.T, suffix string) (*t
 	if err != nil {
 		t.Fatal(err)
 	}
-	modelProfile, _, err := fixture.models.Create(ctx, model.CreateInput{TenantID: root.TenantID, ProfileKey: "deterministic", DisplayName: "Deterministic", Configuration: model.Configuration{Provider: "fake", Model: "deterministic"}, Metadata: model.ChangeMetadata{ActorType: "example", ActorID: "fault-e2e", Reason: "fixture", CorrelationID: "fault-e2e"}})
+	modelProfile, err := fixture.createDeterministicModelProfile(ctx, root.TenantID)
 	if err != nil {
 		t.Fatal(err)
 	}
