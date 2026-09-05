@@ -35,6 +35,7 @@ import (
 	modelinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
@@ -252,7 +253,7 @@ func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture
 		t.Fatal(err)
 	}
 	runner := &weComRunner{reply: "wecom-e2e-ok"}
-	registry, err := gateway.NewRunnerRegistry(gateway.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (gateway.Runner, error) { return runner, nil }})
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return runner, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}

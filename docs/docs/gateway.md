@@ -1,4 +1,4 @@
-# Gateway、Execution Plan 与 HTTP/SSE
+# Gateway、Runtime Execution Plan 与 HTTP/SSE
 
 > 本页把已合并的生产架构设计（PR #25，对应 Issue #24）和已完成的 Channel
 > Binding 可信边界（Issue #26）收敛为 Issue #28 的可执行验收契约。文档阶段只
@@ -79,7 +79,7 @@ Secret value 或 live client。
 
 ## 4. RunnerRegistry
 
-Registry 持有由它创建的 Runner，借用调用方提供的 Session service、Secret Resolver、
+`trpcservice/runtime/runner` 持有由它创建的 Runner，借用调用方提供的 Session service、Secret Resolver、
 Model Factory 等共享依赖，不在关闭时关闭借用资源。
 
 ### 生命周期契约
@@ -93,7 +93,8 @@ Model Factory 等共享依赖，不在关闭时关闭借用资源。
   每个 Runner 最多关闭一次。
 - 关闭错误不能泄露 provider endpoint 或 Secret；重复 `Close` 安全。
 
-Registry 失效接口保留未来接入分布式配置事件的边界，但本阶段只提供进程内实现。
+Registry 失效接口保留未来接入分布式配置事件的边界，但本阶段只提供进程内实现；其实现归属
+`trpcservice/runtime/runner/registry.go`，Gateway 只依赖它的 Acquire/lease 接口。
 
 ## 5. Dispatch
 
@@ -212,6 +213,7 @@ disconnect 验收仍必须保持未勾选，不能用 fake 就绪状态替代。
 | JSON/SSE Handler、严格请求 schema、health/readiness、response 脱敏 | `trpcservice/gateway/http.go` | `trpcservice/gateway/http_test.go` |
 | Tenant 并发/窗口限流和稳定拒绝错误 | `trpcservice/gateway/limits.go` | `trpcservice/gateway/limits_test.go` |
 | principal + external message ID 的进程内幂等接口 | `trpcservice/gateway/idempotency.go` | `trpcservice/gateway/idempotency_test.go` |
+| Runner 缓存、lease、精确失效与有界关闭 | `trpcservice/runtime/runner/registry.go` | `trpcservice/runtime/runner/registry_test.go`、`trpcservice/gateway/runner_integration_test.go` |
 | 持续 HTTP Server、signal shutdown、readiness 摘流与有界退出 | `cmd/trpc-service/main.go` | `cmd/trpc-service/main_test.go` |
 
 ### 11.2 HTTP 与关联 ID 验收项

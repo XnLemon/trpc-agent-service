@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -520,7 +521,7 @@ func TestHTTPAdditionalBoundaryBranches(t *testing.T) {
 		{err: context.DeadlineExceeded, status: http.StatusGatewayTimeout},
 		{err: ErrIdempotencyCapacity, status: http.StatusServiceUnavailable},
 		{err: ErrPlanUnavailable, status: http.StatusBadGateway},
-		{err: ErrRunnerUnavailable, status: http.StatusBadGateway},
+		{err: runtimerunner.ErrRunnerUnavailable, status: http.StatusBadGateway},
 		{err: ErrClosed, status: http.StatusServiceUnavailable},
 		{err: nil, status: http.StatusInternalServerError},
 	} {

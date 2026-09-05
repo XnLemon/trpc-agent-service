@@ -22,6 +22,7 @@ import (
 	modelinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -88,7 +89,7 @@ func runTelegramOutboxScenario(t *testing.T, ctx context.Context, provider outbo
 	fixture := newDurableTelegramFixture(t, providerAccountID)
 	store := inmemory.New()
 	runner := &telegramE2ERunner{reply: fmt.Sprintf("telegram-outbox-runner-e2e-%d", time.Now().UTC().UnixNano())}
-	registry, err := gateway.NewRunnerRegistry(gateway.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (gateway.Runner, error) { return runner, nil }})
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return runner, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}

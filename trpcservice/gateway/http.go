@@ -15,6 +15,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 )
 
 const (
@@ -572,13 +573,13 @@ func mapHTTPError(err error) (int, string) {
 		return http.StatusTooManyRequests, "rate limited"
 	case errors.Is(err, ErrDuplicateMessage):
 		return http.StatusConflict, "duplicate message"
-	case errors.Is(err, ErrNotReady), errors.Is(err, ErrClosed):
+	case errors.Is(err, ErrNotReady), errors.Is(err, ErrClosed), errors.Is(err, runtimerunner.ErrNotReady), errors.Is(err, runtimerunner.ErrClosed):
 		return http.StatusServiceUnavailable, "not ready"
 	case errors.Is(err, ErrIdempotencyCapacity):
 		return http.StatusServiceUnavailable, "gateway capacity unavailable"
 	case errors.Is(err, ErrAuditWriteFailed):
 		return http.StatusBadGateway, ErrAuditWriteFailed.Error()
-	case errors.Is(err, ErrExecution), errors.Is(err, ErrPlanUnavailable), errors.Is(err, ErrRunnerUnavailable):
+	case errors.Is(err, ErrExecution), errors.Is(err, ErrPlanUnavailable), errors.Is(err, runtimerunner.ErrRunnerUnavailable):
 		return http.StatusBadGateway, "execution failed"
 	default:
 		return http.StatusInternalServerError, "gateway error"

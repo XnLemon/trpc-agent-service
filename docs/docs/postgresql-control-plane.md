@@ -201,7 +201,7 @@ validate explicit config
   → verify database + required catalog/capability
   → construct SQL repositories
   → construct PlanResolver
-  → construct RunnerRegistry(runtime.NewRunner)
+  → construct runtime/runner.NewRuntimeRunnerRegistry
   → construct Dispatcher
   → construct HTTPHandler with real Dispatcher/Authenticator
   → expose readiness

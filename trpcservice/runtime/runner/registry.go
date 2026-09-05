@@ -1,4 +1,6 @@
-package gateway
+// Package runner owns service-side Runner caching, leasing, invalidation, and
+// bounded lifecycle management.
+package runner
 
 import (
 	"context"
@@ -13,11 +15,17 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
-	"trpc.group/trpc-go/trpc-agent-go/runner"
+	trpcrunner "trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 )
 
 var (
+	// ErrInvalid reports invalid Runner registry configuration or input.
+	ErrInvalid = errors.New("invalid runtime runner")
+	// ErrNotReady reports that the Runner registry is nil or unavailable.
+	ErrNotReady = errors.New("runtime Runner registry is not ready")
+	// ErrClosed reports that the Runner registry has stopped accepting work.
+	ErrClosed = errors.New("runtime Runner registry is closed")
 	// ErrRunnerCapacity reports that every registry slot is still borrowed.
 	ErrRunnerCapacity = errors.New("runner registry capacity exhausted")
 	// ErrRunnerUnavailable is the redacted result of a failed Runner factory.
@@ -41,7 +49,7 @@ const (
 // Runner is the minimal tRPC-Agent-Go Runner lifecycle contract owned by the
 // Registry. The registry never closes borrowed Session/Secret/Model
 // dependencies captured by a Runner factory.
-type Runner = runner.Runner
+type Runner = trpcrunner.Runner
 
 // RunnerFactory builds one Runner from one immutable, validated plan.
 type RunnerFactory func(context.Context, runtime.ExecutionPlan) (Runner, error)

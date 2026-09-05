@@ -16,6 +16,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
@@ -95,7 +96,7 @@ type DispatchService interface {
 // DispatchConfig configures the Resolver/Registry execution boundary.
 type DispatchConfig struct {
 	Resolver      *PlanResolver
-	Registry      *RunnerRegistry
+	Registry      *runtimerunner.RunnerRegistry
 	DrainTimeout  time.Duration
 	Observability observability.Provider
 	// RuntimeStore enables durable inbound claims for verified Channel principals.
@@ -117,7 +118,7 @@ type DispatchConfig struct {
 // Runner events into a bounded, redacted event stream.
 type Dispatcher struct {
 	resolver        *PlanResolver
-	registry        *RunnerRegistry
+	registry        *runtimerunner.RunnerRegistry
 	drainTimeout    time.Duration
 	telemetry       observability.Provider
 	metrics         metrics.Catalog
@@ -286,14 +287,14 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	if runnerValue == nil {
 		_ = lease.Release()
 		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
-		dispatcher.failDurable(durable, ErrRunnerUnavailable)
+		dispatcher.failDurable(durable, runtimerunner.ErrRunnerUnavailable)
 		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
 			dispatcher.failDurable(durable, auditErr)
 			finishWithError(auditErr)
 			return nil, auditWriteFailure()
 		}
-		finishWithError(ErrRunnerUnavailable)
-		return nil, ErrRunnerUnavailable
+		finishWithError(runtimerunner.ErrRunnerUnavailable)
+		return nil, runtimerunner.ErrRunnerUnavailable
 	}
 	_ = dispatcher.metrics.Lease(ctx, 1, map[string]string{"component": "runner", "status": "active"})
 	runnerStarted := time.Now()
@@ -609,7 +610,7 @@ func (dispatcher *Dispatcher) observeStorage(ctx context.Context, operation func
 	return err
 }
 
-func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, finishRunner func(error), runnerStarted time.Time, mediaReplies *servicetool.ReplyCollector) {
+func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *runtimerunner.RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, finishRunner func(error), runnerStarted time.Time, mediaReplies *servicetool.ReplyCollector) {
 	defer close(output)
 	var terminalState atomic.Uint32
 	terminalState.Store(forwardTerminalPending)

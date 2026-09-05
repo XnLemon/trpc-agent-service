@@ -11,6 +11,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
+	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -61,8 +62,8 @@ func TestRunnerRegistryMergesConcurrentConstructionAndReusesCompleteKey(t *testi
 	startedCh := make(chan struct{})
 	release := make(chan struct{})
 	runnerValue := &testRunner{}
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{
-		Factory: func(ctx context.Context, got runtime.ExecutionPlan) (Runner, error) {
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{
+		Factory: func(ctx context.Context, got runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 			calls.Add(1)
 			started.Do(func() { close(startedCh) })
 			select {
@@ -80,7 +81,7 @@ func TestRunnerRegistryMergesConcurrentConstructionAndReusesCompleteKey(t *testi
 	defer func() { _ = registry.Close() }()
 
 	const workers = 12
-	leases := make(chan *RunnerLease, workers)
+	leases := make(chan *runtimerunner.RunnerLease, workers)
 	errorsCh := make(chan error, workers)
 	var wait sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -106,8 +107,8 @@ func TestRunnerRegistryMergesConcurrentConstructionAndReusesCompleteKey(t *testi
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("factory calls = %d, want 1", got)
 	}
-	var first *RunnerLease
-	allLeases := make([]*RunnerLease, 0, workers)
+	var first *runtimerunner.RunnerLease
+	allLeases := make([]*runtimerunner.RunnerLease, 0, workers)
 	for lease := range leases {
 		allLeases = append(allLeases, lease)
 		if first == nil {
@@ -130,8 +131,8 @@ func TestRunnerRegistryInvalidationDefersCloseUntilRelease(t *testing.T) {
 	plan := testExecutionPlan(t)
 	var calls atomic.Int32
 	runners := make(chan *testRunner, 2)
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{
-		Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{
+		Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 			runnerValue := &testRunner{}
 			runners <- runnerValue
 			calls.Add(1)
@@ -181,7 +182,7 @@ func TestRunnerRegistrySelectiveInvalidationPreservesUnrelatedTenant(t *testing.
 	planOne := testExecutionPlan(t)
 	planTwo := testExecutionPlan(t)
 	var calls atomic.Int32
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 		calls.Add(1)
 		return &testRunner{}, nil
 	}})
@@ -255,7 +256,7 @@ func TestRunnerRegistrySeparatesBackendProfileVersions(t *testing.T) {
 		t.Fatalf("backend cache keys = %+v, %+v; updated=%+v", firstKey, secondKey, updated)
 	}
 	var calls atomic.Int32
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 		calls.Add(1)
 		return &testRunner{}, nil
 	}})
@@ -283,8 +284,8 @@ func TestRunnerRegistryCapacityEvictsIdleButNotBorrowedEntries(t *testing.T) {
 	planTwo := testExecutionPlan(t)
 	var runnersMu sync.Mutex
 	var runners []*testRunner
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{
-		Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{
+		Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 			runnerValue := &testRunner{}
 			runnersMu.Lock()
 			runners = append(runners, runnerValue)
@@ -302,7 +303,7 @@ func TestRunnerRegistryCapacityEvictsIdleButNotBorrowedEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.Acquire(context.Background(), planTwo); !errors.Is(err, ErrRunnerCapacity) {
+	if _, err := registry.Acquire(context.Background(), planTwo); !errors.Is(err, runtimerunner.ErrRunnerCapacity) {
 		t.Fatalf("borrowed capacity error = %v", err)
 	}
 	if err := leaseOne.Release(); err != nil {
@@ -326,8 +327,8 @@ func TestRunnerRegistryCapacityEvictsIdleButNotBorrowedEntries(t *testing.T) {
 func TestRunnerRegistryDoesNotCacheFactoryFailures(t *testing.T) {
 	plan := testExecutionPlan(t)
 	var calls atomic.Int32
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{
-		Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{
+		Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 			if calls.Add(1) == 1 {
 				return nil, errors.New("provider secret must not escape")
 			}
@@ -338,7 +339,7 @@ func TestRunnerRegistryDoesNotCacheFactoryFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = registry.Close() }()
-	if _, err := registry.Acquire(context.Background(), plan); !errors.Is(err, ErrRunnerUnavailable) {
+	if _, err := registry.Acquire(context.Background(), plan); !errors.Is(err, runtimerunner.ErrRunnerUnavailable) {
 		t.Fatalf("first factory error = %v", err)
 	}
 	lease, err := registry.Acquire(context.Background(), plan)
@@ -356,8 +357,8 @@ func TestRunnerRegistryDoesNotCacheFactoryFailures(t *testing.T) {
 func TestRunnerRegistryCloseWaitsForBorrowedLease(t *testing.T) {
 	plan := testExecutionPlan(t)
 	runnerValue := &testRunner{}
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{
-		Factory:      func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil },
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{
+		Factory:      func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return runnerValue, nil },
 		CloseTimeout: time.Second,
 	})
 	if err != nil {
@@ -385,22 +386,22 @@ func TestRunnerRegistryCloseWaitsForBorrowedLease(t *testing.T) {
 }
 
 func TestRunnerRegistryConfigurationAndBoundaryErrors(t *testing.T) {
-	factory := func(context.Context, runtime.ExecutionPlan) (Runner, error) { return &testRunner{}, nil }
-	for name, config := range map[string]RunnerRegistryConfig{
+	factory := func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return &testRunner{}, nil }
+	for name, config := range map[string]runtimerunner.RunnerRegistryConfig{
 		"missing factory":        {},
 		"negative entries":       {Factory: factory, MaxEntries: -1},
 		"negative idle ttl":      {Factory: factory, IdleTTL: -time.Second},
 		"negative close timeout": {Factory: factory, CloseTimeout: -time.Second},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := NewRunnerRegistry(config); !errors.Is(err, ErrInvalid) {
-				t.Fatalf("NewRunnerRegistry() error = %v", err)
+			if _, err := runtimerunner.NewRunnerRegistry(config); !errors.Is(err, runtimerunner.ErrInvalid) {
+				t.Fatalf("runtimerunner.NewRunnerRegistry() error = %v", err)
 			}
 		})
 	}
 
 	plan := testExecutionPlan(t)
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: factory})
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: factory})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +409,7 @@ func TestRunnerRegistryConfigurationAndBoundaryErrors(t *testing.T) {
 		t.Fatal("new registry is not ready")
 	}
 	var nilContext context.Context
-	if _, err := registry.Acquire(nilContext, plan); !errors.Is(err, ErrInvalid) {
+	if _, err := registry.Acquire(nilContext, plan); !errors.Is(err, runtimerunner.ErrInvalid) {
 		t.Fatalf("nil context error = %v", err)
 	}
 	canceled, cancel := context.WithCancel(context.Background())
@@ -416,7 +417,7 @@ func TestRunnerRegistryConfigurationAndBoundaryErrors(t *testing.T) {
 	if _, err := registry.Acquire(canceled, plan); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled context error = %v", err)
 	}
-	if _, err := registry.Acquire(context.Background(), runtime.ExecutionPlan{}); !errors.Is(err, ErrInvalid) {
+	if _, err := registry.Acquire(context.Background(), runtime.ExecutionPlan{}); !errors.Is(err, runtimerunner.ErrInvalid) {
 		t.Fatalf("invalid plan error = %v", err)
 	}
 	if err := registry.Close(); err != nil {
@@ -425,38 +426,38 @@ func TestRunnerRegistryConfigurationAndBoundaryErrors(t *testing.T) {
 	if registry.Ready() {
 		t.Fatal("closed registry is ready")
 	}
-	if _, err := registry.Acquire(context.Background(), plan); !errors.Is(err, ErrClosed) {
+	if _, err := registry.Acquire(context.Background(), plan); !errors.Is(err, runtimerunner.ErrClosed) {
 		t.Fatalf("closed registry acquire error = %v", err)
 	}
-	if err := registry.Invalidate(runtime.CacheKey{}); !errors.Is(err, ErrClosed) {
+	if err := registry.Invalidate(runtime.CacheKey{}); !errors.Is(err, runtimerunner.ErrClosed) {
 		t.Fatalf("closed registry invalidation error = %v", err)
 	}
 	if err := registry.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	var nilRegistry *RunnerRegistry
+	var nilRegistry *runtimerunner.RunnerRegistry
 	if nilRegistry.Ready() {
 		t.Fatal("nil registry is ready")
 	}
-	if _, err := nilRegistry.Acquire(context.Background(), plan); !errors.Is(err, ErrNotReady) {
+	if _, err := nilRegistry.Acquire(context.Background(), plan); !errors.Is(err, runtimerunner.ErrNotReady) {
 		t.Fatalf("nil registry acquire error = %v", err)
 	}
-	if err := nilRegistry.Invalidate(runtime.CacheKey{}); !errors.Is(err, ErrNotReady) {
+	if err := nilRegistry.Invalidate(runtime.CacheKey{}); !errors.Is(err, runtimerunner.ErrNotReady) {
 		t.Fatalf("nil registry invalidation error = %v", err)
 	}
 }
 
 func TestRunnerRegistryInvalidationWrappersAndPredicateBoundaries(t *testing.T) {
 	plan := testExecutionPlan(t)
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 		return &testRunner{}, nil
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = registry.Close() }()
-	if err := registry.InvalidateMatching(nil); !errors.Is(err, ErrInvalid) {
+	if err := registry.InvalidateMatching(nil); !errors.Is(err, runtimerunner.ErrInvalid) {
 		t.Fatalf("nil predicate = %v", err)
 	}
 	lease, err := registry.Acquire(context.Background(), plan)
@@ -491,11 +492,11 @@ func TestRunnerRegistryInvalidationWrappersAndPredicateBoundaries(t *testing.T) 
 	if err := lease.Release(); err != nil {
 		t.Fatal(err)
 	}
-	var nilRegistry *RunnerRegistry
-	if err := nilRegistry.InvalidateMatching(func(runtime.CacheKey) bool { return true }); !errors.Is(err, ErrNotReady) {
+	var nilRegistry *runtimerunner.RunnerRegistry
+	if err := nilRegistry.InvalidateMatching(func(runtime.CacheKey) bool { return true }); !errors.Is(err, runtimerunner.ErrNotReady) {
 		t.Fatalf("nil registry matching = %v", err)
 	}
-	var nilLease *RunnerLease
+	var nilLease *runtimerunner.RunnerLease
 	if nilLease.Runner() != nil || nilLease.Release() != nil {
 		t.Fatal("nil lease boundary was not harmless")
 	}
@@ -508,13 +509,13 @@ func (stage2ModelFactory) New(context.Context, model.ModelFactoryInput, model.Se
 }
 
 func TestRuntimeRunnerRegistryWiresBorrowedDependencies(t *testing.T) {
-	if _, err := NewRuntimeRunnerRegistry(RuntimeRunnerRegistryConfig{}); !errors.Is(err, ErrInvalid) {
+	if _, err := runtimerunner.NewRuntimeRunnerRegistry(runtimerunner.RuntimeRunnerRegistryConfig{}); !errors.Is(err, runtimerunner.ErrInvalid) {
 		t.Fatalf("missing runtime dependency error = %v", err)
 	}
 	plan := testExecutionPlan(t)
 	sessions := sessioninmemory.NewSessionService()
 	t.Cleanup(func() { _ = sessions.Close() })
-	registry, err := NewRuntimeRunnerRegistry(RuntimeRunnerRegistryConfig{
+	registry, err := runtimerunner.NewRuntimeRunnerRegistry(runtimerunner.RuntimeRunnerRegistryConfig{
 		ModelFactory: stage2ModelFactory{},
 		Sessions:     sessions,
 	})
@@ -524,13 +525,13 @@ func TestRuntimeRunnerRegistryWiresBorrowedDependencies(t *testing.T) {
 	if !registry.Ready() {
 		t.Fatal("runtime registry is not ready")
 	}
-	if _, err := registry.Acquire(context.Background(), plan); !errors.Is(err, ErrRunnerUnavailable) {
+	if _, err := registry.Acquire(context.Background(), plan); !errors.Is(err, runtimerunner.ErrRunnerUnavailable) {
 		t.Fatalf("agent-backed runner construction error = %v", err)
 	}
 	if err := registry.Close(); err != nil {
 		t.Fatal(err)
 	}
-	storageRegistry, err := NewRuntimeRunnerRegistry(RuntimeRunnerRegistryConfig{
+	storageRegistry, err := runtimerunner.NewRuntimeRunnerRegistry(runtimerunner.RuntimeRunnerRegistryConfig{
 		ModelFactory: stage2ModelFactory{},
 		StorageFactory: backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
 			return nil, backend.ErrStorageFactory
@@ -539,7 +540,7 @@ func TestRuntimeRunnerRegistryWiresBorrowedDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := storageRegistry.Acquire(context.Background(), plan); !errors.Is(err, ErrRunnerUnavailable) {
+	if _, err := storageRegistry.Acquire(context.Background(), plan); !errors.Is(err, runtimerunner.ErrRunnerUnavailable) {
 		t.Fatalf("storage-backed runner construction error = %v", err)
 	}
 	if err := storageRegistry.Close(); err != nil {
@@ -549,19 +550,19 @@ func TestRuntimeRunnerRegistryWiresBorrowedDependencies(t *testing.T) {
 
 func TestRunnerRegistryFactoryAndPendingCancellationEdges(t *testing.T) {
 	plan := testExecutionPlan(t)
-	for name, factory := range map[string]RunnerFactory{
-		"nil runner": func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+	for name, factory := range map[string]runtimerunner.RunnerFactory{
+		"nil runner": func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 			return nil, nil
 		},
-		"context failure": func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+		"context failure": func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 			return nil, context.DeadlineExceeded
 		},
-		"runner with failure": func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+		"runner with failure": func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 			return &testRunner{}, errors.New("provider detail")
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: factory})
+			registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: factory})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -573,7 +574,7 @@ func TestRunnerRegistryFactoryAndPendingCancellationEdges(t *testing.T) {
 					t.Fatalf("factory context error = %v", err)
 				}
 			default:
-				if !errors.Is(err, ErrRunnerUnavailable) {
+				if !errors.Is(err, runtimerunner.ErrRunnerUnavailable) {
 					t.Fatalf("factory error = %v", err)
 				}
 			}
@@ -582,8 +583,8 @@ func TestRunnerRegistryFactoryAndPendingCancellationEdges(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{
-		Factory: func(ctx context.Context, _ runtime.ExecutionPlan) (Runner, error) {
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{
+		Factory: func(ctx context.Context, _ runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 			close(started)
 			select {
 			case <-release:
@@ -597,7 +598,7 @@ func TestRunnerRegistryFactoryAndPendingCancellationEdges(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = registry.Close() }()
-	first := make(chan *RunnerLease, 1)
+	first := make(chan *runtimerunner.RunnerLease, 1)
 	go func() {
 		lease, acquireErr := registry.Acquire(context.Background(), plan)
 		if acquireErr != nil {
@@ -634,7 +635,7 @@ func TestRunnerRegistryInvalidatesPendingBuildAndRetries(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var calls atomic.Int32
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(ctx context.Context, _ runtime.ExecutionPlan) (Runner, error) {
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(ctx context.Context, _ runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 		if calls.Add(1) == 1 {
 			close(started)
 			select {
@@ -649,7 +650,7 @@ func TestRunnerRegistryInvalidatesPendingBuildAndRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = registry.Close() }()
-	result := make(chan *RunnerLease, 1)
+	result := make(chan *runtimerunner.RunnerLease, 1)
 	go func() {
 		lease, acquireErr := registry.Acquire(context.Background(), plan)
 		if acquireErr != nil {
@@ -677,8 +678,8 @@ func TestRunnerRegistryIdleCloseErrorAndTimeoutEdges(t *testing.T) {
 	planTwo := testExecutionPlan(t)
 	now := time.Unix(100, 0)
 	var runners []*testRunner
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{
-		Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{
+		Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 			runner := &testRunner{}
 			runners = append(runners, runner)
 			return runner, nil
@@ -711,7 +712,7 @@ func TestRunnerRegistryIdleCloseErrorAndTimeoutEdges(t *testing.T) {
 	}
 
 	closeFail := &testRunner{closeErr: errors.New("provider close detail")}
-	failing, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return closeFail, nil }})
+	failing, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return closeFail, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -722,16 +723,16 @@ func TestRunnerRegistryIdleCloseErrorAndTimeoutEdges(t *testing.T) {
 	if err := failingLease.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if err := failing.Close(); !errors.Is(err, ErrRunnerClose) {
+	if err := failing.Close(); !errors.Is(err, runtimerunner.ErrRunnerClose) {
 		t.Fatalf("close failure = %v", err)
 	}
-	if err := failing.Close(); !errors.Is(err, ErrRunnerClose) {
+	if err := failing.Close(); !errors.Is(err, runtimerunner.ErrRunnerClose) {
 		t.Fatalf("repeated close failure = %v", err)
 	}
 
 	borrowed := &testRunner{}
-	timeoutRegistry, err := NewRunnerRegistry(RunnerRegistryConfig{
-		Factory:      func(context.Context, runtime.ExecutionPlan) (Runner, error) { return borrowed, nil },
+	timeoutRegistry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{
+		Factory:      func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return borrowed, nil },
 		CloseTimeout: 5 * time.Millisecond,
 	})
 	if err != nil {
@@ -741,7 +742,7 @@ func TestRunnerRegistryIdleCloseErrorAndTimeoutEdges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := timeoutRegistry.Close(); !errors.Is(err, ErrRegistryCloseTimeout) {
+	if err := timeoutRegistry.Close(); !errors.Is(err, runtimerunner.ErrRegistryCloseTimeout) {
 		t.Fatalf("close timeout = %v", err)
 	}
 	if err := borrowedLease.Release(); err != nil {

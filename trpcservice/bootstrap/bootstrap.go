@@ -35,6 +35,7 @@ import (
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
@@ -123,7 +124,7 @@ type Config struct {
 	// Dispatcher construction. Returned adapters are owned by Runtime.
 	WeComAIBotFactories []func(gateway.DispatchService) (channels.PollingAdapter, error)
 
-	Registry          gateway.RunnerRegistryConfig
+	Registry          runtimerunner.RunnerRegistryConfig
 	HTTP              gateway.HTTPConfig
 	DrainTimeout      time.Duration
 	ReadyGate         func() bool
@@ -139,7 +140,7 @@ type Config struct {
 type Runtime struct {
 	Handler        *gateway.HTTPHandler
 	Resolver       *gateway.PlanResolver
-	Registry       *gateway.RunnerRegistry
+	Registry       *runtimerunner.RunnerRegistry
 	Dispatcher     *gateway.Dispatcher
 	OutboxWorker   *outbox.Worker
 	wecomLifecycle callbackLifecycle
@@ -351,7 +352,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, ErrInvalidConfig
 	}
-	registry, err := gateway.NewRuntimeRunnerRegistry(gateway.RuntimeRunnerRegistryConfig{
+	registry, err := runtimerunner.NewRuntimeRunnerRegistry(runtimerunner.RuntimeRunnerRegistryConfig{
 		Registry: config.Registry, SecretResolver: config.SecretResolver,
 		ModelFactory: config.ModelFactory, Sessions: config.Sessions, StorageFactory: config.StorageFactory,
 		Observability: config.Observability, ToolRegistry: config.ToolRegistry,
@@ -459,7 +460,7 @@ func startAIBots(runtimeGraph *Runtime) error {
 	return nil
 }
 
-func configureAdmin(config *Config, registry *gateway.RunnerRegistry) error {
+func configureAdmin(config *Config, registry *runtimerunner.RunnerRegistry) error {
 	if config.AdminAuthenticator == nil {
 		config.HTTP.AdminAuth = nil
 		return nil
@@ -489,7 +490,7 @@ func configureAdmin(config *Config, registry *gateway.RunnerRegistry) error {
 	return nil
 }
 
-func invalidateRuntimeCache(registry *gateway.RunnerRegistry, change admin.CacheInvalidation) {
+func invalidateRuntimeCache(registry *runtimerunner.RunnerRegistry, change admin.CacheInvalidation) {
 	// A closed registry cannot admit a future execution. Other errors are
 	// impossible for Admin-derived non-empty IDs, so a committed control-
 	// plane mutation remains successful during shutdown.

@@ -21,7 +21,7 @@ Issue #82 delivers only the instance-local App Registry behavior: revision selec
 
 ## Existing baseline
 
-`runtime.ExecutionPlan.CacheKey()` already contains the tenant, App, revision, content digest, and resolved Model/Backend versions. `gateway.RunnerRegistry` owns runners by that complete key, combines concurrent construction, and keeps invalidated runners alive until the last lease releases. `agent.Repository` already persists immutable published revisions and atomically moves `current_revision` for publish and rollback.
+`runtime.ExecutionPlan.CacheKey()` already contains the tenant, App, revision, content digest, and resolved Model/Backend versions. `runtime/runner.RunnerRegistry` owns runners by that complete key, combines concurrent construction, and keeps invalidated runners alive until the last lease releases. `agent.Repository` already persists immutable published revisions and atomically moves `current_revision` for publish and rollback.
 
 The new contract must preserve those properties. A canary must choose a different immutable plan; it must never mutate a cached runner or evict an in-flight lease.
 
