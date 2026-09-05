@@ -204,9 +204,46 @@ type durableTelegramFixture struct {
 	resolver *gateway.PlanResolver
 }
 
+type telegramControlPlaneFixture struct {
+	root           *tenant.Tenant
+	app            *appmodel.App
+	modelCatalog   *model.ProviderCatalog
+	backendCatalog *backend.ProviderCatalog
+	tenants        *tenantinmemory.InMemoryRepository
+	apps           *agentinmemory.InMemoryRepository
+	models         *modelinmemory.InMemoryRepository
+	backends       *backendinmemory.InMemoryRepository
+}
+
 func newDurableTelegramFixture(t *testing.T, providerAccountID string) durableTelegramFixture {
 	t.Helper()
 	ctx := context.Background()
+	controlPlane := newTelegramControlPlaneFixture(t, ctx)
+	target := newTelegramChannelTarget(t, ctx, controlPlane, providerAccountID)
+	planResolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{Tenants: controlPlane.tenants, Apps: controlPlane.apps, Models: controlPlane.models, Backends: controlPlane.backends, ModelCatalog: controlPlane.modelCatalog, BackendCatalog: controlPlane.backendCatalog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return durableTelegramFixture{target: target, resolver: planResolver}
+}
+
+func newTelegramControlPlaneFixture(t *testing.T, ctx context.Context) telegramControlPlaneFixture {
+	t.Helper()
+	modelCatalog, backendCatalog := newTelegramCatalogs(t)
+	tenants := tenantinmemory.NewRepository()
+	root := createTelegramTenant(t, ctx, tenants)
+	modelsRepo := modelinmemory.NewRepository(modelCatalog)
+	modelProfile := createTelegramModelProfile(t, ctx, modelsRepo, root.TenantID)
+	backends := backendinmemory.NewRepository(backendCatalog)
+	backendProfile := createTelegramBackendProfile(t, ctx, backends, root.TenantID)
+	apps := agentinmemory.NewRepository()
+	app := createPublishedTelegramApp(t, ctx, apps, root.TenantID, modelProfile.ProfileID)
+	root = configureTelegramTenant(t, ctx, tenants, root, app, backendProfile)
+	return telegramControlPlaneFixture{root: root, app: app, modelCatalog: modelCatalog, backendCatalog: backendCatalog, tenants: tenants, apps: apps, models: modelsRepo, backends: backends}
+}
+
+func newTelegramCatalogs(t *testing.T) (*model.ProviderCatalog, *backend.ProviderCatalog) {
+	t.Helper()
 	modelCatalog, err := model.NewProviderCatalog(model.ProviderSpec{Provider: "fake", Models: []string{"deterministic"}, EndpointPolicy: model.FieldForbidden, SecretRefPolicy: model.FieldForbidden})
 	if err != nil {
 		t.Fatal(err)
@@ -218,45 +255,71 @@ func newDurableTelegramFixture(t *testing.T, providerAccountID string) durableTe
 	if err != nil {
 		t.Fatal(err)
 	}
-	tenants := tenantinmemory.NewRepository()
+	return modelCatalog, backendCatalog
+}
+
+func createTelegramTenant(t *testing.T, ctx context.Context, tenants *tenantinmemory.InMemoryRepository) *tenant.Tenant {
+	t.Helper()
 	root, err := tenants.Create(ctx, tenant.CreateInput{TenantKey: "telegram-outbox-e2e", DisplayName: "Telegram Outbox E2E", AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	modelsRepo := modelinmemory.NewRepository(modelCatalog)
-	modelProfile, _, err := modelsRepo.Create(ctx, model.CreateInput{TenantID: root.TenantID, ProfileKey: "primary-model", DisplayName: "Primary Model", Configuration: model.Configuration{Provider: "fake", Model: "deterministic"}, Metadata: modelMetadata()})
+	return root
+}
+
+func createTelegramModelProfile(t *testing.T, ctx context.Context, models *modelinmemory.InMemoryRepository, tenantID string) *model.Profile {
+	t.Helper()
+	profile, _, err := models.Create(ctx, model.CreateInput{TenantID: tenantID, ProfileKey: "primary-model", DisplayName: "Primary Model", Configuration: model.Configuration{Provider: "fake", Model: "deterministic"}, Metadata: modelMetadata()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	backends := backendinmemory.NewRepository(backendCatalog)
-	backendProfile, _, err := backends.Create(ctx, backend.CreateInput{TenantID: root.TenantID, ProfileKey: "primary-backend", DisplayName: "Primary Backend", Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory", Options: map[string]string{"namespace": "telegram-outbox-e2e"}}}, Metadata: backendMetadata()})
+	return profile
+}
+
+func createTelegramBackendProfile(t *testing.T, ctx context.Context, backends *backendinmemory.InMemoryRepository, tenantID string) *backend.Profile {
+	t.Helper()
+	profile, _, err := backends.Create(ctx, backend.CreateInput{TenantID: tenantID, ProfileKey: "primary-backend", DisplayName: "Primary Backend", Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory", Options: map[string]string{"namespace": "telegram-outbox-e2e"}}}, Metadata: backendMetadata()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	apps := agentinmemory.NewRepository()
-	appRoot, err := apps.Create(ctx, appmodel.CreateInput{TenantID: root.TenantID, AppKey: "telegram-outbox-e2e", DisplayName: "Telegram Outbox E2E", Description: "Durable Telegram reply test"})
+	return profile
+}
+
+func createPublishedTelegramApp(t *testing.T, ctx context.Context, apps *agentinmemory.InMemoryRepository, tenantID, modelProfileID string) *appmodel.App {
+	t.Helper()
+	appRoot, err := apps.Create(ctx, appmodel.CreateInput{TenantID: tenantID, AppKey: "telegram-outbox-e2e", DisplayName: "Telegram Outbox E2E", Description: "Durable Telegram reply test"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft, err := apps.CreateDraft(ctx, appmodel.CreateDraftInput{TenantID: root.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version, Configuration: appmodel.DraftConfiguration{Description: "Telegram Outbox E2E", Instruction: "Reply deterministically.", ModelProfileID: modelProfile.ProfileID, Runtime: appmodel.DefaultRuntimePolicy()}})
+	draft, err := apps.CreateDraft(ctx, appmodel.CreateDraftInput{TenantID: tenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version, Configuration: appmodel.DraftConfiguration{Description: "Telegram Outbox E2E", Instruction: "Reply deterministically.", ModelProfileID: modelProfileID, Runtime: appmodel.DefaultRuntimePolicy()}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	publishedApp, _, _, err := apps.Publish(ctx, appmodel.PublishInput{TenantID: root.TenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: agentMetadata()})
+	publishedApp, _, _, err := apps.Publish(ctx, appmodel.PublishInput{TenantID: tenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: agentMetadata()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	appID, backendID := publishedApp.AppID, backendProfile.ProfileID
-	root, err = tenants.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{TenantID: root.TenantID, ExpectedVersion: root.Version, DisplayName: root.DisplayName, AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1, DefaultAgentAppID: &appID, DefaultBackendProfileID: &backendID})
+	return publishedApp
+}
+
+func configureTelegramTenant(t *testing.T, ctx context.Context, tenants *tenantinmemory.InMemoryRepository, root *tenant.Tenant, app *appmodel.App, backendProfile *backend.Profile) *tenant.Tenant {
+	t.Helper()
+	appID, backendID := app.AppID, backendProfile.ProfileID
+	updated, err := tenants.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{TenantID: root.TenantID, ExpectedVersion: root.Version, DisplayName: root.DisplayName, AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1, DefaultAgentAppID: &appID, DefaultBackendProfileID: &backendID})
 	if err != nil {
 		t.Fatal(err)
 	}
+	return updated
+}
+
+func newTelegramChannelTarget(t *testing.T, ctx context.Context, controlPlane telegramControlPlaneFixture, providerAccountID string) channels.RoutingTarget {
+	t.Helper()
 	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelTelegram, "telegram-outbox-e2e")
 	if err != nil {
 		t.Fatal(err)
 	}
 	channelRepo := channelsinmemory.NewRepository()
-	binding, _, err := channelRepo.Create(ctx, channels.CreateInput{TenantID: root.TenantID, BindingKey: "telegram-outbox-e2e", Channel: channels.ChannelTelegram, ProviderAccountID: providerAccountID, PublicRouteKeyDigest: routeDigest, AppID: publishedApp.AppID, SecretRef: "examples/telegram-e2e", Protocol: channels.ProtocolConfiguration{Telegram: &channels.TelegramProtocolConfiguration{}}, Metadata: exampleMetadata()})
+	binding, _, err := channelRepo.Create(ctx, channels.CreateInput{TenantID: controlPlane.root.TenantID, BindingKey: "telegram-outbox-e2e", Channel: channels.ChannelTelegram, ProviderAccountID: providerAccountID, PublicRouteKeyDigest: routeDigest, AppID: controlPlane.app.AppID, SecretRef: "examples/telegram-e2e", Protocol: channels.ProtocolConfiguration{Telegram: &channels.TelegramProtocolConfiguration{}}, Metadata: exampleMetadata()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,19 +343,15 @@ func newDurableTelegramFixture(t *testing.T, providerAccountID string) durableTe
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := tenant.NewConfigurationSnapshot(root)
+	snapshot, err := tenant.NewConfigurationSnapshot(controlPlane.root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := channels.NewRoutingTarget(snapshot, binding, publishedApp, verified)
+	target, err := channels.NewRoutingTarget(snapshot, binding, controlPlane.app, verified)
 	if err != nil {
 		t.Fatal(err)
 	}
-	planResolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{Tenants: tenants, Apps: apps, Models: modelsRepo, Backends: backends, ModelCatalog: modelCatalog, BackendCatalog: backendCatalog})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return durableTelegramFixture{target: target, resolver: planResolver}
+	return target
 }
 
 func agentMetadata() appmodel.ChangeMetadata {

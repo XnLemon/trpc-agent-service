@@ -16,10 +16,7 @@ import (
 
 func TestNewRunnerMaterializesPlanStorageCapability(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
-	if err != nil {
-		t.Fatal(err)
-	}
+	plan := mustExecutionPlan(t, fixture)
 	sessions := inmemory.NewSessionService()
 	builds := 0
 	factory := backend.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
@@ -50,10 +47,7 @@ func TestNewRunnerMaterializesPlanStorageCapability(t *testing.T) {
 
 func TestNewRunnerClosesStorageCapabilityWhenModelBuildFails(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
-	if err != nil {
-		t.Fatal(err)
-	}
+	plan := mustExecutionPlan(t, fixture)
 	base := inmemory.NewSessionService()
 	var closes atomic.Int32
 	service := &closeCountingSession{Service: base, closes: &closes}
@@ -71,7 +65,7 @@ func TestNewRunnerClosesStorageCapabilityWhenModelBuildFails(t *testing.T) {
 
 func TestNewRunnerWithObservabilityRecordsStorageFactorySuccess(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan := newExecutionPlanForRunner(t, fixture)
+	plan := mustExecutionPlan(t, fixture)
 	telemetry := &runtimeTelemetryProvider{}
 	sessions := inmemory.NewSessionService()
 	factory := backend.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
@@ -92,7 +86,7 @@ func TestNewRunnerWithObservabilityRecordsStorageFactorySuccess(t *testing.T) {
 
 func TestNewRunnerWithObservabilityRecordsStorageFactoryFailure(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan := newExecutionPlanForRunner(t, fixture)
+	plan := mustExecutionPlan(t, fixture)
 	telemetry := &runtimeTelemetryProvider{}
 	factoryErr := errors.New("storage unavailable")
 	factory := backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {

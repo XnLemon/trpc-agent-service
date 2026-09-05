@@ -156,8 +156,64 @@ type weComFixture struct {
 	runner         *weComRunner
 }
 
-//nolint:gocyclo // Fixture assembly mirrors the tenant/app/binding execution boundary.
+type weComControlPlaneFixture struct {
+	root           *tenant.Tenant
+	app            *appmodel.App
+	modelCatalog   *model.ProviderCatalog
+	backendCatalog *backend.ProviderCatalog
+	db             *sql.DB
+	tenantRepo     *tenantinmemory.InMemoryRepository
+	appRepo        *agentinmemory.InMemoryRepository
+	modelRepo      *modelinmemory.InMemoryRepository
+	backendRepo    *backendinmemory.InMemoryRepository
+}
+
+type weComChannelFixture struct {
+	repo           *channelsinmemory.InMemoryRepository
+	credentials    fixtureCredentials
+	encodingAESKey string
+	aesKey         []byte
+	target         channels.RoutingTarget
+}
+
 func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture {
+	t.Helper()
+	controlPlane := newWeComControlPlaneFixture(t, ctx, db)
+	channelFixture := newWeComChannelFixture(t, ctx, controlPlane)
+	planResolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{Tenants: controlPlane.tenantRepo, Apps: controlPlane.appRepo, Models: controlPlane.modelRepo, Backends: controlPlane.backendRepo, ModelCatalog: controlPlane.modelCatalog, BackendCatalog: controlPlane.backendCatalog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &weComRunner{reply: "wecom-e2e-ok"}
+	registry, err := gateway.NewRunnerRegistry(gateway.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (gateway.Runner, error) { return runner, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	store := runtimestoragepostgres.New(db)
+	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: planResolver, Registry: registry, RuntimeStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return weComFixture{tenant: controlPlane.root, channels: channelFixture.repo, credentials: channelFixture.credentials, encodingAESKey: channelFixture.encodingAESKey, aesKey: channelFixture.aesKey, target: channelFixture.target, store: store, dispatcher: dispatcher, runner: runner}
+}
+
+func newWeComControlPlaneFixture(t *testing.T, ctx context.Context, db *sql.DB) weComControlPlaneFixture {
+	t.Helper()
+	modelCatalog, backendCatalog := newWeComCatalogs(t)
+	tenantRepo := tenantinmemory.NewRepository()
+	root := createWeComTenant(t, ctx, db, tenantRepo)
+	modelRepo := modelinmemory.NewRepository(modelCatalog)
+	modelProfile := createWeComModelProfile(t, ctx, modelRepo, root.TenantID)
+	backendRepo := backendinmemory.NewRepository(backendCatalog)
+	backendProfile := createWeComBackendProfile(t, ctx, backendRepo, root.TenantID)
+	appRepo := agentinmemory.NewRepository()
+	app := createPublishedWeComApp(t, ctx, appRepo, root.TenantID, modelProfile.ProfileID)
+	root = configureWeComTenant(t, ctx, tenantRepo, root, app, backendProfile)
+	return weComControlPlaneFixture{root: root, app: app, modelCatalog: modelCatalog, backendCatalog: backendCatalog, db: db, tenantRepo: tenantRepo, appRepo: appRepo, modelRepo: modelRepo, backendRepo: backendRepo}
+}
+
+func newWeComCatalogs(t *testing.T) (*model.ProviderCatalog, *backend.ProviderCatalog) {
 	t.Helper()
 	modelCatalog, err := model.NewProviderCatalog(model.ProviderSpec{Provider: "fake", Models: []string{"deterministic"}, EndpointPolicy: model.FieldForbidden, SecretRefPolicy: model.FieldForbidden})
 	if err != nil {
@@ -167,48 +223,85 @@ func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	tenantRepo := tenantinmemory.NewRepository()
-	root, err := tenantRepo.Create(ctx, tenant.CreateInput{TenantKey: fmt.Sprintf("wecom-e2e-%d", time.Now().UnixNano()), DisplayName: "WeCom E2E", AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1})
+	return modelCatalog, backendCatalog
+}
+
+func createWeComTenant(t *testing.T, ctx context.Context, db *sql.DB, tenants *tenantinmemory.InMemoryRepository) *tenant.Tenant {
+	t.Helper()
+	root, err := tenants.Create(ctx, tenant.CreateInput{TenantKey: fmt.Sprintf("wecom-e2e-%d", time.Now().UnixNano()), DisplayName: "WeCom E2E", AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO public.tenant (tenant_id, tenant_key, display_name, status, audit_retention_days, log_masking_level, trace_sampling_rate, version, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, root.TenantID, root.TenantKey, root.DisplayName, string(root.Status), root.AuditRetentionDays, string(root.LogMaskingLevel), root.TraceSamplingRate, root.Version, root.CreatedAt, root.UpdatedAt); err != nil {
 		t.Fatal(err)
 	}
-	modelRepo := modelinmemory.NewRepository(modelCatalog)
-	modelProfile, _, err := modelRepo.Create(ctx, model.CreateInput{TenantID: root.TenantID, ProfileKey: "deterministic", DisplayName: "Deterministic", Configuration: model.Configuration{Provider: "fake", Model: "deterministic"}, Metadata: model.ChangeMetadata{ActorType: "example", ActorID: "wecom-e2e", Reason: "test", CorrelationID: "wecom-e2e"}})
+	return root
+}
+
+func createWeComModelProfile(t *testing.T, ctx context.Context, models *modelinmemory.InMemoryRepository, tenantID string) *model.Profile {
+	t.Helper()
+	profile, _, err := models.Create(ctx, model.CreateInput{TenantID: tenantID, ProfileKey: "deterministic", DisplayName: "Deterministic", Configuration: model.Configuration{Provider: "fake", Model: "deterministic"}, Metadata: model.ChangeMetadata{ActorType: "example", ActorID: "wecom-e2e", Reason: "test", CorrelationID: "wecom-e2e"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	backendRepo := backendinmemory.NewRepository(backendCatalog)
-	backendProfile, _, err := backendRepo.Create(ctx, backend.CreateInput{TenantID: root.TenantID, ProfileKey: "session", DisplayName: "Session", Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory"}}, Metadata: backend.ChangeMetadata{ActorType: "example", ActorID: "wecom-e2e", Reason: "test", CorrelationID: "wecom-e2e"}})
+	return profile
+}
+
+func createWeComBackendProfile(t *testing.T, ctx context.Context, backends *backendinmemory.InMemoryRepository, tenantID string) *backend.Profile {
+	t.Helper()
+	profile, _, err := backends.Create(ctx, backend.CreateInput{TenantID: tenantID, ProfileKey: "session", DisplayName: "Session", Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory"}}, Metadata: backend.ChangeMetadata{ActorType: "example", ActorID: "wecom-e2e", Reason: "test", CorrelationID: "wecom-e2e"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	appRepo := agentinmemory.NewRepository()
-	appRoot, err := appRepo.Create(ctx, appmodel.CreateInput{TenantID: root.TenantID, AppKey: "wecom-e2e", DisplayName: "WeCom E2E", Description: "Deterministic WeCom callback"})
+	return profile
+}
+
+func createPublishedWeComApp(t *testing.T, ctx context.Context, apps *agentinmemory.InMemoryRepository, tenantID, modelProfileID string) *appmodel.App {
+	t.Helper()
+	appRoot, err := apps.Create(ctx, appmodel.CreateInput{TenantID: tenantID, AppKey: "wecom-e2e", DisplayName: "WeCom E2E", Description: "Deterministic WeCom callback"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft, err := appRepo.CreateDraft(ctx, appmodel.CreateDraftInput{TenantID: root.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version, Configuration: appmodel.DraftConfiguration{Instruction: "Reply deterministically.", ModelProfileID: modelProfile.ProfileID, Runtime: appmodel.DefaultRuntimePolicy()}})
+	draft, err := apps.CreateDraft(ctx, appmodel.CreateDraftInput{TenantID: tenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version, Configuration: appmodel.DraftConfiguration{Instruction: "Reply deterministically.", ModelProfileID: modelProfileID, Runtime: appmodel.DefaultRuntimePolicy()}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	published, _, _, err := appRepo.Publish(ctx, appmodel.PublishInput{TenantID: root.TenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: appmodel.ChangeMetadata{ActorType: "example", ActorID: "wecom-e2e", Reason: "test", CorrelationID: "wecom-e2e"}})
+	published, _, _, err := apps.Publish(ctx, appmodel.PublishInput{TenantID: tenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: appmodel.ChangeMetadata{ActorType: "example", ActorID: "wecom-e2e", Reason: "test", CorrelationID: "wecom-e2e"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	appID, backendID := published.AppID, backendProfile.ProfileID
-	root, err = tenantRepo.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{TenantID: root.TenantID, ExpectedVersion: root.Version, DisplayName: root.DisplayName, AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1, DefaultAgentAppID: &appID, DefaultBackendProfileID: &backendID})
+	return published
+}
+
+func configureWeComTenant(t *testing.T, ctx context.Context, tenants *tenantinmemory.InMemoryRepository, root *tenant.Tenant, app *appmodel.App, backendProfile *backend.Profile) *tenant.Tenant {
+	t.Helper()
+	appID, backendID := app.AppID, backendProfile.ProfileID
+	updated, err := tenants.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{TenantID: root.TenantID, ExpectedVersion: root.Version, DisplayName: root.DisplayName, AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1, DefaultAgentAppID: &appID, DefaultBackendProfileID: &backendID})
 	if err != nil {
 		t.Fatal(err)
 	}
+	return updated
+}
+
+func persistWeComAppAndBinding(ctx context.Context, controlPlane weComControlPlaneFixture, binding *channels.Binding, routeDigest string) error {
+	if _, err := controlPlane.db.ExecContext(ctx, `INSERT INTO public.agent_app (tenant_id, app_id, app_key, display_name, description, status, version, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,'draft',$6,$7,$8)`, controlPlane.root.TenantID, controlPlane.app.AppID, "wecom-e2e", "WeCom E2E", "Deterministic WeCom callback", controlPlane.app.Version, controlPlane.app.CreatedAt, controlPlane.app.UpdatedAt); err != nil {
+		return fmt.Errorf("persist WeCom app: %w", err)
+	}
+	protocolConfig := fmt.Sprintf(`{"wecom":{"corp_id":%q,"agent_id":%q,"receive_id":%q}}`, wecomReceive, wecomAgentID, wecomReceive)
+	if _, err := controlPlane.db.ExecContext(ctx, `INSERT INTO public.channel_binding (tenant_id, binding_id, binding_key, channel, provider_account_id, public_route_key_digest, app_id, secret_ref, protocol_config, status, version, config_digest, created_at, updated_at) VALUES ($1,$2,$3,'wecom',$4,$5,$6,$7,$8::jsonb,'active',$9,$10,$11,$12)`, controlPlane.root.TenantID, binding.BindingID, binding.BindingKey, binding.ProviderAccountID, routeDigest, controlPlane.app.AppID, binding.SecretRef, protocolConfig, binding.Version, binding.ConfigDigest, binding.CreatedAt, binding.UpdatedAt); err != nil {
+		return fmt.Errorf("persist WeCom binding: %w", err)
+	}
+	return nil
+}
+
+func newWeComChannelFixture(t *testing.T, ctx context.Context, controlPlane weComControlPlaneFixture) weComChannelFixture {
+	t.Helper()
 	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeCom, wecomRouteKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	channelRepo := channelsinmemory.NewRepository()
-	binding, _, err := channelRepo.Create(ctx, channels.CreateInput{TenantID: root.TenantID, BindingKey: "wecom-e2e", Channel: channels.ChannelWeCom, ProviderAccountID: "corp-e2e:1", PublicRouteKeyDigest: routeDigest, AppID: published.AppID, SecretRef: "examples/wecom-e2e", Protocol: channels.ProtocolConfiguration{WeCom: &channels.WeComProtocolConfiguration{CorpID: "corp-e2e", AgentID: wecomAgentID, ReceiveID: wecomReceive}}, Metadata: channels.ChangeMetadata{ActorType: "example", ActorID: "wecom-e2e", Reason: "test", CorrelationID: "wecom-e2e"}})
+	binding, _, err := channelRepo.Create(ctx, channels.CreateInput{TenantID: controlPlane.root.TenantID, BindingKey: "wecom-e2e", Channel: channels.ChannelWeCom, ProviderAccountID: "corp-e2e:1", PublicRouteKeyDigest: routeDigest, AppID: controlPlane.app.AppID, SecretRef: "examples/wecom-e2e", Protocol: channels.ProtocolConfiguration{WeCom: &channels.WeComProtocolConfiguration{CorpID: "corp-e2e", AgentID: wecomAgentID, ReceiveID: wecomReceive}}, Metadata: channels.ChangeMetadata{ActorType: "example", ActorID: "wecom-e2e", Reason: "test", CorrelationID: "wecom-e2e"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,11 +309,7 @@ func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO public.agent_app (tenant_id, app_id, app_key, display_name, description, status, version, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,'draft',$6,$7,$8)`, root.TenantID, published.AppID, "wecom-e2e", "WeCom E2E", "Deterministic WeCom callback", published.Version, published.CreatedAt, published.UpdatedAt); err != nil {
-		t.Fatal(err)
-	}
-	protocolConfig := fmt.Sprintf(`{"wecom":{"corp_id":%q,"agent_id":%q,"receive_id":%q}}`, wecomReceive, wecomAgentID, wecomReceive)
-	if _, err := db.ExecContext(ctx, `INSERT INTO public.channel_binding (tenant_id, binding_id, binding_key, channel, provider_account_id, public_route_key_digest, app_id, secret_ref, protocol_config, status, version, config_digest, created_at, updated_at) VALUES ($1,$2,$3,'wecom',$4,$5,$6,$7,$8::jsonb,'active',$9,$10,$11,$12)`, root.TenantID, binding.BindingID, binding.BindingKey, binding.ProviderAccountID, routeDigest, published.AppID, binding.SecretRef, protocolConfig, binding.Version, binding.ConfigDigest, binding.CreatedAt, binding.UpdatedAt); err != nil {
+	if err := persistWeComAppAndBinding(ctx, controlPlane, binding, routeDigest); err != nil {
 		t.Fatal(err)
 	}
 	key, secret := bytes.Repeat([]byte{1}, 32), "callback-secret"
@@ -239,30 +328,15 @@ func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := tenant.NewConfigurationSnapshot(root)
+	snapshot, err := tenant.NewConfigurationSnapshot(controlPlane.root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := channels.NewRoutingTarget(snapshot, binding, published, verified)
+	target, err := channels.NewRoutingTarget(snapshot, binding, controlPlane.app, verified)
 	if err != nil {
 		t.Fatal(err)
 	}
-	planResolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{Tenants: tenantRepo, Apps: appRepo, Models: modelRepo, Backends: backendRepo, ModelCatalog: modelCatalog, BackendCatalog: backendCatalog})
-	if err != nil {
-		t.Fatal(err)
-	}
-	runner := &weComRunner{reply: "wecom-e2e-ok"}
-	registry, err := gateway.NewRunnerRegistry(gateway.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (gateway.Runner, error) { return runner, nil }})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = registry.Close() })
-	store := runtimestoragepostgres.New(db)
-	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: planResolver, Registry: registry, RuntimeStore: store})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return weComFixture{tenant: root, channels: channelRepo, credentials: fixtureCredentials{tenantID: binding.TenantID, secretRef: binding.SecretRef, token: wecomToken, aesKey: base64.RawStdEncoding.EncodeToString(key), appSecret: wecomSecret}, encodingAESKey: base64.RawStdEncoding.EncodeToString(key), aesKey: key, target: target, store: store, dispatcher: dispatcher, runner: runner}
+	return weComChannelFixture{repo: channelRepo, credentials: fixtureCredentials{tenantID: binding.TenantID, secretRef: binding.SecretRef, token: wecomToken, aesKey: base64.RawStdEncoding.EncodeToString(key), appSecret: wecomSecret}, encodingAESKey: base64.RawStdEncoding.EncodeToString(key), aesKey: key, target: target}
 }
 
 type fixtureCredentials struct{ tenantID, secretRef, token, aesKey, appSecret string }

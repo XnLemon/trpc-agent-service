@@ -35,16 +35,19 @@ type trustedInboundSetup struct {
 
 func setupTrustedInbound(t *testing.T) trustedInboundSetup {
 	t.Helper()
-	root, snapshot, app := activeTenantApp(t, "trusted-route")
+	tenantApp := activeTenantApp(t, "trusted-route")
 	repo := inmemory.NewInMemoryRepository()
 	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeCom, "public-wecom-route")
 	if err != nil {
 		t.Fatal(err)
 	}
-	binding := createActiveBinding(t, repo, root.TenantID, app.AppID, "wecom", channels.ChannelWeCom, "corp-trusted", routeDigest, "secret/wecom")
+	binding := createActiveBinding(t, repo, activeBindingSpec{
+		tenantID: tenantApp.root.TenantID, appID: tenantApp.app.AppID, key: "wecom", channel: channels.ChannelWeCom,
+		providerAccountID: "corp-trusted", routeDigest: routeDigest, secretRef: "secret/wecom",
+	})
 	secret := "offline-fake-secret" // #nosec G101 -- deterministic fixture secret for an offline test.
-	resolver := inmemory.NewFakeCandidateResolver(repo, map[channels.SecretScope]string{{TenantID: root.TenantID, SecretRef: binding.SecretRef}: secret})
-	return trustedInboundSetup{root: root, snapshot: snapshot, app: app, repo: repo, binding: binding, routeDigest: routeDigest, secret: secret, resolver: resolver}
+	resolver := inmemory.NewFakeCandidateResolver(repo, map[channels.SecretScope]string{{TenantID: tenantApp.root.TenantID, SecretRef: binding.SecretRef}: secret})
+	return trustedInboundSetup{root: tenantApp.root, snapshot: tenantApp.snapshot, app: tenantApp.app, repo: repo, binding: binding, routeDigest: routeDigest, secret: secret, resolver: resolver}
 }
 
 func assertTrustedInboundVerification(t *testing.T, setup trustedInboundSetup) (channels.VerifiedBinding, channels.RoutingTarget) {
@@ -103,7 +106,10 @@ func assertRunnerIdentityBoundaries(t *testing.T, setup trustedInboundSetup, tar
 	}
 
 	otherRoute, _ := channels.DigestPublicRouteKey(channels.ChannelTelegram, "public-telegram-route")
-	otherBinding := createActiveBinding(t, setup.repo, setup.root.TenantID, setup.app.AppID, "telegram", channels.ChannelTelegram, "bot-trusted", otherRoute, "secret/telegram")
+	otherBinding := createActiveBinding(t, setup.repo, activeBindingSpec{
+		tenantID: setup.root.TenantID, appID: setup.app.AppID, key: "telegram", channel: channels.ChannelTelegram,
+		providerAccountID: "bot-trusted", routeDigest: otherRoute, secretRef: "secret/telegram",
+	})
 	otherSecret := "offline-telegram-secret"
 	resolver := inmemory.NewFakeCandidateResolver(setup.repo, map[channels.SecretScope]string{
 		{TenantID: setup.root.TenantID, SecretRef: setup.binding.SecretRef}: setup.secret,
@@ -143,24 +149,27 @@ func assertTrustedTargetRejectsInvalidStates(t *testing.T, setup trustedInboundS
 }
 
 func TestResolveCandidateRoutingTargetSealsCurrentSnapshots(t *testing.T) {
-	root, _, app := activeTenantApp(t, "resolve-target")
+	tenantApp := activeTenantApp(t, "resolve-target")
 	repo := inmemory.NewInMemoryRepository()
 	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeCom, "resolve-target-route")
 	if err != nil {
 		t.Fatal(err)
 	}
-	binding := createActiveBinding(t, repo, root.TenantID, app.AppID, "wecom", channels.ChannelWeCom, "corp-resolve", routeDigest, "secret/wecom")
+	binding := createActiveBinding(t, repo, activeBindingSpec{
+		tenantID: tenantApp.root.TenantID, appID: tenantApp.app.AppID, key: "wecom", channel: channels.ChannelWeCom,
+		providerAccountID: "corp-resolve", routeDigest: routeDigest, secretRef: "secret/wecom",
+	})
 	candidate := oneCandidate(t, repo, channels.ChannelWeCom, routeDigest)
 	if candidate.CandidateToken == "" {
 		t.Fatal("candidate token is empty")
 	}
-	tenantRepo := &singleTenantRepository{value: root}
-	appRepo := &singleAppRepository{value: app}
+	tenantRepo := &singleTenantRepository{value: tenantApp.root}
+	appRepo := &singleAppRepository{value: tenantApp.app}
 	target, err := channels.ResolveCandidateRoutingTarget(context.Background(), repo, tenantRepo, appRepo, candidate, func(context.Context, channels.Binding) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := target.Validate(); err != nil || target.BindingID != binding.BindingID || target.TenantID != root.TenantID || target.AppID != app.AppID {
+	if err := target.Validate(); err != nil || target.BindingID != binding.BindingID || target.TenantID != tenantApp.root.TenantID || target.AppID != tenantApp.app.AppID {
 		t.Fatalf("target = %+v, err=%v", target, err)
 	}
 	if _, err := channels.ResolveCandidateRoutingTarget(context.Background(), repo, tenantRepo, appRepo, candidate, func(context.Context, channels.Binding) error { return nil }); !errors.Is(err, channels.ErrVerificationFailed) {
@@ -255,21 +264,24 @@ type routingTargetFixture struct {
 
 func newRoutingTargetFixture(t *testing.T) routingTargetFixture {
 	t.Helper()
-	root, _, app := activeTenantApp(t, "resolve-boundaries")
+	tenantApp := activeTenantApp(t, "resolve-boundaries")
 	repo := inmemory.NewInMemoryRepository()
 	routeDigest, err := channels.DigestPublicRouteKey(channels.ChannelWeCom, "resolve-boundaries-route")
 	if err != nil {
 		t.Fatal(err)
 	}
-	binding := createActiveBinding(t, repo, root.TenantID, app.AppID, "wecom", channels.ChannelWeCom, "corp-boundaries", routeDigest, "secret/wecom")
+	binding := createActiveBinding(t, repo, activeBindingSpec{
+		tenantID: tenantApp.root.TenantID, appID: tenantApp.app.AppID, key: "wecom", channel: channels.ChannelWeCom,
+		providerAccountID: "corp-boundaries", routeDigest: routeDigest, secretRef: "secret/wecom",
+	})
 	fixture := routingTargetFixture{
 		ctx:        context.Background(),
 		consumer:   &routingCandidateConsumerStub{binding: binding},
 		candidate:  oneCandidate(t, repo, channels.ChannelWeCom, routeDigest),
 		verifyErr:  nil,
-		tenantRepo: &singleTenantRepository{value: root},
-		appRepo:    &singleAppRepository{value: app},
-		app:        app,
+		tenantRepo: &singleTenantRepository{value: tenantApp.root},
+		appRepo:    &singleAppRepository{value: tenantApp.app},
+		app:        tenantApp.app,
 	}
 	fixture.consumerStub = fixture.consumer.(*routingCandidateConsumerStub)
 	fixture.tenants = fixture.tenantRepo
@@ -380,11 +392,14 @@ func (r *singleAppRepository) TransitionStatus(context.Context, appmodel.Transit
 func TestFakeResolverRejectsPurposeMismatchBadProofExpiryAndReplay(t *testing.T) {
 	clock := &integrationClock{now: time.Now().UTC().Add(time.Hour)}
 	repo := inmemory.NewInMemoryRepository(inmemory.Options{Clock: clock.Now, CandidateTTL: time.Second})
-	root, _, app := activeTenantApp(t, "fake-failures")
+	tenantApp := activeTenantApp(t, "fake-failures")
 	routeDigest, _ := channels.DigestPublicRouteKey(channels.ChannelWeCom, "failure-route")
-	binding := createActiveBinding(t, repo, root.TenantID, app.AppID, "wecom", channels.ChannelWeCom, "corp-failure", routeDigest, "secret/failure")
+	binding := createActiveBinding(t, repo, activeBindingSpec{
+		tenantID: tenantApp.root.TenantID, appID: tenantApp.app.AppID, key: "wecom", channel: channels.ChannelWeCom,
+		providerAccountID: "corp-failure", routeDigest: routeDigest, secretRef: "secret/failure",
+	})
 	secret := "failure-secret"
-	resolver := inmemory.NewFakeCandidateResolver(repo, map[channels.SecretScope]string{{TenantID: root.TenantID, SecretRef: binding.SecretRef}: secret}, inmemory.FakeResolverOptions{Clock: clock.Now})
+	resolver := inmemory.NewFakeCandidateResolver(repo, map[channels.SecretScope]string{{TenantID: tenantApp.root.TenantID, SecretRef: binding.SecretRef}: secret}, inmemory.FakeResolverOptions{Clock: clock.Now})
 
 	candidate := oneCandidate(t, repo, channels.ChannelWeCom, routeDigest)
 	if _, err := resolver.ResolveCandidate(context.Background(), channels.CandidateSecretRequest{Candidate: candidate, Purpose: channels.VerificationPurpose("wrong-purpose")}); !errors.Is(err, channels.ErrVerificationFailed) {
@@ -447,15 +462,21 @@ func TestFakeResolverRejectsPurposeMismatchBadProofExpiryAndReplay(t *testing.T)
 func TestFakeResolverKeepsTwoTenantCandidatesSeparated(t *testing.T) {
 	clock := &integrationClock{now: time.Now().UTC().Add(time.Hour)}
 	repo := inmemory.NewInMemoryRepository(inmemory.Options{Clock: clock.Now})
-	firstRoot, firstSnapshot, firstApp := activeTenantApp(t, "same-route-one")
-	secondRoot, secondSnapshot, secondApp := activeTenantApp(t, "same-route-two")
+	firstTenantApp := activeTenantApp(t, "same-route-one")
+	secondTenantApp := activeTenantApp(t, "same-route-two")
 	routeDigest, _ := channels.DigestPublicRouteKey(channels.ChannelWeCom, "same-public-route")
-	first := createActiveBinding(t, repo, firstRoot.TenantID, firstApp.AppID, "shared", channels.ChannelWeCom, "corp-one", routeDigest, "secret/first")
-	second := createActiveBinding(t, repo, secondRoot.TenantID, secondApp.AppID, "shared", channels.ChannelWeCom, "corp-two", routeDigest, "secret/second")
+	first := createActiveBinding(t, repo, activeBindingSpec{
+		tenantID: firstTenantApp.root.TenantID, appID: firstTenantApp.app.AppID, key: "shared", channel: channels.ChannelWeCom,
+		providerAccountID: "corp-one", routeDigest: routeDigest, secretRef: "secret/first",
+	})
+	second := createActiveBinding(t, repo, activeBindingSpec{
+		tenantID: secondTenantApp.root.TenantID, appID: secondTenantApp.app.AppID, key: "shared", channel: channels.ChannelWeCom,
+		providerAccountID: "corp-two", routeDigest: routeDigest, secretRef: "secret/second",
+	})
 	const sharedSecret = "same-offline-secret"
 	resolver := inmemory.NewFakeCandidateResolver(repo, map[channels.SecretScope]string{
-		{TenantID: firstRoot.TenantID, SecretRef: first.SecretRef}:   sharedSecret,
-		{TenantID: secondRoot.TenantID, SecretRef: second.SecretRef}: sharedSecret,
+		{TenantID: firstTenantApp.root.TenantID, SecretRef: first.SecretRef}:   sharedSecret,
+		{TenantID: secondTenantApp.root.TenantID, SecretRef: second.SecretRef}: sharedSecret,
 	}, inmemory.FakeResolverOptions{Clock: clock.Now})
 	candidates, err := repo.LookupCandidates(context.Background(), channels.ChannelWeCom, routeDigest)
 	if err != nil || len(candidates) != 2 {
@@ -475,19 +496,19 @@ func TestFakeResolverKeepsTwoTenantCandidatesSeparated(t *testing.T) {
 		}
 		seen[verified.TenantID] = true
 		switch verified.TenantID {
-		case firstRoot.TenantID:
-			if _, err := channels.NewRoutingTarget(firstSnapshot, first, firstApp, verified); err != nil {
+		case firstTenantApp.root.TenantID:
+			if _, err := channels.NewRoutingTarget(firstTenantApp.snapshot, first, firstTenantApp.app, verified); err != nil {
 				t.Fatal(err)
 			}
-		case secondRoot.TenantID:
-			if _, err := channels.NewRoutingTarget(secondSnapshot, second, secondApp, verified); err != nil {
+		case secondTenantApp.root.TenantID:
+			if _, err := channels.NewRoutingTarget(secondTenantApp.snapshot, second, secondTenantApp.app, verified); err != nil {
 				t.Fatal(err)
 			}
 		default:
 			t.Fatalf("candidate crossed tenant boundary: %+v", verified)
 		}
 	}
-	if len(seen) != 2 || !seen[firstRoot.TenantID] || !seen[secondRoot.TenantID] {
+	if len(seen) != 2 || !seen[firstTenantApp.root.TenantID] || !seen[secondTenantApp.root.TenantID] {
 		t.Fatalf("same-route candidates did not preserve both tenant scopes: %v", seen)
 	}
 }
@@ -498,7 +519,13 @@ type integrationClock struct {
 
 func (c *integrationClock) Now() time.Time { return c.now }
 
-func activeTenantApp(t *testing.T, key string) (*tenant.Tenant, tenant.ConfigurationSnapshot, *appmodel.App) {
+type activeTenantAppFixture struct {
+	root     *tenant.Tenant
+	snapshot tenant.ConfigurationSnapshot
+	app      *appmodel.App
+}
+
+func activeTenantApp(t *testing.T, key string) activeTenantAppFixture {
 	t.Helper()
 	root, err := tenant.NewTenant(tenant.CreateInput{TenantKey: key, DisplayName: "Integration Tenant", AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1})
 	if err != nil {
@@ -520,18 +547,31 @@ func activeTenantApp(t *testing.T, key string) (*tenant.Tenant, tenant.Configura
 	if err := appRoot.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	return root, snapshot, appRoot
+	return activeTenantAppFixture{root: root, snapshot: snapshot, app: appRoot}
 }
 
-func createActiveBinding(t *testing.T, repo *inmemory.InMemoryRepository, tenantID, appID, key string, channel channels.Channel, providerAccountID, routeDigest, secretRef string) *channels.Binding {
+type activeBindingSpec struct {
+	tenantID          string
+	appID             string
+	key               string
+	channel           channels.Channel
+	providerAccountID string
+	routeDigest       string
+	secretRef         string
+}
+
+func createActiveBinding(t *testing.T, repo *inmemory.InMemoryRepository, spec activeBindingSpec) *channels.Binding {
 	t.Helper()
 	protocol := channels.ProtocolConfiguration{}
-	if channel == channels.ChannelWeCom {
-		protocol.WeCom = &channels.WeComProtocolConfiguration{CorpID: providerAccountID, ReceiveID: "receive"}
+	if spec.channel == channels.ChannelWeCom {
+		protocol.WeCom = &channels.WeComProtocolConfiguration{CorpID: spec.providerAccountID, ReceiveID: "receive"}
 	} else {
 		protocol.Telegram = &channels.TelegramProtocolConfiguration{WebhookPath: "/callback"}
 	}
-	binding, _, err := repo.Create(context.Background(), channels.CreateInput{TenantID: tenantID, BindingKey: key, Channel: channel, ProviderAccountID: providerAccountID, PublicRouteKeyDigest: routeDigest, AppID: appID, SecretRef: secretRef, Protocol: protocol, Metadata: validMetadata()})
+	binding, _, err := repo.Create(context.Background(), channels.CreateInput{
+		TenantID: spec.tenantID, BindingKey: spec.key, Channel: spec.channel, ProviderAccountID: spec.providerAccountID,
+		PublicRouteKeyDigest: spec.routeDigest, AppID: spec.appID, SecretRef: spec.secretRef, Protocol: protocol, Metadata: validMetadata(),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

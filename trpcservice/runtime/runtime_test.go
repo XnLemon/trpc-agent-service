@@ -25,10 +25,7 @@ import (
 
 func TestExecutionPlanFreezesAllTenantScopedInputs(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
-	if err != nil {
-		t.Fatal(err)
-	}
+	plan := mustExecutionPlan(t, fixture)
 	runnerInput, err := plan.AgentRunnerInput()
 	if err != nil {
 		t.Fatal(err)
@@ -101,10 +98,7 @@ func TestExecutionPlanRejectsRevisionFromDifferentAppInSameTenant(t *testing.T) 
 
 func TestExecutionPlanContextAndInvalidBoundaries(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
-	if err != nil {
-		t.Fatal(err)
-	}
+	plan := mustExecutionPlan(t, fixture)
 	if zero := (ExecutionPlan{}).Tenant(); zero.TenantID != "" {
 		t.Fatalf("zero plan tenant = %+v", zero)
 	}
@@ -170,10 +164,7 @@ func TestExecutionPlanContextAndInvalidBoundaries(t *testing.T) {
 
 func TestNewRunnerRejectsInvalidInputsAndFactoryFailures(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
-	if err != nil {
-		t.Fatal(err)
-	}
+	plan := mustExecutionPlan(t, fixture)
 	sessions := inmemory.NewSessionService()
 	defer func() {
 		if err := sessions.Close(); err != nil {
@@ -205,7 +196,7 @@ func TestNewRunnerRejectsInvalidInputsAndFactoryFailures(t *testing.T) {
 
 func TestNewRunnerValidatesAndClosesStorageCapabilities(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan := newExecutionPlanForRunner(t, fixture)
+	plan := mustExecutionPlan(t, fixture)
 	if _, err := agent.NewRunner(context.Background(), agentRunnerInputForTest(t, plan), nil, &runtimeModelFactory{}, nil, nil); err == nil {
 		t.Fatal("nil storage factory unexpectedly succeeded")
 	}
@@ -280,7 +271,7 @@ func TestRunnerExecutesRevisionAuthorizedMediaTool(t *testing.T) {
 
 func TestRunnerDoesNotExposeUnapprovedTools(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan := newExecutionPlanForRunner(t, fixture)
+	plan := mustExecutionPlan(t, fixture)
 	model := &runtimeToolCallingModel{respondText: true}
 	sessions := inmemory.NewSessionService()
 	runner, err := agent.NewRunner(context.Background(), agentRunnerInputForTest(t, plan), nil, &runtimeModelFactory{model: model}, sessions)
@@ -304,7 +295,7 @@ func TestRunnerDoesNotExposeUnapprovedTools(t *testing.T) {
 
 func TestRunnerExecutesFakeModelAndPersistsTenantScopedSession(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan := newExecutionPlanForRunner(t, fixture)
+	plan := mustExecutionPlan(t, fixture)
 	sessions := inmemory.NewSessionService()
 	factory := &runtimeModelFactory{response: "deterministic reply"}
 	runner := newRunnerForExecution(t, plan, factory, sessions)
@@ -318,7 +309,7 @@ func TestRunnerExecutesFakeModelAndPersistsTenantScopedSession(t *testing.T) {
 	assertRunnerFactoryBoundary(t, fixture, factory)
 }
 
-func newExecutionPlanForRunner(t *testing.T, fixture runtimeFixtureData) ExecutionPlan {
+func mustExecutionPlan(t *testing.T, fixture runtimeFixtureData) ExecutionPlan {
 	t.Helper()
 	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
 	if err != nil {
@@ -424,10 +415,7 @@ func assertRunnerFactoryBoundary(t *testing.T, fixture runtimeFixtureData, facto
 
 func TestRunnerCancellationDrainsAndClosesEventChannel(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
-	if err != nil {
-		t.Fatal(err)
-	}
+	plan := mustExecutionPlan(t, fixture)
 	sessions := inmemory.NewSessionService()
 	runner, err := agent.NewRunner(context.Background(), agentRunnerInputForTest(t, plan), nil, &runtimeModelFactory{block: true}, sessions)
 	if err != nil {

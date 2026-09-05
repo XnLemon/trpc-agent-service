@@ -398,6 +398,25 @@ type gatewayFixture struct {
 
 func newGatewayFixture(t *testing.T) gatewayFixture {
 	t.Helper()
+	ctx := context.Background()
+	modelCatalog, backendCatalog := newGatewayCatalogs(t)
+	tenants := tenantinmemory.NewRepository()
+	root := createGatewayTenant(t, ctx, tenants)
+	models := modelinmemory.NewRepository(modelCatalog)
+	modelProfile := createGatewayModelProfile(t, ctx, models, root.TenantID)
+	backends := backendinmemory.NewRepository(backendCatalog)
+	backendProfile := createGatewayBackendProfile(t, ctx, backends, root.TenantID)
+	apps := agentinmemory.NewRepository()
+	publishedApp, published := createPublishedGatewayApp(t, ctx, apps, root.TenantID, modelProfile.ProfileID)
+	updatedRoot := configureGatewayTenant(t, ctx, tenants, root, publishedApp, backendProfile)
+	return gatewayFixture{
+		tenant: updatedRoot, app: publishedApp, revision: published, model: modelProfile, backend: backendProfile,
+		modelCatalog: modelCatalog, backendCatalog: backendCatalog, tenants: tenants, apps: apps, models: models, backends: backends,
+	}
+}
+
+func newGatewayCatalogs(t *testing.T) (*model.ProviderCatalog, *backend.ProviderCatalog) {
+	t.Helper()
 	modelCatalog, err := model.NewProviderCatalog(model.ProviderSpec{
 		Provider: "fake", Models: []string{"deterministic"}, EndpointPolicy: model.FieldForbidden, SecretRefPolicy: model.FieldForbidden,
 	})
@@ -411,50 +430,75 @@ func newGatewayFixture(t *testing.T) gatewayFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tenants := tenantinmemory.NewRepository()
-	root, err := tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "gateway-tenant", DisplayName: "Gateway Tenant", AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	models := modelinmemory.NewRepository(modelCatalog)
-	modelProfile, _, err := models.Create(context.Background(), model.CreateInput{
-		TenantID: root.TenantID, ProfileKey: "primary-model", DisplayName: "Primary Model",
-		Configuration: model.Configuration{Provider: "fake", Model: "deterministic"}, Metadata: model.ChangeMetadata{ActorType: "test", ActorID: "fixture", Reason: "fixture", CorrelationID: "fixture"},
+	return modelCatalog, backendCatalog
+}
+
+func createGatewayTenant(t *testing.T, ctx context.Context, tenants *tenantinmemory.InMemoryRepository) *tenant.Tenant {
+	t.Helper()
+	root, err := tenants.Create(ctx, tenant.CreateInput{
+		TenantKey: "gateway-tenant", DisplayName: "Gateway Tenant", AuditRetentionDays: 30,
+		LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	backends := backendinmemory.NewRepository(backendCatalog)
-	backendProfile, _, err := backends.Create(context.Background(), backend.CreateInput{
-		TenantID: root.TenantID, ProfileKey: "primary-backend", DisplayName: "Primary Backend",
+	return root
+}
+
+func createGatewayModelProfile(t *testing.T, ctx context.Context, models *modelinmemory.InMemoryRepository, tenantID string) *model.Profile {
+	t.Helper()
+	profile, _, err := models.Create(ctx, model.CreateInput{
+		TenantID: tenantID, ProfileKey: "primary-model", DisplayName: "Primary Model",
+		Configuration: model.Configuration{Provider: "fake", Model: "deterministic"},
+		Metadata:      model.ChangeMetadata{ActorType: "test", ActorID: "fixture", Reason: "fixture", CorrelationID: "fixture"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return profile
+}
+
+func createGatewayBackendProfile(t *testing.T, ctx context.Context, backends *backendinmemory.InMemoryRepository, tenantID string) *backend.Profile {
+	t.Helper()
+	profile, _, err := backends.Create(ctx, backend.CreateInput{
+		TenantID: tenantID, ProfileKey: "primary-backend", DisplayName: "Primary Backend",
 		Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory", Options: map[string]string{"namespace": "gateway"}}},
 		Metadata: backend.ChangeMetadata{ActorType: "test", ActorID: "fixture", Reason: "fixture", CorrelationID: "fixture"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	apps := agentinmemory.NewRepository()
-	appRoot, err := apps.Create(context.Background(), appmodel.CreateInput{TenantID: root.TenantID, AppKey: "gateway-app", DisplayName: "Gateway App", Description: "Fixture"})
+	return profile
+}
+
+func createPublishedGatewayApp(t *testing.T, ctx context.Context, apps *agentinmemory.InMemoryRepository, tenantID, modelProfileID string) (*appmodel.App, *appmodel.Revision) {
+	t.Helper()
+	appRoot, err := apps.Create(ctx, appmodel.CreateInput{TenantID: tenantID, AppKey: "gateway-app", DisplayName: "Gateway App", Description: "Fixture"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft, err := apps.CreateDraft(context.Background(), appmodel.CreateDraftInput{
-		TenantID: root.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version,
-		Configuration: appmodel.DraftConfiguration{Description: "Gateway revision", Instruction: "Answer clearly.", ModelProfileID: modelProfile.ProfileID, Runtime: appmodel.DefaultRuntimePolicy()},
+	draft, err := apps.CreateDraft(ctx, appmodel.CreateDraftInput{
+		TenantID: tenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version,
+		Configuration: appmodel.DraftConfiguration{Description: "Gateway revision", Instruction: "Answer clearly.", ModelProfileID: modelProfileID, Runtime: appmodel.DefaultRuntimePolicy()},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	publishedApp, published, _, err := apps.Publish(context.Background(), appmodel.PublishInput{
-		TenantID: root.TenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version,
+	publishedApp, published, _, err := apps.Publish(ctx, appmodel.PublishInput{
+		TenantID: tenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version,
 		ExpectedDraftVersion: draft.DraftVersion, TenantActive: true,
 		Metadata: appmodel.ChangeMetadata{ActorType: "test", ActorID: "fixture", Reason: "fixture", CorrelationID: "fixture"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	appID, backendID := publishedApp.AppID, backendProfile.ProfileID
-	updatedRoot, err := tenants.UpdateConfiguration(context.Background(), tenant.UpdateConfigurationInput{
+	return publishedApp, published
+}
+
+func configureGatewayTenant(t *testing.T, ctx context.Context, tenants *tenantinmemory.InMemoryRepository, root *tenant.Tenant, app *appmodel.App, backendProfile *backend.Profile) *tenant.Tenant {
+	t.Helper()
+	appID, backendID := app.AppID, backendProfile.ProfileID
+	updatedRoot, err := tenants.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{
 		TenantID: root.TenantID, ExpectedVersion: root.Version, DisplayName: root.DisplayName,
 		AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1,
 		DefaultAgentAppID: &appID, DefaultBackendProfileID: &backendID,
@@ -462,10 +506,7 @@ func newGatewayFixture(t *testing.T) gatewayFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return gatewayFixture{
-		tenant: updatedRoot, app: publishedApp, revision: published, model: modelProfile, backend: backendProfile,
-		modelCatalog: modelCatalog, backendCatalog: backendCatalog, tenants: tenants, apps: apps, models: models, backends: backends,
-	}
+	return updatedRoot
 }
 
 func TestGatewayAuthenticationAndPrincipalValidationEdges(t *testing.T) {
