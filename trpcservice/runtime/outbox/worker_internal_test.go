@@ -49,6 +49,23 @@ type branchStore struct {
 	replyTransitions   []runtimestorage.ReplyTransition
 }
 
+type replyStoreOnly struct{ runtimestorage.ReplyStore }
+
+type messageStoreOnly struct{ runtimestorage.MessageStore }
+
+func seedWorkerReply(t *testing.T, store *inmemory.Store) {
+	t.Helper()
+	if _, err := store.CreateSession(context.Background(), "tenant-a", "session-split", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", EventID: "event-split", SessionID: "session-split", BindingID: "binding-split", ExternalMessageID: "external-split"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply-split", EventID: "event-split", SegmentIndex: 0, SegmentCount: 1, Payload: "payload"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (s *branchStore) ClaimReply(_ context.Context, _ string, _ string, _ int, _ string, _ time.Duration) (runtimestorage.ReplyOutbox, error) {
 	if len(s.candidates) == 0 {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrNotFound
@@ -185,6 +202,34 @@ func TestWorkerRunAndRetryDueBoundaryBranches(t *testing.T) {
 	cancel()
 	if err := worker.Run(ctx, 0); !errors.Is(err, context.Canceled) {
 		t.Fatalf("default poll interval cancellation = %v", err)
+	}
+}
+
+func TestNewWorkerAcceptsSplitStorageCapabilities(t *testing.T) {
+	store := inmemory.New()
+	seedWorkerReply(t, store)
+	worker, err := New(Config{
+		Store:         replyStoreOnly{ReplyStore: store},
+		MessageStore:  messageStoreOnly{MessageStore: store},
+		Provider:      branchProvider{id: "provider"},
+		TenantID:      "tenant-a",
+		Owner:         "worker",
+		LeaseDuration: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := worker.RunOnce(context.Background()); err != nil || processed != 1 {
+		t.Fatalf("split-capability run = %d/%v", processed, err)
+	}
+	if _, err := New(Config{
+		Store:         replyStoreOnly{ReplyStore: store},
+		Provider:      branchProvider{},
+		TenantID:      "tenant-a",
+		Owner:         "worker",
+		LeaseDuration: time.Second,
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing message capability error = %v, want %v", err, ErrInvalid)
 	}
 }
 

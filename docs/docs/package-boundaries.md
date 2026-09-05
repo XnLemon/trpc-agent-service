@@ -50,6 +50,11 @@ Agent 的实现。
 `RuntimeStore` 暂时保留为兼容性组合接口；新的消费者应依赖自己需要的最窄
 接口，而不是继续接收完整存储聚合。
 
+`runtime/outbox` 的 Worker 现在分别接收 `ReplyStore` 和
+`MessageStore`：前者拥有回复分片的 claim/transition，后者只负责所有分片
+投递完成后的 inbound message 状态推进。为了兼容旧调用，省略后者时 Worker
+会从 `ReplyStore` 中探测同一个能力；新的组合根应显式注入两个能力。
+
 ## 允许的依赖
 
 当前实现和目标演进遵守以下规则：
