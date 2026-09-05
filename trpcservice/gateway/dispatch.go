@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
@@ -15,16 +14,13 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/execution"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	"github.com/google/uuid"
-	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
-	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
-	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 var (
@@ -40,10 +36,6 @@ var (
 )
 
 const (
-	forwardTerminalPending uint32 = iota
-	forwardTerminalCanceled
-	forwardTerminalCommitted
-
 	defaultDispatchDrainTimeout      = 250 * time.Millisecond
 	durableInboundLeaseGrace         = 30 * time.Second
 	durableFailureFallbackReply      = "An error occurred during execution. Please contact the service provider."
@@ -94,14 +86,7 @@ type DispatchService interface {
 	Dispatch(context.Context, DispatchRequest) (<-chan DispatchEvent, error)
 }
 
-// runnerRegistry is the subset of runtime Runner registry behavior required by
-// Dispatcher. The concrete registry remains the public configuration type.
-type runnerRegistry interface {
-	Ready() bool
-	Acquire(context.Context, runtime.ExecutionPlan) (*runtimerunner.RunnerLease, error)
-}
-
-// DispatchConfig configures the Resolver/Registry execution boundary.
+// DispatchConfig configures the Resolver and Runtime Execution boundary.
 type DispatchConfig struct {
 	Resolver      *PlanResolver
 	Registry      *runtimerunner.RunnerRegistry
@@ -122,12 +107,11 @@ type DispatchConfig struct {
 	AttachmentStore runtimestorage.AttachmentStore
 }
 
-// Dispatcher resolves a fixed plan, acquires a Runner lease, and translates
-// Runner events into a bounded, redacted event stream.
+// Dispatcher resolves a fixed plan, prepares the Gateway execution context,
+// and adapts runtime events into a bounded, redacted protocol stream.
 type Dispatcher struct {
 	resolver        *PlanResolver
-	registry        runnerRegistry
-	drainTimeout    time.Duration
+	executor        *execution.Coordinator
 	telemetry       observability.Provider
 	metrics         metrics.Catalog
 	runtimeStore    runtimestorage.RuntimeStore
@@ -161,6 +145,12 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
 	}
+	executor, err := execution.NewCoordinator(execution.Config{
+		Registry: config.Registry, DrainTimeout: config.DrainTimeout, Observability: config.Observability,
+	})
+	if err != nil {
+		return nil, err
+	}
 	if config.Attachments == nil {
 		if reader, ok := config.RuntimeStore.(attachment.Reader); ok {
 			config.Attachments = reader
@@ -181,12 +171,12 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 		}
 		config.Materializer = materializer
 	}
-	return &Dispatcher{resolver: config.Resolver, registry: config.Registry, drainTimeout: config.DrainTimeout, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore, materializer: config.Materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore, attachments: config.Attachments, attachmentStore: config.AttachmentStore}, nil
+	return &Dispatcher{resolver: config.Resolver, executor: executor, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore, materializer: config.Materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore, attachments: config.Attachments, attachmentStore: config.AttachmentStore}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.
 func (dispatcher *Dispatcher) Ready() bool {
-	return dispatcher != nil && dispatcher.resolver != nil && dispatcher.resolver.Ready() && dispatcher.registry != nil && dispatcher.registry.Ready()
+	return dispatcher != nil && dispatcher.resolver != nil && dispatcher.resolver.Ready() && dispatcher.executor != nil && dispatcher.executor.Ready()
 }
 
 // Dispatch starts one execution and returns a redacted event stream. The
@@ -195,7 +185,7 @@ func (dispatcher *Dispatcher) Ready() bool {
 //
 //nolint:gocyclo // Dispatch coordinates validation, durable state, audit, lease, and stream lifecycle.
 func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequest) (<-chan DispatchEvent, error) {
-	if dispatcher == nil || dispatcher.resolver == nil || dispatcher.registry == nil {
+	if dispatcher == nil || dispatcher.resolver == nil || dispatcher.executor == nil {
 		return nil, ErrNotReady
 	}
 	message, requestID, traceID, err := normalizeDispatchRequest(ctx, request)
@@ -281,34 +271,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		default:
 		}
 	}
-	lease, err := dispatcher.registry.Acquire(ctx, plan)
-	if err != nil {
-		dispatcher.failDurable(durable, err)
-		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
-			dispatcher.failDurable(durable, auditErr)
-			finishWithError(auditErr)
-			return nil, auditWriteFailure()
-		}
-		finishWithError(err)
-		return nil, err
-	}
-	runnerValue := lease.Runner()
-	if runnerValue == nil {
-		_ = lease.Release()
-		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
-		dispatcher.failDurable(durable, runtimerunner.ErrRunnerUnavailable)
-		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
-			dispatcher.failDurable(durable, auditErr)
-			finishWithError(auditErr)
-			return nil, auditWriteFailure()
-		}
-		finishWithError(runtimerunner.ErrRunnerUnavailable)
-		return nil, runtimerunner.ErrRunnerUnavailable
-	}
-	_ = dispatcher.metrics.Lease(ctx, 1, map[string]string{"component": "runner", "status": "active"})
-	runnerStarted := time.Now()
-	runnerCtx, _, finishRunner := observability.StartOperation(ctx, dispatcher.telemetry, observability.OperationRunnerExecution, "runner")
-	_ = dispatcher.metrics.Request(runnerCtx, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution, "status": "started"})
+	runnerCtx := ctx
 	mediaReplies := servicetool.NewReplyCollector()
 	if durable != nil {
 		runnerCtx = servicetool.WithExecutionContext(runnerCtx, servicetool.ExecutionContext{
@@ -317,13 +280,15 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 			Audit: audit.Recorder{Writer: dispatcher.auditWriter, TenantID: request.Principal.TenantID()},
 		})
 	}
-	runnerEvents, err := runnerValue.Run(runnerCtx, identity.UserID, identity.SessionID, userMessage, trpcagent.WithRequestID(requestID))
+	runnerEvents, err := dispatcher.executor.Execute(runnerCtx, execution.Request{
+		Plan: plan, Identity: identity, Message: userMessage, RequestID: requestID, TraceID: traceID,
+	})
 	if err != nil {
-		finishRunner(err)
-		_ = dispatcher.metrics.Operation(runnerCtx, runnerStarted, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, err)
-		_ = lease.Release()
-		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
-		dispatcher.failDurable(durable, err)
+		executionErr := err
+		if errors.Is(executionErr, execution.ErrExecution) {
+			executionErr = ErrExecution
+		}
+		dispatcher.failDurable(durable, executionErr)
 		eventType, errorType := audit.EventExecutionFailed, string(audit.ErrorUnavailable)
 		if IsContextCancellation(err) {
 			eventType, errorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
@@ -337,27 +302,12 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 			finishWithError(err)
 			return nil, err
 		}
-		finishWithError(err)
-		return nil, ErrExecution
-	}
-	if runnerEvents == nil {
-		finishRunner(ErrExecution)
-		_ = dispatcher.metrics.Operation(runnerCtx, runnerStarted, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, ErrExecution)
-		_ = lease.Release()
-		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
-		dispatcher.failDurable(durable, ErrExecution)
-		if auditErr := dispatcher.writeExecutionAudit(context.Background(), request.Principal, message, identity, requestID, traceID, audit.EventExecutionFailed, string(audit.ErrorUnavailable)); auditErr != nil {
-			dispatcher.failDurable(durable, auditErr)
-			finishWithError(auditErr)
-			return nil, auditWriteFailure()
-		}
-		finishWithError(ErrExecution)
-		return nil, ErrExecution
+		finishWithError(executionErr)
+		return nil, executionErr
 	}
 
 	output := make(chan DispatchEvent, 32)
-	_ = dispatcher.metrics.Active(ctx, 1, map[string]string{"component": "runner"})
-	go dispatcher.forward(runnerCtx, requestID, traceID, runnerEvents, lease, durable, output, span, started, request.Principal, message, identity, finishRunner, runnerStarted, mediaReplies)
+	go dispatcher.forwardExecution(runnerCtx, requestID, traceID, runnerEvents, durable, output, span, started, request.Principal, message, identity, mediaReplies)
 	return output, nil
 }
 
@@ -619,29 +569,102 @@ func (dispatcher *Dispatcher) observeStorage(ctx context.Context, operation func
 	return err
 }
 
-func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, lease *runtimerunner.RunnerLease, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, finishRunner func(error), runnerStarted time.Time, mediaReplies *servicetool.ReplyCollector) {
-	defer close(output)
-	var terminalState atomic.Uint32
-	terminalState.Store(forwardTerminalPending)
-	cancelWatchDone := make(chan struct{})
-	defer close(cancelWatchDone)
-	go func() {
-		select {
-		case <-ctx.Done():
-			terminalState.CompareAndSwap(forwardTerminalPending, forwardTerminalCanceled)
-		case <-cancelWatchDone:
+type executionForwardState struct {
+	terminalErr          error
+	terminalEventType    audit.EventType
+	terminalErrorType    string
+	terminalErrorEmitted bool
+	terminalSeen         bool
+	reply                strings.Builder
+}
+
+func (state *executionForwardState) observe(event execution.Event) {
+	switch event.Type {
+	case execution.EventMessage:
+		state.reply.WriteString(event.Text)
+	case execution.EventError:
+		state.terminalErr = event.Err
+		if IsContextCancellation(state.terminalErr) {
+			state.terminalEventType, state.terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
+			return
 		}
-	}()
-	defer func() {
-		_ = lease.Release()
-		_ = dispatcher.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
-	}()
-	var terminalErr error
-	var reply strings.Builder
-	var terminalEventType audit.EventType
-	var terminalErrorType string
-	terminalCommitted := false
-	terminalErrorEmitted := false
+		if state.terminalErr == nil {
+			state.terminalErr = ErrExecution
+		}
+		state.terminalEventType, state.terminalErrorType = audit.EventExecutionFailed, string(audit.ErrorUnavailable)
+	}
+	if event.Done {
+		state.terminalSeen = true
+	}
+	if !event.Done || state.terminalErr != nil {
+		return
+	}
+	switch event.Status {
+	case "error":
+		state.terminalErr = ErrExecution
+		state.terminalEventType, state.terminalErrorType = audit.EventExecutionFailed, string(audit.ErrorUnavailable)
+	case "canceled":
+		state.terminalErr = context.Canceled
+		state.terminalEventType, state.terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
+	case "deadline_exceeded":
+		state.terminalErr = context.DeadlineExceeded
+		state.terminalEventType, state.terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
+	default:
+		state.terminalEventType, state.terminalErrorType = audit.EventExecutionCompleted, ""
+	}
+}
+
+func (state *executionForwardState) skip(event execution.Event) bool {
+	return event.Type == execution.EventDone || (event.Type == execution.EventError && IsContextCancellation(event.Err))
+}
+
+func (state *executionForwardState) markSendFailure(ctx context.Context) {
+	state.terminalErr = ctx.Err()
+	if state.terminalErr == nil {
+		state.terminalErr = context.Canceled
+	}
+	state.terminalEventType, state.terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
+	state.terminalErrorEmitted = false
+}
+
+func (state *executionForwardState) ensureTerminal(ctx context.Context) {
+	if state.terminalSeen || state.terminalErr != nil {
+		return
+	}
+	if ctx.Err() != nil {
+		state.terminalErr = ctx.Err()
+		state.terminalEventType, state.terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
+		return
+	}
+	state.terminalEventType, state.terminalErrorType = audit.EventExecutionCompleted, ""
+}
+
+func (dispatcher *Dispatcher) forwardExecution(ctx context.Context, requestID, traceID string, executionEvents <-chan execution.Event, durable *durableExecution, output chan<- DispatchEvent, span observability.Span, started time.Time, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, mediaReplies *servicetool.ReplyCollector) {
+	defer close(output)
+
+	state := executionForwardState{}
+	for event := range executionEvents {
+		state.observe(event)
+		if state.skip(event) {
+			continue
+		}
+		mapped := mapExecutionEvent(event)
+		if mapped.Type != DispatchEventMessage && mapped.Type != DispatchEventStatus && mapped.Type != DispatchEventError {
+			continue
+		}
+		if mapped.Type == DispatchEventError {
+			state.terminalErrorEmitted = true
+		}
+		if !sendDispatchEvent(ctx, output, mapped) {
+			state.markSendFailure(ctx)
+			break
+		}
+	}
+	state.ensureTerminal(ctx)
+	mediaIntents := []servicetool.ReplyIntent(nil)
+	if mediaReplies != nil {
+		mediaIntents = mediaReplies.Intents()
+	}
 	auditFinalized := false
 	finalizeAudit := func(eventType audit.EventType, errorType string) error {
 		if auditFinalized {
@@ -653,93 +676,31 @@ func (dispatcher *Dispatcher) forward(ctx context.Context, requestID, traceID st
 		}
 		return err
 	}
-	finalizeHandoff := func(result audit.ExecutionResult, errorType string) error {
-		if dispatcher.handoffStore == nil {
-			return nil
-		}
-		_, err := dispatcher.handoffStore.Finalize(detachedCorrelationContext(ctx, requestID, traceID), audit.ExecutionHandoff{TenantID: principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType})
-		return err
+	terminalErr := dispatcher.finalizeForward(ctx, requestID, traceID, durable, principal, state.terminalErr, state.reply.String(), mediaIntents, state.terminalEventType, state.terminalErrorType, finalizeAudit)
+	finishForwardOutput(ctx, output, requestID, traceID, terminalErr, false, state.terminalErrorEmitted)
+	if terminalErr != nil {
+		class := observability.ErrorClass(terminalErr)
+		span.SetAttributes(observability.Attribute{Key: "error_class", Value: class})
+		span.SetStatus(observability.StatusError, class)
+		span.RecordError(terminalErr)
+	} else {
+		span.SetStatus(observability.StatusOK, "")
 	}
-	defer func() {
-		dispatcher.prepareForwardTerminal(ctx, requestID, traceID, runnerEvents, output, &terminalErr, &terminalEventType, &terminalErrorType, &terminalCommitted, &terminalState, finalizeAudit, finalizeHandoff)
-		if finishRunner != nil {
-			finishRunner(terminalErr)
-			_ = dispatcher.metrics.Operation(ctx, runnerStarted, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, terminalErr)
-		}
-		terminalErr = dispatcher.finalizeForward(ctx, requestID, traceID, durable, principal, terminalErr, reply.String(), mediaReplies.Intents(), terminalEventType, terminalErrorType, finalizeAudit)
-		finishForwardOutput(ctx, output, requestID, traceID, terminalErr, terminalCommitted, terminalErrorEmitted)
-		_ = dispatcher.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
-		if terminalErr != nil {
-			class := observability.ErrorClass(terminalErr)
-			span.SetAttributes(observability.Attribute{Key: "error_class", Value: class})
-			span.SetStatus(observability.StatusError, class)
-			span.RecordError(terminalErr)
-		} else {
-			span.SetStatus(observability.StatusOK, "")
-		}
-		_ = dispatcher.metrics.Operation(ctx, started, map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch}, terminalErr)
-		logDispatchFailure(principal, requestID, traceID, terminalErr)
-		span.End()
-	}()
-	for {
-		if ctx.Err() != nil {
-			terminalErr = ctx.Err()
-			terminalEventType, terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
-			terminalErr = dispatcher.handleForwardCancellation(ctx, requestID, traceID, runnerEvents, output, finalizeAudit, finalizeHandoff)
-			terminalCommitted, terminalErrorEmitted = true, true
-			return
-		}
-		select {
-		case event, ok := <-runnerEvents:
-			// A canceled context and a ready runner event can both win the
-			// select. Re-check cancellation after receiving so a late event
-			// cannot turn a canceled execution into a successful completion.
-			if ctx.Err() != nil {
-				terminalErr = ctx.Err()
-				terminalEventType, terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
-				terminalErr = dispatcher.handleForwardCancellation(ctx, requestID, traceID, runnerEvents, output, finalizeAudit, finalizeHandoff)
-				terminalCommitted, terminalErrorEmitted = true, true
-				return
-			}
-			if !ok {
-				if dispatcher.cancelForwardIfNeeded(ctx, requestID, traceID, runnerEvents, output, &terminalErr, &terminalEventType, &terminalErrorType, &terminalCommitted, finalizeAudit, finalizeHandoff) {
-					terminalErrorEmitted = true
-					return
-				}
-				terminalEventType, terminalErrorType = audit.EventExecutionCompleted, ""
-				terminalErr = dispatcher.handleForwardStreamClosed(ctx, requestID, traceID, runnerEvents, output, &terminalCommitted, finalizeAudit, finalizeHandoff)
-				return
-			}
-			if dispatcher.handleForwardRunnerEvent(ctx, requestID, traceID, runnerEvents, output, event, &reply, &terminalErr, &terminalEventType, &terminalErrorType, &terminalCommitted, &terminalErrorEmitted, finalizeAudit, finalizeHandoff) {
-				return
-			}
-		case <-ctx.Done():
-			terminalErr = ctx.Err()
-			terminalEventType, terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
-			terminalErr = dispatcher.handleForwardCancellation(ctx, requestID, traceID, runnerEvents, output, finalizeAudit, finalizeHandoff)
-			terminalCommitted, terminalErrorEmitted = true, true
-			return
-		}
-	}
+	_ = dispatcher.metrics.Operation(ctx, started, map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch}, terminalErr)
+	logDispatchFailure(principal, requestID, traceID, terminalErr)
+	span.End()
 }
 
-func (dispatcher *Dispatcher) prepareForwardTerminal(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent, terminalErr *error, terminalEventType *audit.EventType, terminalErrorType *string, terminalCommitted *bool, terminalState *atomic.Uint32, finalizeAudit func(audit.EventType, string) error, finalizeHandoff func(audit.ExecutionResult, string) error) {
-	if *terminalErr != nil || *terminalCommitted {
-		return
+func mapExecutionEvent(event execution.Event) DispatchEvent {
+	result := DispatchEvent{Type: DispatchEventType(event.Type), RequestID: event.RequestID, TraceID: event.TraceID, Text: event.Text, Status: event.Status, Done: event.Done}
+	if event.Type == execution.EventError {
+		if IsContextCancellation(event.Err) {
+			result.Error = ErrExecutionCanceled.Error()
+		} else {
+			result.Error = ErrExecution.Error()
+		}
 	}
-	if ctx.Err() == nil && terminalState.CompareAndSwap(forwardTerminalPending, forwardTerminalCommitted) {
-		return
-	}
-	cancelErr := ctx.Err()
-	if cancelErr == nil {
-		cancelErr = context.Canceled
-	}
-	*terminalErr = cancelErr
-	*terminalEventType, *terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
-	if err := dispatcher.handleForwardCancellation(ctx, requestID, traceID, runnerEvents, output, finalizeAudit, finalizeHandoff); err != nil {
-		*terminalErr = err
-	}
-	*terminalCommitted = true
+	return result
 }
 
 func finishForwardOutput(ctx context.Context, output chan<- DispatchEvent, requestID, traceID string, terminalErr error, terminalCommitted, terminalErrorEmitted bool) {
@@ -767,77 +728,6 @@ func finishForwardOutput(ctx context.Context, output chan<- DispatchEvent, reque
 	trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "complete", Done: true})
 }
 
-func (dispatcher *Dispatcher) handleForwardStreamClosed(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent, terminalCommitted *bool, finalizeAudit func(audit.EventType, string) error, finalizeHandoff func(audit.ExecutionResult, string) error) error {
-	if ctx.Err() != nil {
-		err := dispatcher.handleForwardCancellation(ctx, requestID, traceID, runnerEvents, output, finalizeAudit, finalizeHandoff)
-		*terminalCommitted = true
-		return err
-	}
-	return nil
-}
-
-func (dispatcher *Dispatcher) cancelForwardIfNeeded(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent, terminalErr *error, terminalEventType *audit.EventType, terminalErrorType *string, terminalCommitted *bool, finalizeAudit func(audit.EventType, string) error, finalizeHandoff func(audit.ExecutionResult, string) error) bool {
-	if ctx.Err() == nil {
-		return false
-	}
-	*terminalErr = ctx.Err()
-	*terminalEventType, *terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
-	*terminalErr = dispatcher.handleForwardCancellation(ctx, requestID, traceID, runnerEvents, output, finalizeAudit, finalizeHandoff)
-	*terminalCommitted = true
-	return true
-}
-
-//nolint:gocyclo // terminal event mapping, cancellation, audit, handoff, and stream ownership are one state transition.
-func (dispatcher *Dispatcher) handleForwardRunnerEvent(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent, event *trpcevent.Event, reply *strings.Builder, terminalErr *error, terminalEventType *audit.EventType, terminalErrorType *string, terminalCommitted, terminalErrorEmitted *bool, finalizeAudit func(audit.EventType, string) error, finalizeHandoff func(audit.ExecutionResult, string) error) bool {
-	if dispatcher.cancelForwardIfNeeded(ctx, requestID, traceID, runnerEvents, output, terminalErr, terminalEventType, terminalErrorType, terminalCommitted, finalizeAudit, finalizeHandoff) {
-		return true
-	}
-	mapped, done := mapRunnerEvent(event, requestID, traceID)
-	if done {
-		*terminalErr = nil
-		for _, item := range mapped {
-			if item.Type == DispatchEventError {
-				*terminalErr = ErrExecution
-			}
-		}
-		eventType, errorType := audit.EventExecutionCompleted, ""
-		if *terminalErr != nil {
-			eventType, errorType = audit.EventExecutionFailed, string(audit.ErrorUnavailable)
-		}
-		*terminalEventType, *terminalErrorType = eventType, errorType
-	}
-	for _, item := range mapped {
-		if dispatcher.cancelForwardIfNeeded(ctx, requestID, traceID, runnerEvents, output, terminalErr, terminalEventType, terminalErrorType, terminalCommitted, finalizeAudit, finalizeHandoff) {
-			return true
-		}
-		if done && item.Type == DispatchEventDone {
-			continue
-		}
-		if item.Type == DispatchEventMessage {
-			reply.WriteString(item.Text)
-		}
-		if item.Type == DispatchEventError {
-			*terminalErr = ErrExecution
-		}
-		if !sendDispatchEvent(ctx, output, item) {
-			*terminalErr = ctx.Err()
-			if IsContextCancellation(*terminalErr) {
-				*terminalEventType, *terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
-			}
-			drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
-			return true
-		}
-		if item.Type == DispatchEventError {
-			*terminalErrorEmitted = true
-		}
-	}
-	if !done {
-		return false
-	}
-	drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
-	return true
-}
-
 func (dispatcher *Dispatcher) finalizeForward(ctx context.Context, requestID, traceID string, durable *durableExecution, principal Principal, terminalErr error, reply string, mediaReplies []servicetool.ReplyIntent, terminalEventType audit.EventType, terminalErrorType string, finalizeAudit func(audit.EventType, string) error) error {
 	eventType := terminalEventType
 	errorType := terminalErrorType
@@ -861,34 +751,15 @@ func (dispatcher *Dispatcher) finalizeForward(ctx context.Context, requestID, tr
 				result = audit.ResultCanceled
 			}
 		}
-		if _, err := dispatcher.handoffStore.Finalize(detachedCorrelationContext(ctx, requestID, traceID), audit.ExecutionHandoff{TenantID: principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType}); err != nil && terminalErr == nil {
+		if _, err := dispatcher.handoffStore.Finalize(detachedCorrelationContext(ctx, requestID, traceID), audit.ExecutionHandoff{TenantID: principal.TenantID(), HandoffID: audit.NewEventID(requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType}); err != nil && (terminalErr == nil || IsContextCancellation(terminalErr)) {
 			terminalErr = auditWriteFailure()
 		}
 	}
-	if err := finalizeAudit(eventType, errorType); err != nil && terminalErr == nil {
+	if err := finalizeAudit(eventType, errorType); err != nil && (terminalErr == nil || IsContextCancellation(terminalErr)) {
 		terminalErr = auditWriteFailure()
 	}
 	dispatcher.finishDurable(ctx, requestID, traceID, durable, terminalErr, reply, mediaReplies)
 	return terminalErr
-}
-
-func (dispatcher *Dispatcher) handleForwardCancellation(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent, finalizeAudit func(audit.EventType, string) error, finalizeHandoff func(audit.ExecutionResult, string) error) error {
-	if err := finalizeAudit(audit.EventExecutionCanceled, string(audit.ErrorCanceled)); err != nil {
-		dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
-		return auditWriteFailure()
-	}
-	if err := finalizeHandoff(audit.ResultCanceled, string(audit.ErrorCanceled)); err != nil {
-		dispatcher.finishAuditFailure(requestID, traceID, runnerEvents, output)
-		return auditWriteFailure()
-	}
-	dispatcher.finishCanceled(ctx, requestID, traceID, runnerEvents, output)
-	return ctx.Err()
-}
-
-func (dispatcher *Dispatcher) finishAuditFailure(requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent) {
-	drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
-	trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventError, RequestID: requestID, TraceID: traceID, Error: ErrAuditWriteFailed.Error()})
-	trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "error", Done: true})
 }
 
 func auditWriteFailure() error {
@@ -924,64 +795,11 @@ func (dispatcher *Dispatcher) writeExecutionAuditRevision(ctx context.Context, p
 	return nil
 }
 
-func (dispatcher *Dispatcher) finishCanceled(ctx context.Context, requestID, traceID string, runnerEvents <-chan *trpcevent.Event, output chan<- DispatchEvent) {
-	drainRunnerEvents(runnerEvents, dispatcher.drainTimeout)
-	trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventError, RequestID: requestID, TraceID: traceID, Error: ErrExecutionCanceled.Error()})
-	trySendDispatchEvent(output, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: cancellationStatus(ctx), Done: true})
-}
-
 func cancellationStatus(ctx context.Context) string {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "deadline_exceeded"
 	}
 	return "canceled"
-}
-
-func mapRunnerEvent(event *trpcevent.Event, requestID, traceID string) ([]DispatchEvent, bool) {
-	if event == nil || event.Response == nil {
-		return []DispatchEvent{{Type: DispatchEventStatus, RequestID: requestID, TraceID: traceID, Status: "progress"}}, false
-	}
-	response := event.Response
-	if response.Error != nil {
-		return []DispatchEvent{
-			{Type: DispatchEventError, RequestID: requestID, TraceID: traceID, Error: ErrExecution.Error()},
-			{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "error", Done: true},
-		}, true
-	}
-	text := responseText(response)
-	result := make([]DispatchEvent, 0, 2)
-	if text != "" {
-		result = append(result, DispatchEvent{Type: DispatchEventMessage, RequestID: requestID, TraceID: traceID, Text: text})
-	}
-	if response.Done {
-		result = append(result, DispatchEvent{Type: DispatchEventDone, RequestID: requestID, TraceID: traceID, Status: "complete", Done: true})
-		return result, true
-	}
-	if len(result) == 0 {
-		status := "progress"
-		if response.IsPartial {
-			status = "partial"
-		}
-		result = append(result, DispatchEvent{Type: DispatchEventStatus, RequestID: requestID, TraceID: traceID, Status: status})
-	}
-	return result, false
-}
-
-func responseText(response *trpcmodel.Response) string {
-	if response == nil {
-		return ""
-	}
-	var builder strings.Builder
-	for _, choice := range response.Choices {
-		text := choice.Delta.Content
-		if text == "" {
-			text = choice.Message.Content
-		}
-		if text != "" {
-			builder.WriteString(text)
-		}
-	}
-	return builder.String()
 }
 
 func sendDispatchEvent(ctx context.Context, output chan<- DispatchEvent, event DispatchEvent) bool {
@@ -1005,24 +823,6 @@ func trySendDispatchEvent(output chan<- DispatchEvent, event DispatchEvent) {
 	select {
 	case output <- event:
 	default:
-	}
-}
-
-func drainRunnerEvents(events <-chan *trpcevent.Event, timeout time.Duration) {
-	if events == nil {
-		return
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	for {
-		select {
-		case _, ok := <-events:
-			if !ok {
-				return
-			}
-		case <-timer.C:
-			return
-		}
 	}
 }
 

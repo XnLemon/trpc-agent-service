@@ -44,16 +44,6 @@ type auditWriterFailure struct {
 	failAfter int
 }
 
-type nilRunnerRegistry struct{}
-
-func (nilRunnerRegistry) Ready() bool {
-	return true
-}
-
-func (nilRunnerRegistry) Acquire(context.Context, runtime.ExecutionPlan) (*runtimerunner.RunnerLease, error) {
-	return &runtimerunner.RunnerLease{}, nil
-}
-
 type handoffStub struct {
 	reserveErr, finalizeErr error
 	reserved, finalized     int32
@@ -121,28 +111,6 @@ func (failingToolAttachmentStore) PutAttachment(context.Context, string, attachm
 func (s dispatchAttachmentStore) BindAttachments(ctx context.Context, tenantID, eventID string, references []attachment.Reference) error {
 	if s.bindFn != nil {
 		return s.bindFn(ctx, tenantID, eventID, references)
-	}
-	return nil
-}
-
-type stagedContext struct {
-	context.Context
-	done      chan struct{}
-	firstErr  chan struct{}
-	errAfter  int
-	errCalls  int
-	firstOnce sync.Once
-}
-
-func (ctx *stagedContext) Done() <-chan struct{} {
-	return ctx.done
-}
-
-func (ctx *stagedContext) Err() error {
-	ctx.errCalls++
-	ctx.firstOnce.Do(func() { close(ctx.firstErr) })
-	if ctx.errCalls > ctx.errAfter {
-		return context.Canceled
 	}
 	return nil
 }
@@ -692,8 +660,9 @@ func TestDispatcherRunnerRunFailureAuditWriteIsRedacted(t *testing.T) {
 }
 
 func TestDispatcherDefensiveNilRunnerAuditFailure(t *testing.T) {
-	dispatcher, principal := newTestDispatcher(t, &testRunner{})
-	dispatcher.registry = nilRunnerRegistry{}
+	dispatcher, principal := newTestDispatcherWithFactory(t, func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
+		return nil, nil
+	})
 	dispatcher.auditWriter = &auditWriterFailure{failAfter: 1}
 	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "nil-runner-audit", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
 	if stream != nil || !errors.Is(err, ErrAuditWriteFailed) {
@@ -702,8 +671,9 @@ func TestDispatcherDefensiveNilRunnerAuditFailure(t *testing.T) {
 }
 
 func TestDispatcherDefensiveNilRunnerWritesFailedAudit(t *testing.T) {
-	dispatcher, principal := newTestDispatcher(t, &testRunner{})
-	dispatcher.registry = nilRunnerRegistry{}
+	dispatcher, principal := newTestDispatcherWithFactory(t, func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
+		return nil, nil
+	})
 	writer, err := audit.NewInMemory(principal.TenantID())
 	if err != nil {
 		t.Fatal(err)
@@ -726,9 +696,10 @@ func TestAuditHelpers(t *testing.T) {
 	if terminalAuditError(nil) != "" || terminalAuditError(context.Canceled) != string(audit.ErrorCanceled) || terminalAuditError(ErrExecution) != string(audit.ErrorUnavailable) {
 		t.Fatal("unexpected terminal audit error mapping")
 	}
-	dispatcher, _ := newTestDispatcher(t, &testRunner{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	output := make(chan DispatchEvent, 2)
-	dispatcher.finishAuditFailure("request-1", "trace-1", nil, output)
+	finishForwardOutput(ctx, output, "request-1", "trace-1", context.Canceled, false, false)
 	close(output)
 	events := collectDispatchEvents(output)
 	if len(events) != 2 || events[0].RequestID != "request-1" || events[0].TraceID != "trace-1" || events[1].RequestID != "request-1" {
@@ -1717,230 +1688,6 @@ func TestDispatcherCancellationWinsLateReadyRunnerEvent(t *testing.T) {
 	}
 }
 
-func TestDispatcherForwardChecksCancellationAfterReceivingRunnerEvent(t *testing.T) {
-	dispatcher, principal := newTestDispatcher(t, &testRunner{})
-	writer, err := audit.NewInMemory(principal.TenantID())
-	if err != nil {
-		t.Fatal(err)
-	}
-	dispatcher.auditWriter = writer
-	ctx := &stagedContext{Context: context.Background(), done: make(chan struct{}), firstErr: make(chan struct{}), errAfter: 1}
-	runnerEvents := make(chan *trpcevent.Event, 1)
-	runnerEvents <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
-	close(runnerEvents)
-	output := make(chan DispatchEvent, 4)
-	_, span := dispatcher.telemetry.Tracer("test").Start(ctx, "forward")
-	dispatcher.forward(ctx, "request-forward-cancel", "trace", runnerEvents, &runtimerunner.RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{}, nil)
-	events := collectDispatchEvents(output)
-	if len(events) != 2 || events[0].Error != ErrExecutionCanceled.Error() || !events[1].Done {
-		t.Fatalf("events = %+v", events)
-	}
-	auditEvents, err := writer.List(context.Background(), audit.Query{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !hasAuditEventTypes(auditEvents, audit.EventExecutionCanceled) || hasAuditEventTypes(auditEvents, audit.EventExecutionCompleted) {
-		t.Fatalf("audit events = %+v", auditEvents)
-	}
-}
-
-func TestDispatcherClosedRunnerChannelCancellationDoesNotComplete(t *testing.T) {
-	dispatcher, principal := newTestDispatcher(t, &testRunner{})
-	writer, err := audit.NewInMemory(principal.TenantID())
-	if err != nil {
-		t.Fatal(err)
-	}
-	dispatcher.auditWriter = writer
-	ctx := &stagedContext{Context: context.Background(), done: make(chan struct{}), firstErr: make(chan struct{}), errAfter: 1}
-	runnerEvents := make(chan *trpcevent.Event)
-	close(runnerEvents)
-	output := make(chan DispatchEvent, 4)
-	_, span := dispatcher.telemetry.Tracer("test").Start(ctx, "forward")
-	dispatcher.forward(ctx, "request-closed-cancel", "trace", runnerEvents, &runtimerunner.RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{}, nil)
-	events := collectDispatchEvents(output)
-	if len(events) != 2 || events[0].Error != ErrExecutionCanceled.Error() || !events[1].Done {
-		t.Fatalf("events = %+v", events)
-	}
-	auditEvents, err := writer.List(context.Background(), audit.Query{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !hasAuditEventTypes(auditEvents, audit.EventExecutionCanceled) || hasAuditEventTypes(auditEvents, audit.EventExecutionCompleted) {
-		t.Fatalf("audit events = %+v", auditEvents)
-	}
-}
-
-func TestDispatcherPrepareForwardTerminalCancellationFallback(t *testing.T) {
-	dispatcher, _ := newTestDispatcher(t, &testRunner{})
-	ctx := context.Background()
-	output := make(chan DispatchEvent, 4)
-	var terminalErr error
-	var terminalEventType audit.EventType
-	var terminalErrorType string
-	terminalCommitted := false
-	var terminalState atomic.Uint32
-	terminalState.Store(forwardTerminalCanceled)
-	dispatcher.prepareForwardTerminal(ctx, "request-terminal-fallback", "trace", nil, output, &terminalErr, &terminalEventType, &terminalErrorType, &terminalCommitted, &terminalState,
-		func(audit.EventType, string) error { return nil },
-		func(audit.ExecutionResult, string) error { return nil })
-	if !errors.Is(terminalErr, context.Canceled) || terminalEventType != audit.EventExecutionCanceled || terminalErrorType != string(audit.ErrorCanceled) || !terminalCommitted {
-		t.Fatalf("err=%v event=%q error=%q committed=%v", terminalErr, terminalEventType, terminalErrorType, terminalCommitted)
-	}
-	events := []DispatchEvent{<-output, <-output}
-	if events[0].Error != ErrExecutionCanceled.Error() || !events[1].Done {
-		t.Fatalf("events=%+v", events)
-	}
-	terminalErr = nil
-	terminalEventType = ""
-	terminalErrorType = ""
-	terminalCommitted = false
-	terminalState.Store(forwardTerminalCanceled)
-	dispatcher.prepareForwardTerminal(ctx, "request-terminal-fallback-error", "trace", nil, output, &terminalErr, &terminalEventType, &terminalErrorType, &terminalCommitted, &terminalState,
-		func(audit.EventType, string) error { return errors.New("audit unavailable") },
-		func(audit.ExecutionResult, string) error { return nil })
-	if !errors.Is(terminalErr, ErrAuditWriteFailed) {
-		t.Fatalf("fallback error = %v", terminalErr)
-	}
-	_ = <-output
-	_ = <-output
-}
-
-func TestFinishForwardOutputCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	output := make(chan DispatchEvent, 4)
-	finishForwardOutput(ctx, output, "request-output-cancel", "trace", context.Canceled, false, false)
-	events := []DispatchEvent{<-output, <-output}
-	if events[0].Error != ErrExecutionCanceled.Error() || !events[1].Done || events[1].Status != "canceled" {
-		t.Fatalf("events=%+v", events)
-	}
-}
-
-func TestDispatcherForwardSelectCancellationBranch(t *testing.T) {
-	dispatcher, principal := newTestDispatcher(t, &testRunner{})
-	ctx := &stagedContext{Context: context.Background(), done: make(chan struct{}), firstErr: make(chan struct{}), errAfter: 1}
-	runnerEvents := make(chan *trpcevent.Event)
-	output := make(chan DispatchEvent, 4)
-	_, span := dispatcher.telemetry.Tracer("test").Start(ctx, "forward")
-	finished := make(chan struct{})
-	go func() {
-		dispatcher.forward(ctx, "request-select-cancel", "trace", runnerEvents, &runtimerunner.RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{}, nil)
-		close(finished)
-	}()
-	<-ctx.firstErr
-	close(ctx.done)
-	select {
-	case <-finished:
-	case <-time.After(time.Second):
-		t.Fatal("forward did not finish after cancellation")
-	}
-	events := collectDispatchEvents(output)
-	if len(events) != 2 || events[0].Error != ErrExecutionCanceled.Error() || !events[1].Done {
-		t.Fatalf("events = %+v", events)
-	}
-}
-
-func TestDispatcherRunnerEventCancellationAfterReceiptDoesNotComplete(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	dispatcher, _ := newTestDispatcher(t, &testRunner{})
-	runnerEvents := make(chan *trpcevent.Event, 1)
-	runnerEvents <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
-	event := <-runnerEvents
-	cancel()
-	output := make(chan DispatchEvent, 4)
-	var terminalErr error
-	var terminalEventType audit.EventType
-	var terminalErrorType string
-	var terminalOutputCommitted bool
-	var terminalErrorEmitted bool
-	var reply strings.Builder
-	var auditTypes []audit.EventType
-	var handoffResults []audit.ExecutionResult
-	done := dispatcher.handleForwardRunnerEvent(ctx, "request-cancel-after-receipt", "", runnerEvents, output, event, &reply, &terminalErr, &terminalEventType, &terminalErrorType, &terminalOutputCommitted, &terminalErrorEmitted,
-		func(eventType audit.EventType, _ string) error {
-			auditTypes = append(auditTypes, eventType)
-			return nil
-		},
-		func(result audit.ExecutionResult, _ string) error {
-			handoffResults = append(handoffResults, result)
-			return nil
-		})
-	if !done || !errors.Is(terminalErr, context.Canceled) || terminalEventType != audit.EventExecutionCanceled || terminalErrorType != string(audit.ErrorCanceled) {
-		t.Fatalf("cancellation state done=%v err=%v event=%q error=%q", done, terminalErr, terminalEventType, terminalErrorType)
-	}
-	got := []DispatchEvent{<-output, <-output}
-	if got[0].Error != ErrExecutionCanceled.Error() || !got[1].Done || got[1].Status != "canceled" || reply.Len() != 0 {
-		t.Fatalf("cancellation events=%+v reply=%q", got, reply.String())
-	}
-	if len(auditTypes) != 1 || auditTypes[0] != audit.EventExecutionCanceled {
-		t.Fatalf("audit types=%v", auditTypes)
-	}
-	if len(handoffResults) != 1 || handoffResults[0] != audit.ResultCanceled {
-		t.Fatalf("handoff results=%v", handoffResults)
-	}
-}
-
-func TestDispatcherRunnerEventCancellationDuringSendRecordsCanceledAudit(t *testing.T) {
-	dispatcher, principal := newTestDispatcher(t, &testRunner{})
-	writer, err := audit.NewInMemory(principal.TenantID())
-	if err != nil {
-		t.Fatal(err)
-	}
-	handoffs := audit.NewInMemoryHandoffStore()
-	dispatcher.auditWriter, dispatcher.handoffStore = writer, handoffs
-	requestID := "request-cancel-during-send"
-	if _, err := handoffs.Reserve(context.Background(), audit.ExecutionHandoff{
-		TenantID:  principal.TenantID(),
-		HandoffID: audit.NewEventID(requestID, "handoff"),
-		RequestID: requestID,
-		State:     audit.HandoffPending,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	ctx := &stagedContext{Context: context.Background(), done: make(chan struct{}), firstErr: make(chan struct{}), errAfter: 2}
-	runnerEvents := make(chan *trpcevent.Event)
-	event := &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "terminal"}}}, Done: true}}
-	output := make(chan DispatchEvent, 4)
-	var terminalErr error
-	var terminalEventType audit.EventType
-	var terminalErrorType string
-	var terminalCommitted bool
-	var terminalErrorEmitted bool
-	var reply strings.Builder
-	done := dispatcher.handleForwardRunnerEvent(ctx, requestID, "", runnerEvents, output, event, &reply, &terminalErr, &terminalEventType, &terminalErrorType, &terminalCommitted, &terminalErrorEmitted,
-		func(audit.EventType, string) error { return nil },
-		func(audit.ExecutionResult, string) error { return nil })
-	if !done || !errors.Is(terminalErr, context.Canceled) || terminalEventType != audit.EventExecutionCanceled || terminalErrorType != string(audit.ErrorCanceled) {
-		t.Fatalf("cancellation state done=%v err=%v event=%q error=%q", done, terminalErr, terminalEventType, terminalErrorType)
-	}
-	var finalizedType audit.EventType
-	if err := dispatcher.finalizeForward(ctx, requestID, "", nil, principal, terminalErr, reply.String(), nil, terminalEventType, terminalErrorType,
-		func(eventType audit.EventType, errorType string) error {
-			finalizedType = eventType
-			return dispatcher.writeExecutionAudit(context.Background(), principal, InboundMessage{ExternalUserID: "user"}, tenant.RunnerIdentity{}, requestID, "", eventType, errorType)
-		}); err == nil || !errors.Is(err, context.Canceled) {
-		t.Fatalf("finalize error = %v", err)
-	}
-	if finalizedType != audit.EventExecutionCanceled {
-		t.Fatalf("finalized audit type = %q", finalizedType)
-	}
-	handoff, err := handoffs.Get(context.Background(), principal.TenantID(), audit.NewEventID(requestID, "handoff"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if handoff.Result != audit.ResultCanceled || handoff.State != audit.HandoffFinalized {
-		t.Fatalf("handoff = %+v", handoff)
-	}
-	auditEvents, err := writer.List(context.Background(), audit.Query{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !hasAuditEventTypes(auditEvents, audit.EventExecutionCanceled) || hasAuditEventTypes(auditEvents, audit.EventExecutionCompleted, audit.EventExecutionFailed) {
-		t.Fatalf("audit events = %+v", auditEvents)
-	}
-}
-
 func TestDispatcherRejectsInvalidBoundaryInputs(t *testing.T) {
 	dispatcher, principal := newTestDispatcher(t, &testRunner{})
 	if _, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Message: InboundMessage{Content: "hello"}}); !errors.Is(err, ErrUnauthenticated) {
@@ -1968,10 +1715,13 @@ func TestDispatcherConfigurationAndEventMappingEdges(t *testing.T) {
 		t.Fatalf("missing dispatcher dependency error = %v", err)
 	}
 	dispatcher, principal := newTestDispatcher(t, &testRunner{})
-	registry, ok := dispatcher.registry.(*runtimerunner.RunnerRegistry)
-	if !ok {
-		t.Fatalf("registry type = %T", dispatcher.registry)
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
+		return &testRunner{}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = registry.Close() })
 	if _, err := NewDispatcher(DispatchConfig{Resolver: dispatcher.resolver, Registry: registry, DrainTimeout: -time.Second}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("negative drain timeout error = %v", err)
 	}
@@ -1994,19 +1744,6 @@ func TestDispatcherConfigurationAndEventMappingEdges(t *testing.T) {
 		t.Fatalf("nil dispatch context error = %v", err)
 	}
 
-	assertDispatchEventMappings(t)
-	if got := cancellationStatus(contextWithDeadline(t)); got != "deadline_exceeded" {
-		t.Fatalf("deadline cancellation status = %q", got)
-	}
-	if got := cancellationStatus(canceledContext()); got != "canceled" {
-		t.Fatalf("canceled status = %q", got)
-	}
-	if responseText(nil) != "" || responseText(&trpcmodel.Response{Choices: []trpcmodel.Choice{{Message: trpcmodel.Message{Content: "message"}}, {Delta: trpcmodel.Message{Content: "delta"}}}}) != "messagedelta" {
-		t.Fatal("response text mapping was incorrect")
-	}
-	if _, done := mapRunnerEvent(&trpcevent.Event{Response: &trpcmodel.Response{Error: &trpcmodel.ResponseError{Message: "secret"}}}, "request", "trace"); !done {
-		t.Fatal("error event was not terminal")
-	}
 	if _, err := dispatchRunnerIdentity(Principal{}, InboundMessage{}); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("unknown principal identity error = %v", err)
 	}
@@ -2018,26 +1755,6 @@ func TestDispatcherConfigurationAndEventMappingEdges(t *testing.T) {
 	}
 	if _, err := dispatchRunnerIdentity(principal, groupMessage); err != nil {
 		t.Fatalf("API group identity error = %v", err)
-	}
-}
-
-func assertDispatchEventMappings(t *testing.T) {
-	t.Helper()
-	for name, event := range map[string]*trpcevent.Event{
-		"nil event":        nil,
-		"partial status":   {Response: &trpcmodel.Response{IsPartial: true}},
-		"message fallback": {Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Message: trpcmodel.Message{Content: "fallback"}}}}},
-		"done with text":   {Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "final"}}}, Done: true}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			mapped, done := mapRunnerEvent(event, "request", "trace")
-			if name == "done with text" && !done {
-				t.Fatal("done event was not terminal")
-			}
-			if len(mapped) == 0 || mapped[0].RequestID != "request" {
-				t.Fatalf("mapped event = %+v", mapped)
-			}
-		})
 	}
 }
 
@@ -2104,13 +1821,6 @@ func TestDispatcherRunAndChannelTerminalEdges(t *testing.T) {
 	if sendDispatchEvent(ctx, make(chan DispatchEvent), DispatchEvent{}) {
 		t.Fatal("sendDispatchEvent succeeded after cancellation")
 	}
-	doneOnly := &stagedContext{Context: context.Background(), done: make(chan struct{}), firstErr: make(chan struct{}), errAfter: 1}
-	close(doneOnly.done)
-	if sendDispatchEvent(doneOnly, make(chan DispatchEvent), DispatchEvent{}) {
-		t.Fatal("sendDispatchEvent succeeded after Done closed")
-	}
-	drainRunnerEvents(nil, time.Millisecond)
-	drainRunnerEvents(make(chan *trpcevent.Event), time.Millisecond)
 
 	var nilLease *runtimerunner.RunnerLease
 	if nilLease.Runner() != nil || nilLease.Release() != nil {
@@ -2119,17 +1829,4 @@ func TestDispatcherRunAndChannelTerminalEdges(t *testing.T) {
 	if (&runtimerunner.RunnerLease{}).Runner() != nil || (&runtimerunner.RunnerLease{}).Release() != nil {
 		t.Fatal("empty lease was not safe")
 	}
-}
-
-func contextWithDeadline(t *testing.T) context.Context {
-	t.Helper()
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
-	t.Cleanup(cancel)
-	return ctx
-}
-
-func canceledContext() context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	return ctx
 }
