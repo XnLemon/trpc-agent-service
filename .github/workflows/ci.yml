@@ -226,7 +226,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: trpc_agent_migration_test
@@ -238,7 +238,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       postgres-repository:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: trpc_agent_repository_test
@@ -250,7 +250,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       postgres-init:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: trpc_agent_init_test
@@ -346,7 +346,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: trpc_agent_migration_test
@@ -358,7 +358,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       postgres-repository:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: trpc_agent_repository_test
@@ -370,7 +370,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       postgres-init:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: trpc_agent_init_test

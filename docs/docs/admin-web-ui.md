@@ -246,6 +246,14 @@ Backend Profile 列表显示 Profile Key、名称、状态、能力数量和更�
 
 Channel Binding 列表显示 Binding Key、渠道、目标 App、Provider Account、状态和更新时间；详情显示协议配置、路由 digest、Secret Reference 和版本。不得回显 route key 原文或渠道凭据。
 
+Backend Profile 中的 `knowledge` 能力如果选择 `pgvector`，前端会展开受控的配置表单，字段与运行时
+Provider Catalog 保持一致：PostgreSQL `schema`、`collection`、Embedding model/version、vector
+dimension、index queue size、workers 和 max attempts。`schema` 与 `collection` 只接受不带引号的安全
+标识符，dimension 的范围为 `1..2000`，队列、worker 和尝试次数也使用服务端相同的边界。Endpoint 必须
+是与服务端连接一致的 `postgres`/`postgresql` URI，界面不会要求或保存用户名、密码、查询参数或 Secret
+值。详情页同时展示 pending → ready、failed/dead-letter、删除一致性、租户/授权过滤和模型/维度变更需要
+显式重建等运行时语义；这些状态仍以运行时和服务端数据为准，前端不自行估算健康度。
+
 ## 5. 列表与详情的通用交互规范
 
 ### 5.1 列表状态

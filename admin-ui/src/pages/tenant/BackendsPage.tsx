@@ -3,7 +3,7 @@ import { Button, Form, Input, MessagePlugin } from 'tdesign-react';
 import { useNavigate } from 'react-router-dom';
 import type { BackendProfile } from '@/api/types';
 import { AuditFields } from '@/components/AuditFields';
-import { BindingsEditor, emptyCapabilityBinding, serializeBindings, type CapabilityBindingForm } from '@/components/BindingsEditor';
+import { BindingsEditor, bindingsReady, emptyCapabilityBinding, serializeBindings, type CapabilityBindingForm } from '@/components/BindingsEditor';
 import { ResourceListPanel } from '@/components/ResourceListPanel';
 import { ResourceLobby } from '@/components/ResourceLobby';
 import { StatusTag } from '@/components/StatusTag';
@@ -56,7 +56,7 @@ export function BackendsPage() {
     }
   };
 
-  const canSubmit = profileKey.trim() && displayName.trim() && reason.trim() && serializeBindings(bindings).length > 0;
+  const canSubmit = profileKey.trim() && displayName.trim() && reason.trim() && bindingsReady(bindings);
 
   return (
     <ResourceLobby
@@ -83,6 +83,11 @@ export function BackendsPage() {
             },
             { colKey: 'ProfileKey', title: 'Profile Key' },
             { colKey: 'Bindings', title: '能力绑定', cell: ({ row }) => `${row.Bindings?.length ?? 0} 项` },
+            {
+              colKey: 'KnowledgeProvider',
+              title: 'Knowledge Provider',
+              cell: ({ row }) => row.Bindings?.find((binding) => binding.Capability === 'knowledge')?.Provider || '未配置',
+            },
             { colKey: 'Status', title: '状态', cell: ({ row }) => <StatusTag status={row.Status} /> },
             { colKey: 'Version', title: '版本', cell: ({ row }) => `v${row.Version}` },
             { colKey: 'UpdatedAt', title: '更新时间', cell: ({ row }) => formatDateTime(row.UpdatedAt) },
@@ -91,7 +96,7 @@ export function BackendsPage() {
         />
       }
       createTitle="创建存储后端配置"
-      createDescription="绑定 session / memory / summary / knowledge / artifact / audit 能力的 Provider；active 状态至少需要一条 session 绑定。"
+      createDescription="绑定 session / memory / summary / knowledge / artifact / audit 能力的 Provider。Knowledge 选择 pgvector 时，可配置 PostgreSQL 命名空间、Embedding 和异步索引参数；active 状态至少需要一条 session 绑定。"
       createForm={
         <Form layout="vertical" labelAlign="top" colon>
           <Form.FormItem label="Profile Key" help="创建后不可修改，租户内唯一。">
