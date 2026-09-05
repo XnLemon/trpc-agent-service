@@ -9,8 +9,30 @@ import (
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	serviceruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
+
+func TestMapPlanResolverErrorKeepsGatewayErrorBoundary(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "resolver not ready", err: serviceruntime.ErrPlanResolverNotReady, want: ErrNotReady},
+		{name: "invalid request", err: serviceruntime.ErrInvalidPlanRequest, want: ErrInvalid},
+		{name: "canceled", err: context.Canceled, want: context.Canceled},
+		{name: "dependency failure", err: errors.New("repository detail"), want: ErrPlanUnavailable},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := mapPlanResolverError(test.err); !errors.Is(got, test.want) {
+				t.Fatalf("mapPlanResolverError(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+}
 
 func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 	tests := []struct {
