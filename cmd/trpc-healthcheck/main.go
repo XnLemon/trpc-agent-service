@@ -7,11 +7,14 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"time"
+
+	servicelog "github.com/XnLemon/trpc-agent-service/trpcservice/log"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 const (
@@ -23,20 +26,37 @@ var errUnhealthy = errors.New("health check failed")
 var exitProcess = os.Exit
 
 func main() {
-	if err := run(os.Args[1:], os.Stderr); err != nil {
+	restoreLogger, err := configureLogger(os.Stderr)
+	if err != nil {
+		os.Exit(1)
+	}
+	defer restoreLogger()
+
+	if err := run(os.Args[1:]); err != nil {
+		servicelog.Error("health check failed", zap.Error(err))
 		exitProcess(1)
 	}
 }
 
-func run(args []string, stderr io.Writer) error {
+func configureLogger(output io.Writer) (func(), error) {
+	logger, err := servicelog.New(servicelog.Config{
+		Level:       zapcore.InfoLevel,
+		Encoding:    servicelog.EncodingConsole,
+		Output:      output,
+		ErrorOutput: output,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return servicelog.SetDefault(logger), nil
+}
+
+func run(args []string) error {
 	url := defaultHealthURL
 	if len(args) > 0 {
 		url = args[0]
 	}
 	if err := check(context.Background(), http.DefaultClient, url); err != nil {
-		if stderr != nil {
-			_, _ = fmt.Fprintln(stderr, err)
-		}
 		return err
 	}
 	return nil

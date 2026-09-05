@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -64,12 +63,8 @@ func TestRunAcceptsExplicitHealthyURL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	var stderr bytes.Buffer
-	if err := run([]string{server.URL + "/readyz"}, &stderr); err != nil {
+	if err := run([]string{server.URL + "/readyz"}); err != nil {
 		t.Fatal(err)
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("stderr = %q, want empty", stderr.String())
 	}
 }
 
@@ -79,13 +74,9 @@ func TestRunReportsUnhealthyEndpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	var stderr bytes.Buffer
-	err := run([]string{server.URL}, &stderr)
+	err := run([]string{server.URL})
 	if !errors.Is(err, errUnhealthy) {
 		t.Fatalf("error = %v, want errUnhealthy", err)
-	}
-	if got, want := stderr.String(), "health check failed\n"; got != want {
-		t.Fatalf("stderr = %q, want %q", got, want)
 	}
 }
 
