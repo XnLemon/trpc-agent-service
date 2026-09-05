@@ -46,6 +46,18 @@ func TestStartLogsUnexpectedWorkerFailure(t *testing.T) {
 	}
 }
 
+func TestLogWorkerStoppedSkipsIncompleteInputs(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	restore := servicelog.SetDefault(zap.New(core))
+	t.Cleanup(restore)
+
+	logWorkerStopped(nil, errors.New("worker failed"))
+	logWorkerStopped(&Worker{}, nil)
+	if logs.Len() != 0 {
+		t.Fatalf("incomplete worker failure emitted logs: %v", logs.All())
+	}
+}
+
 func waitForObservedMessage(t *testing.T, logs *observer.ObservedLogs, message string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

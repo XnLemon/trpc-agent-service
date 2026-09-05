@@ -164,6 +164,21 @@ func TestPrefixedLoggerAddsComponentPrefix(t *testing.T) {
 	}
 }
 
+func TestPrefixedLoggerOmitsBlankPrefix(t *testing.T) {
+	var output bytes.Buffer
+	logger, err := New(Config{Output: &output})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	restore := SetDefault(logger)
+	t.Cleanup(restore)
+
+	NewPrefixedLogger(" \t").Info("unprefixed message")
+	if !strings.Contains(output.String(), "unprefixed message") || strings.Contains(output.String(), "[ ]") {
+		t.Fatalf("blank prefix was not omitted: %s", output.String())
+	}
+}
+
 func TestPackagePanicLogsAndPanics(t *testing.T) {
 	var output bytes.Buffer
 	logger, err := New(Config{Output: &output})

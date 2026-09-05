@@ -45,6 +45,24 @@ func TestHandleCallbackLogsDispatchFailure(t *testing.T) {
 	}
 }
 
+func TestLogCallbackFailureWarnsOnTimeoutAndSkipsExpectedErrors(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	restore := servicelog.SetDefault(zap.New(core))
+	t.Cleanup(restore)
+
+	logCallbackFailure("callback failed", "request-1", "dispatch_failed", nil)
+	logCallbackFailure("callback failed", "request-1", "dispatch_failed", context.Canceled)
+	if logs.Len() != 0 {
+		t.Fatalf("expected errors emitted logs: %v", logs.All())
+	}
+
+	logCallbackFailure("callback timed out", "request-1", "dispatch_failed", context.DeadlineExceeded)
+	entries := logs.FilterMessage("[wecom-aibot] callback timed out").All()
+	if len(entries) != 1 || entries[0].Level != zapcore.WarnLevel {
+		t.Fatalf("timeout log = %v, want one warn entry", entries)
+	}
+}
+
 func waitForObservedMessage(t *testing.T, logs *observer.ObservedLogs, message string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

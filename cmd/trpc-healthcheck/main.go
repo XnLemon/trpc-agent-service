@@ -24,7 +24,8 @@ var exitProcess = os.Exit
 func main() {
 	restoreLogger, err := configureLogger(os.Stderr)
 	if err != nil {
-		os.Exit(1)
+		exitProcess(1)
+		return
 	}
 	defer restoreLogger()
 

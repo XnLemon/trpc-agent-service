@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	servicelog "github.com/XnLemon/trpc-agent-service/trpcservice/log"
 	"go.uber.org/zap"
 )
 
@@ -138,6 +139,29 @@ func TestMainExitsNonZeroOnFailure(t *testing.T) {
 	exitProcess = func(code int) { exitCode = code }
 	main()
 
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+}
+
+func TestMainExitsWhenLoggerConfigurationFails(t *testing.T) {
+	originalLogger := newLogger
+	originalArgs := os.Args
+	originalExit := exitProcess
+	t.Cleanup(func() {
+		newLogger = originalLogger
+		os.Args = originalArgs
+		exitProcess = originalExit
+	})
+
+	newLogger = func(servicelog.Config) (*zap.Logger, error) {
+		return nil, errors.New("logger unavailable")
+	}
+	exitCode := 0
+	exitProcess = func(code int) { exitCode = code }
+	os.Args = []string{"trpc-healthcheck"}
+
+	main()
 	if exitCode != 1 {
 		t.Fatalf("exit code = %d, want 1", exitCode)
 	}

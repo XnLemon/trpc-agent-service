@@ -67,11 +67,14 @@ var (
 
 var newBootstrapRuntime = bootstrap.NewFromEnvironment
 
+var exitProcess = os.Exit
+
 func main() {
 	restoreLogger, err := configureLogger(os.Stderr)
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		exitProcess(1)
+		return
 	}
 	defer restoreLogger()
 
@@ -80,7 +83,7 @@ func main() {
 	defer signal.Stop(signals)
 	if err := runMain(context.Background(), os.Args[1:], os.Stdout, os.Stderr, signals); err != nil {
 		packageLog.Error("service command failed", zap.Error(err))
-		os.Exit(1)
+		exitProcess(1)
 	}
 }
 

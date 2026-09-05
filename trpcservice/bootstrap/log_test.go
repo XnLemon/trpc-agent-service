@@ -44,6 +44,18 @@ func TestStartAIBotsLogsUnexpectedStop(t *testing.T) {
 	runtimeGraph.aiBotCancel()
 }
 
+func TestLogPollingAdapterStoppedSkipsIncompleteInputs(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	restore := servicelog.SetDefault(zap.New(core))
+	t.Cleanup(restore)
+
+	logPollingAdapterStopped(nil, errors.New("connection failed"))
+	logPollingAdapterStopped(failingPollingAdapter{}, nil)
+	if logs.Len() != 0 {
+		t.Fatalf("incomplete adapter failure emitted logs: %v", logs.All())
+	}
+}
+
 func waitForObservedMessage(t *testing.T, logs *observer.ObservedLogs, message string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

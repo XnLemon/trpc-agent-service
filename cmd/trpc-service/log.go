@@ -11,8 +11,10 @@ const logPrefix = "[trpc-service]"
 
 var packageLog = servicelog.NewPrefixedLogger(logPrefix)
 
+var newLogger = servicelog.New
+
 func configureLogger(output io.Writer) (func(), error) {
-	logger, err := servicelog.New(servicelog.Config{
+	logger, err := newLogger(servicelog.Config{
 		Level:       zapcore.InfoLevel,
 		Encoding:    servicelog.EncodingConsole,
 		Output:      output,

@@ -42,6 +42,24 @@ func TestLogIngressAuditFailureIncludesCorrelation(t *testing.T) {
 	}
 }
 
+func TestLogIngressFailureSkipsExpectedErrorsAndWarnsOnDeadline(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	restore := servicelog.SetDefault(zap.New(core))
+	t.Cleanup(restore)
+
+	logIngressFailure("ingress failed", "request-1", "trace-1", "internal_error", nil)
+	logIngressFailure("ingress failed", "request-1", "trace-1", "internal_error", context.Canceled)
+	if logs.Len() != 0 {
+		t.Fatalf("expected errors emitted logs: %v", logs.All())
+	}
+
+	logIngressFailure("ingress timed out", "request-1", "trace-1", "internal_error", context.DeadlineExceeded)
+	entries := logs.FilterMessage("[wecom] ingress timed out").All()
+	if len(entries) != 1 || entries[0].Level != zapcore.WarnLevel {
+		t.Fatalf("timeout log = %v, want one warn entry", entries)
+	}
+}
+
 func TestLogIngressBuildFailureClassifiesAttachment(t *testing.T) {
 	core, logs := observer.New(zapcore.ErrorLevel)
 	restore := servicelog.SetDefault(zap.New(core))

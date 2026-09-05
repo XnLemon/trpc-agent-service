@@ -15,7 +15,9 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	servicelog "github.com/XnLemon/trpc-agent-service/trpcservice/log"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	"go.uber.org/zap"
 )
 
 func TestServiceOptionsAndServerDefaults(t *testing.T) {
@@ -152,6 +154,60 @@ func TestRunMainFailsFastWithoutProductionConfiguration(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "postgres://") {
 		t.Fatalf("configuration error disclosed a DSN: %v", err)
+	}
+}
+
+func TestMainExitsWhenLoggerConfigurationFails(t *testing.T) {
+	previousLogger := newLogger
+	previousExit := exitProcess
+	previousArgs := os.Args
+	t.Cleanup(func() {
+		newLogger = previousLogger
+		exitProcess = previousExit
+		os.Args = previousArgs
+	})
+
+	newLogger = func(servicelog.Config) (*zap.Logger, error) {
+		return nil, errors.New("logger unavailable")
+	}
+	exitCode := 0
+	exitProcess = func(code int) { exitCode = code }
+	os.Args = []string{"trpc-service"}
+
+	main()
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+}
+
+func TestMainExitsWhenServiceCommandFails(t *testing.T) {
+	previousBootstrapRuntime := newBootstrapRuntime
+	previousExit := exitProcess
+	previousArgs := os.Args
+	t.Cleanup(func() {
+		newBootstrapRuntime = previousBootstrapRuntime
+		exitProcess = previousExit
+		os.Args = previousArgs
+	})
+
+	newBootstrapRuntime = func(context.Context) (*bootstrap.Runtime, error) {
+		return nil, errors.New("bootstrap failed")
+	}
+	exitCode := 0
+	exitProcess = func(code int) { exitCode = code }
+	os.Args = []string{"trpc-service"}
+
+	main()
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+}
+
+func TestMapInitCommandErrorPreservesCancellation(t *testing.T) {
+	for _, expected := range []error{context.Canceled, context.DeadlineExceeded} {
+		if got := mapInitCommandError(context.Background(), expected, "database unavailable"); !errors.Is(got, expected) {
+			t.Fatalf("mapInitCommandError(%v) = %v, want original cancellation", expected, got)
+		}
 	}
 }
 

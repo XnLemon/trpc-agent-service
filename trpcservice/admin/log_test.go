@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"errors"
 	"net/http/httptest"
 	"testing"
@@ -43,5 +44,22 @@ func TestWriteMappedErrorSkipsClientFailure(t *testing.T) {
 	}
 	if logs.Len() != 0 {
 		t.Fatalf("client failure emitted logs: %v", logs.All())
+	}
+}
+
+func TestLogRequestFailureWarnsOnTimeoutAndSkipsCancellation(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	restore := servicelog.SetDefault(zap.New(core))
+	t.Cleanup(restore)
+
+	logRequestFailure("request-1", 500, "internal_error", context.Canceled)
+	if logs.Len() != 0 {
+		t.Fatalf("cancellation emitted logs: %v", logs.All())
+	}
+
+	logRequestFailure("request-1", 500, "internal_error", context.DeadlineExceeded)
+	entries := logs.FilterMessage("[admin] request failed").All()
+	if len(entries) != 1 || entries[0].Level != zapcore.WarnLevel {
+		t.Fatalf("timeout log = %v, want one warn entry", entries)
 	}
 }
