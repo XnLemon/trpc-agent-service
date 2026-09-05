@@ -79,8 +79,9 @@ Secret value 或 live client。
 
 ## 4. RunnerRegistry
 
-`trpcservice/runtime/runner` 持有由它创建的 Runner，借用调用方提供的 Session service、Secret Resolver、
-Model Factory 等共享依赖，不在关闭时关闭借用资源。
+`trpcservice/runtime/runner` 只持有由它创建的 Runner，并管理缓存、lease、失效和关闭；具体的
+Agent/Model/Storage 组装由 `trpcservice/agent/runnerfactory` 和 runtime-owned materializer 完成。
+Registry 不直接依赖具体 Agent、Secret Resolver、Model Factory 或 Storage Factory。
 
 ### 生命周期契约
 

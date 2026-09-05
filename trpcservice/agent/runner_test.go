@@ -8,8 +8,8 @@ import (
 	"time"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
@@ -22,7 +22,7 @@ import (
 func TestPolicyRunnerCloseReleasesDelegateAndCapabilities(t *testing.T) {
 	delegate := &agentClosingRunner{err: errors.New("delegate close failure")}
 	capability := &agentCloseTrackingSession{Service: inmemory.NewSessionService(), err: errors.New("capability close failure")}
-	set, err := backend.NewCapabilitySet("t_00000000000000000000000000", map[backend.Capability]any{backend.CapabilitySession: capability})
+	set, err := storagefactory.NewCapabilitySet("t_00000000000000000000000000", map[storagefactory.Capability]any{storagefactory.CapabilitySession: capability})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
@@ -209,16 +210,20 @@ func TestNewRunnerValidatesAndClosesStorageCapabilities(t *testing.T) {
 	if _, err := agent.NewRunner(context.Background(), agentRunnerInputForTest(t, plan), nil, &runtimeModelFactory{}, nil, nil); err == nil {
 		t.Fatal("nil storage factory unexpectedly succeeded")
 	}
-	if _, err := agent.NewRunner(context.Background(), agentRunnerInputForTest(t, plan), nil, &runtimeModelFactory{}, nil, backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) { return nil, nil }), backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) { return nil, nil })); err == nil {
+	if _, err := agent.NewRunner(context.Background(), agentRunnerInputForTest(t, plan), nil, &runtimeModelFactory{}, nil, storagefactory.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
+		return nil, nil
+	}), storagefactory.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
+		return nil, nil
+	})); err == nil {
 		t.Fatal("multiple storage factories unexpectedly succeeded")
 	}
 
 	closed := &runtimeCloseTrackingSession{Service: inmemory.NewSessionService()}
-	factory := backend.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+	factory := storagefactory.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
 		if input.TenantID != fixture.root.TenantID {
 			t.Fatalf("storage input tenant = %q", input.TenantID)
 		}
-		return backend.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: closed})
+		return storagefactory.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: closed})
 	})
 	if _, err := agent.NewRunner(context.Background(), agentRunnerInputForTest(t, plan), nil, &runtimeModelFactory{err: errors.New("model unavailable")}, nil, factory); err == nil {
 		t.Fatal("model setup failure unexpectedly succeeded")
@@ -226,8 +231,8 @@ func TestNewRunnerValidatesAndClosesStorageCapabilities(t *testing.T) {
 	if closed.calls != 1 {
 		t.Fatalf("storage capability close calls = %d", closed.calls)
 	}
-	missingSession := backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
-		return backend.NewCapabilitySet(fixture.root.TenantID, map[backend.Capability]any{backend.CapabilityMemory: struct{}{}})
+	missingSession := storagefactory.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
+		return storagefactory.NewCapabilitySet(fixture.root.TenantID, map[backend.Capability]any{backend.CapabilityMemory: struct{}{}})
 	})
 	if _, err := agent.NewRunner(context.Background(), agentRunnerInputForTest(t, plan), nil, &runtimeModelFactory{}, nil, missingSession); err == nil || !strings.Contains(err.Error(), "session capability") {
 		t.Fatalf("missing session capability error = %v", err)

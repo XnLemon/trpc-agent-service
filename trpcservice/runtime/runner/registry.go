@@ -9,14 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
-	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcrunner "trpc.group/trpc-go/trpc-agent-go/runner"
-	"trpc.group/trpc-go/trpc-agent-go/session"
 )
 
 var (
@@ -128,37 +122,6 @@ func NewRunnerRegistry(config RunnerRegistryConfig) (*RunnerRegistry, error) {
 		closeTimeout: config.CloseTimeout, now: config.Now,
 		entries: make(map[runtime.CacheKey]*runnerEntry), pending: make(map[runtime.CacheKey]*runnerBuild),
 	}, nil
-}
-
-// RuntimeRunnerRegistryConfig wires agent.NewRunner into a registry. The
-// Session service, Secret Resolver, and Model Factory are borrowed by the
-// registry and remain owned by the caller.
-type RuntimeRunnerRegistryConfig struct {
-	Registry       RunnerRegistryConfig
-	SecretResolver model.SecretResolver
-	ModelFactory   model.ModelFactory
-	Sessions       session.Service
-	StorageFactory backend.StorageFactory
-	Observability  observability.Provider
-	ToolRegistry   *servicetool.Registry
-}
-
-// NewRuntimeRunnerRegistry creates a registry backed by agent.NewRunner.
-func NewRuntimeRunnerRegistry(config RuntimeRunnerRegistryConfig) (*RunnerRegistry, error) {
-	if config.ModelFactory == nil || (config.Sessions == nil && config.StorageFactory == nil) {
-		return nil, fmt.Errorf("%w: runtime Runner dependencies are required", ErrInvalid)
-	}
-	config.Registry.Factory = func(ctx context.Context, plan runtime.ExecutionPlan) (Runner, error) {
-		input, err := plan.AgentRunnerInput()
-		if err != nil {
-			return nil, err
-		}
-		if config.StorageFactory != nil {
-			return agent.NewRunnerWithToolRegistry(ctx, input, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability, config.ToolRegistry, config.StorageFactory)
-		}
-		return agent.NewRunnerWithToolRegistry(ctx, input, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability, config.ToolRegistry)
-	}
-	return NewRunnerRegistry(config.Registry)
 }
 
 // Ready reports whether the registry can accept a new lease.

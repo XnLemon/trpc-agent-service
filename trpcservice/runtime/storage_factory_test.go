@@ -10,6 +10,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
@@ -22,12 +23,12 @@ func TestNewRunnerMaterializesPlanStorageCapability(t *testing.T) {
 	}
 	sessions := inmemory.NewSessionService()
 	builds := 0
-	factory := backend.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+	factory := storagefactory.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
 		if input.TenantID != fixture.root.TenantID {
 			t.Fatalf("storage factory tenant = %q", input.TenantID)
 		}
 		builds++
-		set, err := backend.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: sessions})
+		set, err := storagefactory.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: sessions})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -57,8 +58,8 @@ func TestNewRunnerClosesStorageCapabilityWhenModelBuildFails(t *testing.T) {
 	base := inmemory.NewSessionService()
 	var closes atomic.Int32
 	service := &closeCountingSession{Service: base, closes: &closes}
-	factory := backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
-		return backend.NewCapabilitySet(fixture.root.TenantID, map[backend.Capability]any{backend.CapabilitySession: service})
+	factory := storagefactory.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
+		return storagefactory.NewCapabilitySet(fixture.root.TenantID, map[backend.Capability]any{backend.CapabilitySession: service})
 	})
 	if _, err := agent.NewRunner(context.Background(), agentRunnerInputForTest(t, plan), nil, &runtimeModelFactory{err: errors.New("factory failed")}, nil, factory); err == nil {
 		t.Fatal("NewRunner unexpectedly succeeded")
@@ -74,8 +75,8 @@ func TestNewRunnerWithObservabilityRecordsStorageFactorySuccess(t *testing.T) {
 	plan := newExecutionPlanForRunner(t, fixture)
 	telemetry := &runtimeTelemetryProvider{}
 	sessions := inmemory.NewSessionService()
-	factory := backend.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
-		return backend.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: sessions})
+	factory := storagefactory.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
+		return storagefactory.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: sessions})
 	})
 	runner, err := agent.NewRunnerWithObservability(context.Background(), agentRunnerInputForTest(t, plan), nil, &runtimeModelFactory{}, nil, telemetry, factory)
 	if err != nil {
@@ -95,7 +96,7 @@ func TestNewRunnerWithObservabilityRecordsStorageFactoryFailure(t *testing.T) {
 	plan := newExecutionPlanForRunner(t, fixture)
 	telemetry := &runtimeTelemetryProvider{}
 	factoryErr := errors.New("storage unavailable")
-	factory := backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+	factory := storagefactory.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
 		return nil, factoryErr
 	})
 	runner, err := agent.NewRunnerWithObservability(context.Background(), agentRunnerInputForTest(t, plan), nil, &runtimeModelFactory{}, nil, telemetry, factory)

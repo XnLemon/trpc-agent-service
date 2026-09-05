@@ -12,6 +12,8 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	modelruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/model"
+	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
@@ -42,7 +44,7 @@ func NewRunner(
 	resolver modelprofile.SecretResolver,
 	factory modelprofile.ModelFactory,
 	sessions session.Service,
-	storageFactories ...backend.StorageFactory,
+	storageFactories ...storagefactory.StorageFactory,
 ) (trpcrunner.Runner, error) {
 	return NewRunnerWithObservability(ctx, input, resolver, factory, sessions, nil, storageFactories...)
 }
@@ -55,7 +57,7 @@ func NewRunnerWithObservability(
 	factory modelprofile.ModelFactory,
 	sessions session.Service,
 	telemetry observability.Provider,
-	storageFactories ...backend.StorageFactory,
+	storageFactories ...storagefactory.StorageFactory,
 ) (trpcrunner.Runner, error) {
 	return NewRunnerWithToolRegistry(ctx, input, resolver, factory, sessions, telemetry, servicetool.DefaultRegistry(), storageFactories...)
 }
@@ -73,7 +75,7 @@ func NewRunnerWithToolRegistry(
 	sessions session.Service,
 	telemetry observability.Provider,
 	toolRegistry *servicetool.Registry,
-	storageFactories ...backend.StorageFactory,
+	storageFactories ...storagefactory.StorageFactory,
 ) (trpcrunner.Runner, error) {
 	if ctx == nil {
 		return nil, errors.New("invalid runner: context is required")
@@ -84,7 +86,7 @@ func NewRunnerWithToolRegistry(
 	agentInput := input.Agent.Clone()
 	modelInput := input.Model
 	var err error
-	var capabilities *backend.CapabilitySet
+	var capabilities *storagefactory.CapabilitySet
 	if len(storageFactories) > 1 {
 		return nil, errors.New("invalid runner: multiple storage factories")
 	}
@@ -132,7 +134,7 @@ func NewRunnerWithToolRegistry(
 	if err != nil {
 		return nil, fmt.Errorf("build runner: session scope: %w", err)
 	}
-	model, err := modelprofile.ResolveAndBuild(ctx, modelInput, resolver, factory)
+	model, err := modelruntime.ResolveAndBuild(ctx, modelInput, resolver, factory)
 	if err != nil {
 		return nil, fmt.Errorf("build runner: model: %w", err)
 	}
@@ -443,7 +445,7 @@ func telemetryOptions(provider observability.Provider, providerName, modelFamily
 // appended last so an execution cannot silently extend its control-plane limits.
 type policyRunner struct {
 	delegate     trpcrunner.Runner
-	capabilities *backend.CapabilitySet
+	capabilities *storagefactory.CapabilitySet
 	runOptions   []trpcagent.RunOption
 }
 

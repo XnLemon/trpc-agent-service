@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
+	agentrunnerfactory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/runnerfactory"
 	agentsessionstore "github.com/XnLemon/trpc-agent-service/trpcservice/agent/sessionstore"
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
@@ -37,6 +38,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
@@ -93,7 +95,7 @@ type Config struct {
 	BackendCatalog *backend.ProviderCatalog
 	SecretResolver modelprofile.SecretResolver
 	ModelFactory   modelprofile.ModelFactory
-	StorageFactory backend.StorageFactory
+	StorageFactory storagefactory.StorageFactory
 	Sessions       session.Service
 	// ToolRegistry resolves published revision authorizations to installed,
 	// context-bound platform tools. A nil value uses the built-in registry.
@@ -352,7 +354,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, ErrInvalidConfig
 	}
-	registry, err := runtimerunner.NewRuntimeRunnerRegistry(runtimerunner.RuntimeRunnerRegistryConfig{
+	registry, err := agentrunnerfactory.NewRuntimeRunnerRegistry(agentrunnerfactory.Config{
 		Registry: config.Registry, SecretResolver: config.SecretResolver,
 		ModelFactory: config.ModelFactory, Sessions: config.Sessions, StorageFactory: config.StorageFactory,
 		Observability: config.Observability, ToolRegistry: config.ToolRegistry,
