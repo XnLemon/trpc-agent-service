@@ -2,7 +2,10 @@ module github.com/XnLemon/trpc-agent-service
 
 go 1.21
 
-require trpc.group/trpc-go/trpc-agent-go v1.11.2
+require (
+	go.uber.org/zap v1.27.0
+	trpc.group/trpc-go/trpc-agent-go v1.11.2
+)
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
@@ -62,7 +65,6 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.29.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.3.1 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
-	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/net v0.34.0 // indirect
 	golang.org/x/sync v0.10.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
