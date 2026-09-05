@@ -11,9 +11,7 @@ import (
 	"os"
 	"time"
 
-	servicelog "github.com/XnLemon/trpc-agent-service/trpcservice/log"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 const (
@@ -34,19 +32,6 @@ func main() {
 		packageLog.Error("health check failed", zap.Error(err))
 		exitProcess(1)
 	}
-}
-
-func configureLogger(output io.Writer) (func(), error) {
-	logger, err := servicelog.New(servicelog.Config{
-		Level:       zapcore.InfoLevel,
-		Encoding:    servicelog.EncodingConsole,
-		Output:      output,
-		ErrorOutput: output,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return servicelog.SetDefault(logger), nil
 }
 
 func run(args []string) error {

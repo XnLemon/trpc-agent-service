@@ -18,10 +18,8 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
-	servicelog "github.com/XnLemon/trpc-agent-service/trpcservice/log"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 const (
@@ -84,19 +82,6 @@ func main() {
 		packageLog.Error("service command failed", zap.Error(err))
 		os.Exit(1)
 	}
-}
-
-func configureLogger(output io.Writer) (func(), error) {
-	logger, err := servicelog.New(servicelog.Config{
-		Level:       zapcore.InfoLevel,
-		Encoding:    servicelog.EncodingConsole,
-		Output:      output,
-		ErrorOutput: output,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return servicelog.SetDefault(logger), nil
 }
 
 func runMain(ctx context.Context, args []string, stdout, stderr io.Writer, signals <-chan os.Signal) error {

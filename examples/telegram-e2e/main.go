@@ -24,12 +24,10 @@ import (
 	channelsinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/telegram"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
-	servicelog "github.com/XnLemon/trpc-agent-service/trpcservice/log"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 const (
@@ -79,19 +77,6 @@ func main() {
 		packageLog.Error("telegram E2E failed", zap.Error(err))
 		os.Exit(1)
 	}
-}
-
-func configureLogger(output io.Writer) (func(), error) {
-	logger, err := servicelog.New(servicelog.Config{
-		Level:       zapcore.InfoLevel,
-		Encoding:    servicelog.EncodingConsole,
-		Output:      output,
-		ErrorOutput: output,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return servicelog.SetDefault(logger), nil
 }
 
 func run(ctx context.Context, lookup func(string) string, stdout io.Writer) error {
