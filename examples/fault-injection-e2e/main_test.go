@@ -379,68 +379,28 @@ func (fixture controlPlaneFixture) createTenant(t *testing.T, suffix string) (*t
 	if err != nil {
 		t.Fatal(err)
 	}
-	backendProfile, err := fixture.createSessionBackendProfile(ctx, root.TenantID)
+	backendProfile, _, err := fixture.backends.Create(ctx, backend.CreateInput{TenantID: root.TenantID, ProfileKey: "session", DisplayName: "Session", Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory"}}, Metadata: backend.ChangeMetadata{ActorType: "example", ActorID: "fault-e2e", Reason: "fixture", CorrelationID: "fault-e2e"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	published, err := fixture.createPublishedApp(ctx, root, modelProfile, suffix)
+	appRoot, err := fixture.apps.Create(ctx, appmodel.CreateInput{TenantID: root.TenantID, AppKey: "fault-app-" + suffix, DisplayName: "Fault App " + suffix, Description: "Deterministic fault-injection E2E"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, err := fixture.configureTenantDefaults(ctx, root, published, backendProfile)
+	draft, err := fixture.apps.CreateDraft(ctx, appmodel.CreateDraftInput{TenantID: root.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version, Configuration: appmodel.DraftConfiguration{Instruction: "Reply deterministically.", ModelProfileID: modelProfile.ProfileID, Runtime: appmodel.DefaultRuntimePolicy()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, err := fixture.publishDraft(ctx, root, appRoot, draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appID, backendID := published.AppID, backendProfile.ProfileID
+	updated, err := fixture.tenants.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{TenantID: root.TenantID, ExpectedVersion: root.Version, DisplayName: root.DisplayName, AuditRetentionDays: root.AuditRetentionDays, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1, DefaultAgentAppID: &appID, DefaultBackendProfileID: &backendID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return updated, published
-}
-
-func (fixture controlPlaneFixture) createSessionBackendProfile(ctx context.Context, tenantID string) (*backend.Profile, error) {
-	profile, _, err := fixture.backends.Create(ctx, backend.CreateInput{
-		TenantID: tenantID, ProfileKey: "session", DisplayName: "Session",
-		Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory"}},
-		Metadata: backend.ChangeMetadata{ActorType: "example", ActorID: "fault-e2e", Reason: "fixture", CorrelationID: "fault-e2e"},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create session backend profile: %w", err)
-	}
-	return profile, nil
-}
-
-func (fixture controlPlaneFixture) createPublishedApp(ctx context.Context, root *tenant.Tenant, modelProfile *model.Profile, suffix string) (*appmodel.App, error) {
-	if root == nil || modelProfile == nil {
-		return nil, errors.New("fixture app requires tenant and model profile")
-	}
-	appRoot, err := fixture.apps.Create(ctx, appmodel.CreateInput{
-		TenantID: root.TenantID, AppKey: "fault-app-" + suffix,
-		DisplayName: "Fault App " + suffix, Description: "Deterministic fault-injection E2E",
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create fault app: %w", err)
-	}
-	draft, err := fixture.apps.CreateDraft(ctx, appmodel.CreateDraftInput{
-		TenantID: root.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version,
-		Configuration: appmodel.DraftConfiguration{Instruction: "Reply deterministically.", ModelProfileID: modelProfile.ProfileID, Runtime: appmodel.DefaultRuntimePolicy()},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create fault app draft: %w", err)
-	}
-	return fixture.publishDraft(ctx, root, appRoot, draft)
-}
-
-func (fixture controlPlaneFixture) configureTenantDefaults(ctx context.Context, root *tenant.Tenant, app *appmodel.App, backendProfile *backend.Profile) (*tenant.Tenant, error) {
-	if root == nil || app == nil || backendProfile == nil {
-		return nil, errors.New("fixture defaults require tenant, app, and backend profile")
-	}
-	appID, backendID := app.AppID, backendProfile.ProfileID
-	updated, err := fixture.tenants.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{
-		TenantID: root.TenantID, ExpectedVersion: root.Version, DisplayName: root.DisplayName,
-		AuditRetentionDays: root.AuditRetentionDays, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1,
-		DefaultAgentAppID: &appID, DefaultBackendProfileID: &backendID,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("configure fault tenant defaults: %w", err)
-	}
-	return updated, nil
 }
 
 type faultRunner struct {
