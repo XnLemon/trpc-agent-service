@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -283,7 +283,7 @@ func TestRoutingAndScopeValidationBoundaries(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		binding  *Binding
-		app      *agent.App
+		app      *appmodel.App
 		verified VerifiedBinding
 		snapshot tenant.ConfigurationSnapshot
 	}{
@@ -299,7 +299,7 @@ func TestRoutingAndScopeValidationBoundaries(t *testing.T) {
 			value.BindingID = "cb_00000000000000000000000000"
 			return value
 		}(), snapshot: validSnapshot},
-		{name: "app tenant mismatch", binding: binding, app: func() *agent.App {
+		{name: "app tenant mismatch", binding: binding, app: func() *appmodel.App {
 			value := validApp.Clone()
 			value.TenantID = "t_00000000000000000000000001"
 			return &value
@@ -595,22 +595,22 @@ func testConfigurationSnapshot(t *testing.T, tenantID string) tenant.Configurati
 	return snapshot
 }
 
-func testActiveApp(t *testing.T, tenantID, appID string) *agent.App {
+func testActiveApp(t *testing.T, tenantID, appID string) *appmodel.App {
 	t.Helper()
-	app, err := agent.NewApp(agent.CreateInput{TenantID: tenantID, AppKey: "snapshot-app", DisplayName: "Snapshot App", Description: "test"})
+	appRoot, err := appmodel.NewApp(appmodel.CreateInput{TenantID: tenantID, AppKey: "snapshot-app", DisplayName: "Snapshot App", Description: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	app.AppID = appID
+	appRoot.AppID = appID
 	revision := int64(1)
-	app.Status = agent.StatusActive
-	app.CurrentRevision = &revision
-	app.Version = 2
-	app.UpdatedAt = app.CreatedAt.Add(time.Second)
-	if err := app.Validate(); err != nil {
+	appRoot.Status = appmodel.StatusActive
+	appRoot.CurrentRevision = &revision
+	appRoot.Version = 2
+	appRoot.UpdatedAt = appRoot.CreatedAt.Add(time.Second)
+	if err := appRoot.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	return app
+	return appRoot
 }
 
 func validChangeMetadata() ChangeMetadata {

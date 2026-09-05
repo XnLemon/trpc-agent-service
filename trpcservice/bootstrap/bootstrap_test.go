@@ -16,8 +16,8 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -300,8 +300,11 @@ func TestBootstrapFailureAndLifecycleBoundaries(t *testing.T) {
 func TestBootstrapCoversConstructionFailureBoundaries(t *testing.T) {
 	config, closeDependencies := testConfig(t)
 	defer closeDependencies()
-	config.RuntimeTenantID = "invalid"
+	config.RuntimeTenantID = "runtime-tenant"
 	config.Sessions = nil
+	config.StorageFactory = backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+		return nil, nil
+	})
 	if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("invalid runtime tenant configuration = %v", err)
 	}
@@ -1597,7 +1600,7 @@ func createBootstrapTenantExecutionState(
 	models *modelmemory.InMemoryRepository,
 	backends *backendmemory.InMemoryRepository,
 	tenantKey, appKey, modelName, secretRef string,
-) (*tenant.Tenant, *agent.App) {
+) (*tenant.Tenant, *appmodel.App) {
 	t.Helper()
 	root, err := tenants.Create(context.Background(), tenant.CreateInput{TenantKey: tenantKey, DisplayName: tenantKey, AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1})
 	if err != nil {
@@ -1619,20 +1622,20 @@ func createBootstrapTenantExecutionState(
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, err := apps.Create(context.Background(), agent.CreateInput{TenantID: root.TenantID, AppKey: appKey, DisplayName: appKey})
+	app, err := apps.Create(context.Background(), appmodel.CreateInput{TenantID: root.TenantID, AppKey: appKey, DisplayName: appKey})
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft, err := apps.CreateDraft(context.Background(), agent.CreateDraftInput{
+	draft, err := apps.CreateDraft(context.Background(), appmodel.CreateDraftInput{
 		TenantID: root.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version,
-		Configuration: agent.DraftConfiguration{Instruction: "answer", ModelProfileID: profile.ProfileID, Runtime: agent.DefaultRuntimePolicy()},
+		Configuration: appmodel.DraftConfiguration{Instruction: "answer", ModelProfileID: profile.ProfileID, Runtime: appmodel.DefaultRuntimePolicy()},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	published, _, _, err := apps.Publish(context.Background(), agent.PublishInput{
+	published, _, _, err := apps.Publish(context.Background(), appmodel.PublishInput{
 		TenantID: root.TenantID, AppID: app.AppID, Revision: draft.Revision, ExpectedAppVersion: app.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true,
-		Metadata: agent.ChangeMetadata{ActorType: "test", ActorID: "bootstrap", Reason: "fixture", CorrelationID: tenantKey},
+		Metadata: appmodel.ChangeMetadata{ActorType: "test", ActorID: "bootstrap", Reason: "fixture", CorrelationID: tenantKey},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1747,7 +1750,7 @@ func (*bootstrapBlockingProvider) Reconcile(context.Context, runtimestorage.Repl
 
 var (
 	_ tenant.Repository          = (*tenantmemory.InMemoryRepository)(nil)
-	_ agent.Repository           = (*agentmemory.InMemoryRepository)(nil)
+	_ appmodel.Repository        = (*agentmemory.InMemoryRepository)(nil)
 	_ channels.CandidateConsumer = (*channelmemory.InMemoryRepository)(nil)
 	_ session.Service            = (*inmemory.SessionService)(nil)
 )

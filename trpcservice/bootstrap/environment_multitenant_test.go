@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	agentsessionstore "github.com/XnLemon/trpc-agent-service/trpcservice/agent/sessionstore"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
-	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestorageredis "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
@@ -295,7 +295,7 @@ func TestEnvironmentRuntimeCapabilityProviderNew(t *testing.T) {
 		capability backend.Capability
 		matches    func(any) bool
 	}{
-		{name: "session", capability: backend.CapabilitySession, matches: func(value any) bool { _, ok := value.(*runtimesessionpostgres.Service); return ok }},
+		{name: "session", capability: backend.CapabilitySession, matches: func(value any) bool { _, ok := value.(*agentsessionstore.Service); return ok }},
 		{name: "memory", capability: backend.CapabilityMemory, matches: func(value any) bool { _, ok := value.(borrowedMemoryStore); return ok }},
 		{name: "summary", capability: backend.CapabilitySummary, matches: func(value any) bool { _, ok := value.(borrowedSummaryStore); return ok }},
 		{name: "knowledge", capability: backend.CapabilityKnowledge, matches: func(value any) bool { _, ok := value.(borrowedKnowledgeStore); return ok }},

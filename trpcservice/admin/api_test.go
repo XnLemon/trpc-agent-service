@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
@@ -68,7 +68,7 @@ func TestRecordMutationAuditsRawResourceMutation(t *testing.T) {
 func TestRecordMutationUsesDraftVersionForRawRevision(t *testing.T) {
 	w := &adminAuditWriter{}
 	h := &Handler{config: Config{AuditWriter: w}}
-	revision := agent.Revision{TenantID: "tenant-a", DraftVersion: 3, Revision: 7}
+	revision := appmodel.Revision{TenantID: "tenant-a", DraftVersion: 3, Revision: 7}
 	if err := h.recordMutation(context.Background(), Principal{SubjectID: "admin-1"}, "request-draft", &revision); err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +369,7 @@ func TestAdminInvalidatesOnlyTheMutatedRuntimeScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler.config.Authenticator = authenticator
-	app, err := handler.config.Apps.Create(context.Background(), agent.CreateInput{TenantID: tenantValue.TenantID, AppKey: "invalidate", DisplayName: "Invalidate"})
+	app, err := handler.config.Apps.Create(context.Background(), appmodel.CreateInput{TenantID: tenantValue.TenantID, AppKey: "invalidate", DisplayName: "Invalidate"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,46 +615,46 @@ func TestAdminHappyPathCoversResourceMutations(t *testing.T) {
 
 func TestAdminCanaryRouteBuildsTenantScopedMutation(t *testing.T) {
 	fixture := newAdminMutationFixture(t)
-	app := createAndPublishAdminRevision(t, fixture)
-	stored, err := fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, app.AppID)
+	appRoot := createAndPublishAdminRevision(t, fixture)
+	stored, err := fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, appRoot.AppID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate, err := fixture.handler.config.Apps.CreateDraft(context.Background(), agent.CreateDraftInput{
-		TenantID: fixture.root.TenantID, AppID: app.AppID, ExpectedAppVersion: stored.Version, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1,
-		Configuration: agent.DraftConfiguration{Instruction: "candidate", ModelProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", Runtime: agent.DefaultRuntimePolicy()},
+	candidate, err := fixture.handler.config.Apps.CreateDraft(context.Background(), appmodel.CreateDraftInput{
+		TenantID: fixture.root.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: stored.Version, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1,
+		Configuration: appmodel.DraftConfiguration{Instruction: "candidate", ModelProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", Runtime: appmodel.DefaultRuntimePolicy()},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored, err = fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, app.AppID)
+	stored, err = fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, appRoot.AppID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, err = fixture.handler.config.Apps.Publish(context.Background(), agent.PublishInput{
-		TenantID: fixture.root.TenantID, AppID: app.AppID, Revision: candidate.Revision, ExpectedAppVersion: stored.Version, ExpectedDraftVersion: candidate.DraftVersion, TenantActive: true,
-		Metadata: agent.ChangeMetadata{ActorType: "admin", ActorID: fixture.principal.SubjectID, Reason: "publish candidate", CorrelationID: "admin-canary-publish"},
+	_, _, _, err = fixture.handler.config.Apps.Publish(context.Background(), appmodel.PublishInput{
+		TenantID: fixture.root.TenantID, AppID: appRoot.AppID, Revision: candidate.Revision, ExpectedAppVersion: stored.Version, ExpectedDraftVersion: candidate.DraftVersion, TenantActive: true,
+		Metadata: appmodel.ChangeMetadata{ActorType: "admin", ActorID: fixture.principal.SubjectID, Reason: "publish candidate", CorrelationID: "admin-canary-publish"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored, err = fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, app.AppID)
+	stored, err = fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, appRoot.AppID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	stableRevision := int64(1)
 	body := "{\"expected_app_version\":" + strconv.FormatInt(stored.Version, 10) + ",\"candidate_revision\":" + strconv.FormatInt(stableRevision, 10) + ",\"reason\":\"start canary\",\"correlation_id\":\"admin-canary\"}"
 	request := fixture.request(http.MethodPost, body)
-	status, value, err := fixture.handler.apps(context.Background(), request, fixture.principal, fixture.root.TenantID, []string{app.AppID, "canary"})
+	status, value, err := fixture.handler.apps(context.Background(), request, fixture.principal, fixture.root.TenantID, []string{appRoot.AppID, "canary"})
 	if status != http.StatusOK || value == nil || err != nil {
 		t.Fatalf("canary route = status %d value %#v err %v", status, value, err)
 	}
-	selected, err := fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, app.AppID)
+	selected, err := fixture.handler.config.Apps.Get(context.Background(), fixture.root.TenantID, appRoot.AppID)
 	if err != nil || selected.CanaryRevision == nil || *selected.CanaryRevision != stableRevision {
 		t.Fatalf("canary selection = app=%+v err=%v", selected, err)
 	}
 	clearBody := "{\"expected_app_version\":" + strconv.FormatInt(selected.Version, 10) + ",\"reason\":\"clear canary\",\"correlation_id\":\"admin-canary-clear\"}"
-	status, value, err = fixture.handler.apps(context.Background(), fixture.request(http.MethodPost, clearBody), fixture.principal, fixture.root.TenantID, []string{app.AppID, "canary"})
+	status, value, err = fixture.handler.apps(context.Background(), fixture.request(http.MethodPost, clearBody), fixture.principal, fixture.root.TenantID, []string{appRoot.AppID, "canary"})
 	if status != http.StatusOK || value == nil || err != nil {
 		t.Fatalf("canary clear route = status %d value %#v err %v", status, value, err)
 	}
@@ -739,30 +739,30 @@ func assertAdminBackendMutation(t *testing.T, fixture adminMutationFixture) {
 	}
 }
 
-func createAndPublishAdminRevision(t *testing.T, fixture adminMutationFixture) *agent.App {
+func createAndPublishAdminRevision(t *testing.T, fixture adminMutationFixture) *appmodel.App {
 	t.Helper()
-	app, err := fixture.handler.config.Apps.Create(context.Background(), agent.CreateInput{TenantID: fixture.root.TenantID, AppKey: "support", DisplayName: "Support"})
+	appRoot, err := fixture.handler.config.Apps.Create(context.Background(), appmodel.CreateInput{TenantID: fixture.root.TenantID, AppKey: "support", DisplayName: "Support"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	draftBody := "{\"expected_app_version\":1,\"kind\":\"llm\",\"schema_version\":1,\"configuration\":{\"instruction\":\"answer\",\"model_profile_id\":\"mp_01ARZ3NDEKTSV4RRFFQ69G5FAV\"}}"
-	status, draftValue, err := fixture.handler.revisions(context.Background(), fixture.request(http.MethodPost, draftBody), fixture.principal, fixture.root.TenantID, app.AppID, nil)
+	status, draftValue, err := fixture.handler.revisions(context.Background(), fixture.request(http.MethodPost, draftBody), fixture.principal, fixture.root.TenantID, appRoot.AppID, nil)
 	if err != nil || status != http.StatusCreated {
 		t.Fatalf("draft create = %d, %v", status, err)
 	}
-	draft := draftValue.(*agent.Revision)
+	draft := draftValue.(*appmodel.Revision)
 	updateBody := "{\"expected_app_version\":1,\"expected_draft_version\":1,\"configuration\":{\"instruction\":\"answer updated\",\"model_profile_id\":\"mp_01ARZ3NDEKTSV4RRFFQ69G5FAV\"}}"
-	if status, _, err := fixture.handler.revisions(context.Background(), fixture.request(http.MethodPatch, updateBody), fixture.principal, fixture.root.TenantID, app.AppID, []string{strconv.FormatInt(draft.Revision, 10)}); err != nil || status != http.StatusOK {
+	if status, _, err := fixture.handler.revisions(context.Background(), fixture.request(http.MethodPatch, updateBody), fixture.principal, fixture.root.TenantID, appRoot.AppID, []string{strconv.FormatInt(draft.Revision, 10)}); err != nil || status != http.StatusOK {
 		t.Fatalf("draft update = %d, %v", status, err)
 	}
 	publishBody := "{\"expected_app_version\":1,\"expected_draft_version\":2,\"reason\":\"publish\",\"correlation_id\":\"happy-publish\"}"
-	if status, _, err := fixture.handler.revisions(context.Background(), fixture.request(http.MethodPost, publishBody), fixture.principal, fixture.root.TenantID, app.AppID, []string{strconv.FormatInt(draft.Revision, 10), "publish"}); err != nil || status != http.StatusOK {
+	if status, _, err := fixture.handler.revisions(context.Background(), fixture.request(http.MethodPost, publishBody), fixture.principal, fixture.root.TenantID, appRoot.AppID, []string{strconv.FormatInt(draft.Revision, 10), "publish"}); err != nil || status != http.StatusOK {
 		t.Fatalf("draft publish = %d, %v", status, err)
 	}
-	return app
+	return appRoot
 }
 
-func assertAdminBindingMutation(t *testing.T, fixture adminMutationFixture, app *agent.App) {
+func assertAdminBindingMutation(t *testing.T, fixture adminMutationFixture, app *appmodel.App) {
 	t.Helper()
 	bindingBody := "{\"binding_key\":\"primary\",\"channel\":\"wecom\",\"provider_account_id\":\"corp\",\"public_route_key_digest\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"app_id\":\"" + app.AppID + "\",\"secret_ref\":\"secret/corp\",\"reason\":\"create\",\"correlation_id\":\"happy-3\",\"protocol\":{\"wecom\":{\"corp_id\":\"corp\"}}}"
 	status, bindingValue, err := fixture.handler.bindings(context.Background(), fixture.request(http.MethodPost, bindingBody), fixture.principal, fixture.root.TenantID, nil)
@@ -781,11 +781,11 @@ func TestAdminErrorMappingCategories(t *testing.T) {
 		status int
 	}{
 		{ErrUnauthenticated, http.StatusUnauthorized}, {ErrForbidden, http.StatusForbidden}, {errNotFound, http.StatusNotFound},
-		{tenant.ErrConflict, http.StatusConflict}, {agent.ErrConflict, http.StatusConflict}, {modelprofile.ErrConflict, http.StatusConflict},
+		{tenant.ErrConflict, http.StatusConflict}, {appmodel.ErrConflict, http.StatusConflict}, {modelprofile.ErrConflict, http.StatusConflict},
 		{backend.ErrConflict, http.StatusConflict}, {channels.ErrConflict, http.StatusConflict}, {postgres.ErrStorage, http.StatusServiceUnavailable},
-		{tenant.ErrInvalid, http.StatusBadRequest}, {agent.ErrInvalidTransition, http.StatusBadRequest}, {modelprofile.ErrDisabled, http.StatusBadRequest},
+		{tenant.ErrInvalid, http.StatusBadRequest}, {appmodel.ErrInvalidTransition, http.StatusBadRequest}, {modelprofile.ErrDisabled, http.StatusBadRequest},
 		{backend.ErrInvalidTransition, http.StatusBadRequest}, {channels.ErrDisabled, http.StatusBadRequest}, {errInvalidRequest, http.StatusBadRequest},
-		{tenant.ErrDuplicateKey, http.StatusConflict}, {agent.ErrDuplicateKey, http.StatusConflict}, {modelprofile.ErrDuplicateKey, http.StatusConflict},
+		{tenant.ErrDuplicateKey, http.StatusConflict}, {appmodel.ErrDuplicateKey, http.StatusConflict}, {modelprofile.ErrDuplicateKey, http.StatusConflict},
 		{backend.ErrDuplicateKey, http.StatusConflict}, {channels.ErrDuplicateKey, http.StatusConflict},
 	}
 	for _, tc := range cases {

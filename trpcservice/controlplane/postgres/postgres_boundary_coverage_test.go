@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -36,16 +36,16 @@ func TestPostgreSQLRepositoriesPrioritizeCanceledContext(t *testing.T) {
 			_, _, err := tenants.TransitionStatus(canceled, tenant.TransitionStatusInput{})
 			return err
 		}},
-		{name: "agent create", action: func() error { _, err := agents.Create(canceled, agent.CreateInput{}); return err }},
+		{name: "agent create", action: func() error { _, err := agents.Create(canceled, appmodel.CreateInput{}); return err }},
 		{name: "agent get", action: func() error { _, err := agents.Get(canceled, "tenant", "app"); return err }},
-		{name: "agent metadata", action: func() error { _, err := agents.UpdateMetadata(canceled, agent.UpdateMetadataInput{}); return err }},
-		{name: "agent create draft", action: func() error { _, err := agents.CreateDraft(canceled, agent.CreateDraftInput{}); return err }},
-		{name: "agent update draft", action: func() error { _, err := agents.UpdateDraft(canceled, agent.UpdateDraftInput{}); return err }},
+		{name: "agent metadata", action: func() error { _, err := agents.UpdateMetadata(canceled, appmodel.UpdateMetadataInput{}); return err }},
+		{name: "agent create draft", action: func() error { _, err := agents.CreateDraft(canceled, appmodel.CreateDraftInput{}); return err }},
+		{name: "agent update draft", action: func() error { _, err := agents.UpdateDraft(canceled, appmodel.UpdateDraftInput{}); return err }},
 		{name: "agent revision", action: func() error { _, err := agents.GetRevision(canceled, "tenant", "app", 1); return err }},
-		{name: "agent publish", action: func() error { _, _, _, err := agents.Publish(canceled, agent.PublishInput{}); return err }},
-		{name: "agent rollback", action: func() error { _, _, err := agents.Rollback(canceled, agent.RollbackInput{}); return err }},
+		{name: "agent publish", action: func() error { _, _, _, err := agents.Publish(canceled, appmodel.PublishInput{}); return err }},
+		{name: "agent rollback", action: func() error { _, _, err := agents.Rollback(canceled, appmodel.RollbackInput{}); return err }},
 		{name: "agent transition", action: func() error {
-			_, _, err := agents.TransitionStatus(canceled, agent.TransitionStatusInput{})
+			_, _, err := agents.TransitionStatus(canceled, appmodel.TransitionStatusInput{})
 			return err
 		}},
 		{name: "model create", action: func() error { _, _, err := models.Create(canceled, model.CreateInput{}); return err }},

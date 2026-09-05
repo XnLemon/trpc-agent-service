@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -159,30 +159,30 @@ func testPostgreSQLBackendDriverFailures(t *testing.T, db *sql.DB, ctx context.C
 func testPostgreSQLAgentDriverFailures(t *testing.T, db *sql.DB, ctx context.Context) {
 	t.Helper()
 	repo := NewAgentRepository(db)
-	md := agent.ChangeMetadata{ActorType: "test", ActorID: "unit", Reason: "exercise failure", CorrelationID: "error-path"}
+	md := appmodel.ChangeMetadata{ActorType: "test", ActorID: "unit", Reason: "exercise failure", CorrelationID: "error-path"}
 	assertPostgreSQLStorageErrors(t, []struct {
 		name string
 		run  func() error
 	}{
 		{"Create", func() error {
-			_, err := repo.Create(ctx, agent.CreateInput{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", AppKey: "primary", DisplayName: "Agent"})
+			_, err := repo.Create(ctx, appmodel.CreateInput{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", AppKey: "primary", DisplayName: "Agent"})
 			return err
 		}},
 		{"Get", func() error { _, err := repo.Get(ctx, "tenant", "app"); return err }},
-		{"Metadata", func() error { _, err := repo.UpdateMetadata(ctx, agent.UpdateMetadataInput{}); return err }},
-		{"Draft", func() error { _, err := repo.CreateDraft(ctx, agent.CreateDraftInput{}); return err }},
-		{"DraftUpdate", func() error { _, err := repo.UpdateDraft(ctx, agent.UpdateDraftInput{}); return err }},
+		{"Metadata", func() error { _, err := repo.UpdateMetadata(ctx, appmodel.UpdateMetadataInput{}); return err }},
+		{"Draft", func() error { _, err := repo.CreateDraft(ctx, appmodel.CreateDraftInput{}); return err }},
+		{"DraftUpdate", func() error { _, err := repo.UpdateDraft(ctx, appmodel.UpdateDraftInput{}); return err }},
 		{"Revision", func() error { _, err := repo.GetRevision(ctx, "tenant", "app", 1); return err }},
 		{"Publish", func() error {
-			_, _, _, err := repo.Publish(ctx, agent.PublishInput{TenantID: "tenant", AppID: "app", Revision: 1, ExpectedAppVersion: 1, ExpectedDraftVersion: 1, TenantActive: true, Metadata: md})
+			_, _, _, err := repo.Publish(ctx, appmodel.PublishInput{TenantID: "tenant", AppID: "app", Revision: 1, ExpectedAppVersion: 1, ExpectedDraftVersion: 1, TenantActive: true, Metadata: md})
 			return err
 		}},
 		{"Rollback", func() error {
-			_, _, err := repo.Rollback(ctx, agent.RollbackInput{TenantID: "tenant", AppID: "app", TargetRevision: 1, ExpectedAppVersion: 1, Metadata: md})
+			_, _, err := repo.Rollback(ctx, appmodel.RollbackInput{TenantID: "tenant", AppID: "app", TargetRevision: 1, ExpectedAppVersion: 1, Metadata: md})
 			return err
 		}},
 		{"Transition", func() error {
-			_, _, err := repo.TransitionStatus(ctx, agent.TransitionStatusInput{TenantID: "tenant", AppID: "app", ExpectedVersion: 1, NextStatus: agent.StatusSuspended, Metadata: md})
+			_, _, err := repo.TransitionStatus(ctx, appmodel.TransitionStatusInput{TenantID: "tenant", AppID: "app", ExpectedVersion: 1, NextStatus: appmodel.StatusSuspended, Metadata: md})
 			return err
 		}},
 	})

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -28,7 +28,7 @@ import (
 // Config supplies the repositories and authentication policy for an admin handler.
 type Config struct {
 	Tenants        tenant.Repository
-	Apps           agent.Repository
+	Apps           appmodel.Repository
 	Models         modelprofile.Repository
 	Backends       backend.Repository
 	Bindings       channels.Repository
@@ -458,7 +458,7 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
-		var input agent.CreateInput
+		var input appmodel.CreateInput
 		if err := decodeBody(r, &input); err != nil {
 			return 0, nil, err
 		}
@@ -473,7 +473,7 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 			value, err := h.config.Apps.Get(ctx, tenantID, appID)
 			return http.StatusOK, value, err
 		case http.MethodPatch:
-			var body agent.UpdateMetadataInput
+			var body appmodel.UpdateMetadataInput
 			if err := decodeBody(r, &body); err != nil {
 				return 0, nil, err
 			}
@@ -491,14 +491,14 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 		}
 		var body struct {
 			ExpectedVersion int64
-			NextStatus      agent.Status
+			NextStatus      appmodel.Status
 			Reason          string
 			CorrelationID   string
 		}
 		if err := decodeBody(r, &body); err != nil {
 			return 0, nil, err
 		}
-		value, event, err := h.config.Apps.TransitionStatus(ctx, agent.TransitionStatusInput{TenantID: tenantID, AppID: appID, ExpectedVersion: body.ExpectedVersion, NextStatus: body.NextStatus, Metadata: agent.ChangeMetadata{ActorType: "admin", ActorID: p.SubjectID, Reason: body.Reason, CorrelationID: body.CorrelationID}})
+		value, event, err := h.config.Apps.TransitionStatus(ctx, appmodel.TransitionStatusInput{TenantID: tenantID, AppID: appID, ExpectedVersion: body.ExpectedVersion, NextStatus: body.NextStatus, Metadata: appmodel.ChangeMetadata{ActorType: "admin", ActorID: p.SubjectID, Reason: body.Reason, CorrelationID: body.CorrelationID}})
 		return http.StatusOK, map[string]any{"app": value, "event": event}, err
 	case "revisions":
 		return h.revisions(ctx, r, p, tenantID, appID, parts[2:])
@@ -506,7 +506,7 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 		if len(parts) != 2 || r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
-		var body agent.RollbackInput
+		var body appmodel.RollbackInput
 		if err := decodeBody(r, &body); err != nil {
 			return 0, nil, err
 		}
@@ -531,10 +531,10 @@ func (h *Handler) apps(ctx context.Context, r *http.Request, p Principal, tenant
 		if err != nil {
 			return 0, nil, err
 		}
-		bodyInput := agent.SetCanaryInput{
+		bodyInput := appmodel.SetCanaryInput{
 			TenantID: tenantID, AppID: appID, CandidateRevision: body.CandidateRevision,
 			ExpectedAppVersion: body.ExpectedAppVersion, TenantActive: tenantRoot.Status == tenant.StatusActive,
-			Metadata: agent.ChangeMetadata{ActorType: "admin", ActorID: p.SubjectID, Reason: body.Reason, CorrelationID: body.CorrelationID},
+			Metadata: appmodel.ChangeMetadata{ActorType: "admin", ActorID: p.SubjectID, Reason: body.Reason, CorrelationID: body.CorrelationID},
 		}
 		value, event, err := h.config.Apps.SetCanary(ctx, bodyInput)
 		return http.StatusOK, map[string]any{"app": value, "event": event}, err
@@ -564,7 +564,7 @@ func (h *Handler) revisions(ctx context.Context, r *http.Request, p Principal, t
 		if r.Method != http.MethodPost {
 			return 0, nil, errNotFound
 		}
-		var body agent.CreateDraftInput
+		var body appmodel.CreateDraftInput
 		if err := decodeBody(r, &body); err != nil {
 			return 0, nil, err
 		}
@@ -580,7 +580,7 @@ func (h *Handler) revisions(ctx context.Context, r *http.Request, p Principal, t
 		if r.Method != http.MethodPatch {
 			return 0, nil, errNotFound
 		}
-		var body agent.UpdateDraftInput
+		var body appmodel.UpdateDraftInput
 		if err := decodeBody(r, &body); err != nil {
 			return 0, nil, err
 		}
@@ -591,7 +591,7 @@ func (h *Handler) revisions(ctx context.Context, r *http.Request, p Principal, t
 	if len(parts) != 2 || parts[1] != "publish" || r.Method != http.MethodPost {
 		return 0, nil, errNotFound
 	}
-	var body agent.PublishInput
+	var body appmodel.PublishInput
 	if err := decodeBody(r, &body); err != nil {
 		return 0, nil, err
 	}
@@ -917,15 +917,15 @@ func mapError(err error) (int, string) {
 		return http.StatusForbidden, "forbidden"
 	case errors.Is(err, audit.ErrWriteFailed):
 		return http.StatusServiceUnavailable, "audit_unavailable"
-	case matchesAny(err, errNotFound, tenant.ErrNotFound, agent.ErrNotFound, modelprofile.ErrNotFound, backend.ErrNotFound, channels.ErrNotFound):
+	case matchesAny(err, errNotFound, tenant.ErrNotFound, appmodel.ErrNotFound, modelprofile.ErrNotFound, backend.ErrNotFound, channels.ErrNotFound):
 		return http.StatusNotFound, "not_found"
-	case matchesAny(err, tenant.ErrConflict, agent.ErrConflict, modelprofile.ErrConflict, backend.ErrConflict, channels.ErrConflict, tenant.ErrDuplicateKey, agent.ErrDuplicateKey, modelprofile.ErrDuplicateKey, backend.ErrDuplicateKey, channels.ErrDuplicateKey):
+	case matchesAny(err, tenant.ErrConflict, appmodel.ErrConflict, modelprofile.ErrConflict, backend.ErrConflict, channels.ErrConflict, tenant.ErrDuplicateKey, appmodel.ErrDuplicateKey, modelprofile.ErrDuplicateKey, backend.ErrDuplicateKey, channels.ErrDuplicateKey):
 		return http.StatusConflict, "conflict"
 	case errors.Is(err, postgres.ErrStorage), errors.Is(err, storagemysql.ErrStorage):
 		return http.StatusServiceUnavailable, "storage_unavailable"
-	case matchesAny(err, tenant.ErrInvalid, agent.ErrInvalid, modelprofile.ErrInvalid, backend.ErrInvalid, channels.ErrInvalid):
+	case matchesAny(err, tenant.ErrInvalid, appmodel.ErrInvalid, modelprofile.ErrInvalid, backend.ErrInvalid, channels.ErrInvalid):
 		return http.StatusBadRequest, "invalid_request"
-	case matchesAny(err, tenant.ErrInvalidTransition, agent.ErrInvalidTransition, modelprofile.ErrInvalidTransition, backend.ErrInvalidTransition, channels.ErrInvalidTransition, tenant.ErrDisabled, agent.ErrDisabled, modelprofile.ErrDisabled, backend.ErrDisabled, channels.ErrDisabled, agent.ErrImmutableRevision):
+	case matchesAny(err, tenant.ErrInvalidTransition, appmodel.ErrInvalidTransition, modelprofile.ErrInvalidTransition, backend.ErrInvalidTransition, channels.ErrInvalidTransition, tenant.ErrDisabled, appmodel.ErrDisabled, modelprofile.ErrDisabled, backend.ErrDisabled, channels.ErrDisabled, appmodel.ErrImmutableRevision):
 		return http.StatusBadRequest, "invalid_request"
 	default:
 		return http.StatusInternalServerError, "internal_error"

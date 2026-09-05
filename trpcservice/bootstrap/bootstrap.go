@@ -13,10 +13,11 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
-	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/inmemory"
-	agentmysql "github.com/XnLemon/trpc-agent-service/trpcservice/agent/mysql"
-	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/agent/postgres"
+	agentsessionstore "github.com/XnLemon/trpc-agent-service/trpcservice/agent/sessionstore"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
+	agentmysql "github.com/XnLemon/trpc-agent-service/trpcservice/app/mysql"
+	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
@@ -34,7 +35,6 @@ import (
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
-	runtimesessionpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/sessionpostgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
@@ -83,7 +83,7 @@ type Config struct {
 	// supplied and repositories are not injected. Empty means PostgreSQL.
 	ControlPlaneDriver ControlPlaneDriver
 	Tenants            tenant.Repository
-	Apps               agent.Repository
+	Apps               appmodel.Repository
 	Models             modelprofile.Repository
 	Backends           backend.Repository
 	Channels           channels.CandidateConsumer
@@ -335,7 +335,7 @@ func prepareRuntimeConfig(config *Config) error {
 	if config.RuntimeTenantID == "" {
 		return nil
 	}
-	wrapped, err := runtimesessionpostgres.NewWithObservability(config.RuntimeTenantID, config.Sessions, config.RuntimeStore, config.Observability)
+	wrapped, err := agentsessionstore.NewWithObservability(config.RuntimeTenantID, config.Sessions, config.RuntimeStore, config.Observability)
 	if err != nil {
 		return ErrInvalidConfig
 	}

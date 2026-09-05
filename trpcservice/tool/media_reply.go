@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -191,7 +191,7 @@ func DefaultRegistry() *Registry {
 // Resolve returns only installed tools explicitly authorized by the published
 // revision. Unknown optional tools remain unavailable; unknown required tools
 // fail closed during Runner construction.
-func (registry *Registry) Resolve(authorizations []agent.ToolAuthorization) ([]trpctool.Tool, error) {
+func (registry *Registry) Resolve(authorizations []appmodel.ToolAuthorization) ([]trpctool.Tool, error) {
 	if registry == nil || len(authorizations) == 0 {
 		return nil, nil
 	}

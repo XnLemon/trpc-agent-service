@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -426,12 +426,12 @@ func TestDispatcherCancellationFinalizesAuditAndHandoff(t *testing.T) {
 func TestDispatcherAuditsCanarySelectionBeforeExecutionStart(t *testing.T) {
 	fixture := newGatewayFixture(t)
 	current, candidate := int64(1), int64(2)
-	app := fixture.app.Clone()
-	app.CurrentRevision, app.CanaryRevision = &current, &candidate
+	appRoot := fixture.app.Clone()
+	appRoot.CurrentRevision, appRoot.CanaryRevision = &current, &candidate
 	candidateRevision := fixture.revision.Clone()
 	candidateRevision.Revision = candidate
 	resolverConfig := resolverTestConfig(fixture)
-	resolverConfig.Apps = resolverAgentRepository{Repository: fixture.apps, getFn: func(context.Context, string, string) (*agent.App, error) { return &app, nil }, getRevisionFn: func(_ context.Context, _ string, _ string, revision int64) (*agent.Revision, error) {
+	resolverConfig.Apps = resolverAgentRepository{Repository: fixture.apps, getFn: func(context.Context, string, string) (*appmodel.App, error) { return &appRoot, nil }, getRevisionFn: func(_ context.Context, _ string, _ string, revision int64) (*appmodel.Revision, error) {
 		if revision == candidate {
 			return &candidateRevision, nil
 		}
@@ -462,7 +462,7 @@ func TestDispatcherAuditsCanarySelectionBeforeExecutionStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	dispatcher.auditWriter = writer
-	principal := mustAPIPrincipal(t, fixture.tenant.TenantID, app.AppID)
+	principal := mustAPIPrincipal(t, fixture.tenant.TenantID, appRoot.AppID)
 	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "canary-audit", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
 	if err != nil {
 		t.Fatal(err)
@@ -1022,7 +1022,7 @@ func newToolMediaDispatcher(t *testing.T, fixture gatewayFixture) (*Dispatcher, 
 }
 
 func testImageToolEvents(ctx context.Context) (<-chan *trpcevent.Event, error) {
-	tools, err := servicetool.DefaultRegistry().Resolve([]agent.ToolAuthorization{{ToolID: servicetool.SendTestImageID, Required: true}})
+	tools, err := servicetool.DefaultRegistry().Resolve([]appmodel.ToolAuthorization{{ToolID: servicetool.SendTestImageID, Required: true}})
 	if err != nil {
 		return nil, err
 	}
@@ -1101,7 +1101,7 @@ func TestDispatcherToolFailureMaterializesFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	runnerValue := &testRunner{runFn: func(ctx context.Context, _ string, _ string, _ trpcmodel.Message, _ ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
-		tools, resolveErr := servicetool.DefaultRegistry().Resolve([]agent.ToolAuthorization{{ToolID: servicetool.SendTestImageID}})
+		tools, resolveErr := servicetool.DefaultRegistry().Resolve([]appmodel.ToolAuthorization{{ToolID: servicetool.SendTestImageID}})
 		if resolveErr != nil {
 			return nil, resolveErr
 		}
@@ -1311,6 +1311,30 @@ func TestDispatcherDurableClaimReclaimsReceivedAndExpiredRunning(t *testing.T) {
 	assertDurableClaimReclaimsLeases(t, dispatcher, principal, message, identity, store, target.BindingID)
 	assertDurableClaimRejectsTerminalStates(t, dispatcher, principal, message, identity, store, target.BindingID)
 	assertDurableClaimReclaimsReconcilingAndValidatesIDs(t, dispatcher, principal, message, identity, store, target.BindingID)
+
+	message.ExternalMessageID = "claim-default-lease"
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{
+		TenantID: principal.TenantID(), EventID: "default-lease-event", SessionID: identity.SessionID,
+		BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := dispatcher.claimInboundWithLease(context.Background(), principal, message, identity, 0)
+	if err != nil || claimed == nil {
+		t.Fatalf("default durable lease claim = %+v err=%v", claimed, err)
+	}
+	dispatcher.failDurable(claimed, errors.New("runner unavailable"))
+}
+
+func TestDurableInboundLeaseUsesRuntimePolicyDefaults(t *testing.T) {
+	defaultPolicy := appmodel.DefaultRuntimePolicy()
+	if got, want := durableInboundLeaseForRuntime(appmodel.RuntimePolicy{}), time.Duration(defaultPolicy.ExecutionTimeoutSeconds)*time.Second+durableInboundLeaseGrace; got != want {
+		t.Fatalf("zero runtime policy lease = %v, want %v", got, want)
+	}
+	custom := appmodel.RuntimePolicy{ExecutionTimeoutSeconds: 7}
+	if got, want := durableInboundLeaseForRuntime(custom), 7*time.Second+durableInboundLeaseGrace; got != want {
+		t.Fatalf("custom runtime policy lease = %v, want %v", got, want)
+	}
 }
 
 func assertDurableClaimReclaimsLeases(t *testing.T, dispatcher *Dispatcher, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, store runtimestorage.RuntimeStore, bindingID string) {

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -58,7 +58,7 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 				config := resolverTestConfig(fixture)
 				config.Apps = resolverAgentRepository{
 					Repository: fixture.apps,
-					getFn: func(context.Context, string, string) (*agent.App, error) {
+					getFn: func(context.Context, string, string) (*appmodel.App, error) {
 						return nil, errors.New("app-secret-provider-detail")
 					},
 				}
@@ -71,7 +71,7 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 				config := resolverTestConfig(fixture)
 				config.Apps = resolverAgentRepository{
 					Repository: fixture.apps,
-					getFn:      func(context.Context, string, string) (*agent.App, error) { return nil, nil },
+					getFn:      func(context.Context, string, string) (*appmodel.App, error) { return nil, nil },
 				}
 				return config
 			},
@@ -82,7 +82,7 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 				config := resolverTestConfig(fixture)
 				config.Apps = resolverAgentRepository{
 					Repository: fixture.apps,
-					getFn: func(ctx context.Context, tenantID, appID string) (*agent.App, error) {
+					getFn: func(ctx context.Context, tenantID, appID string) (*appmodel.App, error) {
 						appValue, err := fixture.apps.Get(ctx, tenantID, appID)
 						if err != nil {
 							return nil, err
@@ -101,7 +101,7 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 				config := resolverTestConfig(fixture)
 				config.Apps = resolverAgentRepository{
 					Repository: fixture.apps,
-					getRevisionFn: func(context.Context, string, string, int64) (*agent.Revision, error) {
+					getRevisionFn: func(context.Context, string, string, int64) (*appmodel.Revision, error) {
 						return nil, errors.New("revision-secret-provider-detail")
 					},
 				}
@@ -114,7 +114,7 @@ func TestPlanResolverNormalizesRepositoryFailures(t *testing.T) {
 				config := resolverTestConfig(fixture)
 				config.Apps = resolverAgentRepository{
 					Repository: fixture.apps,
-					getRevisionFn: func(context.Context, string, string, int64) (*agent.Revision, error) {
+					getRevisionFn: func(context.Context, string, string, int64) (*appmodel.Revision, error) {
 						return nil, nil
 					},
 				}
@@ -309,19 +309,19 @@ func (repository resolverTenantRepository) Get(ctx context.Context, tenantID str
 }
 
 type resolverAgentRepository struct {
-	agent.Repository
-	getFn         func(context.Context, string, string) (*agent.App, error)
-	getRevisionFn func(context.Context, string, string, int64) (*agent.Revision, error)
+	appmodel.Repository
+	getFn         func(context.Context, string, string) (*appmodel.App, error)
+	getRevisionFn func(context.Context, string, string, int64) (*appmodel.Revision, error)
 }
 
-func (repository resolverAgentRepository) Get(ctx context.Context, tenantID, appID string) (*agent.App, error) {
+func (repository resolverAgentRepository) Get(ctx context.Context, tenantID, appID string) (*appmodel.App, error) {
 	if repository.getFn != nil {
 		return repository.getFn(ctx, tenantID, appID)
 	}
 	return repository.Repository.Get(ctx, tenantID, appID)
 }
 
-func (repository resolverAgentRepository) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (*agent.Revision, error) {
+func (repository resolverAgentRepository) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (*appmodel.Revision, error) {
 	if repository.getRevisionFn != nil {
 		return repository.getRevisionFn(ctx, tenantID, appID, revision)
 	}
@@ -364,22 +364,22 @@ func (repository cancelAfterTenantGet) Get(ctx context.Context, tenantID string)
 }
 
 type cancelAfterAppGet struct {
-	agent.Repository
+	appmodel.Repository
 	cancel context.CancelFunc
 }
 
-func (repository cancelAfterAppGet) Get(ctx context.Context, tenantID, appID string) (*agent.App, error) {
+func (repository cancelAfterAppGet) Get(ctx context.Context, tenantID, appID string) (*appmodel.App, error) {
 	appValue, err := repository.Repository.Get(ctx, tenantID, appID)
 	repository.cancel()
 	return appValue, err
 }
 
 type cancelAfterRevisionGet struct {
-	agent.Repository
+	appmodel.Repository
 	cancel context.CancelFunc
 }
 
-func (repository cancelAfterRevisionGet) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (*agent.Revision, error) {
+func (repository cancelAfterRevisionGet) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (*appmodel.Revision, error) {
 	revisionValue, err := repository.Repository.GetRevision(ctx, tenantID, appID, revision)
 	repository.cancel()
 	return revisionValue, err

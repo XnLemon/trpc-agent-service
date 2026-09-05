@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -36,12 +36,12 @@ type TenantLister interface {
 
 // AppLister lists tenant-scoped Agent Apps.
 type AppLister interface {
-	List(context.Context, string, string, string, string, int) ([]*agent.App, string, error)
+	List(context.Context, string, string, string, string, int) ([]*appmodel.App, string, error)
 }
 
 // RevisionLister lists revisions belonging to an Agent App.
 type RevisionLister interface {
-	ListRevisions(context.Context, string, string, string, string, string, int) ([]*agent.Revision, string, error)
+	ListRevisions(context.Context, string, string, string, string, string, int) ([]*appmodel.Revision, string, error)
 }
 
 // ModelLister lists tenant-scoped Model Profiles.

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -163,7 +163,7 @@ func TestPostgreSQLRepositoriesRollbackAfterControlledWriterFailure(t *testing.T
 		expectAgentApp(mock, draftApp)
 		mock.ExpectExec(".*").WithArgs(agentWriterArgs(6, draftApp.TenantID, draftApp.AppID, draftApp.Version)...).WillReturnError(errors.New("writer failure"))
 		mock.ExpectRollback()
-		_, err := repo.UpdateMetadata(ctx, agent.UpdateMetadataInput{
+		_, err := repo.UpdateMetadata(ctx, appmodel.UpdateMetadataInput{
 			TenantID: draftApp.TenantID, AppID: draftApp.AppID, ExpectedVersion: draftApp.Version, DisplayName: "Updated Agent", Description: "updated",
 		})
 		assertStorageFailure(t, err, mock)
@@ -177,10 +177,10 @@ func TestPostgreSQLRepositoriesRollbackAfterControlledWriterFailure(t *testing.T
 		mock.ExpectQuery(".*").WithArgs(draftApp.TenantID, draftApp.AppID).WillReturnRows(sqlmock.NewRows([]string{"next_revision"}).AddRow(int64(3)))
 		mock.ExpectExec(".*").WithArgs(agentWriterArgs(16, draftApp.TenantID, draftApp.AppID, int64(3), int64(1))...).WillReturnError(errors.New("writer failure"))
 		mock.ExpectRollback()
-		_, err := repo.CreateDraft(ctx, agent.CreateDraftInput{
+		_, err := repo.CreateDraft(ctx, appmodel.CreateDraftInput{
 			TenantID: draftApp.TenantID, AppID: draftApp.AppID, ExpectedAppVersion: draftApp.Version,
-			Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1,
-			Configuration: agent.DraftConfiguration{Instruction: "draft", ModelProfileID: mockModelID, Runtime: agent.DefaultRuntimePolicy()},
+			Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1,
+			Configuration: appmodel.DraftConfiguration{Instruction: "draft", ModelProfileID: mockModelID, Runtime: appmodel.DefaultRuntimePolicy()},
 		})
 		assertStorageFailure(t, err, mock)
 	})
@@ -193,10 +193,10 @@ func TestPostgreSQLRepositoriesRollbackAfterControlledWriterFailure(t *testing.T
 		expectAgentRevision(mock, draft)
 		mock.ExpectExec(".*").WithArgs(agentWriterArgs(16, draftApp.TenantID, draftApp.AppID, draft.Revision, draft.DraftVersion)...).WillReturnError(errors.New("writer failure"))
 		mock.ExpectRollback()
-		_, err := repo.UpdateDraft(ctx, agent.UpdateDraftInput{
+		_, err := repo.UpdateDraft(ctx, appmodel.UpdateDraftInput{
 			TenantID: draftApp.TenantID, AppID: draftApp.AppID, Revision: draft.Revision,
 			ExpectedAppVersion: draftApp.Version, ExpectedDraftVersion: draft.DraftVersion,
-			Configuration: agent.DraftConfiguration{Instruction: "updated", ModelProfileID: mockModelID, Runtime: agent.DefaultRuntimePolicy()},
+			Configuration: appmodel.DraftConfiguration{Instruction: "updated", ModelProfileID: mockModelID, Runtime: appmodel.DefaultRuntimePolicy()},
 		})
 		assertStorageFailure(t, err, mock)
 	})
@@ -210,7 +210,7 @@ func TestPostgreSQLRepositoriesRollbackAfterControlledWriterFailure(t *testing.T
 		expectAgentRevision(mock, draft)
 		mock.ExpectQuery(".*").WithArgs(agentWriterArgs(20, draftApp.TenantID, draftApp.AppID, draft.Revision, draftApp.Version, draft.DraftVersion)...).WillReturnError(errors.New("writer failure"))
 		mock.ExpectRollback()
-		_, _, _, err := repo.Publish(ctx, agent.PublishInput{
+		_, _, _, err := repo.Publish(ctx, appmodel.PublishInput{
 			TenantID: draftApp.TenantID, AppID: draftApp.AppID, Revision: draft.Revision,
 			ExpectedAppVersion: draftApp.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: mockAgentMetadata(),
 		})
@@ -225,7 +225,7 @@ func TestPostgreSQLRepositoriesRollbackAfterControlledWriterFailure(t *testing.T
 		expectAgentRevision(mock, rollbackTarget)
 		mock.ExpectQuery(".*").WithArgs(agentWriterArgs(16, rollbackApp.TenantID, rollbackApp.AppID, rollbackTarget.Revision, rollbackApp.Version)...).WillReturnError(errors.New("writer failure"))
 		mock.ExpectRollback()
-		_, _, err := repo.Rollback(ctx, agent.RollbackInput{
+		_, _, err := repo.Rollback(ctx, appmodel.RollbackInput{
 			TenantID: rollbackApp.TenantID, AppID: rollbackApp.AppID, TargetRevision: rollbackTarget.Revision, ExpectedAppVersion: rollbackApp.Version, Metadata: mockAgentMetadata(),
 		})
 		assertStorageFailure(t, err, mock)
@@ -239,9 +239,9 @@ func TestPostgreSQLRepositoriesRollbackAfterControlledWriterFailure(t *testing.T
 		expectAgentRevision(mock, transitionRevision)
 		mock.ExpectQuery(".*").WithArgs(agentWriterArgs(12, transitionApp.TenantID, transitionApp.AppID, transitionApp.Version)...).WillReturnError(errors.New("writer failure"))
 		mock.ExpectRollback()
-		_, _, err := repo.TransitionStatus(ctx, agent.TransitionStatusInput{
+		_, _, err := repo.TransitionStatus(ctx, appmodel.TransitionStatusInput{
 			TenantID: transitionApp.TenantID, AppID: transitionApp.AppID, ExpectedVersion: transitionApp.Version,
-			NextStatus: agent.StatusSuspended, Metadata: mockAgentMetadata(),
+			NextStatus: appmodel.StatusSuspended, Metadata: mockAgentMetadata(),
 		})
 		assertStorageFailure(t, err, mock)
 	})
@@ -309,11 +309,11 @@ func mockTenantRows(value *tenant.Tenant) *sqlmock.Rows {
 		value.DefaultBackendProfileID, value.Version, value.CreatedAt, value.UpdatedAt)
 }
 
-func mockApp(t *testing.T, currentRevision int64) *agent.App {
+func mockApp(t *testing.T, currentRevision int64) *appmodel.App {
 	t.Helper()
 	now := time.Now().UTC()
-	value := &agent.App{
-		TenantID: mockTenantID, AppID: mockAppID, AppKey: "mock-app", DisplayName: "Mock App", Status: agent.StatusActive,
+	value := &appmodel.App{
+		TenantID: mockTenantID, AppID: mockAppID, AppKey: "mock-app", DisplayName: "Mock App", Status: appmodel.StatusActive,
 		CurrentRevision: &currentRevision, Version: 3, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := value.Validate(); err != nil {
@@ -322,7 +322,7 @@ func mockApp(t *testing.T, currentRevision int64) *agent.App {
 	return value
 }
 
-func mockAgentAppRows(value *agent.App) *sqlmock.Rows {
+func mockAgentAppRows(value *appmodel.App) *sqlmock.Rows {
 	var current any
 	if value.CurrentRevision != nil {
 		current = *value.CurrentRevision
@@ -331,15 +331,15 @@ func mockAgentAppRows(value *agent.App) *sqlmock.Rows {
 		AddRow(value.TenantID, value.AppID, value.AppKey, value.DisplayName, value.Description, string(value.Status), current, nil, value.Version, value.CreatedAt, value.UpdatedAt)
 }
 
-func expectAgentApp(mock sqlmock.Sqlmock, value *agent.App) {
+func expectAgentApp(mock sqlmock.Sqlmock, value *appmodel.App) {
 	mock.ExpectQuery(".*").WithArgs(value.TenantID, value.AppID).WillReturnRows(mockAgentAppRows(value))
 }
 
-func mockRevision(t *testing.T, app *agent.App, revision int64, published bool) *agent.Revision {
+func mockRevision(t *testing.T, appRoot *appmodel.App, revision int64, published bool) *appmodel.Revision {
 	t.Helper()
-	value, err := agent.NewRevision(agent.CreateRevisionInput{
-		TenantID: app.TenantID, AppID: app.AppID, Revision: revision, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1,
-		Configuration: agent.DraftConfiguration{Instruction: "Answer", ModelProfileID: mockModelID, Runtime: agent.DefaultRuntimePolicy()},
+	value, err := appmodel.NewRevision(appmodel.CreateRevisionInput{
+		TenantID: appRoot.TenantID, AppID: appRoot.AppID, Revision: revision, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1,
+		Configuration: appmodel.DraftConfiguration{Instruction: "Answer", ModelProfileID: mockModelID, Runtime: appmodel.DefaultRuntimePolicy()},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -354,7 +354,7 @@ func mockRevision(t *testing.T, app *agent.App, revision int64, published bool) 
 	return value
 }
 
-func expectAgentRevision(mock sqlmock.Sqlmock, value *agent.Revision) {
+func expectAgentRevision(mock sqlmock.Sqlmock, value *appmodel.Revision) {
 	generation, runtime, _, err := encodeAgentRevisionParts(*value)
 	if err != nil {
 		panic(err)
@@ -464,8 +464,8 @@ func mockTenantMetadata() tenant.TransitionMetadata {
 	return tenant.TransitionMetadata{ActorType: "test", ActorID: "mock", Reason: "test", CorrelationID: "mock"}
 }
 
-func mockAgentMetadata() agent.ChangeMetadata {
-	return agent.ChangeMetadata{ActorType: "test", ActorID: "mock", Reason: "test", CorrelationID: "mock"}
+func mockAgentMetadata() appmodel.ChangeMetadata {
+	return appmodel.ChangeMetadata{ActorType: "test", ActorID: "mock", Reason: "test", CorrelationID: "mock"}
 }
 
 func mockModelMetadata() model.ChangeMetadata {

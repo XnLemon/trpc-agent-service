@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -225,7 +225,7 @@ func TestPostgreSQLAgentRepositoryDomainGuards(t *testing.T) {
 
 	t.Run("disabled app rejects mutable operations", func(t *testing.T) {
 		disabled := mockApp(t, 1)
-		disabled.Status = agent.StatusDisabled
+		disabled.Status = appmodel.StatusDisabled
 		if err := disabled.Validate(); err != nil {
 			t.Fatal(err)
 		}
@@ -234,19 +234,19 @@ func TestPostgreSQLAgentRepositoryDomainGuards(t *testing.T) {
 			action func(*AgentRepository) error
 		}{
 			{name: "metadata", action: func(repo *AgentRepository) error {
-				_, err := repo.UpdateMetadata(ctx, agent.UpdateMetadataInput{TenantID: disabled.TenantID, AppID: disabled.AppID, ExpectedVersion: disabled.Version, DisplayName: disabled.DisplayName})
+				_, err := repo.UpdateMetadata(ctx, appmodel.UpdateMetadataInput{TenantID: disabled.TenantID, AppID: disabled.AppID, ExpectedVersion: disabled.Version, DisplayName: disabled.DisplayName})
 				return err
 			}},
 			{name: "draft", action: func(repo *AgentRepository) error {
-				_, err := repo.CreateDraft(ctx, agent.CreateDraftInput{TenantID: disabled.TenantID, AppID: disabled.AppID, ExpectedAppVersion: disabled.Version, Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1, Configuration: agent.DraftConfiguration{Instruction: "disabled", ModelProfileID: mockModelID, Runtime: agent.DefaultRuntimePolicy()}})
+				_, err := repo.CreateDraft(ctx, appmodel.CreateDraftInput{TenantID: disabled.TenantID, AppID: disabled.AppID, ExpectedAppVersion: disabled.Version, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Configuration: appmodel.DraftConfiguration{Instruction: "disabled", ModelProfileID: mockModelID, Runtime: appmodel.DefaultRuntimePolicy()}})
 				return err
 			}},
 			{name: "draft update", action: func(repo *AgentRepository) error {
-				_, err := repo.UpdateDraft(ctx, agent.UpdateDraftInput{TenantID: disabled.TenantID, AppID: disabled.AppID, Revision: 1, ExpectedAppVersion: disabled.Version, ExpectedDraftVersion: 1, Configuration: agent.DraftConfiguration{Instruction: "disabled", ModelProfileID: mockModelID, Runtime: agent.DefaultRuntimePolicy()}})
+				_, err := repo.UpdateDraft(ctx, appmodel.UpdateDraftInput{TenantID: disabled.TenantID, AppID: disabled.AppID, Revision: 1, ExpectedAppVersion: disabled.Version, ExpectedDraftVersion: 1, Configuration: appmodel.DraftConfiguration{Instruction: "disabled", ModelProfileID: mockModelID, Runtime: appmodel.DefaultRuntimePolicy()}})
 				return err
 			}},
 			{name: "transition", action: func(repo *AgentRepository) error {
-				_, _, err := repo.TransitionStatus(ctx, agent.TransitionStatusInput{TenantID: disabled.TenantID, AppID: disabled.AppID, ExpectedVersion: disabled.Version, NextStatus: agent.StatusActive, Metadata: mockAgentMetadata()})
+				_, _, err := repo.TransitionStatus(ctx, appmodel.TransitionStatusInput{TenantID: disabled.TenantID, AppID: disabled.AppID, ExpectedVersion: disabled.Version, NextStatus: appmodel.StatusActive, Metadata: mockAgentMetadata()})
 				return err
 			}},
 		} {
@@ -256,7 +256,7 @@ func TestPostgreSQLAgentRepositoryDomainGuards(t *testing.T) {
 				mock.ExpectBegin()
 				expectAgentApp(mock, disabled)
 				mock.ExpectRollback()
-				assertDomainFailure(t, test.action(repo), agent.ErrDisabled, mock)
+				assertDomainFailure(t, test.action(repo), appmodel.ErrDisabled, mock)
 			})
 		}
 	})
@@ -264,12 +264,12 @@ func TestPostgreSQLAgentRepositoryDomainGuards(t *testing.T) {
 	t.Run("draft mutation rejects immutable revision and stale version", func(t *testing.T) {
 		for _, test := range []struct {
 			name     string
-			revision *agent.Revision
+			revision *appmodel.Revision
 			expected int64
 			want     error
 		}{
-			{name: "published", revision: published, expected: published.DraftVersion, want: agent.ErrImmutableRevision},
-			{name: "stale", revision: draft, expected: draft.DraftVersion + 1, want: agent.ErrConflict},
+			{name: "published", revision: published, expected: published.DraftVersion, want: appmodel.ErrImmutableRevision},
+			{name: "stale", revision: draft, expected: draft.DraftVersion + 1, want: appmodel.ErrConflict},
 		} {
 			t.Run(test.name, func(t *testing.T) {
 				db, mock := newSQLMock(t)
@@ -278,10 +278,10 @@ func TestPostgreSQLAgentRepositoryDomainGuards(t *testing.T) {
 				expectAgentApp(mock, draftApp)
 				expectAgentRevision(mock, test.revision)
 				mock.ExpectRollback()
-				_, err := repo.UpdateDraft(ctx, agent.UpdateDraftInput{
+				_, err := repo.UpdateDraft(ctx, appmodel.UpdateDraftInput{
 					TenantID: draftApp.TenantID, AppID: draftApp.AppID, Revision: test.revision.Revision,
 					ExpectedAppVersion: draftApp.Version, ExpectedDraftVersion: test.expected,
-					Configuration: agent.DraftConfiguration{Instruction: "updated", ModelProfileID: mockModelID, Runtime: agent.DefaultRuntimePolicy()},
+					Configuration: appmodel.DraftConfiguration{Instruction: "updated", ModelProfileID: mockModelID, Runtime: appmodel.DefaultRuntimePolicy()},
 				})
 				assertDomainFailure(t, err, test.want, mock)
 			})
@@ -291,7 +291,7 @@ func TestPostgreSQLAgentRepositoryDomainGuards(t *testing.T) {
 	t.Run("publication rejects inactive tenant and immutable revision", func(t *testing.T) {
 		db, mock := newSQLMock(t)
 		repo := NewAgentRepository(db)
-		if _, _, _, err := repo.Publish(ctx, agent.PublishInput{TenantActive: false, Metadata: mockAgentMetadata()}); !errors.Is(err, agent.ErrInvalid) {
+		if _, _, _, err := repo.Publish(ctx, appmodel.PublishInput{TenantActive: false, Metadata: mockAgentMetadata()}); !errors.Is(err, appmodel.ErrInvalid) {
 			t.Fatalf("inactive publication input error = %v", err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -303,8 +303,8 @@ func TestPostgreSQLAgentRepositoryDomainGuards(t *testing.T) {
 		mock.ExpectBegin()
 		mock.ExpectQuery(".*").WithArgs(draftApp.TenantID).WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("suspended"))
 		mock.ExpectRollback()
-		_, _, _, err := repo.Publish(ctx, agent.PublishInput{TenantID: draftApp.TenantID, AppID: draftApp.AppID, Revision: draft.Revision, ExpectedAppVersion: draftApp.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: mockAgentMetadata()})
-		assertDomainFailure(t, err, agent.ErrInvalid, mock)
+		_, _, _, err := repo.Publish(ctx, appmodel.PublishInput{TenantID: draftApp.TenantID, AppID: draftApp.AppID, Revision: draft.Revision, ExpectedAppVersion: draftApp.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: mockAgentMetadata()})
+		assertDomainFailure(t, err, appmodel.ErrInvalid, mock)
 
 		db, mock = newSQLMock(t)
 		repo = NewAgentRepository(db)
@@ -313,19 +313,19 @@ func TestPostgreSQLAgentRepositoryDomainGuards(t *testing.T) {
 		expectAgentApp(mock, draftApp)
 		expectAgentRevision(mock, published)
 		mock.ExpectRollback()
-		_, _, _, err = repo.Publish(ctx, agent.PublishInput{TenantID: draftApp.TenantID, AppID: draftApp.AppID, Revision: published.Revision, ExpectedAppVersion: draftApp.Version, ExpectedDraftVersion: published.DraftVersion, TenantActive: true, Metadata: mockAgentMetadata()})
-		assertDomainFailure(t, err, agent.ErrImmutableRevision, mock)
+		_, _, _, err = repo.Publish(ctx, appmodel.PublishInput{TenantID: draftApp.TenantID, AppID: draftApp.AppID, Revision: published.Revision, ExpectedAppVersion: draftApp.Version, ExpectedDraftVersion: published.DraftVersion, TenantActive: true, Metadata: mockAgentMetadata()})
+		assertDomainFailure(t, err, appmodel.ErrImmutableRevision, mock)
 	})
 
 	t.Run("rollback rejects draft and current targets", func(t *testing.T) {
 		for _, test := range []struct {
 			name   string
-			app    *agent.App
-			target *agent.Revision
+			app    *appmodel.App
+			target *appmodel.Revision
 			want   error
 		}{
-			{name: "draft target", app: mockApp(t, 2), target: draft, want: agent.ErrInvalid},
-			{name: "current target", app: mockApp(t, 1), target: published, want: agent.ErrInvalid},
+			{name: "draft target", app: mockApp(t, 2), target: draft, want: appmodel.ErrInvalid},
+			{name: "current target", app: mockApp(t, 1), target: published, want: appmodel.ErrInvalid},
 		} {
 			t.Run(test.name, func(t *testing.T) {
 				db, mock := newSQLMock(t)
@@ -334,7 +334,7 @@ func TestPostgreSQLAgentRepositoryDomainGuards(t *testing.T) {
 				expectAgentApp(mock, test.app)
 				expectAgentRevision(mock, test.target)
 				mock.ExpectRollback()
-				_, _, err := repo.Rollback(ctx, agent.RollbackInput{TenantID: test.app.TenantID, AppID: test.app.AppID, TargetRevision: test.target.Revision, ExpectedAppVersion: test.app.Version, Metadata: mockAgentMetadata()})
+				_, _, err := repo.Rollback(ctx, appmodel.RollbackInput{TenantID: test.app.TenantID, AppID: test.app.AppID, TargetRevision: test.target.Revision, ExpectedAppVersion: test.app.Version, Metadata: mockAgentMetadata()})
 				assertDomainFailure(t, err, test.want, mock)
 			})
 		}
@@ -346,8 +346,8 @@ func TestPostgreSQLAgentRepositoryDomainGuards(t *testing.T) {
 		mock.ExpectBegin()
 		expectAgentApp(mock, draftApp)
 		mock.ExpectRollback()
-		_, _, err := repo.TransitionStatus(ctx, agent.TransitionStatusInput{TenantID: draftApp.TenantID, AppID: draftApp.AppID, ExpectedVersion: draftApp.Version, NextStatus: agent.StatusActive, Metadata: mockAgentMetadata()})
-		assertDomainFailure(t, err, agent.ErrInvalidTransition, mock)
+		_, _, err := repo.TransitionStatus(ctx, appmodel.TransitionStatusInput{TenantID: draftApp.TenantID, AppID: draftApp.AppID, ExpectedVersion: draftApp.Version, NextStatus: appmodel.StatusActive, Metadata: mockAgentMetadata()})
+		assertDomainFailure(t, err, appmodel.ErrInvalidTransition, mock)
 	})
 }
 

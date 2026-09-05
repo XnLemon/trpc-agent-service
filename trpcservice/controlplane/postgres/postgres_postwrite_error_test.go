@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -273,7 +273,7 @@ func TestPostgreSQLRepositoriesRollbackWhenReadAfterControlledWriteFails(t *test
 		mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectQuery(".*").WillReturnError(readFailure)
 		mock.ExpectRollback()
-		_, err := repo.Create(ctx, agent.CreateInput{TenantID: draftApp.TenantID, AppKey: "postwrite-app", DisplayName: "Postwrite App"})
+		_, err := repo.Create(ctx, appmodel.CreateInput{TenantID: draftApp.TenantID, AppKey: "postwrite-app", DisplayName: "Postwrite App"})
 		assertStorageFailure(t, err, mock)
 	})
 
@@ -285,7 +285,7 @@ func TestPostgreSQLRepositoriesRollbackWhenReadAfterControlledWriteFails(t *test
 		mock.ExpectExec(".*").WithArgs(agentWriterArgs(6, draftApp.TenantID, draftApp.AppID, draftApp.Version)...).WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectQuery(".*").WithArgs(draftApp.TenantID, draftApp.AppID).WillReturnError(readFailure)
 		mock.ExpectRollback()
-		_, err := repo.UpdateMetadata(ctx, agent.UpdateMetadataInput{
+		_, err := repo.UpdateMetadata(ctx, appmodel.UpdateMetadataInput{
 			TenantID: draftApp.TenantID, AppID: draftApp.AppID, ExpectedVersion: draftApp.Version, DisplayName: "Updated Agent", Description: "updated",
 		})
 		assertStorageFailure(t, err, mock)
@@ -300,10 +300,10 @@ func TestPostgreSQLRepositoriesRollbackWhenReadAfterControlledWriteFails(t *test
 		mock.ExpectExec(".*").WithArgs(agentWriterArgs(16, draftApp.TenantID, draftApp.AppID, int64(3), int64(1))...).WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectQuery(".*").WithArgs(draftApp.TenantID, draftApp.AppID, int64(3)).WillReturnError(readFailure)
 		mock.ExpectRollback()
-		_, err := repo.CreateDraft(ctx, agent.CreateDraftInput{
+		_, err := repo.CreateDraft(ctx, appmodel.CreateDraftInput{
 			TenantID: draftApp.TenantID, AppID: draftApp.AppID, ExpectedAppVersion: draftApp.Version,
-			Kind: agent.KindLLM, SchemaVersion: agent.SchemaVersionV1,
-			Configuration: agent.DraftConfiguration{Instruction: "draft", ModelProfileID: mockModelID, Runtime: agent.DefaultRuntimePolicy()},
+			Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1,
+			Configuration: appmodel.DraftConfiguration{Instruction: "draft", ModelProfileID: mockModelID, Runtime: appmodel.DefaultRuntimePolicy()},
 		})
 		assertStorageFailure(t, err, mock)
 	})
@@ -317,10 +317,10 @@ func TestPostgreSQLRepositoriesRollbackWhenReadAfterControlledWriteFails(t *test
 		mock.ExpectExec(".*").WithArgs(agentWriterArgs(16, draftApp.TenantID, draftApp.AppID, draft.Revision, draft.DraftVersion)...).WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectQuery(".*").WithArgs(draftApp.TenantID, draftApp.AppID, draft.Revision).WillReturnError(readFailure)
 		mock.ExpectRollback()
-		_, err := repo.UpdateDraft(ctx, agent.UpdateDraftInput{
+		_, err := repo.UpdateDraft(ctx, appmodel.UpdateDraftInput{
 			TenantID: draftApp.TenantID, AppID: draftApp.AppID, Revision: draft.Revision,
 			ExpectedAppVersion: draftApp.Version, ExpectedDraftVersion: draft.DraftVersion,
-			Configuration: agent.DraftConfiguration{Instruction: "updated", ModelProfileID: mockModelID, Runtime: agent.DefaultRuntimePolicy()},
+			Configuration: appmodel.DraftConfiguration{Instruction: "updated", ModelProfileID: mockModelID, Runtime: appmodel.DefaultRuntimePolicy()},
 		})
 		assertStorageFailure(t, err, mock)
 	})
@@ -335,7 +335,7 @@ func TestPostgreSQLRepositoriesRollbackWhenReadAfterControlledWriteFails(t *test
 		mock.ExpectQuery(".*").WithArgs(agentWriterArgs(20, draftApp.TenantID, draftApp.AppID, draft.Revision, draftApp.Version, draft.DraftVersion)...).WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(1)))
 		mock.ExpectQuery(".*").WithArgs(draftApp.TenantID, draftApp.AppID).WillReturnError(readFailure)
 		mock.ExpectRollback()
-		_, _, _, err := repo.Publish(ctx, agent.PublishInput{
+		_, _, _, err := repo.Publish(ctx, appmodel.PublishInput{
 			TenantID: draftApp.TenantID, AppID: draftApp.AppID, Revision: draft.Revision,
 			ExpectedAppVersion: draftApp.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: mockAgentMetadata(),
 		})
@@ -351,7 +351,7 @@ func TestPostgreSQLRepositoriesRollbackWhenReadAfterControlledWriteFails(t *test
 		mock.ExpectQuery(".*").WithArgs(agentWriterArgs(16, rollbackApp.TenantID, rollbackApp.AppID, rollbackTarget.Revision, rollbackApp.Version)...).WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(1)))
 		mock.ExpectQuery(".*").WithArgs(rollbackApp.TenantID, rollbackApp.AppID).WillReturnError(readFailure)
 		mock.ExpectRollback()
-		_, _, err := repo.Rollback(ctx, agent.RollbackInput{
+		_, _, err := repo.Rollback(ctx, appmodel.RollbackInput{
 			TenantID: rollbackApp.TenantID, AppID: rollbackApp.AppID, TargetRevision: rollbackTarget.Revision, ExpectedAppVersion: rollbackApp.Version, Metadata: mockAgentMetadata(),
 		})
 		assertStorageFailure(t, err, mock)
@@ -366,9 +366,9 @@ func TestPostgreSQLRepositoriesRollbackWhenReadAfterControlledWriteFails(t *test
 		mock.ExpectQuery(".*").WithArgs(agentWriterArgs(12, transitionApp.TenantID, transitionApp.AppID, transitionApp.Version)...).WillReturnRows(sqlmock.NewRows([]string{"event_id"}).AddRow(int64(1)))
 		mock.ExpectQuery(".*").WithArgs(transitionApp.TenantID, transitionApp.AppID).WillReturnError(readFailure)
 		mock.ExpectRollback()
-		_, _, err := repo.TransitionStatus(ctx, agent.TransitionStatusInput{
+		_, _, err := repo.TransitionStatus(ctx, appmodel.TransitionStatusInput{
 			TenantID: transitionApp.TenantID, AppID: transitionApp.AppID, ExpectedVersion: transitionApp.Version,
-			NextStatus: agent.StatusSuspended, Metadata: mockAgentMetadata(),
+			NextStatus: appmodel.StatusSuspended, Metadata: mockAgentMetadata(),
 		})
 		assertStorageFailure(t, err, mock)
 	})
@@ -403,7 +403,7 @@ func TestPostgreSQLControlledCreatesCommitAfterCompleteReadback(t *testing.T) {
 		mock.ExpectExec("control_plane_create_agent_app").WithArgs(agentWriterArgs(9)...).WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectQuery("FROM public\\.agent_app").WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg()).WillReturnRows(mockAgentAppRows(stored))
 		mock.ExpectCommit()
-		if _, err := NewAgentRepository(db).Create(ctx, agent.CreateInput{TenantID: stored.TenantID, AppKey: "committed-app", DisplayName: "Committed App"}); err != nil {
+		if _, err := NewAgentRepository(db).Create(ctx, appmodel.CreateInput{TenantID: stored.TenantID, AppKey: "committed-app", DisplayName: "Committed App"}); err != nil {
 			t.Fatal(err)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -506,7 +506,7 @@ func TestPostgreSQLControlledCreateTransactionFailureBoundaries(t *testing.T) {
 		{
 			name: "agent",
 			create: func(db *sql.DB) error {
-				_, err := NewAgentRepository(db).Create(ctx, agent.CreateInput{TenantID: appValue.TenantID, AppKey: "transaction-app", DisplayName: "Transaction App"})
+				_, err := NewAgentRepository(db).Create(ctx, appmodel.CreateInput{TenantID: appValue.TenantID, AppKey: "transaction-app", DisplayName: "Transaction App"})
 				return err
 			},
 			expectWriterFailure: func(mock sqlmock.Sqlmock) {

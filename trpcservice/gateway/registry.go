@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
@@ -121,7 +122,7 @@ func NewRunnerRegistry(config RunnerRegistryConfig) (*RunnerRegistry, error) {
 	}, nil
 }
 
-// RuntimeRunnerRegistryConfig wires runtime.NewRunner into a registry. The
+// RuntimeRunnerRegistryConfig wires agent.NewRunner into a registry. The
 // Session service, Secret Resolver, and Model Factory are borrowed by the
 // registry and remain owned by the caller.
 type RuntimeRunnerRegistryConfig struct {
@@ -134,16 +135,20 @@ type RuntimeRunnerRegistryConfig struct {
 	ToolRegistry   *servicetool.Registry
 }
 
-// NewRuntimeRunnerRegistry creates a registry backed by runtime.NewRunner.
+// NewRuntimeRunnerRegistry creates a registry backed by agent.NewRunner.
 func NewRuntimeRunnerRegistry(config RuntimeRunnerRegistryConfig) (*RunnerRegistry, error) {
 	if config.ModelFactory == nil || (config.Sessions == nil && config.StorageFactory == nil) {
 		return nil, fmt.Errorf("%w: runtime Runner dependencies are required", ErrInvalid)
 	}
 	config.Registry.Factory = func(ctx context.Context, plan runtime.ExecutionPlan) (Runner, error) {
-		if config.StorageFactory != nil {
-			return runtime.NewRunnerWithToolRegistry(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability, config.ToolRegistry, config.StorageFactory)
+		input, err := plan.AgentRunnerInput()
+		if err != nil {
+			return nil, err
 		}
-		return runtime.NewRunnerWithToolRegistry(ctx, plan, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability, config.ToolRegistry)
+		if config.StorageFactory != nil {
+			return agent.NewRunnerWithToolRegistry(ctx, input, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability, config.ToolRegistry, config.StorageFactory)
+		}
+		return agent.NewRunnerWithToolRegistry(ctx, input, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability, config.ToolRegistry)
 	}
 	return NewRunnerRegistry(config.Registry)
 }

@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -25,16 +25,16 @@ func (s adminTenantListStub) List(context.Context, []string, string, string, str
 }
 
 type adminAppListStub struct {
-	agent.Repository
+	appmodel.Repository
 	err  error
 	next string
 }
 
-func (s adminAppListStub) List(context.Context, string, string, string, string, int) ([]*agent.App, string, error) {
+func (s adminAppListStub) List(context.Context, string, string, string, string, int) ([]*appmodel.App, string, error) {
 	return nil, s.next, s.err
 }
 
-func (s adminAppListStub) ListRevisions(context.Context, string, string, string, string, string, int) ([]*agent.Revision, string, error) {
+func (s adminAppListStub) ListRevisions(context.Context, string, string, string, string, string, int) ([]*appmodel.Revision, string, error) {
 	return nil, s.next, s.err
 }
 
@@ -277,8 +277,8 @@ func TestAdminCollectionListsRejectInvalidRepositoryCursorParameter(t *testing.T
 }
 
 type noTenantListRepository struct{ tenant.Repository }
-type noAppListRepository struct{ agent.Repository }
-type noRevisionListRepository struct{ agent.Repository }
+type noAppListRepository struct{ appmodel.Repository }
+type noRevisionListRepository struct{ appmodel.Repository }
 type noModelListRepository struct{ modelprofile.Repository }
 type noBackendListRepository struct{ backend.Repository }
 type noBindingListRepository struct{ channels.Repository }
