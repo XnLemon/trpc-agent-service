@@ -454,7 +454,9 @@ func startAIBots(runtimeGraph *Runtime) error {
 		runtimeGraph.aiBotDone = append(runtimeGraph.aiBotDone, done)
 		go func(adapter channels.PollingAdapter, done chan struct{}) {
 			defer close(done)
-			_ = adapter.Run(ctx)
+			if err := adapter.Run(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				logPollingAdapterStopped(adapter, err)
+			}
 		}(adapter, done)
 	}
 	return nil

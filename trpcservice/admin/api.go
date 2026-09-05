@@ -901,6 +901,7 @@ func writeError(w http.ResponseWriter, requestID string, status int, category st
 
 func writeMappedError(w http.ResponseWriter, requestID string, err error) {
 	status, category := mapError(err)
+	logRequestFailure(requestID, status, category, err)
 	writeError(w, requestID, status, category)
 }
 

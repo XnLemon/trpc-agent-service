@@ -27,6 +27,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"go.uber.org/zap"
 )
 
 const (
@@ -34,26 +35,6 @@ const (
 	defaultPollTimeout = 5 * time.Second
 	shutdownTimeout    = 5 * time.Second
 	e2eReply           = "telegram-e2e-ok"
-)
-
-var (
-	errConfiguration         = errors.New("invalid Telegram E2E configuration")
-	errPreflight             = errors.New("telegram E2E preflight failed")
-	errPreflightClient       = errors.New("telegram E2E bot client preflight failed")
-	errPreflightGetMeNetwork = errors.New("telegram E2E getMe network failure")
-	errPreflightGetMeTimeout = errors.New("telegram E2E getMe timeout")
-	errPreflightGetMeAPI     = errors.New("telegram E2E getMe Telegram API rejected the request")
-	errPreflightGetMeReply   = errors.New("telegram E2E getMe response was invalid")
-	errPreflightWebhook      = errors.New("telegram E2E webhook preflight failed")
-	errWebhookConfigured     = errors.New("telegram webhook is configured; remove it or enable TELEGRAM_DELETE_WEBHOOK")
-	errAdapterConfiguration  = errors.New("telegram E2E adapter configuration failed")
-	errAdapterInitialization = errors.New("telegram E2E adapter initialization failed")
-	errAdapterIdentity       = errors.New("telegram E2E adapter identity check failed")
-	errAdapterRun            = errors.New("telegram E2E adapter stopped unexpectedly")
-	errAdapterClose          = errors.New("telegram E2E adapter close failed")
-	errRunTimeout            = errors.New("telegram E2E timed out waiting for the test message")
-	errSender                = errors.New("telegram E2E sender failed")
-	errSenderStopped         = errors.New("telegram E2E sender stopped unexpectedly")
 )
 
 type runConfig struct {
@@ -83,20 +64,27 @@ type deterministicDispatcher struct {
 var _ gateway.DispatchService = (*deterministicDispatcher)(nil)
 
 func main() {
+	restoreLogger, err := configureLogger(os.Stderr)
+	if err != nil {
+		_, _ = io.WriteString(os.Stderr, err.Error()+"\n")
+		os.Exit(1)
+	}
+	defer restoreLogger()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, os.Getenv, os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	if err := run(ctx, os.Getenv, os.Stdout); err != nil {
+		packageLog.Error("telegram E2E failed", zap.Error(err))
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, lookup func(string) string, stdout, stderr io.Writer) error {
-	return runWithPreflight(ctx, lookup, stdout, stderr, prepareBot)
+func run(ctx context.Context, lookup func(string) string, stdout io.Writer) error {
+	return runWithPreflight(ctx, lookup, stdout, prepareBot)
 }
 
-func runWithPreflight(ctx context.Context, lookup func(string) string, stdout, stderr io.Writer, prepare prepareBotFunc) error {
-	if ctx == nil || lookup == nil || stdout == nil || stderr == nil {
+func runWithPreflight(ctx context.Context, lookup func(string) string, stdout io.Writer, prepare prepareBotFunc) error {
+	if ctx == nil || lookup == nil || stdout == nil {
 		return errConfiguration
 	}
 	if prepare == nil {
@@ -123,7 +111,7 @@ func runWithPreflight(ctx context.Context, lookup func(string) string, stdout, s
 		return errConfiguration
 	}
 	dispatcher := newDeterministicDispatcher(configuration.testMessage, reply)
-	adapter, err := telegramAdapter(runContext, configuration, target, dispatcher, stderr)
+	adapter, err := telegramAdapter(runContext, configuration, target, dispatcher)
 	if err != nil {
 		return classifyPreflightResult(ctx.Err(), runContext.Err(), err)
 	}
@@ -133,7 +121,7 @@ func runWithPreflight(ctx context.Context, lookup func(string) string, stdout, s
 		runDone <- adapter.Run(runContext)
 	}()
 
-	_, _ = fmt.Fprintf(stdout, "Telegram E2E receiver @%s (%d) is listening.\n", receiver.Username, receiver.ID)
+	packageLog.Info("telegram receiver listening", zap.String("username", receiver.Username), zap.Int64("receiver_id", receiver.ID))
 	_, _ = fmt.Fprintf(stdout, "Send this ordinary text: %s\n", configuration.testMessage)
 
 	var result error
@@ -431,18 +419,20 @@ func exampleMetadata() channels.ChangeMetadata {
 	}
 }
 
-func telegramAdapter(ctx context.Context, configuration runConfig, target channels.RoutingTarget, dispatcher gateway.DispatchService, stderr io.Writer) (*telegram.Adapter, error) {
+func telegramAdapter(ctx context.Context, configuration runConfig, target channels.RoutingTarget, dispatcher gateway.DispatchService) (*telegram.Adapter, error) {
 	adapter, err := telegram.New(ctx, telegram.Config{
 		BotToken: configuration.botToken, Target: target, Dispatcher: dispatcher,
 		PollTimeout: configuration.pollTimeout,
-		ErrorHook: func(event telegram.ErrorEvent) {
-			_, _ = fmt.Fprintf(stderr, "telegram %s failed: %v\n", event.Operation, event.Err)
-		},
+		ErrorHook:   reportTelegramError,
 	})
 	if err != nil {
 		return nil, classifyAdapterError(err)
 	}
 	return adapter, nil
+}
+
+func reportTelegramError(event telegram.ErrorEvent) {
+	packageLog.Error("telegram operation failed", zap.String("operation", string(event.Operation)), zap.Error(event.Err))
 }
 
 func newDeterministicDispatcher(marker, reply string) *deterministicDispatcher {
