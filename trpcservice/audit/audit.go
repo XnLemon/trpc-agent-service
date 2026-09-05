@@ -612,9 +612,21 @@ func containsSensitivePhrase(value string) bool {
 }
 
 func containsSensitiveWords(value string) bool {
-	words := strings.FieldsFunc(value, func(r rune) bool { return r < 'a' || r > 'z' })
+	// Opaque identifiers may contain arbitrary letter fragments separated by
+	// punctuation or digits. Treating every non-letter as a word boundary makes
+	// random ULID fragments such as "dsn" look like sensitive metadata. Natural
+	// language sensitive words are still detected when separated by whitespace;
+	// explicit assignment/phrase forms are handled by containsSensitivePhrase.
+	words := strings.Fields(strings.ToLower(value))
 	for i, word := range words {
-		if i+1 < len(words) && (word == "bearer" || word == "authorization" || word == "token" || word == "secret" || word == "password" || word == "dsn" || word == "api" && words[i+1] == "key") {
+		word = strings.Trim(word, ".,:;!?()[]{}<>\"'`")
+		if i+1 < len(words) {
+			next := strings.Trim(words[i+1], ".,:;!?()[]{}<>\"'`")
+			if word == "api" && next == "key" {
+				return true
+			}
+		}
+		if word == "bearer" || word == "authorization" || word == "token" || word == "secret" || word == "password" || word == "dsn" {
 			return true
 		}
 	}

@@ -138,6 +138,14 @@ func TestEventRejectsSensitiveValuesAndUnknownErrorTypes(t *testing.T) {
 	}
 }
 
+func TestEventAllowsSensitiveLookingOpaqueIdentifierFragments(t *testing.T) {
+	event := testEvent("tenant-a", "event-opaque-id")
+	event.SessionID = "28:t_01M1QXA4YFVGZK0D0CTJFW4DSN:54:3:api30:app_01M1QXA4YF9J49ARY63APBJ2736:direct4:peer0:"
+	if err := event.Validate(); err != nil {
+		t.Fatalf("opaque identifier was rejected: %v", err)
+	}
+}
+
 func TestAggregationSeparatesCurrenciesAndIDsCannotCollide(t *testing.T) {
 	store, err := NewInMemory("tenant-a")
 	if err != nil {
