@@ -15,7 +15,6 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
-	servicelog "github.com/XnLemon/trpc-agent-service/trpcservice/log"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
 
@@ -124,7 +123,7 @@ func TestRunMainStartsAndStopsConfiguredHTTPServer(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("configured HTTP server did not stop")
 	}
-	if !strings.Contains(output.String(), "service listening") || !strings.Contains(output.String(), "127.0.0.1:0") {
+	if !strings.Contains(output.String(), "[trpc-service] service listening") || !strings.Contains(output.String(), "127.0.0.1:0") {
 		t.Fatalf("server output = %q", output.String())
 	}
 }
@@ -137,9 +136,9 @@ func TestConfigureLoggerUsesConfiguredWriter(t *testing.T) {
 	}
 	t.Cleanup(restoreLogger)
 
-	servicelog.Info("configured logger")
+	packageLog.Info("configured logger")
 
-	if !strings.Contains(output.String(), "configured logger") {
+	if !strings.Contains(output.String(), "[trpc-service] configured logger") {
 		t.Fatalf("logger output = %q", output.String())
 	}
 }

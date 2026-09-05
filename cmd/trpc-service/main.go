@@ -81,7 +81,7 @@ func main() {
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
 	if err := runMain(context.Background(), os.Args[1:], os.Stdout, os.Stderr, signals); err != nil {
-		servicelog.Error("service command failed", zap.Error(err))
+		packageLog.Error("service command failed", zap.Error(err))
 		os.Exit(1)
 	}
 }
@@ -120,7 +120,7 @@ func runMain(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 	}
 	handler := bootstrapRuntime.HandlerValue()
 	server := newServiceHTTPServer(handler.Handler(), options)
-	servicelog.Info("service listening", zap.String("version", trpcservice.Version), zap.String("address", options.address))
+	packageLog.Info("service listening", zap.String("version", trpcservice.Version), zap.String("address", options.address))
 	returnErr := runService(ctx, signals, handler, options.shutdownTimeout, server.ListenAndServe, server.Shutdown)
 	return errors.Join(returnErr, bootstrapRuntime.Close())
 }

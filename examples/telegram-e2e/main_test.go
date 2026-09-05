@@ -347,7 +347,7 @@ func TestReportTelegramErrorUsesStructuredFields(t *testing.T) {
 	reportTelegramError(telegram.ErrorEvent{Operation: telegram.ErrorOperationPolling, Err: telegram.ErrPolling})
 
 	logged := output.String()
-	if !strings.Contains(logged, "telegram operation failed") || !strings.Contains(logged, "polling") || !strings.Contains(logged, "telegram polling failed") {
+	if !strings.Contains(logged, "[telegram-e2e] telegram operation failed") || !strings.Contains(logged, "polling") || !strings.Contains(logged, "telegram polling failed") {
 		t.Fatalf("structured Telegram error = %q", logged)
 	}
 }

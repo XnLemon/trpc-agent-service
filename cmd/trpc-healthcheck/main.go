@@ -31,7 +31,7 @@ func main() {
 	defer restoreLogger()
 
 	if err := run(os.Args[1:]); err != nil {
-		servicelog.Error("health check failed", zap.Error(err))
+		packageLog.Error("health check failed", zap.Error(err))
 		exitProcess(1)
 	}
 }

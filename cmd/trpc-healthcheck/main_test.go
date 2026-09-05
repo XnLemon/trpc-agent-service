@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 func TestCheckAcceptsSuccessfulEndpoint(t *testing.T) {
@@ -51,6 +54,30 @@ func TestCheckRejectsInvalidInputsAndUnhealthyResponses(t *testing.T) {
 				t.Fatalf("error = %v, want errUnhealthy", err)
 			}
 		})
+	}
+}
+
+func TestPackageLogAddsPrefix(t *testing.T) {
+	var output strings.Builder
+	restoreLogger, err := configureLogger(&output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restoreLogger)
+
+	packageLog.Info("info message")
+	packageLog.Warn("warn message")
+	packageLog.Error("error message", zap.String("operation", "check"))
+
+	logged := output.String()
+	for _, message := range []string{
+		"[trpc-healthcheck] info message",
+		"[trpc-healthcheck] warn message",
+		"[trpc-healthcheck] error message",
+	} {
+		if !strings.Contains(logged, message) {
+			t.Errorf("package logger did not log %q: %s", message, logged)
+		}
 	}
 }
 

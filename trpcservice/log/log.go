@@ -118,6 +118,46 @@ func SetDefault(logger *zap.Logger) func() {
 	return zap.ReplaceGlobals(logger)
 }
 
+// PrefixedLogger is a lightweight view that adds a component prefix to each
+// message while using the current process-wide logger.
+type PrefixedLogger struct {
+	prefix string
+}
+
+// NewPrefixedLogger creates a logger view with the supplied message prefix.
+// The prefix is resolved against the process-wide logger for every entry, so
+// replacing the default logger remains effective for existing views.
+func NewPrefixedLogger(prefix string) PrefixedLogger {
+	return PrefixedLogger{prefix: strings.TrimSpace(prefix)}
+}
+
+// Debug logs a debug-level message with the configured prefix.
+func (logger PrefixedLogger) Debug(message string, fields ...zap.Field) {
+	packageLogger().Debug(logger.prefixedMessage(message), fields...)
+}
+
+// Info logs an info-level message with the configured prefix.
+func (logger PrefixedLogger) Info(message string, fields ...zap.Field) {
+	packageLogger().Info(logger.prefixedMessage(message), fields...)
+}
+
+// Warn logs a warning-level message with the configured prefix.
+func (logger PrefixedLogger) Warn(message string, fields ...zap.Field) {
+	packageLogger().Warn(logger.prefixedMessage(message), fields...)
+}
+
+// Error logs an error-level message with the configured prefix.
+func (logger PrefixedLogger) Error(message string, fields ...zap.Field) {
+	packageLogger().Error(logger.prefixedMessage(message), fields...)
+}
+
+func (logger PrefixedLogger) prefixedMessage(message string) string {
+	if logger.prefix == "" {
+		return message
+	}
+	return logger.prefix + " " + message
+}
+
 func packageLogger() *zap.Logger {
 	return L().WithOptions(zap.AddCallerSkip(1))
 }

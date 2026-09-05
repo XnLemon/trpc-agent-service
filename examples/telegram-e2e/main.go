@@ -76,7 +76,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Getenv, os.Stdout); err != nil {
-		servicelog.Error("telegram E2E failed", zap.Error(err))
+		packageLog.Error("telegram E2E failed", zap.Error(err))
 		os.Exit(1)
 	}
 }
@@ -136,7 +136,7 @@ func runWithPreflight(ctx context.Context, lookup func(string) string, stdout io
 		runDone <- adapter.Run(runContext)
 	}()
 
-	servicelog.Info("telegram receiver listening", zap.String("username", receiver.Username), zap.Int64("receiver_id", receiver.ID))
+	packageLog.Info("telegram receiver listening", zap.String("username", receiver.Username), zap.Int64("receiver_id", receiver.ID))
 	_, _ = fmt.Fprintf(stdout, "Send this ordinary text: %s\n", configuration.testMessage)
 
 	var result error
@@ -447,7 +447,7 @@ func telegramAdapter(ctx context.Context, configuration runConfig, target channe
 }
 
 func reportTelegramError(event telegram.ErrorEvent) {
-	servicelog.Error("telegram operation failed", zap.String("operation", string(event.Operation)), zap.Error(event.Err))
+	packageLog.Error("telegram operation failed", zap.String("operation", string(event.Operation)), zap.Error(event.Err))
 }
 
 func newDeterministicDispatcher(marker, reply string) *deterministicDispatcher {
