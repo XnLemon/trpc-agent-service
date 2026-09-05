@@ -263,7 +263,7 @@ func parseInitOptions(args []string, stderr io.Writer) (initOptions, bool, error
 		return initOptions{}, false, err
 	}
 	if flags.NArg() != 0 {
-		return initOptions{}, false, errors.New("unexpected init arguments")
+		return initOptions{}, false, errUnexpectedInitArguments
 	}
 	return options, options.help, nil
 }
@@ -294,7 +294,7 @@ func parseDemoOptions(args []string, stderr io.Writer) (demoOptions, bool, error
 		return demoOptions{}, false, err
 	}
 	if flags.NArg() != 0 {
-		return demoOptions{}, false, errors.New("unexpected demo arguments")
+		return demoOptions{}, false, errUnexpectedDemoArguments
 	}
 	return options, options.help, nil
 }
@@ -308,18 +308,6 @@ func loadInitEnvironment(config bootstrap.InitConfig) (string, bootstrap.InitCon
 		return "", bootstrap.InitConfig{}, err
 	}
 	return dsn, config, nil
-}
-
-func mapInitCommandError(ctx context.Context, err error, message string) error {
-	if ctx != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	return fmt.Errorf("%w: %s", bootstrap.ErrInvalidConfig, message)
 }
 
 func parseServiceOptions(args []string, stderr io.Writer) (serviceOptions, bool, error) {
@@ -358,7 +346,7 @@ func newServiceHTTPServer(handler http.Handler, options serviceOptions) *http.Se
 
 func runService(ctx context.Context, signals <-chan os.Signal, handler *gateway.HTTPHandler, shutdownTimeout time.Duration, serve func() error, shutdown func(context.Context) error) error {
 	if ctx == nil || serve == nil || shutdown == nil || shutdownTimeout <= 0 {
-		return fmt.Errorf("invalid service supervisor configuration")
+		return errInvalidServiceSupervisorConfiguration
 	}
 	serveResult := make(chan error, 1)
 	go func() {

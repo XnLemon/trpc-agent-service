@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -22,7 +21,6 @@ const (
 	healthTimeout    = 2 * time.Second
 )
 
-var errUnhealthy = errors.New("health check failed")
 var exitProcess = os.Exit
 
 func main() {
