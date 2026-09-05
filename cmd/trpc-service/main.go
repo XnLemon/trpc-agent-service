@@ -18,7 +18,10 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	servicelog "github.com/XnLemon/trpc-agent-service/trpcservice/log"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 const (
@@ -67,13 +70,33 @@ var (
 var newBootstrapRuntime = bootstrap.NewFromEnvironment
 
 func main() {
+	restoreLogger, err := configureLogger(os.Stderr)
+	if err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer restoreLogger()
+
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
 	if err := runMain(context.Background(), os.Args[1:], os.Stdout, os.Stderr, signals); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		servicelog.Error("service command failed", zap.Error(err))
 		os.Exit(1)
 	}
+}
+
+func configureLogger(output io.Writer) (func(), error) {
+	logger, err := servicelog.New(servicelog.Config{
+		Level:       zapcore.InfoLevel,
+		Encoding:    servicelog.EncodingConsole,
+		Output:      output,
+		ErrorOutput: output,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return servicelog.SetDefault(logger), nil
 }
 
 func runMain(ctx context.Context, args []string, stdout, stderr io.Writer, signals <-chan os.Signal) error {
@@ -97,7 +120,7 @@ func runMain(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 	}
 	handler := bootstrapRuntime.HandlerValue()
 	server := newServiceHTTPServer(handler.Handler(), options)
-	_, _ = fmt.Fprintf(stdout, "trpc-agent-service %s listening on %s\n", trpcservice.Version, options.address)
+	servicelog.Info("service listening", zap.String("version", trpcservice.Version), zap.String("address", options.address))
 	returnErr := runService(ctx, signals, handler, options.shutdownTimeout, server.ListenAndServe, server.Shutdown)
 	return errors.Join(returnErr, bootstrapRuntime.Close())
 }

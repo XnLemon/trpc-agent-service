@@ -15,6 +15,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	servicelog "github.com/XnLemon/trpc-agent-service/trpcservice/log"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
 
@@ -90,6 +91,13 @@ func TestRunMainHelpAndSupervisorShutdown(t *testing.T) {
 }
 
 func TestRunMainStartsAndStopsConfiguredHTTPServer(t *testing.T) {
+	var output strings.Builder
+	restoreLogger, err := configureLogger(&output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restoreLogger)
+
 	previousBootstrapRuntime := newBootstrapRuntime
 	newBootstrapRuntime = func(context.Context) (*bootstrap.Runtime, error) {
 		return bootstrap.NewUnavailable()
@@ -102,7 +110,6 @@ func TestRunMainStartsAndStopsConfiguredHTTPServer(t *testing.T) {
 	os.Args = oldArgs
 
 	signals := make(chan os.Signal, 1)
-	var output strings.Builder
 	result := make(chan error, 1)
 	go func() {
 		result <- runMain(context.Background(), []string{"-addr", "127.0.0.1:0", "-shutdown-timeout", "500ms"}, &output, io.Discard, signals)
@@ -117,8 +124,23 @@ func TestRunMainStartsAndStopsConfiguredHTTPServer(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("configured HTTP server did not stop")
 	}
-	if !strings.Contains(output.String(), "listening on 127.0.0.1:0") {
+	if !strings.Contains(output.String(), "service listening") || !strings.Contains(output.String(), "127.0.0.1:0") {
 		t.Fatalf("server output = %q", output.String())
+	}
+}
+
+func TestConfigureLoggerUsesConfiguredWriter(t *testing.T) {
+	var output strings.Builder
+	restoreLogger, err := configureLogger(&output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restoreLogger)
+
+	servicelog.Info("configured logger")
+
+	if !strings.Contains(output.String(), "configured logger") {
+		t.Fatalf("logger output = %q", output.String())
 	}
 }
 
