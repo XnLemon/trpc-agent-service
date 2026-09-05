@@ -90,7 +90,7 @@ func TestRunTimeoutCoversBlockingPreflight(t *testing.T) {
 		return nil, errPreflightGetMeTimeout
 	}
 
-	err := runWithPreflight(context.Background(), func(name string) string { return values[name] }, io.Discard, io.Discard, prepare)
+	err := runWithPreflight(context.Background(), func(name string) string { return values[name] }, io.Discard, prepare)
 	if !errors.Is(err, errRunTimeout) {
 		t.Fatalf("runWithPreflight() error = %v, want run timeout", err)
 	}
@@ -110,7 +110,7 @@ func TestRunWithPreflightTreatsParentCancellationAsClean(t *testing.T) {
 			return "receiver-token"
 		}
 		return ""
-	}, io.Discard, io.Discard, prepare); err != nil {
+	}, io.Discard, prepare); err != nil {
 		t.Fatalf("runWithPreflight() error = %v, want clean cancellation", err)
 	}
 }

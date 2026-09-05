@@ -24,9 +24,12 @@ import (
 	channelsinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/telegram"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	servicelog "github.com/XnLemon/trpc-agent-service/trpcservice/log"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 const (
@@ -83,20 +86,40 @@ type deterministicDispatcher struct {
 var _ gateway.DispatchService = (*deterministicDispatcher)(nil)
 
 func main() {
+	restoreLogger, err := configureLogger(os.Stderr)
+	if err != nil {
+		_, _ = io.WriteString(os.Stderr, err.Error()+"\n")
+		os.Exit(1)
+	}
+	defer restoreLogger()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, os.Getenv, os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	if err := run(ctx, os.Getenv, os.Stdout); err != nil {
+		servicelog.Error("telegram E2E failed", zap.Error(err))
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, lookup func(string) string, stdout, stderr io.Writer) error {
-	return runWithPreflight(ctx, lookup, stdout, stderr, prepareBot)
+func configureLogger(output io.Writer) (func(), error) {
+	logger, err := servicelog.New(servicelog.Config{
+		Level:       zapcore.InfoLevel,
+		Encoding:    servicelog.EncodingConsole,
+		Output:      output,
+		ErrorOutput: output,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return servicelog.SetDefault(logger), nil
 }
 
-func runWithPreflight(ctx context.Context, lookup func(string) string, stdout, stderr io.Writer, prepare prepareBotFunc) error {
-	if ctx == nil || lookup == nil || stdout == nil || stderr == nil {
+func run(ctx context.Context, lookup func(string) string, stdout io.Writer) error {
+	return runWithPreflight(ctx, lookup, stdout, prepareBot)
+}
+
+func runWithPreflight(ctx context.Context, lookup func(string) string, stdout io.Writer, prepare prepareBotFunc) error {
+	if ctx == nil || lookup == nil || stdout == nil {
 		return errConfiguration
 	}
 	if prepare == nil {
@@ -123,7 +146,7 @@ func runWithPreflight(ctx context.Context, lookup func(string) string, stdout, s
 		return errConfiguration
 	}
 	dispatcher := newDeterministicDispatcher(configuration.testMessage, reply)
-	adapter, err := telegramAdapter(runContext, configuration, target, dispatcher, stderr)
+	adapter, err := telegramAdapter(runContext, configuration, target, dispatcher)
 	if err != nil {
 		return classifyPreflightResult(ctx.Err(), runContext.Err(), err)
 	}
@@ -133,7 +156,7 @@ func runWithPreflight(ctx context.Context, lookup func(string) string, stdout, s
 		runDone <- adapter.Run(runContext)
 	}()
 
-	_, _ = fmt.Fprintf(stdout, "Telegram E2E receiver @%s (%d) is listening.\n", receiver.Username, receiver.ID)
+	servicelog.Info("telegram receiver listening", zap.String("username", receiver.Username), zap.Int64("receiver_id", receiver.ID))
 	_, _ = fmt.Fprintf(stdout, "Send this ordinary text: %s\n", configuration.testMessage)
 
 	var result error
@@ -431,12 +454,12 @@ func exampleMetadata() channels.ChangeMetadata {
 	}
 }
 
-func telegramAdapter(ctx context.Context, configuration runConfig, target channels.RoutingTarget, dispatcher gateway.DispatchService, stderr io.Writer) (*telegram.Adapter, error) {
+func telegramAdapter(ctx context.Context, configuration runConfig, target channels.RoutingTarget, dispatcher gateway.DispatchService) (*telegram.Adapter, error) {
 	adapter, err := telegram.New(ctx, telegram.Config{
 		BotToken: configuration.botToken, Target: target, Dispatcher: dispatcher,
 		PollTimeout: configuration.pollTimeout,
 		ErrorHook: func(event telegram.ErrorEvent) {
-			_, _ = fmt.Fprintf(stderr, "telegram %s failed: %v\n", event.Operation, event.Err)
+			servicelog.Error("telegram operation failed", zap.String("operation", string(event.Operation)), zap.Error(event.Err))
 		},
 	})
 	if err != nil {
