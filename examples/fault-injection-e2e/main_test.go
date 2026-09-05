@@ -242,8 +242,20 @@ type fixture struct {
 	dispatcher       *gateway.Dispatcher
 	runner           *faultRunner
 	planA, planB     runtime.ExecutionPlan
-	modelCatalog     *model.ProviderCatalog
-	backendCatalog   *backend.ProviderCatalog
+	controlPlane     controlPlaneFixture
+}
+
+// controlPlaneFixture owns the repositories and catalogs used to prepare
+// tenant-scoped test state. Callers provide only the state relevant to one
+// operation, while the fixture keeps the shared control-plane dependencies
+// together.
+type controlPlaneFixture struct {
+	tenants        tenant.Repository
+	apps           appmodel.Repository
+	models         model.Repository
+	backends       backend.Repository
+	modelCatalog   *model.ProviderCatalog
+	backendCatalog *backend.ProviderCatalog
 }
 
 func newFixture(t *testing.T) fixture {
@@ -260,8 +272,12 @@ func newFixture(t *testing.T) fixture {
 	apps := agentinmemory.NewRepository()
 	models := modelinmemory.NewRepository(modelCatalog)
 	backends := backendinmemory.NewRepository(backendCatalog)
-	tenantA, appA := createTenant(t, tenants, apps, models, backends, "a")
-	tenantB, appB := createTenant(t, tenants, apps, models, backends, "b")
+	controlPlane := controlPlaneFixture{
+		tenants: tenants, apps: apps, models: models, backends: backends,
+		modelCatalog: modelCatalog, backendCatalog: backendCatalog,
+	}
+	tenantA, appA := controlPlane.createTenant(t, "a")
+	tenantB, appB := controlPlane.createTenant(t, "b")
 	resolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{Tenants: tenants, Apps: apps, Models: models, Backends: backends, ModelCatalog: modelCatalog, BackendCatalog: backendCatalog})
 	if err != nil {
 		t.Fatal(err)
@@ -278,69 +294,110 @@ func newFixture(t *testing.T) fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	planA := makePlan(t, tenantA, appA, apps, models, backends, modelCatalog, backendCatalog)
-	planB := makePlan(t, tenantB, appB, apps, models, backends, modelCatalog, backendCatalog)
-	return fixture{tenantA: tenantA, tenantB: tenantB, appA: appA, appB: appB, resolver: resolver, dispatcher: dispatcher, runner: runner, planA: planA, planB: planB, modelCatalog: modelCatalog, backendCatalog: backendCatalog}
+	planA := controlPlane.mustPlan(t, tenantA, appA)
+	planB := controlPlane.mustPlan(t, tenantB, appB)
+	return fixture{tenantA: tenantA, tenantB: tenantB, appA: appA, appB: appB, resolver: resolver, dispatcher: dispatcher, runner: runner, planA: planA, planB: planB, controlPlane: controlPlane}
 }
 
-func makePlan(t *testing.T, root *tenant.Tenant, app *appmodel.App, apps *agentinmemory.InMemoryRepository, models *modelinmemory.InMemoryRepository, backends *backendinmemory.InMemoryRepository, modelCatalog *model.ProviderCatalog, backendCatalog *backend.ProviderCatalog) runtime.ExecutionPlan {
+func (fixture controlPlaneFixture) mustPlan(t *testing.T, root *tenant.Tenant, app *appmodel.App) runtime.ExecutionPlan {
 	t.Helper()
-	if app.CurrentRevision == nil || root.DefaultBackendProfileID == nil {
-		t.Fatal("fixture did not publish default references")
-	}
-	ctx := context.Background()
-	revision, err := apps.GetRevision(ctx, root.TenantID, app.AppID, *app.CurrentRevision)
-	if err != nil {
-		t.Fatal(err)
-	}
-	modelProfile, err := models.Get(ctx, root.TenantID, revision.ModelProfileID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	backendProfile, err := backends.Get(ctx, root.TenantID, *root.DefaultBackendProfileID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := tenant.NewConfigurationSnapshot(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan, err := runtime.NewExecutionPlan(snapshot, app, revision, modelProfile, modelCatalog, backendProfile, backendCatalog)
+	plan, err := fixture.buildPlan(context.Background(), root, app)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return plan
 }
 
-func createTenant(t *testing.T, tenants *tenantinmemory.InMemoryRepository, apps *agentinmemory.InMemoryRepository, models *modelinmemory.InMemoryRepository, backends *backendinmemory.InMemoryRepository, suffix string) (*tenant.Tenant, *appmodel.App) {
+func (fixture controlPlaneFixture) buildPlan(ctx context.Context, root *tenant.Tenant, app *appmodel.App) (runtime.ExecutionPlan, error) {
+	if app == nil || root == nil || app.CurrentRevision == nil || root.DefaultBackendProfileID == nil {
+		return runtime.ExecutionPlan{}, errors.New("fixture did not publish default references")
+	}
+	revision, err := fixture.apps.GetRevision(ctx, root.TenantID, app.AppID, *app.CurrentRevision)
+	if err != nil {
+		return runtime.ExecutionPlan{}, err
+	}
+	modelProfile, err := fixture.models.Get(ctx, root.TenantID, revision.ModelProfileID)
+	if err != nil {
+		return runtime.ExecutionPlan{}, err
+	}
+	backendProfile, err := fixture.backends.Get(ctx, root.TenantID, *root.DefaultBackendProfileID)
+	if err != nil {
+		return runtime.ExecutionPlan{}, err
+	}
+	snapshot, err := tenant.NewConfigurationSnapshot(root)
+	if err != nil {
+		return runtime.ExecutionPlan{}, err
+	}
+	return runtime.NewExecutionPlan(snapshot, app, revision, modelProfile, fixture.modelCatalog, backendProfile, fixture.backendCatalog)
+}
+
+func (fixture controlPlaneFixture) publishDraft(ctx context.Context, root *tenant.Tenant, app *appmodel.App, draft *appmodel.Revision) (*appmodel.App, error) {
+	if root == nil || app == nil || draft == nil {
+		return nil, errors.New("fixture publish requires tenant, app, and draft")
+	}
+	published, _, _, err := fixture.apps.Publish(ctx, appmodel.PublishInput{
+		TenantID:             root.TenantID,
+		AppID:                app.AppID,
+		Revision:             draft.Revision,
+		ExpectedAppVersion:   app.Version,
+		ExpectedDraftVersion: draft.DraftVersion,
+		TenantActive:         true,
+		Metadata: appmodel.ChangeMetadata{
+			ActorType:     "example",
+			ActorID:       "fault-e2e",
+			Reason:        "fixture",
+			CorrelationID: "fault-e2e",
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("publish fixture draft: %w", err)
+	}
+	return published, nil
+}
+
+func (fixture controlPlaneFixture) createDeterministicModelProfile(ctx context.Context, tenantID string) (*model.Profile, error) {
+	profile, _, err := fixture.models.Create(ctx, model.CreateInput{
+		TenantID: tenantID, ProfileKey: "deterministic", DisplayName: "Deterministic",
+		Configuration: model.Configuration{Provider: "fake", Model: "deterministic"},
+		Metadata: model.ChangeMetadata{
+			ActorType: "example", ActorID: "fault-e2e", Reason: "fixture", CorrelationID: "fault-e2e",
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create deterministic model profile: %w", err)
+	}
+	return profile, nil
+}
+
+func (fixture controlPlaneFixture) createTenant(t *testing.T, suffix string) (*tenant.Tenant, *appmodel.App) {
 	t.Helper()
 	ctx := context.Background()
-	root, err := tenants.Create(ctx, tenant.CreateInput{TenantKey: "fault-tenant-" + suffix, DisplayName: "Fault Tenant " + suffix, AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1})
+	root, err := fixture.tenants.Create(ctx, tenant.CreateInput{TenantKey: "fault-tenant-" + suffix, DisplayName: "Fault Tenant " + suffix, AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	modelProfile, _, err := models.Create(ctx, model.CreateInput{TenantID: root.TenantID, ProfileKey: "deterministic", DisplayName: "Deterministic", Configuration: model.Configuration{Provider: "fake", Model: "deterministic"}, Metadata: model.ChangeMetadata{ActorType: "example", ActorID: "fault-e2e", Reason: "fixture", CorrelationID: "fault-e2e"}})
+	modelProfile, err := fixture.createDeterministicModelProfile(ctx, root.TenantID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	backendProfile, _, err := backends.Create(ctx, backend.CreateInput{TenantID: root.TenantID, ProfileKey: "session", DisplayName: "Session", Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory"}}, Metadata: backend.ChangeMetadata{ActorType: "example", ActorID: "fault-e2e", Reason: "fixture", CorrelationID: "fault-e2e"}})
+	backendProfile, _, err := fixture.backends.Create(ctx, backend.CreateInput{TenantID: root.TenantID, ProfileKey: "session", DisplayName: "Session", Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory"}}, Metadata: backend.ChangeMetadata{ActorType: "example", ActorID: "fault-e2e", Reason: "fixture", CorrelationID: "fault-e2e"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	appRoot, err := apps.Create(ctx, appmodel.CreateInput{TenantID: root.TenantID, AppKey: "fault-app-" + suffix, DisplayName: "Fault App " + suffix, Description: "Deterministic fault-injection E2E"})
+	appRoot, err := fixture.apps.Create(ctx, appmodel.CreateInput{TenantID: root.TenantID, AppKey: "fault-app-" + suffix, DisplayName: "Fault App " + suffix, Description: "Deterministic fault-injection E2E"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft, err := apps.CreateDraft(ctx, appmodel.CreateDraftInput{TenantID: root.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version, Configuration: appmodel.DraftConfiguration{Instruction: "Reply deterministically.", ModelProfileID: modelProfile.ProfileID, Runtime: appmodel.DefaultRuntimePolicy()}})
+	draft, err := fixture.apps.CreateDraft(ctx, appmodel.CreateDraftInput{TenantID: root.TenantID, AppID: appRoot.AppID, ExpectedAppVersion: appRoot.Version, Configuration: appmodel.DraftConfiguration{Instruction: "Reply deterministically.", ModelProfileID: modelProfile.ProfileID, Runtime: appmodel.DefaultRuntimePolicy()}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	published, _, _, err := apps.Publish(ctx, appmodel.PublishInput{TenantID: root.TenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: appmodel.ChangeMetadata{ActorType: "example", ActorID: "fault-e2e", Reason: "fixture", CorrelationID: "fault-e2e"}})
+	published, err := fixture.publishDraft(ctx, root, appRoot, draft)
 	if err != nil {
 		t.Fatal(err)
 	}
 	appID, backendID := published.AppID, backendProfile.ProfileID
-	updated, err := tenants.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{TenantID: root.TenantID, ExpectedVersion: root.Version, DisplayName: root.DisplayName, AuditRetentionDays: root.AuditRetentionDays, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1, DefaultAgentAppID: &appID, DefaultBackendProfileID: &backendID})
+	updated, err := fixture.tenants.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{TenantID: root.TenantID, ExpectedVersion: root.Version, DisplayName: root.DisplayName, AuditRetentionDays: root.AuditRetentionDays, LogMaskingLevel: tenant.MaskingStrict, TraceSamplingRate: 1, DefaultAgentAppID: &appID, DefaultBackendProfileID: &backendID})
 	if err != nil {
 		t.Fatal(err)
 	}
