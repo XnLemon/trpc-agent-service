@@ -211,6 +211,7 @@ func (a *SessionAuthenticator) login(writer http.ResponseWriter, request *http.R
 	}
 	token, err := a.newSession()
 	if err != nil {
+		logRequestFailure(requestID, http.StatusInternalServerError, "internal_error", err)
 		writeError(writer, requestID, http.StatusInternalServerError, "internal_error")
 		return
 	}
