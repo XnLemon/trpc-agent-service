@@ -15,6 +15,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -93,6 +94,13 @@ type DispatchService interface {
 	Dispatch(context.Context, DispatchRequest) (<-chan DispatchEvent, error)
 }
 
+// runnerRegistry is the subset of runtime Runner registry behavior required by
+// Dispatcher. The concrete registry remains the public configuration type.
+type runnerRegistry interface {
+	Ready() bool
+	Acquire(context.Context, runtime.ExecutionPlan) (*runtimerunner.RunnerLease, error)
+}
+
 // DispatchConfig configures the Resolver/Registry execution boundary.
 type DispatchConfig struct {
 	Resolver      *PlanResolver
@@ -118,7 +126,7 @@ type DispatchConfig struct {
 // Runner events into a bounded, redacted event stream.
 type Dispatcher struct {
 	resolver        *PlanResolver
-	registry        *runtimerunner.RunnerRegistry
+	registry        runnerRegistry
 	drainTimeout    time.Duration
 	telemetry       observability.Provider
 	metrics         metrics.Catalog

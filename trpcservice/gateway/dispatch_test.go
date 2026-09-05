@@ -44,6 +44,16 @@ type auditWriterFailure struct {
 	failAfter int
 }
 
+type nilRunnerRegistry struct{}
+
+func (nilRunnerRegistry) Ready() bool {
+	return true
+}
+
+func (nilRunnerRegistry) Acquire(context.Context, runtime.ExecutionPlan) (*runtimerunner.RunnerLease, error) {
+	return &runtimerunner.RunnerLease{}, nil
+}
+
 type handoffStub struct {
 	reserveErr, finalizeErr error
 	reserved, finalized     int32
@@ -682,9 +692,8 @@ func TestDispatcherRunnerRunFailureAuditWriteIsRedacted(t *testing.T) {
 }
 
 func TestDispatcherDefensiveNilRunnerAuditFailure(t *testing.T) {
-	dispatcher, principal := newTestDispatcherWithFactory(t, func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
-		return nil, nil
-	})
+	dispatcher, principal := newTestDispatcher(t, &testRunner{})
+	dispatcher.registry = nilRunnerRegistry{}
 	dispatcher.auditWriter = &auditWriterFailure{failAfter: 1}
 	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "nil-runner-audit", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
 	if stream != nil || !errors.Is(err, ErrAuditWriteFailed) {
@@ -693,9 +702,8 @@ func TestDispatcherDefensiveNilRunnerAuditFailure(t *testing.T) {
 }
 
 func TestDispatcherDefensiveNilRunnerWritesFailedAudit(t *testing.T) {
-	dispatcher, principal := newTestDispatcherWithFactory(t, func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
-		return nil, nil
-	})
+	dispatcher, principal := newTestDispatcher(t, &testRunner{})
+	dispatcher.registry = nilRunnerRegistry{}
 	writer, err := audit.NewInMemory(principal.TenantID())
 	if err != nil {
 		t.Fatal(err)
@@ -1960,10 +1968,14 @@ func TestDispatcherConfigurationAndEventMappingEdges(t *testing.T) {
 		t.Fatalf("missing dispatcher dependency error = %v", err)
 	}
 	dispatcher, principal := newTestDispatcher(t, &testRunner{})
-	if _, err := NewDispatcher(DispatchConfig{Resolver: dispatcher.resolver, Registry: dispatcher.registry, DrainTimeout: -time.Second}); !errors.Is(err, ErrInvalid) {
+	registry, ok := dispatcher.registry.(*runtimerunner.RunnerRegistry)
+	if !ok {
+		t.Fatalf("registry type = %T", dispatcher.registry)
+	}
+	if _, err := NewDispatcher(DispatchConfig{Resolver: dispatcher.resolver, Registry: registry, DrainTimeout: -time.Second}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("negative drain timeout error = %v", err)
 	}
-	readyDispatcher, err := NewDispatcher(DispatchConfig{Resolver: dispatcher.resolver, Registry: dispatcher.registry})
+	readyDispatcher, err := NewDispatcher(DispatchConfig{Resolver: dispatcher.resolver, Registry: registry})
 	if err != nil {
 		t.Fatal(err)
 	}
