@@ -1,4 +1,4 @@
-package backend
+package factory
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	backendprofile "github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 )
 
@@ -44,7 +45,7 @@ func NewProviderRegistry() *ProviderRegistry {
 
 // Register installs or replaces one tenant/capability/provider implementation.
 func (registry *ProviderRegistry) Register(tenantID string, capability Capability, provider string, value CapabilityProvider) error {
-	if registry == nil || validateTenantID(tenantID) != nil || !validCapability(capability) || value == nil {
+	if registry == nil || backendprofile.ValidateTenantID(tenantID) != nil || !validCapability(capability) || value == nil {
 		return fmt.Errorf("%w: invalid backend provider registration", ErrInvalid)
 	}
 	provider = strings.ToLower(strings.TrimSpace(provider))
@@ -62,7 +63,7 @@ func (registry *ProviderRegistry) Register(tenantID string, capability Capabilit
 
 // Remove deletes one tenant/capability/provider registration.
 func (registry *ProviderRegistry) Remove(tenantID string, capability Capability, provider string) error {
-	if registry == nil || validateTenantID(tenantID) != nil {
+	if registry == nil || backendprofile.ValidateTenantID(tenantID) != nil {
 		return fmt.Errorf("%w: invalid backend provider scope", ErrInvalid)
 	}
 	registry.mu.Lock()

@@ -37,8 +37,10 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	modelruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	runtimestorageredis "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
@@ -308,7 +310,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, fmt.Errorf("%w: wecom ai bot components: %v", ErrInvalidConfig, err)
 	}
 	workerFactory := environmentOutboxWorkerFactory(config, runtimeStore, auditWriter, wecomProvider, aiBotBindingIDs)
-	storageFactory, err := backend.NewRegistryStorageFactory(backendRegistry, secretRegistry)
+	storageFactory, err := storagefactory.NewRegistryStorageFactory(backendRegistry, secretRegistry)
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = runtimeStores.Close()
@@ -564,7 +566,7 @@ func (p environmentReplyProvider) Reconcile(ctx context.Context, value runtimest
 	return p.legacy.Reconcile(ctx, value)
 }
 
-func environmentRegistries(config environmentConfig, delegateSessions session.Service, runtimeStore runtimestorage.RuntimeStore) (*modelprofile.SecretRegistry, *modelprofile.ModelProviderRegistry, *backend.ProviderRegistry, error) {
+func environmentRegistries(config environmentConfig, delegateSessions session.Service, runtimeStore runtimestorage.RuntimeStore) (*modelruntime.SecretRegistry, *modelruntime.ModelProviderRegistry, *storagefactory.ProviderRegistry, error) {
 	providerName := environmentRuntimeProviderName(config.runtimeStorage)
 	return environmentRegistriesForStores(config, delegateSessions, environmentRuntimeStores{
 		primary:   runtimeStore,
@@ -578,10 +580,10 @@ type environmentRuntimeProviderSpec struct {
 	store        runtimestorage.RuntimeStore
 }
 
-func environmentRegistriesForStores(config environmentConfig, delegateSessions session.Service, runtimeStores environmentRuntimeStores) (*modelprofile.SecretRegistry, *modelprofile.ModelProviderRegistry, *backend.ProviderRegistry, error) {
-	secretRegistry := modelprofile.NewSecretRegistry()
-	modelRegistry := modelprofile.NewModelProviderRegistry()
-	backendRegistry := backend.NewProviderRegistry()
+func environmentRegistriesForStores(config environmentConfig, delegateSessions session.Service, runtimeStores environmentRuntimeStores) (*modelruntime.SecretRegistry, *modelruntime.ModelProviderRegistry, *storagefactory.ProviderRegistry, error) {
+	secretRegistry := modelruntime.NewSecretRegistry()
+	modelRegistry := modelruntime.NewModelProviderRegistry()
+	backendRegistry := storagefactory.NewProviderRegistry()
 	runtimeProviders, err := environmentRuntimeProviders(config, runtimeStores)
 	if err != nil {
 		return nil, nil, nil, err
@@ -643,7 +645,7 @@ func environmentRuntimeProviders(config environmentConfig, stores environmentRun
 	return append(providers, environmentRuntimeProviderSpec{name: "inmemory", capabilities: environmentRuntimeCapabilities("inmemory"), store: fallback}), nil
 }
 
-func registerEnvironmentRuntimeProviders(registry *backend.ProviderRegistry, tenantID string, delegateSessions session.Service, config environmentConfig, runtimeProviders []environmentRuntimeProviderSpec) error {
+func registerEnvironmentRuntimeProviders(registry *storagefactory.ProviderRegistry, tenantID string, delegateSessions session.Service, config environmentConfig, runtimeProviders []environmentRuntimeProviderSpec) error {
 	for _, runtimeProvider := range runtimeProviders {
 		for _, capability := range runtimeProvider.capabilities {
 			provider := environmentRuntimeCapabilityProvider{capability: capability, delegate: delegateSessions, store: runtimeProvider.store, telemetry: config.telemetry, backend: runtimeProvider.name}
@@ -1420,37 +1422,37 @@ func (provider environmentS3CapabilityProvider) New(ctx context.Context, input b
 		return nil, err
 	}
 	if provider.tenantID == "" || input.TenantID != provider.tenantID || binding.Capability != backend.CapabilityArtifact || strings.ToLower(strings.TrimSpace(binding.Provider)) != "s3" || provider.secretRef == "" || binding.SecretRef != provider.secretRef {
-		return nil, backend.ErrStorageFactory
+		return nil, storagefactory.ErrStorageFactory
 	}
 	store, err := newEnvironmentS3Store(ctx, provider.tenantID, binding, secret)
 	if err != nil || store == nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, backend.ErrStorageFactory
+		return nil, storagefactory.ErrStorageFactory
 	}
 	if err := store.Probe(ctx); err != nil {
 		_ = store.Close()
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, backend.ErrStorageFactory
+		return nil, storagefactory.ErrStorageFactory
 	}
 	return store, nil
 }
 
 func newEnvironmentS3StoreFromConfig(ctx context.Context, tenantID string, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (environmentS3Store, error) {
 	if ctx == nil || ctx.Err() != nil || tenantID == "" {
-		return nil, backend.ErrStorageFactory
+		return nil, storagefactory.ErrStorageFactory
 	}
 	accessKey, secretKey, err := parseEnvironmentS3Credentials(binding.SecretRef, secret)
 	if err != nil {
-		return nil, backend.ErrStorageFactory
+		return nil, storagefactory.ErrStorageFactory
 	}
 	endpoint := strings.TrimSpace(binding.Endpoint)
 	options, err := parseEnvironmentS3Options(binding.Options)
 	if err != nil || !validEnvironmentS3Endpoint(endpoint, options.allowInsecure) {
-		return nil, backend.ErrStorageFactory
+		return nil, storagefactory.ErrStorageFactory
 	}
 	cfg := awssdk.Config{
 		Region:      options.region,
@@ -1463,11 +1465,11 @@ func newEnvironmentS3StoreFromConfig(ctx context.Context, tenantID string, bindi
 
 func parseEnvironmentS3Credentials(secretRef string, secret modelprofile.SecretValue) (string, string, error) {
 	if secretRef == "" || secret.Value() == "" {
-		return "", "", backend.ErrStorageFactory
+		return "", "", storagefactory.ErrStorageFactory
 	}
 	accessKey, secretKey, ok := strings.Cut(secret.Value(), ":")
 	if !ok || strings.TrimSpace(accessKey) == "" || secretKey == "" || strings.ContainsAny(accessKey, "\r\n") || strings.ContainsAny(secretKey, "\r\n") {
-		return "", "", backend.ErrStorageFactory
+		return "", "", storagefactory.ErrStorageFactory
 	}
 	return accessKey, secretKey, nil
 }
@@ -1495,7 +1497,7 @@ func parseEnvironmentS3Options(raw map[string]string) (environmentS3Options, err
 		switch key {
 		case "bucket", "region", "path_style", "allow_insecure", "max_bytes", "connect_timeout_ms", "read_timeout_ms", "write_timeout_ms":
 		default:
-			return environmentS3Options{}, backend.ErrStorageFactory
+			return environmentS3Options{}, storagefactory.ErrStorageFactory
 		}
 	}
 	value := func(key, fallback string) string {
@@ -1506,18 +1508,18 @@ func parseEnvironmentS3Options(raw map[string]string) (environmentS3Options, err
 	}
 	result := environmentS3Options{bucket: value("bucket", ""), region: value("region", "us-east-1")}
 	if result.bucket == "" || result.region == "" || len(result.region) > 128 || strings.ContainsAny(result.region, "\r\n\t ") || !validS3Bucket(result.bucket) {
-		return environmentS3Options{}, backend.ErrStorageFactory
+		return environmentS3Options{}, storagefactory.ErrStorageFactory
 	}
 	var err error
 	if result.pathStyle, err = strconv.ParseBool(value("path_style", "false")); err != nil {
-		return environmentS3Options{}, backend.ErrStorageFactory
+		return environmentS3Options{}, storagefactory.ErrStorageFactory
 	}
 	if result.allowInsecure, err = strconv.ParseBool(value("allow_insecure", "false")); err != nil {
-		return environmentS3Options{}, backend.ErrStorageFactory
+		return environmentS3Options{}, storagefactory.ErrStorageFactory
 	}
 	maxBytes, err := strconv.ParseInt(value("max_bytes", "33554432"), 10, 64)
 	if err != nil || maxBytes < 1 || maxBytes > 1<<30 {
-		return environmentS3Options{}, backend.ErrStorageFactory
+		return environmentS3Options{}, storagefactory.ErrStorageFactory
 	}
 	result.maxBytes = maxBytes
 	for key, target := range map[string]*time.Duration{
@@ -1527,7 +1529,7 @@ func parseEnvironmentS3Options(raw map[string]string) (environmentS3Options, err
 	} {
 		milliseconds, parseErr := strconv.ParseInt(value(key, "15000"), 10, 64)
 		if parseErr != nil || milliseconds < 1 || milliseconds > 300000 {
-			return environmentS3Options{}, backend.ErrStorageFactory
+			return environmentS3Options{}, storagefactory.ErrStorageFactory
 		}
 		*target = time.Duration(milliseconds) * time.Millisecond
 	}
@@ -1567,16 +1569,16 @@ func (provider environmentRuntimeCapabilityProvider) validateRedisBinding(bindin
 		return nil
 	}
 	if provider.capability != backend.CapabilitySession && provider.capability != backend.CapabilityMemory {
-		return backend.ErrStorageFactory
+		return storagefactory.ErrStorageFactory
 	}
 	if provider.redisEndpoint != "" && binding.Endpoint != provider.redisEndpoint {
-		return backend.ErrStorageFactory
+		return storagefactory.ErrStorageFactory
 	}
 	if provider.redisSecretRef != "" && binding.SecretRef != "" && binding.SecretRef != provider.redisSecretRef {
-		return backend.ErrStorageFactory
+		return storagefactory.ErrStorageFactory
 	}
 	if provider.redisPasswordRequired && secret.Value() == "" {
-		return backend.ErrStorageFactory
+		return storagefactory.ErrStorageFactory
 	}
 	return nil
 }
@@ -1592,43 +1594,43 @@ func (provider environmentRuntimeCapabilityProvider) newCapability(ctx context.C
 	case backend.CapabilityMemory:
 		store, ok := provider.store.(runtimestorage.MemoryStore)
 		if !ok {
-			return nil, backend.ErrStorageFactory
+			return nil, storagefactory.ErrStorageFactory
 		}
 		return borrowedMemoryStore{MemoryStore: store}, nil
 	case backend.CapabilitySummary:
 		store, ok := provider.store.(runtimestorage.SummaryStore)
 		if !ok {
-			return nil, backend.ErrStorageFactory
+			return nil, storagefactory.ErrStorageFactory
 		}
 		return borrowedSummaryStore{SummaryStore: store}, nil
 	case backend.CapabilityKnowledge:
 		knowledge, ok := provider.store.(runtimestorage.KnowledgeStore)
 		if !ok {
-			return nil, backend.ErrStorageFactory
+			return nil, storagefactory.ErrStorageFactory
 		}
 		vector, ok := provider.store.(runtimestorage.VectorStore)
 		if !ok {
-			return nil, backend.ErrStorageFactory
+			return nil, storagefactory.ErrStorageFactory
 		}
 		return borrowedKnowledgeStore{KnowledgeStore: knowledge, VectorStore: vector}, nil
 	case backend.CapabilityArtifact:
 		artifact, ok := provider.store.(runtimestorage.ArtifactStore)
 		if !ok {
-			return nil, backend.ErrStorageFactory
+			return nil, storagefactory.ErrStorageFactory
 		}
 		object, ok := provider.store.(runtimestorage.ObjectStore)
 		if !ok {
-			return nil, backend.ErrStorageFactory
+			return nil, storagefactory.ErrStorageFactory
 		}
 		return borrowedArtifactStore{ArtifactStore: artifact, ObjectStore: object}, nil
 	case backend.CapabilityAudit:
 		store, ok := provider.store.(runtimestorage.AuditStore)
 		if !ok {
-			return nil, backend.ErrStorageFactory
+			return nil, storagefactory.ErrStorageFactory
 		}
 		return borrowedAuditStore{AuditStore: store}, nil
 	default:
-		return nil, backend.ErrStorageFactory
+		return nil, storagefactory.ErrStorageFactory
 	}
 }
 

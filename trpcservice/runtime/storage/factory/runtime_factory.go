@@ -1,4 +1,4 @@
-package backend
+package factory
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sync"
 
+	backendprofile "github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"trpc.group/trpc-go/trpc-agent-go/session"
@@ -32,7 +33,7 @@ type CapabilitySet struct {
 // NewCapabilitySet creates an owned capability set for a trusted storage
 // adapter. The map is copied so callers cannot mutate the set after return.
 func NewCapabilitySet(tenantID string, capabilities map[Capability]any) (*CapabilitySet, error) {
-	if validateTenantID(tenantID) != nil || len(capabilities) == 0 {
+	if backendprofile.ValidateTenantID(tenantID) != nil || len(capabilities) == 0 {
 		return nil, fmt.Errorf("%w: capability set is invalid", ErrStorageFactory)
 	}
 	copyValues := make(map[Capability]any, len(capabilities))
@@ -267,7 +268,7 @@ func (factory *RegistryStorageFactory) New(ctx context.Context, input StorageFac
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if factory == nil || factory.providers == nil || factory.secrets == nil || validateTenantID(input.TenantID) != nil || len(input.Bindings) == 0 {
+	if factory == nil || factory.providers == nil || factory.secrets == nil || backendprofile.ValidateTenantID(input.TenantID) != nil || len(input.Bindings) == 0 {
 		return nil, ErrStorageFactory
 	}
 	set := &CapabilitySet{tenantID: input.TenantID, capabilities: make(map[Capability]any, len(input.Bindings))}

@@ -17,11 +17,11 @@ for asynchronous vector indexing (the explicit EnqueueMemoryIndex operation is
 also available for retries).
 
 Backend profiles select session, memory, summary, knowledge, artifact, and
-audit bindings. backend.CapabilitySet exposes typed accessors for those
-capabilities; providers are resolved only under the requested tenant and are
-closed by the owning set. Vector and object adapters travel with their source
-knowledge and artifact capabilities so a provider cannot accidentally cross a
-tenant namespace.
+audit bindings. runtime/storage/factory.CapabilitySet exposes typed accessors
+for those capabilities; providers are resolved only under the requested tenant
+and are closed by the owning set. Vector and object adapters travel with their
+source knowledge and artifact capabilities so a provider cannot accidentally
+cross a tenant namespace.
 
 ## Commit Ordering
 

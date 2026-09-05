@@ -27,9 +27,11 @@ import (
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
 	runtimeservice "github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
+	modelruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
@@ -97,7 +99,7 @@ func TestBootstrapServesConcurrentTenantsWithIndependentProviders(t *testing.T) 
 	models := modelmemory.NewRepository(modelCatalog)
 	backends := backendmemory.NewRepository(backendCatalog)
 	identities := make(map[string]gateway.APIIdentity)
-	secrets := modelprofile.NewSecretRegistry()
+	secrets := modelruntime.NewSecretRegistry()
 	for _, configured := range []struct {
 		token, tenantKey, appKey, modelName, secretRef, secretValue string
 	}{
@@ -303,7 +305,7 @@ func TestBootstrapCoversConstructionFailureBoundaries(t *testing.T) {
 	defer closeDependencies()
 	config.RuntimeTenantID = "runtime-tenant"
 	config.Sessions = nil
-	config.StorageFactory = backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+	config.StorageFactory = storagefactory.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
 		return nil, nil
 	})
 	if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalidConfig) {
@@ -744,8 +746,8 @@ func TestBootstrapBuildsRuntimeRegistryFromStorageFactory(t *testing.T) {
 	config, closeDependencies := testConfig(t)
 	defer closeDependencies()
 	config.Sessions = nil
-	config.StorageFactory = backend.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
-		return backend.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: inmemory.NewSessionService()})
+	config.StorageFactory = storagefactory.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
+		return storagefactory.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: inmemory.NewSessionService()})
 	})
 	graph, err := New(context.Background(), config)
 	if err != nil {
@@ -1685,14 +1687,14 @@ type bootstrapRecordingStorageFactory struct {
 	sessions map[string]int
 }
 
-func (factory *bootstrapRecordingStorageFactory) New(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+func (factory *bootstrapRecordingStorageFactory) New(_ context.Context, input backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
 	factory.mu.Lock()
 	if factory.sessions == nil {
 		factory.sessions = make(map[string]int)
 	}
 	factory.sessions[input.TenantID]++
 	factory.mu.Unlock()
-	return backend.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: inmemory.NewSessionService()})
+	return storagefactory.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: inmemory.NewSessionService()})
 }
 
 func (factory *bootstrapRecordingStorageFactory) SessionCount(tenantID string) int {
