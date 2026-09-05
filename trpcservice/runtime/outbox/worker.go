@@ -54,7 +54,8 @@ func (e *DeliveryError) Error() string { return ErrProvider.Error() }
 
 // Worker delivers durable reply segments with lease fencing.
 type Worker struct {
-	store         runtimestorage.RuntimeStore
+	store         runtimestorage.ReplyStore
+	messageStore  runtimestorage.MessageStore
 	provider      Provider
 	channel       string
 	providerName  string
@@ -83,8 +84,14 @@ const (
 
 // Config controls a durable reply worker.
 type Config struct {
-	Store    runtimestorage.RuntimeStore
-	Provider Provider
+	// Store is the durable reply-segment capability used for claiming and
+	// transitioning deliveries.
+	Store runtimestorage.ReplyStore
+	// MessageStore is the inbound message lifecycle capability used to advance
+	// an event after all of its reply segments are delivered. When omitted, New
+	// derives it from Store for compatibility with a RuntimeStore aggregate.
+	MessageStore runtimestorage.MessageStore
+	Provider     Provider
 	// Channel and ProviderName identify the real delivery route for telemetry.
 	// Empty values retain the legacy outbox/other defaults.
 	Channel       string
@@ -104,6 +111,13 @@ type Config struct {
 // New creates a reply worker after validating delivery and lease settings.
 func New(config Config) (*Worker, error) {
 	if config.Store == nil || config.Provider == nil || runtimestorage.ValidateTenant(config.TenantID) != nil || config.Owner == "" || config.LeaseDuration <= 0 {
+		return nil, ErrInvalid
+	}
+	messageStore := config.MessageStore
+	if messageStore == nil {
+		messageStore, _ = config.Store.(runtimestorage.MessageStore)
+	}
+	if messageStore == nil {
 		return nil, ErrInvalid
 	}
 	if config.MaxAttempts <= 0 {
@@ -130,7 +144,7 @@ func New(config Config) (*Worker, error) {
 	if config.ProviderName == "" {
 		config.ProviderName = "other"
 	}
-	return &Worker{store: config.Store, provider: config.Provider, channel: config.Channel, providerName: config.ProviderName, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, jitter: config.Jitter, telemetry: config.Observability, metrics: metrics.New(config.Observability), audit: audit.Recorder{Writer: config.AuditWriter, TenantID: config.TenantID}}, nil
+	return &Worker{store: config.Store, messageStore: messageStore, provider: config.Provider, channel: config.Channel, providerName: config.ProviderName, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, jitter: config.Jitter, telemetry: config.Observability, metrics: metrics.New(config.Observability), audit: audit.Recorder{Writer: config.AuditWriter, TenantID: config.TenantID}}, nil
 }
 
 // Run polls until ctx is canceled. It owns no goroutine after returning.
@@ -345,7 +359,7 @@ func (w *Worker) processClaimed(ctx context.Context, candidate, claimed runtimes
 	return w.rejectDelivery(ctx, operationCtx, claimed, deliveryErr)
 }
 
-func restoreCorrelationContext(ctx context.Context, store runtimestorage.RuntimeStore, value runtimestorage.ReplyOutbox) context.Context {
+func restoreCorrelationContext(ctx context.Context, store runtimestorage.ReplyStore, value runtimestorage.ReplyOutbox) context.Context {
 	ctx = observability.ContextWithoutTraceParent(ctx)
 	correlations, ok := store.(runtimestorage.ReplyCorrelationStore)
 	if !ok {
@@ -470,15 +484,19 @@ func (w *Worker) advanceEvent(ctx context.Context, eventID string) {
 	if !hasEvent {
 		return
 	}
+	messageStore := w.messageCapability()
+	if messageStore == nil {
+		return
+	}
 	event, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.MessageEvent, error) {
-		return w.store.GetMessage(operationCtx, w.tenantID, eventID)
+		return messageStore.GetMessage(operationCtx, w.tenantID, eventID)
 	})
 	if err != nil {
 		return
 	}
 	if event.Status == runtimestorage.EventCompleted {
 		if _, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.MessageEvent, error) {
-			return w.store.TransitionMessage(operationCtx, runtimestorage.MessageTransition{TenantID: w.tenantID, EventID: eventID, From: runtimestorage.EventCompleted, To: runtimestorage.EventReplyPending, Owner: w.owner})
+			return messageStore.TransitionMessage(operationCtx, runtimestorage.MessageTransition{TenantID: w.tenantID, EventID: eventID, From: runtimestorage.EventCompleted, To: runtimestorage.EventReplyPending, Owner: w.owner})
 		}); err != nil {
 			return
 		}
@@ -486,9 +504,20 @@ func (w *Worker) advanceEvent(ctx context.Context, eventID string) {
 	}
 	if event.Status == runtimestorage.EventReplyPending {
 		_, _ = observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.MessageEvent, error) {
-			return w.store.TransitionMessage(operationCtx, runtimestorage.MessageTransition{TenantID: w.tenantID, EventID: eventID, From: runtimestorage.EventReplyPending, To: runtimestorage.EventReplied, Owner: w.owner})
+			return messageStore.TransitionMessage(operationCtx, runtimestorage.MessageTransition{TenantID: w.tenantID, EventID: eventID, From: runtimestorage.EventReplyPending, To: runtimestorage.EventReplied, Owner: w.owner})
 		})
 	}
+}
+
+func (w *Worker) messageCapability() runtimestorage.MessageStore {
+	if w == nil {
+		return nil
+	}
+	if w.messageStore != nil {
+		return w.messageStore
+	}
+	messageStore, _ := w.store.(runtimestorage.MessageStore)
+	return messageStore
 }
 
 func (w *Worker) reconcile(ctx context.Context, claimed runtimestorage.ReplyOutbox) bool {

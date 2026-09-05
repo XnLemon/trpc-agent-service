@@ -213,10 +213,17 @@ type RuntimeCapabilities interface {
 	AttachmentStore
 }
 
-// SessionStore is the tenant-scoped session runtime contract.
+// SessionStore is retained as a compatibility alias for the complete runtime
+// store contract.
+//
+// Deprecated: use SessionStateStore and EventHistoryStore for session-owned
+// dependencies, or RuntimeStore when the complete aggregate is required.
 type SessionStore = RuntimeStore
 
-// SessionRepository is the repository naming alias for SessionStore.
+// SessionRepository is retained as the repository naming alias for RuntimeStore.
+//
+// Deprecated: use SessionStateStore and EventHistoryStore for session-owned
+// dependencies.
 type SessionRepository = RuntimeStore
 
 // MemoryRepository is the repository naming alias for MemoryStore.

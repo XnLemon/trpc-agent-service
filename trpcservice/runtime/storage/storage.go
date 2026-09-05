@@ -236,22 +236,49 @@ type ReplyTransition struct {
 	ProviderID    string
 }
 
-// RuntimeStore is the tenant-scoped persistence contract used by Runner.
-type RuntimeStore interface {
+// SessionStateStore is the tenant-scoped persistence contract for session
+// state. It deliberately excludes message lifecycle and reply delivery.
+type SessionStateStore interface {
 	GetSession(context.Context, string, string) (Session, error)
 	CreateSession(context.Context, string, string, map[string]any) (Session, error)
 	UpdateSessionState(context.Context, string, string, int64, map[string]any) (Session, error)
 	DeleteSession(context.Context, string, string) error
+}
+
+// EventHistoryStore is the immutable event-history contract used to recover a
+// session's upstream Runner state.
+type EventHistoryStore interface {
+	AppendEventPayload(context.Context, EventPayload) (EventPayload, error)
+	ListEventPayloads(context.Context, string, string) ([]EventPayload, error)
+}
+
+// MessageStore is the durable inbound message lifecycle contract. It owns
+// idempotency, execution leases, and fenced message transitions.
+type MessageStore interface {
 	RecordMessage(context.Context, MessageEventInput) (MessageEvent, bool, error)
 	GetMessage(context.Context, string, string) (MessageEvent, error)
 	TransitionMessage(context.Context, MessageTransition) (MessageEvent, error)
-	AppendEventPayload(context.Context, EventPayload) (EventPayload, error)
-	ListEventPayloads(context.Context, string, string) ([]EventPayload, error)
+}
+
+// ReplyStore is the durable reply-segment lifecycle contract. Atomic batch
+// materialization and optional correlation/receipt capabilities remain
+// separate interfaces because not every legacy store provides them.
+type ReplyStore interface {
 	EnqueueReply(context.Context, ReplyOutbox) (ReplyOutbox, error)
 	ListReplyCandidates(context.Context, string) ([]ReplyOutbox, error)
 	GetReply(context.Context, string, string, int) (ReplyOutbox, error)
 	ClaimReply(context.Context, string, string, int, string, time.Duration) (ReplyOutbox, error)
 	TransitionReply(context.Context, ReplyTransition) (ReplyOutbox, error)
+}
+
+// RuntimeStore is the tenant-scoped compatibility aggregate used by the
+// runtime persistence implementations. Consumers should depend on the
+// narrowest capability interface they need.
+type RuntimeStore interface {
+	SessionStateStore
+	EventHistoryStore
+	MessageStore
+	ReplyStore
 	Close() error
 }
 

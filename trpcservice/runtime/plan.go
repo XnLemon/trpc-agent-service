@@ -42,6 +42,16 @@ type ExecutionPlan struct {
 	backend backend.BackendExecutionSnapshot
 }
 
+type executionPlanInputs struct {
+	tenantSnapshot tenant.ConfigurationSnapshot
+	appRoot        *appmodel.App
+	revision       *appmodel.Revision
+	modelProfile   *modelprofile.Profile
+	modelCatalog   *modelprofile.ProviderCatalog
+	backendProfile *backend.Profile
+	backendCatalog *backend.ProviderCatalog
+}
+
 // NewExecutionPlan validates and freezes one Tenant, current Agent Revision,
 // active Model Profile, and active Backend Profile. All objects must belong to
 // the same tenant and the Model Profile must satisfy the Revision reference.
@@ -54,29 +64,41 @@ func NewExecutionPlan(
 	backendProfile *backend.Profile,
 	backendCatalog *backend.ProviderCatalog,
 ) (ExecutionPlan, error) {
-	tenantValue := tenantSnapshot.Tenant()
+	return newExecutionPlan(executionPlanInputs{
+		tenantSnapshot: tenantSnapshot,
+		appRoot:        appRoot,
+		revision:       revision,
+		modelProfile:   modelProfile,
+		modelCatalog:   modelCatalog,
+		backendProfile: backendProfile,
+		backendCatalog: backendCatalog,
+	})
+}
+
+func newExecutionPlan(inputs executionPlanInputs) (ExecutionPlan, error) {
+	tenantValue := inputs.tenantSnapshot.Tenant()
 	if err := tenantValue.Validate(); err != nil {
 		return ExecutionPlan{}, errors.New("invalid execution plan: tenant snapshot is invalid")
 	}
 	if !tenantValue.CanAcceptExecution() {
 		return ExecutionPlan{}, errors.New("invalid execution plan: tenant cannot accept execution")
 	}
-	if appRoot != nil && revision != nil && appRoot.AppID != revision.AppID {
+	if inputs.appRoot != nil && inputs.revision != nil && inputs.appRoot.AppID != inputs.revision.AppID {
 		return ExecutionPlan{}, errors.New("invalid execution plan: revision does not belong to App")
 	}
-	agentSnapshot, err := agent.NewAgentExecutionSnapshot(tenantSnapshot, appRoot, revision)
+	agentSnapshot, err := agent.NewAgentExecutionSnapshot(inputs.tenantSnapshot, inputs.appRoot, inputs.revision)
 	if err != nil {
 		return ExecutionPlan{}, fmt.Errorf("invalid execution plan: agent snapshot: %w", err)
 	}
-	modelSnapshot, err := modelprofile.NewModelExecutionSnapshot(tenantSnapshot, modelProfile, modelCatalog)
+	modelSnapshot, err := modelprofile.NewModelExecutionSnapshot(inputs.tenantSnapshot, inputs.modelProfile, inputs.modelCatalog)
 	if err != nil {
 		return ExecutionPlan{}, fmt.Errorf("invalid execution plan: model snapshot: %w", err)
 	}
-	backendSnapshot, err := backend.NewBackendExecutionSnapshot(tenantSnapshot, backendProfile, backendCatalog)
+	backendSnapshot, err := backend.NewBackendExecutionSnapshot(inputs.tenantSnapshot, inputs.backendProfile, inputs.backendCatalog)
 	if err != nil {
 		return ExecutionPlan{}, fmt.Errorf("invalid execution plan: backend snapshot: %w", err)
 	}
-	if revision == nil || modelProfile == nil || revision.ModelProfileID != modelProfile.ProfileID {
+	if inputs.revision == nil || inputs.modelProfile == nil || inputs.revision.ModelProfileID != inputs.modelProfile.ProfileID {
 		return ExecutionPlan{}, errors.New("invalid execution plan: revision model reference does not match profile")
 	}
 	tenantCopy := tenantValue.Clone()

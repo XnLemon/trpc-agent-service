@@ -72,25 +72,55 @@ erDiagram
 
 ## Repository 契约
 
-平台层使用小接口，避免把 PostgreSQL 类型泄漏给 Gateway：
+平台层使用小接口，避免把 PostgreSQL 类型泄漏给 Gateway。规范定义在
+`trpcservice/runtime/storage/storage.go`；下面的接口与当前实现保持一致，新的
+消费者应只依赖自己需要的最窄能力：
 
 ```go
-type RuntimeStore interface {
+type SessionStateStore interface {
     GetSession(ctx context.Context, tenantID, sessionID string) (Session, error)
     CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (Session, error)
     UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (Session, error)
-    RecordMessage(ctx context.Context, MessageEventInput) (MessageEvent, bool, error)
-    TransitionMessage(ctx context.Context, MessageTransition) (MessageEvent, error)
-    AppendEventPayload(ctx context.Context, EventPayload) (EventPayload, error)
+    DeleteSession(ctx context.Context, tenantID, sessionID string) error
+}
+
+type EventHistoryStore interface {
+    AppendEventPayload(ctx context.Context, payload EventPayload) (EventPayload, error)
     ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]EventPayload, error)
-    TransitionReply(ctx context.Context, ReplyTransition) (ReplyOutbox, error)
+}
+
+type MessageStore interface {
+    RecordMessage(ctx context.Context, input MessageEventInput) (MessageEvent, bool, error)
+    GetMessage(ctx context.Context, tenantID, eventID string) (MessageEvent, error)
+    TransitionMessage(ctx context.Context, transition MessageTransition) (MessageEvent, error)
+}
+
+type ReplyStore interface {
+    EnqueueReply(ctx context.Context, reply ReplyOutbox) (ReplyOutbox, error)
+    ListReplyCandidates(ctx context.Context, tenantID string) ([]ReplyOutbox, error)
+    GetReply(ctx context.Context, tenantID, replyID string, segmentIndex int) (ReplyOutbox, error)
+    ClaimReply(ctx context.Context, tenantID, replyID string, segmentIndex int, owner string, leaseDuration time.Duration) (ReplyOutbox, error)
+    TransitionReply(ctx context.Context, transition ReplyTransition) (ReplyOutbox, error)
+}
+
+type RuntimeStore interface {
+    SessionStateStore
+    EventHistoryStore
+    MessageStore
+    ReplyStore
+    Close() error
 }
 ```
+
+`RuntimeStore` 是兼容性聚合接口，不是新的消费者默认依赖。原子回复物化、
+correlation 和 provider receipt 分别由 `ReplyBatchEnqueuer`、
+`ReplyBatchCorrelationEnqueuer`、`ReplyCorrelationStore` 和
+`ReplyReceiptRecorder` 等可选能力表达，也不应被错误地塞回所有消费者的基础
+接口。
 
 runtime_event_history 是 session-scoped、append-only 的完整上游 Event JSON 历史；
 同一 (tenant_id, session_id, event_id) 只能以相同 payload 幂等重放，冲突 payload 被拒绝。
 Session adapter 在上游 delegate 恢复后按 history_seq 增量回放，避免 fresh process 丢失事件。
-具体实现还可以提供读取事件、领取 Outbox 和更新 provider receipt 的窄接口；
 每个方法都要在 SQL 查询、事务、锁等待和连接获取处传递 `context.Context`。
 
 稳定错误分类为：`ErrNotFound`、`ErrDuplicate`、`ErrConflict`、`ErrInvalid`、

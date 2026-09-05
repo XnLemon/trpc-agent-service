@@ -540,7 +540,7 @@ func environmentOutboxWorkerFactory(config environmentConfig, runtimeStore runti
 		if err != nil {
 			return nil, err
 		}
-		return newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, Provider: provider, Channel: channel, ProviderName: providerName, TenantID: config.tenantID, Owner: owner, LeaseDuration: leaseDuration, AuditWriter: auditWriter, Observability: config.telemetry})
+		return newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, MessageStore: runtimeStore, Provider: provider, Channel: channel, ProviderName: providerName, TenantID: config.tenantID, Owner: owner, LeaseDuration: leaseDuration, AuditWriter: auditWriter, Observability: config.telemetry})
 	}
 }
 
