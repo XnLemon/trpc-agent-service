@@ -30,6 +30,7 @@ nav:
   - 项目说明: project-brief.md
   - 项目架构:
       - 生产架构设计: architecture.md
+      - app、agent 与 runtime 包边界: package-boundaries.md
       - 数据模型: data-model.md
       - Tenant 运行时边界: tenant-runtime-boundary.md
       - Channel Binding: channel-binding.md
