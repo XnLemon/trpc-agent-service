@@ -243,7 +243,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	metadata.identity = identity
 	planSnapshot := plan.AgentSnapshot()
 	planApp := planSnapshot.App()
-	durable, err := dispatcher.claimInboundWithLease(ctx, request.Principal, message, identity, durableInboundLeaseForRuntime(planSnapshot.Revision().Runtime))
+	durable, err := dispatcher.claimInboundWithLease(ctx, metadata, durableInboundLeaseForRuntime(planSnapshot.Revision().Runtime))
 	if err != nil {
 		finishWithError(err)
 		return nil, err
@@ -384,12 +384,12 @@ func detachedCorrelationContext(parent context.Context, requestID, traceID strin
 	return observability.WithCorrelation(context.WithoutCancel(parent), requestID, traceID)
 }
 
-func (dispatcher *Dispatcher) claimInbound(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity) (result *durableExecution, err error) {
-	return dispatcher.claimInboundWithLease(ctx, principal, message, identity, durableInboundLeaseForRuntime(appmodel.DefaultRuntimePolicy()))
+func (dispatcher *Dispatcher) claimInbound(ctx context.Context, metadata dispatchMetadata) (result *durableExecution, err error) {
+	return dispatcher.claimInboundWithLease(ctx, metadata, durableInboundLeaseForRuntime(appmodel.DefaultRuntimePolicy()))
 }
 
-func (dispatcher *Dispatcher) claimInboundWithLease(ctx context.Context, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, leaseDuration time.Duration) (result *durableExecution, err error) {
-	if dispatcher.runtimeStore == nil || principal.Kind() != PrincipalChannel {
+func (dispatcher *Dispatcher) claimInboundWithLease(ctx context.Context, metadata dispatchMetadata, leaseDuration time.Duration) (result *durableExecution, err error) {
+	if dispatcher.runtimeStore == nil || metadata.principal.Kind() != PrincipalChannel {
 		return nil, nil
 	}
 	if leaseDuration <= 0 {
@@ -411,35 +411,35 @@ func (dispatcher *Dispatcher) claimInboundWithLease(ctx context.Context, princip
 		_ = dispatcher.metrics.BackendDuration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "status": status, "error_class": observability.ErrorClass(err)})
 	}()
 	ctx = operationCtx
-	target, ok := principal.RoutingTarget()
-	if !ok || message.ExternalMessageID == "" || len([]rune(message.ExternalMessageID)) > maxDurableExternalMessageIDRunes {
+	target, ok := metadata.principal.RoutingTarget()
+	if !ok || metadata.message.ExternalMessageID == "" || len([]rune(metadata.message.ExternalMessageID)) > maxDurableExternalMessageIDRunes {
 		return nil, fmt.Errorf("%w: durable Channel messages require an external message ID", ErrInvalid)
 	}
 	store := dispatcher.runtimeStore
-	replyTarget, err := replyTarget(target, message)
+	replyTarget, err := replyTarget(target, metadata.message)
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureInboundSession(ctx, store, principal.TenantID(), identity.SessionID); err != nil {
+	if err := ensureInboundSession(ctx, store, metadata.principal.TenantID(), metadata.identity.SessionID); err != nil {
 		return nil, err
 	}
 	event, duplicate, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{
-		TenantID: principal.TenantID(), EventID: uuid.NewString(), SessionID: identity.SessionID,
-		BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID,
-		IdempotencyKey: message.ExternalMessageID,
+		TenantID: metadata.principal.TenantID(), EventID: uuid.NewString(), SessionID: metadata.identity.SessionID,
+		BindingID: target.BindingID, ExternalMessageID: metadata.message.ExternalMessageID,
+		IdempotencyKey: metadata.message.ExternalMessageID,
 		ReplyTarget:    replyTarget,
 	})
 	if err != nil {
 		return nil, err
 	}
 	owner := "gateway-" + uuid.NewString()
-	event, err = prepareInboundEvent(ctx, store, principal.TenantID(), event, duplicate, owner)
+	event, err = prepareInboundEvent(ctx, store, inboundEventPreparation{tenantID: metadata.principal.TenantID(), event: event, duplicate: duplicate, owner: owner})
 	if err != nil {
 		return nil, err
 	}
 	from := event.Status
 	running, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{
-		TenantID: principal.TenantID(), EventID: event.EventID, From: from,
+		TenantID: metadata.principal.TenantID(), EventID: event.EventID, From: from,
 		To: runtimestorage.EventRunning, Owner: owner, LeaseDuration: leaseDuration,
 	})
 	if err != nil {
@@ -448,7 +448,7 @@ func (dispatcher *Dispatcher) claimInboundWithLease(ctx context.Context, princip
 		}
 		return nil, err
 	}
-	return &durableExecution{store: store, tenantID: principal.TenantID(), eventID: event.EventID, owner: owner, fencingToken: running.FencingToken, replyTarget: event.ReplyTarget}, nil
+	return &durableExecution{store: store, tenantID: metadata.principal.TenantID(), eventID: event.EventID, owner: owner, fencingToken: running.FencingToken, replyTarget: event.ReplyTarget}, nil
 }
 
 func durableInboundLeaseForRuntime(policy appmodel.RuntimePolicy) time.Duration {
@@ -488,15 +488,23 @@ func ensureInboundSession(ctx context.Context, store runtimestorage.RuntimeStore
 	return err
 }
 
-func prepareInboundEvent(ctx context.Context, store runtimestorage.RuntimeStore, tenantID string, event runtimestorage.MessageEvent, duplicate bool, owner string) (runtimestorage.MessageEvent, error) {
-	if !duplicate {
-		return event, nil
+type inboundEventPreparation struct {
+	tenantID  string
+	event     runtimestorage.MessageEvent
+	duplicate bool
+	owner     string
+}
+
+func prepareInboundEvent(ctx context.Context, store runtimestorage.RuntimeStore, preparation inboundEventPreparation) (runtimestorage.MessageEvent, error) {
+	if !preparation.duplicate {
+		return preparation.event, nil
 	}
+	event := preparation.event
 	if event.Status == runtimestorage.EventRunning && (event.LeaseExpiresAt == nil || event.LeaseExpiresAt.After(time.Now().UTC())) {
 		return runtimestorage.MessageEvent{}, ErrDuplicateMessage
 	}
 	if event.Status == runtimestorage.EventRunning {
-		if _, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: tenantID, EventID: event.EventID, From: runtimestorage.EventRunning, To: runtimestorage.EventExecutionReconciling, Owner: owner}); err != nil {
+		if _, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: preparation.tenantID, EventID: event.EventID, From: runtimestorage.EventRunning, To: runtimestorage.EventExecutionReconciling, Owner: preparation.owner}); err != nil {
 			return runtimestorage.MessageEvent{}, ErrDuplicateMessage
 		}
 		event.Status = runtimestorage.EventExecutionReconciling

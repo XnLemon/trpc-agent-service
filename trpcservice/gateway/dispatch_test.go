@@ -1285,7 +1285,7 @@ func TestDispatcherDurableClaimReclaimsReceivedAndExpiredRunning(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := dispatcher.claimInboundWithLease(context.Background(), principal, message, identity, 0)
+	claimed, err := dispatcher.claimInboundWithLease(context.Background(), dispatchMetadata{principal: principal, message: message, identity: identity}, 0)
 	if err != nil || claimed == nil {
 		t.Fatalf("default durable lease claim = %+v err=%v", claimed, err)
 	}
@@ -1308,7 +1308,7 @@ func assertDurableClaimReclaimsLeases(t *testing.T, dispatcher *Dispatcher, prin
 	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: principal.TenantID(), EventID: "received-event", SessionID: identity.SessionID, BindingID: bindingID, ExternalMessageID: message.ExternalMessageID}); err != nil {
 		t.Fatal(err)
 	}
-	reclaimed, err := dispatcher.claimInbound(context.Background(), principal, message, identity)
+	reclaimed, err := dispatcher.claimInbound(context.Background(), dispatchMetadata{principal: principal, message: message, identity: identity})
 	if err != nil || reclaimed == nil {
 		t.Fatalf("received reclaim = %+v err=%v", reclaimed, err)
 	}
@@ -1321,11 +1321,11 @@ func assertDurableClaimReclaimsLeases(t *testing.T, dispatcher *Dispatcher, prin
 		t.Fatal(err)
 	}
 	time.Sleep(2 * time.Millisecond)
-	recovered, err := dispatcher.claimInbound(context.Background(), principal, message, identity)
+	recovered, err := dispatcher.claimInbound(context.Background(), dispatchMetadata{principal: principal, message: message, identity: identity})
 	if err != nil || recovered == nil {
 		t.Fatalf("expired reclaim = %+v err=%v", recovered, err)
 	}
-	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrDuplicateMessage) {
+	if _, err := dispatcher.claimInbound(context.Background(), dispatchMetadata{principal: principal, message: message, identity: identity}); !errors.Is(err, ErrDuplicateMessage) {
 		t.Fatalf("active duplicate error = %v", err)
 	}
 }
@@ -1359,12 +1359,12 @@ func assertDurableClaimRejectsTerminalStates(t *testing.T, dispatcher *Dispatche
 	}
 	seedClaimEvent("completed-event", "claim-completed", runtimestorage.EventCompleted)
 	message.ExternalMessageID = "claim-completed"
-	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrDuplicateMessage) {
+	if _, err := dispatcher.claimInbound(context.Background(), dispatchMetadata{principal: principal, message: message, identity: identity}); !errors.Is(err, ErrDuplicateMessage) {
 		t.Fatalf("completed duplicate error = %v", err)
 	}
 	seedClaimEvent("failed-event", "claim-failed", runtimestorage.EventFailed)
 	message.ExternalMessageID = "claim-failed"
-	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrDuplicateMessage) {
+	if _, err := dispatcher.claimInbound(context.Background(), dispatchMetadata{principal: principal, message: message, identity: identity}); !errors.Is(err, ErrDuplicateMessage) {
 		t.Fatalf("failed duplicate error = %v", err)
 	}
 }
@@ -1383,17 +1383,17 @@ func assertDurableClaimReclaimsReconcilingAndValidatesIDs(t *testing.T, dispatch
 	if _, err := store.TransitionMessage(context.Background(), runtimestorage.MessageTransition{TenantID: principal.TenantID(), EventID: "reconciling-event", From: runtimestorage.EventRunning, To: runtimestorage.EventExecutionReconciling, Owner: "recovery", FencingToken: running.FencingToken}); err != nil {
 		t.Fatal(err)
 	}
-	recoveredReconciling, err := dispatcher.claimInbound(context.Background(), principal, message, identity)
+	recoveredReconciling, err := dispatcher.claimInbound(context.Background(), dispatchMetadata{principal: principal, message: message, identity: identity})
 	if err != nil || recoveredReconciling == nil {
 		t.Fatalf("reconciling reclaim = %+v err=%v", recoveredReconciling, err)
 	}
 	dispatcher.finishDurable(context.Background(), dispatchMetadata{}, recoveredReconciling, errors.New("execution failed"), "", nil)
 	message.ExternalMessageID = ""
-	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrInvalid) {
+	if _, err := dispatcher.claimInbound(context.Background(), dispatchMetadata{principal: principal, message: message, identity: identity}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing external ID error = %v", err)
 	}
 	message.ExternalMessageID = strings.Repeat("x", maxDurableExternalMessageIDRunes+1)
-	if _, err := dispatcher.claimInbound(context.Background(), principal, message, identity); !errors.Is(err, ErrInvalid) {
+	if _, err := dispatcher.claimInbound(context.Background(), dispatchMetadata{principal: principal, message: message, identity: identity}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("oversized durable external ID error = %v", err)
 	}
 }
@@ -1412,7 +1412,7 @@ func TestDispatcherDurableClaimMapsStorageErrors(t *testing.T) {
 	}
 	base := inmemory.New()
 	claim := func(store runtimestorage.RuntimeStore) error {
-		_, err := (&Dispatcher{runtimeStore: store}).claimInbound(context.Background(), principal, message, identity)
+		_, err := (&Dispatcher{runtimeStore: store}).claimInbound(context.Background(), dispatchMetadata{principal: principal, message: message, identity: identity})
 		return err
 	}
 	if err := claim(&claimStoreStub{RuntimeStore: base, getErr: errors.New("storage")}); err == nil {
