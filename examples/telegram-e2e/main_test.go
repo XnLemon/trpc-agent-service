@@ -336,6 +336,22 @@ func TestPreflightHTTPClientUsesPollTimeoutBudget(t *testing.T) {
 	}
 }
 
+func TestReportTelegramErrorUsesStructuredFields(t *testing.T) {
+	var output strings.Builder
+	restoreLogger, err := configureLogger(&output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restoreLogger)
+
+	reportTelegramError(telegram.ErrorEvent{Operation: telegram.ErrorOperationPolling, Err: telegram.ErrPolling})
+
+	logged := output.String()
+	if !strings.Contains(logged, "telegram operation failed") || !strings.Contains(logged, "polling") || !strings.Contains(logged, "telegram polling failed") {
+		t.Fatalf("structured Telegram error = %q", logged)
+	}
+}
+
 type fakeWebhookClient struct {
 	info        *models.WebhookInfo
 	deleted     bool
