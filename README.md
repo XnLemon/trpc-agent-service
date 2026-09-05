@@ -160,9 +160,10 @@ trpcservice/tenant/     多租户模型与 repository
 trpcservice/agent/      Agent App、Revision 与发布
 trpcservice/model/      Model Profile、Secret Resolver、Factory
 trpcservice/backend/    Backend Profile、Capability Registry/Factory
-trpcservice/gateway/    鉴权、路由、Execution Plan、HTTP/SSE
+trpcservice/gateway/    鉴权、路由、Dispatch、HTTP/SSE
 trpcservice/channels/   Telegram、企业微信 Channel Adapter
-trpcservice/runtime/    Session、Event、Queue、Outbox、Storage
+trpcservice/runtime/    Execution Plan、Runner 生命周期、Session、Event、Queue、Outbox、Storage
+trpcservice/runtime/runner/  Runner Registry、lease、失效与关闭
 trpcservice/admin/      Admin API 与管理员认证
 migrations/             PostgreSQL/MySQL schema 与 migration
 deploy/                 Compose、Kubernetes、OTel/Prometheus 配置

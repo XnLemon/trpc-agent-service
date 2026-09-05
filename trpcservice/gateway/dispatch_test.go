@@ -16,6 +16,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -41,6 +42,16 @@ type durableOutboxProvider struct {
 type auditWriterFailure struct {
 	calls     int
 	failAfter int
+}
+
+type nilRunnerRegistry struct{}
+
+func (nilRunnerRegistry) Ready() bool {
+	return true
+}
+
+func (nilRunnerRegistry) Acquire(context.Context, runtime.ExecutionPlan) (*runtimerunner.RunnerLease, error) {
+	return &runtimerunner.RunnerLease{}, nil
 }
 
 type handoffStub struct {
@@ -186,6 +197,12 @@ func (s *transitionCaptureStore) runningLease() (time.Duration, bool) {
 }
 
 func newTestDispatcher(t *testing.T, runnerValue *testRunner) (*Dispatcher, Principal) {
+	return newTestDispatcherWithFactory(t, func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
+		return runnerValue, nil
+	})
+}
+
+func newTestDispatcherWithFactory(t *testing.T, factory runtimerunner.RunnerFactory) (*Dispatcher, Principal) {
 	t.Helper()
 	fixture := newGatewayFixture(t)
 	resolver, err := NewPlanResolver(PlanResolverConfig{
@@ -195,9 +212,7 @@ func newTestDispatcher(t *testing.T, runnerValue *testRunner) (*Dispatcher, Prin
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{
-		Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil },
-	})
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: factory})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +456,7 @@ func TestDispatcherAuditsCanarySelectionBeforeExecutionStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 		events := make(chan *trpcevent.Event, 1)
 		events <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
 		close(events)
@@ -606,10 +621,9 @@ func TestDispatcherRunnerBoundaryAuditFailures(t *testing.T) {
 }
 
 func TestDispatcherAcquireFailureWritesTerminalAudit(t *testing.T) {
-	dispatcher, principal := newTestDispatcher(t, &testRunner{})
-	dispatcher.registry.factory = func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+	dispatcher, principal := newTestDispatcherWithFactory(t, func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 		return nil, errors.New("factory provider detail")
-	}
+	})
 	writer := &auditWriterFailure{failAfter: 1}
 	dispatcher.auditWriter = writer
 	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "acquire-audit", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
@@ -619,10 +633,9 @@ func TestDispatcherAcquireFailureWritesTerminalAudit(t *testing.T) {
 }
 
 func TestDispatcherAcquireFailureWithSuccessfulTerminalAudit(t *testing.T) {
-	dispatcher, principal := newTestDispatcher(t, &testRunner{})
-	dispatcher.registry.factory = func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+	dispatcher, principal := newTestDispatcherWithFactory(t, func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 		return nil, errors.New("factory unavailable")
-	}
+	})
 	writer, err := audit.NewInMemory(principal.TenantID())
 	if err != nil {
 		t.Fatal(err)
@@ -680,17 +693,7 @@ func TestDispatcherRunnerRunFailureAuditWriteIsRedacted(t *testing.T) {
 
 func TestDispatcherDefensiveNilRunnerAuditFailure(t *testing.T) {
 	dispatcher, principal := newTestDispatcher(t, &testRunner{})
-	plan, err := dispatcher.resolver.Resolve(context.Background(), principal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key, err := plan.CacheKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	dispatcher.registry.mu.Lock()
-	dispatcher.registry.entries[key] = &runnerEntry{runner: nil, lastUsed: time.Now(), zero: make(chan struct{})}
-	dispatcher.registry.mu.Unlock()
+	dispatcher.registry = nilRunnerRegistry{}
 	dispatcher.auditWriter = &auditWriterFailure{failAfter: 1}
 	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "nil-runner-audit", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
 	if stream != nil || !errors.Is(err, ErrAuditWriteFailed) {
@@ -700,24 +703,14 @@ func TestDispatcherDefensiveNilRunnerAuditFailure(t *testing.T) {
 
 func TestDispatcherDefensiveNilRunnerWritesFailedAudit(t *testing.T) {
 	dispatcher, principal := newTestDispatcher(t, &testRunner{})
-	plan, err := dispatcher.resolver.Resolve(context.Background(), principal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key, err := plan.CacheKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	dispatcher.registry.mu.Lock()
-	dispatcher.registry.entries[key] = &runnerEntry{runner: nil, lastUsed: time.Now(), zero: make(chan struct{})}
-	dispatcher.registry.mu.Unlock()
+	dispatcher.registry = nilRunnerRegistry{}
 	writer, err := audit.NewInMemory(principal.TenantID())
 	if err != nil {
 		t.Fatal(err)
 	}
 	dispatcher.auditWriter = writer
 	stream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, RequestID: "nil-runner-terminal", Message: InboundMessage{Content: "hello", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}})
-	if stream != nil || !errors.Is(err, ErrRunnerUnavailable) {
+	if stream != nil || !errors.Is(err, runtimerunner.ErrRunnerUnavailable) {
 		t.Fatalf("stream=%v err=%v", stream, err)
 	}
 	events, err := writer.List(context.Background(), audit.Query{})
@@ -787,7 +780,7 @@ func TestDispatcherUsesVerifiedChannelIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return runnerValue, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -845,7 +838,7 @@ func TestDispatcherDurableChannelClaimSuppressesDuplicateRunner(t *testing.T) {
 		close(events)
 		return events, nil
 	}}
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return runnerValue, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -915,7 +908,7 @@ func TestDispatcherBindsStoredAttachmentBeforePassingVerifiedContentToRunner(t *
 		close(events)
 		return events, nil
 	}}
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return runnerValue, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -958,7 +951,7 @@ func TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle(t 
 		close(events)
 		return events, nil
 	}}
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return runnerValue, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1008,7 +1001,7 @@ func newToolMediaDispatcher(t *testing.T, fixture gatewayFixture) (*Dispatcher, 
 		runs.Add(1)
 		return testImageToolEvents(ctx)
 	}}
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return runnerValue, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1111,7 +1104,7 @@ func TestDispatcherToolFailureMaterializesFallback(t *testing.T) {
 		close(events)
 		return events, nil
 	}}
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return runnerValue, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1152,7 +1145,7 @@ func TestDispatcherDurableInboundLeaseCoversAgentRuntimeTimeout(t *testing.T) {
 		close(events)
 		return events, nil
 	}}
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return runnerValue, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1197,7 +1190,7 @@ func TestDispatcherDurableChannelModelErrorMaterializesFallbackReply(t *testing.
 		close(events)
 		return events, nil
 	}}
-	registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) { return runnerValue, nil }})
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return runnerValue, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1477,9 +1470,9 @@ func TestDispatcherDurableDispatchFailurePaths(t *testing.T) {
 	message := func(id string) InboundMessage {
 		return InboundMessage{Content: "failure", ExternalMessageID: id, ExternalUserID: "user-1", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1"}
 	}
-	newDispatcher := func(runFn func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error), factoryNil bool) (*Dispatcher, *RunnerRegistry) {
+	newDispatcher := func(runFn func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error), factoryNil bool) (*Dispatcher, *runtimerunner.RunnerRegistry) {
 		runner := &testRunner{runFn: runFn}
-		registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+		registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 			if factoryNil {
 				return nil, nil
 			}
@@ -1511,7 +1504,7 @@ func TestDispatcherDurableDispatchFailurePaths(t *testing.T) {
 	}
 	_ = registry.Close()
 	dispatcher, registry = newDispatcher(nil, true)
-	if _, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message("nil-runner")}); !errors.Is(err, ErrRunnerUnavailable) {
+	if _, err := dispatcher.Dispatch(context.Background(), DispatchRequest{Principal: principal, Message: message("nil-runner")}); !errors.Is(err, runtimerunner.ErrRunnerUnavailable) {
 		t.Fatalf("nil runner = %v", err)
 	}
 	_ = registry.Close()
@@ -1541,10 +1534,10 @@ func TestDispatcherDurableAttachmentFailurePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	reference := testAttachmentReference(t, attachment.KindImage, "image/png", []byte("image"))
-	newDispatcher := func(t *testing.T, store runtimestorage.RuntimeStore, attachments attachment.Reader) (*Dispatcher, *RunnerRegistry, *atomic.Int32) {
+	newDispatcher := func(t *testing.T, store runtimestorage.RuntimeStore, attachments attachment.Reader) (*Dispatcher, *runtimerunner.RunnerRegistry, *atomic.Int32) {
 		t.Helper()
 		var runnerCalls atomic.Int32
-		registry, err := NewRunnerRegistry(RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (Runner, error) {
+		registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 			return &testRunner{runFn: func(context.Context, string, string, trpcmodel.Message, ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
 				runnerCalls.Add(1)
 				return nil, nil
@@ -1737,7 +1730,7 @@ func TestDispatcherForwardChecksCancellationAfterReceivingRunnerEvent(t *testing
 	close(runnerEvents)
 	output := make(chan DispatchEvent, 4)
 	_, span := dispatcher.telemetry.Tracer("test").Start(ctx, "forward")
-	dispatcher.forward(ctx, "request-forward-cancel", "trace", runnerEvents, &RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{}, nil)
+	dispatcher.forward(ctx, "request-forward-cancel", "trace", runnerEvents, &runtimerunner.RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{}, nil)
 	events := collectDispatchEvents(output)
 	if len(events) != 2 || events[0].Error != ErrExecutionCanceled.Error() || !events[1].Done {
 		t.Fatalf("events = %+v", events)
@@ -1763,7 +1756,7 @@ func TestDispatcherClosedRunnerChannelCancellationDoesNotComplete(t *testing.T) 
 	close(runnerEvents)
 	output := make(chan DispatchEvent, 4)
 	_, span := dispatcher.telemetry.Tracer("test").Start(ctx, "forward")
-	dispatcher.forward(ctx, "request-closed-cancel", "trace", runnerEvents, &RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{}, nil)
+	dispatcher.forward(ctx, "request-closed-cancel", "trace", runnerEvents, &runtimerunner.RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{}, nil)
 	events := collectDispatchEvents(output)
 	if len(events) != 2 || events[0].Error != ErrExecutionCanceled.Error() || !events[1].Done {
 		t.Fatalf("events = %+v", events)
@@ -1831,7 +1824,7 @@ func TestDispatcherForwardSelectCancellationBranch(t *testing.T) {
 	_, span := dispatcher.telemetry.Tracer("test").Start(ctx, "forward")
 	finished := make(chan struct{})
 	go func() {
-		dispatcher.forward(ctx, "request-select-cancel", "trace", runnerEvents, &RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{}, nil)
+		dispatcher.forward(ctx, "request-select-cancel", "trace", runnerEvents, &runtimerunner.RunnerLease{}, nil, output, span, time.Now(), principal, InboundMessage{}, tenant.RunnerIdentity{}, nil, time.Time{}, nil)
 		close(finished)
 	}()
 	<-ctx.firstErr
@@ -1975,10 +1968,14 @@ func TestDispatcherConfigurationAndEventMappingEdges(t *testing.T) {
 		t.Fatalf("missing dispatcher dependency error = %v", err)
 	}
 	dispatcher, principal := newTestDispatcher(t, &testRunner{})
-	if _, err := NewDispatcher(DispatchConfig{Resolver: dispatcher.resolver, Registry: dispatcher.registry, DrainTimeout: -time.Second}); !errors.Is(err, ErrInvalid) {
+	registry, ok := dispatcher.registry.(*runtimerunner.RunnerRegistry)
+	if !ok {
+		t.Fatalf("registry type = %T", dispatcher.registry)
+	}
+	if _, err := NewDispatcher(DispatchConfig{Resolver: dispatcher.resolver, Registry: registry, DrainTimeout: -time.Second}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("negative drain timeout error = %v", err)
 	}
-	readyDispatcher, err := NewDispatcher(DispatchConfig{Resolver: dispatcher.resolver, Registry: dispatcher.registry})
+	readyDispatcher, err := NewDispatcher(DispatchConfig{Resolver: dispatcher.resolver, Registry: registry})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2115,15 +2112,12 @@ func TestDispatcherRunAndChannelTerminalEdges(t *testing.T) {
 	drainRunnerEvents(nil, time.Millisecond)
 	drainRunnerEvents(make(chan *trpcevent.Event), time.Millisecond)
 
-	var nilLease *RunnerLease
+	var nilLease *runtimerunner.RunnerLease
 	if nilLease.Runner() != nil || nilLease.Release() != nil {
 		t.Fatal("nil lease was not safe")
 	}
-	if (&RunnerLease{}).Runner() != nil || (&RunnerLease{}).Release() != nil {
+	if (&runtimerunner.RunnerLease{}).Runner() != nil || (&runtimerunner.RunnerLease{}).Release() != nil {
 		t.Fatal("empty lease was not safe")
-	}
-	if (&runnerEntry{}).close() != nil {
-		t.Fatal("empty Runner entry close failed")
 	}
 }
 

@@ -28,6 +28,7 @@ import (
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
 	runtimeservice "github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
@@ -310,7 +311,7 @@ func TestBootstrapCoversConstructionFailureBoundaries(t *testing.T) {
 	}
 
 	config, closeDependencies = testConfig(t)
-	config.Registry.Factory = func(context.Context, runtimeservice.ExecutionPlan) (gateway.Runner, error) { return nil, nil }
+	config.Registry.Factory = func(context.Context, runtimeservice.ExecutionPlan) (runtimerunner.Runner, error) { return nil, nil }
 	config.HTTP.MaxBodyBytes = -1
 	if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalidConfig) {
 		closeDependencies()

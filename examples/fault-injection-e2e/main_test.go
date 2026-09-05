@@ -21,6 +21,7 @@ import (
 	modelinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -192,7 +193,7 @@ func TestFaultInjectionRegistryConstructionE2E(t *testing.T) {
 		t.Fatal("tenant plans share a cache key")
 	}
 	var builds atomic.Int32
-	registry, err := gateway.NewRunnerRegistry(gateway.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (gateway.Runner, error) {
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
 		builds.Add(1)
 		return &faultRunner{}, nil
 	}})
@@ -266,7 +267,7 @@ func newFixture(t *testing.T) fixture {
 		t.Fatal(err)
 	}
 	runner := &faultRunner{}
-	registry, err := gateway.NewRunnerRegistry(gateway.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (gateway.Runner, error) { return runner, nil }})
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) { return runner, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
