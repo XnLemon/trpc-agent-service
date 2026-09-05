@@ -458,14 +458,16 @@ func telegramAdapter(ctx context.Context, configuration runConfig, target channe
 	adapter, err := telegram.New(ctx, telegram.Config{
 		BotToken: configuration.botToken, Target: target, Dispatcher: dispatcher,
 		PollTimeout: configuration.pollTimeout,
-		ErrorHook: func(event telegram.ErrorEvent) {
-			servicelog.Error("telegram operation failed", zap.String("operation", string(event.Operation)), zap.Error(event.Err))
-		},
+		ErrorHook:   reportTelegramError,
 	})
 	if err != nil {
 		return nil, classifyAdapterError(err)
 	}
 	return adapter, nil
+}
+
+func reportTelegramError(event telegram.ErrorEvent) {
+	servicelog.Error("telegram operation failed", zap.String("operation", string(event.Operation)), zap.Error(event.Err))
 }
 
 func newDeterministicDispatcher(marker, reply string) *deterministicDispatcher {
