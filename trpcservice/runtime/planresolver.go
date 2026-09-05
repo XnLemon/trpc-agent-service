@@ -107,7 +107,15 @@ func (resolver *PlanResolver) Resolve(ctx context.Context, request PlanRequest) 
 	if err != nil {
 		return ExecutionPlan{}, err
 	}
-	plan, err := NewExecutionPlan(inputs.tenantSnapshot, inputs.app, inputs.revision, inputs.model, resolver.modelCatalog, inputs.backend, resolver.backendCatalog)
+	plan, err := newExecutionPlan(executionPlanInputs{
+		tenantSnapshot: inputs.tenantSnapshot,
+		appRoot:        inputs.app,
+		revision:       inputs.revision,
+		modelProfile:   inputs.model,
+		modelCatalog:   resolver.modelCatalog,
+		backendProfile: inputs.backend,
+		backendCatalog: resolver.backendCatalog,
+	})
 	if err != nil {
 		return ExecutionPlan{}, ErrPlanUnavailable
 	}
