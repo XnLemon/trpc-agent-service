@@ -330,6 +330,30 @@ func (fixture controlPlaneFixture) buildPlan(ctx context.Context, root *tenant.T
 	return runtime.NewExecutionPlan(snapshot, app, revision, modelProfile, fixture.modelCatalog, backendProfile, fixture.backendCatalog)
 }
 
+func (fixture controlPlaneFixture) publishDraft(ctx context.Context, root *tenant.Tenant, app *appmodel.App, draft *appmodel.Revision) (*appmodel.App, error) {
+	if root == nil || app == nil || draft == nil {
+		return nil, errors.New("fixture publish requires tenant, app, and draft")
+	}
+	published, _, _, err := fixture.apps.Publish(ctx, appmodel.PublishInput{
+		TenantID:             root.TenantID,
+		AppID:                app.AppID,
+		Revision:             draft.Revision,
+		ExpectedAppVersion:   app.Version,
+		ExpectedDraftVersion: draft.DraftVersion,
+		TenantActive:         true,
+		Metadata: appmodel.ChangeMetadata{
+			ActorType:     "example",
+			ActorID:       "fault-e2e",
+			Reason:        "fixture",
+			CorrelationID: "fault-e2e",
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("publish fixture draft: %w", err)
+	}
+	return published, nil
+}
+
 func (fixture controlPlaneFixture) createTenant(t *testing.T, suffix string) (*tenant.Tenant, *appmodel.App) {
 	t.Helper()
 	ctx := context.Background()
@@ -353,7 +377,7 @@ func (fixture controlPlaneFixture) createTenant(t *testing.T, suffix string) (*t
 	if err != nil {
 		t.Fatal(err)
 	}
-	published, _, _, err := fixture.apps.Publish(ctx, appmodel.PublishInput{TenantID: root.TenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true, Metadata: appmodel.ChangeMetadata{ActorType: "example", ActorID: "fault-e2e", Reason: "fixture", CorrelationID: "fault-e2e"}})
+	published, err := fixture.publishDraft(ctx, root, appRoot, draft)
 	if err != nil {
 		t.Fatal(err)
 	}
