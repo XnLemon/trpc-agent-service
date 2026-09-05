@@ -146,6 +146,28 @@ func TestEventAllowsSensitiveLookingOpaqueIdentifierFragments(t *testing.T) {
 	}
 }
 
+func TestContainsSensitiveWordsHonorsWordBoundaries(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "api key phrase", value: "API key", want: true},
+		{name: "punctuated api key phrase", value: "(API, key.)", want: true},
+		{name: "sensitive word at end", value: "metadata dsn", want: true},
+		{name: "api without key", value: "api", want: false},
+		{name: "opaque identifier fragment", value: "opaque:dsn:fragment", want: false},
+		{name: "empty value", value: "   ", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := containsSensitiveWords(tt.value); got != tt.want {
+				t.Fatalf("containsSensitiveWords(%q) = %t, want %t", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAggregationSeparatesCurrenciesAndIDsCannotCollide(t *testing.T) {
 	store, err := NewInMemory("tenant-a")
 	if err != nil {
