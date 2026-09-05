@@ -1311,6 +1311,30 @@ func TestDispatcherDurableClaimReclaimsReceivedAndExpiredRunning(t *testing.T) {
 	assertDurableClaimReclaimsLeases(t, dispatcher, principal, message, identity, store, target.BindingID)
 	assertDurableClaimRejectsTerminalStates(t, dispatcher, principal, message, identity, store, target.BindingID)
 	assertDurableClaimReclaimsReconcilingAndValidatesIDs(t, dispatcher, principal, message, identity, store, target.BindingID)
+
+	message.ExternalMessageID = "claim-default-lease"
+	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{
+		TenantID: principal.TenantID(), EventID: "default-lease-event", SessionID: identity.SessionID,
+		BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := dispatcher.claimInboundWithLease(context.Background(), principal, message, identity, 0)
+	if err != nil || claimed == nil {
+		t.Fatalf("default durable lease claim = %+v err=%v", claimed, err)
+	}
+	dispatcher.failDurable(claimed, errors.New("runner unavailable"))
+}
+
+func TestDurableInboundLeaseUsesRuntimePolicyDefaults(t *testing.T) {
+	defaultPolicy := appmodel.DefaultRuntimePolicy()
+	if got, want := durableInboundLeaseForRuntime(appmodel.RuntimePolicy{}), time.Duration(defaultPolicy.ExecutionTimeoutSeconds)*time.Second+durableInboundLeaseGrace; got != want {
+		t.Fatalf("zero runtime policy lease = %v, want %v", got, want)
+	}
+	custom := appmodel.RuntimePolicy{ExecutionTimeoutSeconds: 7}
+	if got, want := durableInboundLeaseForRuntime(custom), 7*time.Second+durableInboundLeaseGrace; got != want {
+		t.Fatalf("custom runtime policy lease = %v, want %v", got, want)
+	}
 }
 
 func assertDurableClaimReclaimsLeases(t *testing.T, dispatcher *Dispatcher, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, store runtimestorage.RuntimeStore, bindingID string) {

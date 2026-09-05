@@ -29,6 +29,13 @@ func TestExecutionPlanFreezesAllTenantScopedInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runnerInput, err := plan.AgentRunnerInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runnerInput.Tenant.TenantID != fixture.root.TenantID || runnerInput.Agent.AppID != fixture.app.AppID || runnerInput.Model.ProfileID != fixture.modelProfile.ProfileID || len(runnerInput.Storage.Bindings) != 1 {
+		t.Fatalf("unexpected runner input projection: %+v", runnerInput)
+	}
 	key, err := plan.CacheKey()
 	if err != nil {
 		t.Fatal(err)

@@ -511,15 +511,21 @@ func TestRuntimeRunnerRegistryWiresBorrowedDependencies(t *testing.T) {
 	if _, err := NewRuntimeRunnerRegistry(RuntimeRunnerRegistryConfig{}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing runtime dependency error = %v", err)
 	}
+	plan := testExecutionPlan(t)
+	sessions := sessioninmemory.NewSessionService()
+	t.Cleanup(func() { _ = sessions.Close() })
 	registry, err := NewRuntimeRunnerRegistry(RuntimeRunnerRegistryConfig{
 		ModelFactory: stage2ModelFactory{},
-		Sessions:     sessioninmemory.NewSessionService(),
+		Sessions:     sessions,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !registry.Ready() {
 		t.Fatal("runtime registry is not ready")
+	}
+	if _, err := registry.Acquire(context.Background(), plan); !errors.Is(err, ErrRunnerUnavailable) {
+		t.Fatalf("agent-backed runner construction error = %v", err)
 	}
 	if err := registry.Close(); err != nil {
 		t.Fatal(err)
@@ -532,6 +538,9 @@ func TestRuntimeRunnerRegistryWiresBorrowedDependencies(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := storageRegistry.Acquire(context.Background(), plan); !errors.Is(err, ErrRunnerUnavailable) {
+		t.Fatalf("storage-backed runner construction error = %v", err)
 	}
 	if err := storageRegistry.Close(); err != nil {
 		t.Fatal(err)

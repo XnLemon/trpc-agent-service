@@ -300,8 +300,11 @@ func TestBootstrapFailureAndLifecycleBoundaries(t *testing.T) {
 func TestBootstrapCoversConstructionFailureBoundaries(t *testing.T) {
 	config, closeDependencies := testConfig(t)
 	defer closeDependencies()
-	config.RuntimeTenantID = "invalid"
+	config.RuntimeTenantID = "runtime-tenant"
 	config.Sessions = nil
+	config.StorageFactory = backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+		return nil, nil
+	})
 	if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("invalid runtime tenant configuration = %v", err)
 	}

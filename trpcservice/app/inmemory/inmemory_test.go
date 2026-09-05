@@ -669,6 +669,351 @@ func TestInternalDefensiveBranches(t *testing.T) {
 	}
 }
 
+func TestMutationOperationsObserveCancellationWhileWaitingForWriter(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*InMemoryRepository) func(context.Context) error
+	}{
+		{name: "publish", setup: func(r *InMemoryRepository) func(context.Context) error {
+			app := createApp(t, r, tenantOne, "publish-lock")
+			draft := createDraft(t, r, app, draftConfiguration("publish-lock"))
+			input := publishInput(app, draft)
+			return func(ctx context.Context) error {
+				_, _, _, err := r.Publish(ctx, input)
+				return err
+			}
+		}},
+		{name: "rollback", setup: func(r *InMemoryRepository) func(context.Context) error {
+			app := createApp(t, r, tenantOne, "rollback-lock")
+			first := createDraft(t, r, app, draftConfiguration("rollback-first"))
+			publishedApp, _, _, err := r.Publish(context.Background(), publishInput(app, first))
+			if err != nil {
+				t.Fatal(err)
+			}
+			second := createDraft(t, r, publishedApp, draftConfiguration("rollback-second"))
+			current, _, _, err := r.Publish(context.Background(), publishInput(publishedApp, second))
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := appmodel.RollbackInput{TenantID: tenantOne, AppID: current.AppID, TargetRevision: first.Revision, ExpectedAppVersion: current.Version, Metadata: changeMetadata()}
+			return func(ctx context.Context) error {
+				_, _, err := r.Rollback(ctx, input)
+				return err
+			}
+		}},
+		{name: "canary", setup: func(r *InMemoryRepository) func(context.Context) error {
+			app := createApp(t, r, tenantOne, "canary-lock")
+			draft := createDraft(t, r, app, draftConfiguration("canary-lock"))
+			active, _, _, err := r.Publish(context.Background(), publishInput(app, draft))
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := appmodel.SetCanaryInput{TenantID: tenantOne, AppID: active.AppID, ExpectedAppVersion: active.Version, TenantActive: true, Metadata: changeMetadata()}
+			return func(ctx context.Context) error {
+				_, _, err := r.SetCanary(ctx, input)
+				return err
+			}
+		}},
+		{name: "transition", setup: func(r *InMemoryRepository) func(context.Context) error {
+			app := createApp(t, r, tenantOne, "transition-lock")
+			input := appmodel.TransitionStatusInput{TenantID: tenantOne, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: appmodel.StatusDisabled, Metadata: changeMetadata()}
+			return func(ctx context.Context) error {
+				_, _, err := r.TransitionStatus(ctx, input)
+				return err
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRepository()
+			operation := tc.setup(r)
+			if err := r.mu.lock(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- operation(ctx) }()
+			time.Sleep(25 * time.Millisecond)
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("waiting operation error = %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("operation did not observe cancellation while waiting for writer")
+			}
+			r.mu.unlock()
+		})
+	}
+}
+
+func TestMutationOperationsObserveCancellationAfterWriterLock(t *testing.T) {
+	cases := []struct {
+		name string
+		call func(*InMemoryRepository, context.Context) error
+	}{
+		{name: "publish", call: func(r *InMemoryRepository, ctx context.Context) error {
+			_, _, _, err := r.Publish(ctx, appmodel.PublishInput{TenantID: tenantOne, AppID: "app", Revision: 1, ExpectedAppVersion: 1, ExpectedDraftVersion: 1, TenantActive: true, Metadata: changeMetadata()})
+			return err
+		}},
+		{name: "rollback", call: func(r *InMemoryRepository, ctx context.Context) error {
+			_, _, err := r.Rollback(ctx, appmodel.RollbackInput{TenantID: tenantOne, AppID: "app", TargetRevision: 1, ExpectedAppVersion: 1, Metadata: changeMetadata()})
+			return err
+		}},
+		{name: "canary", call: func(r *InMemoryRepository, ctx context.Context) error {
+			_, _, err := r.SetCanary(ctx, appmodel.SetCanaryInput{TenantID: tenantOne, AppID: "app", ExpectedAppVersion: 1, TenantActive: true, Metadata: changeMetadata()})
+			return err
+		}},
+		{name: "transition", call: func(r *InMemoryRepository, ctx context.Context) error {
+			_, _, err := r.TransitionStatus(ctx, appmodel.TransitionStatusInput{TenantID: tenantOne, AppID: "app", ExpectedVersion: 1, NextStatus: appmodel.StatusDisabled, Metadata: changeMetadata()})
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := newCancelAfterDoneContext(3)
+			if err := tc.call(NewRepository(), ctx); !errors.Is(err, context.Canceled) {
+				t.Fatalf("post-lock cancellation error = %v", err)
+			}
+		})
+	}
+}
+
+func TestMutationOperationsObserveCancellationAfterBuildingEvent(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*InMemoryRepository) func(context.Context) error
+	}{
+		{name: "publish", setup: func(r *InMemoryRepository) func(context.Context) error {
+			app := createApp(t, r, tenantOne, "publish-event-cancel")
+			draft := createDraft(t, r, app, draftConfiguration("publish-event-cancel"))
+			input := publishInput(app, draft)
+			return func(ctx context.Context) error {
+				_, _, _, err := r.Publish(ctx, input)
+				return err
+			}
+		}},
+		{name: "rollback", setup: func(r *InMemoryRepository) func(context.Context) error {
+			app := createApp(t, r, tenantOne, "rollback-event-cancel")
+			first := createDraft(t, r, app, draftConfiguration("rollback-event-first"))
+			active, _, _, err := r.Publish(context.Background(), publishInput(app, first))
+			if err != nil {
+				t.Fatal(err)
+			}
+			second := createDraft(t, r, active, draftConfiguration("rollback-event-second"))
+			current, _, _, err := r.Publish(context.Background(), publishInput(active, second))
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := appmodel.RollbackInput{TenantID: tenantOne, AppID: current.AppID, TargetRevision: first.Revision, ExpectedAppVersion: current.Version, Metadata: changeMetadata()}
+			return func(ctx context.Context) error {
+				_, _, err := r.Rollback(ctx, input)
+				return err
+			}
+		}},
+		{name: "transition", setup: func(r *InMemoryRepository) func(context.Context) error {
+			app := createApp(t, r, tenantOne, "transition-event-cancel")
+			input := appmodel.TransitionStatusInput{TenantID: tenantOne, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: appmodel.StatusDisabled, Metadata: changeMetadata()}
+			return func(ctx context.Context) error {
+				_, _, err := r.TransitionStatus(ctx, input)
+				return err
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.setup(NewRepository())(newCancelAfterDoneContext(4)); !errors.Is(err, context.Canceled) {
+				t.Fatalf("post-event cancellation error = %v", err)
+			}
+		})
+	}
+}
+
+//nolint:gocyclo // This table-driven test deliberately covers each mutation boundary error.
+func TestMutationOperationsCoverRepositoryBoundaryBranches(t *testing.T) {
+	t.Run("publish missing revision", func(t *testing.T) {
+		r := NewRepository()
+		app := createApp(t, r, tenantOne, "publish-missing")
+		if _, _, _, err := r.Publish(context.Background(), appmodel.PublishInput{TenantID: tenantOne, AppID: app.AppID, Revision: 99, ExpectedAppVersion: app.Version, ExpectedDraftVersion: 1, TenantActive: true, Metadata: changeMetadata()}); !errors.Is(err, appmodel.ErrNotFound) {
+			t.Fatalf("missing publish revision error = %v", err)
+		}
+	})
+
+	t.Run("publish invalid draft", func(t *testing.T) {
+		r := NewRepository()
+		app := createApp(t, r, tenantOne, "publish-invalid-draft")
+		draft := createDraft(t, r, app, draftConfiguration("publish-invalid-draft"))
+		stored := r.revisions[appScope{tenantID: tenantOne, appID: app.AppID}][draft.Revision]
+		stored.CreatedAt = time.Time{}
+		if _, _, _, err := r.Publish(context.Background(), publishInput(app, draft)); !errors.Is(err, appmodel.ErrInvalid) {
+			t.Fatalf("invalid draft publication error = %v", err)
+		}
+	})
+
+	t.Run("publish invalid updated app", func(t *testing.T) {
+		r := NewRepository()
+		app := createApp(t, r, tenantOne, "publish-invalid-app")
+		draft := createDraft(t, r, app, draftConfiguration("publish-invalid-app"))
+		r.apps[appScope{tenantID: tenantOne, appID: app.AppID}].AppKey = ""
+		if _, _, _, err := r.Publish(context.Background(), publishInput(app, draft)); !errors.Is(err, appmodel.ErrInvalid) {
+			t.Fatalf("invalid updated app publication error = %v", err)
+		}
+	})
+
+	t.Run("rollback invalid metadata", func(t *testing.T) {
+		r := NewRepository()
+		if _, _, err := r.Rollback(context.Background(), appmodel.RollbackInput{Metadata: appmodel.ChangeMetadata{ActorType: "test"}}); !errors.Is(err, appmodel.ErrInvalid) {
+			t.Fatalf("invalid rollback metadata error = %v", err)
+		}
+	})
+
+	t.Run("rollback disabled app", func(t *testing.T) {
+		r := NewRepository()
+		app := createApp(t, r, tenantOne, "rollback-disabled")
+		r.apps[appScope{tenantID: tenantOne, appID: app.AppID}].Status = appmodel.StatusDisabled
+		if _, _, err := r.Rollback(context.Background(), appmodel.RollbackInput{TenantID: tenantOne, AppID: app.AppID, TargetRevision: 1, ExpectedAppVersion: app.Version, Metadata: changeMetadata()}); !errors.Is(err, appmodel.ErrDisabled) {
+			t.Fatalf("disabled rollback error = %v", err)
+		}
+	})
+
+	t.Run("rollback invalid updated app", func(t *testing.T) {
+		r := NewRepository()
+		app := createApp(t, r, tenantOne, "rollback-invalid-app")
+		first := createDraft(t, r, app, draftConfiguration("rollback-invalid-first"))
+		active, _, _, err := r.Publish(context.Background(), publishInput(app, first))
+		if err != nil {
+			t.Fatal(err)
+		}
+		second := createDraft(t, r, active, draftConfiguration("rollback-invalid-second"))
+		current, _, _, err := r.Publish(context.Background(), publishInput(active, second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.apps[appScope{tenantID: tenantOne, appID: app.AppID}].AppKey = ""
+		if _, _, err := r.Rollback(context.Background(), appmodel.RollbackInput{TenantID: tenantOne, AppID: app.AppID, TargetRevision: first.Revision, ExpectedAppVersion: current.Version, Metadata: changeMetadata()}); !errors.Is(err, appmodel.ErrInvalid) {
+			t.Fatalf("invalid updated app rollback error = %v", err)
+		}
+	})
+
+	t.Run("canary draft candidate", func(t *testing.T) {
+		r := NewRepository()
+		app := createApp(t, r, tenantOne, "canary-draft")
+		stable := createDraft(t, r, app, draftConfiguration("canary-stable"))
+		active, _, _, err := r.Publish(context.Background(), publishInput(app, stable))
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidate := createDraft(t, r, active, draftConfiguration("canary-draft"))
+		if _, _, err := r.SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: tenantOne, AppID: active.AppID, CandidateRevision: int64Pointer(candidate.Revision), ExpectedAppVersion: active.Version, TenantActive: true, Metadata: changeMetadata()}); !errors.Is(err, appmodel.ErrInvalid) {
+			t.Fatalf("draft canary candidate error = %v", err)
+		}
+	})
+
+	t.Run("canary unchanged", func(t *testing.T) {
+		r := NewRepository()
+		app := createApp(t, r, tenantOne, "canary-unchanged")
+		stable := createDraft(t, r, app, draftConfiguration("canary-unchanged-stable"))
+		active, _, _, err := r.Publish(context.Background(), publishInput(app, stable))
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidateDraft := createDraft(t, r, active, draftConfiguration("canary-unchanged-candidate"))
+		current, _, _, err := r.Publish(context.Background(), publishInput(active, candidateDraft))
+		if err != nil {
+			t.Fatal(err)
+		}
+		selected, _, err := r.SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: tenantOne, AppID: current.AppID, CandidateRevision: int64Pointer(stable.Revision), ExpectedAppVersion: current.Version, TenantActive: true, Metadata: changeMetadata()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := r.SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: tenantOne, AppID: current.AppID, CandidateRevision: int64Pointer(stable.Revision), ExpectedAppVersion: selected.Version, TenantActive: true, Metadata: changeMetadata()}); !errors.Is(err, appmodel.ErrInvalid) {
+			t.Fatalf("unchanged canary error = %v", err)
+		}
+	})
+
+	t.Run("canary invalid updated app", func(t *testing.T) {
+		r := NewRepository()
+		app := createApp(t, r, tenantOne, "canary-invalid-app")
+		stable := createDraft(t, r, app, draftConfiguration("canary-invalid-stable"))
+		active, _, _, err := r.Publish(context.Background(), publishInput(app, stable))
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidateDraft := createDraft(t, r, active, draftConfiguration("canary-invalid-candidate"))
+		current, _, _, err := r.Publish(context.Background(), publishInput(active, candidateDraft))
+		if err != nil {
+			t.Fatal(err)
+		}
+		selected, _, err := r.SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: tenantOne, AppID: current.AppID, CandidateRevision: int64Pointer(stable.Revision), ExpectedAppVersion: current.Version, TenantActive: true, Metadata: changeMetadata()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.apps[appScope{tenantID: tenantOne, appID: app.AppID}].AppKey = ""
+		if _, _, err := r.SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: tenantOne, AppID: app.AppID, ExpectedAppVersion: selected.Version, TenantActive: true, Metadata: changeMetadata()}); !errors.Is(err, appmodel.ErrInvalid) {
+			t.Fatalf("invalid updated app canary error = %v", err)
+		}
+	})
+
+	t.Run("transition missing current revision", func(t *testing.T) {
+		r := NewRepository()
+		app := createApp(t, r, tenantOne, "transition-missing-revision")
+		stored := r.apps[appScope{tenantID: tenantOne, appID: app.AppID}]
+		stored.Status = appmodel.StatusActive
+		stored.CurrentRevision = int64Pointer(99)
+		if _, _, err := r.TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: tenantOne, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: appmodel.StatusSuspended, Metadata: changeMetadata()}); !errors.Is(err, appmodel.ErrNotFound) {
+			t.Fatalf("missing transition revision error = %v", err)
+		}
+	})
+
+	t.Run("transition invalid updated app", func(t *testing.T) {
+		r := NewRepository()
+		app := createApp(t, r, tenantOne, "transition-invalid-app")
+		draft := createDraft(t, r, app, draftConfiguration("transition-invalid-app"))
+		active, _, _, err := r.Publish(context.Background(), publishInput(app, draft))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.apps[appScope{tenantID: tenantOne, appID: app.AppID}].AppKey = ""
+		if _, _, err := r.TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: tenantOne, AppID: app.AppID, ExpectedVersion: active.Version, NextStatus: appmodel.StatusSuspended, Metadata: changeMetadata()}); !errors.Is(err, appmodel.ErrInvalid) {
+			t.Fatalf("invalid updated app transition error = %v", err)
+		}
+	})
+}
+
+type cancelAfterDoneContext struct {
+	context.Context
+	done     chan struct{}
+	cancelAt int
+	mu       sync.Mutex
+	calls    int
+	closed   bool
+}
+
+func newCancelAfterDoneContext(cancelAt int) *cancelAfterDoneContext {
+	return &cancelAfterDoneContext{Context: context.Background(), done: make(chan struct{}), cancelAt: cancelAt}
+}
+
+func (c *cancelAfterDoneContext) Done() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	if !c.closed && c.calls >= c.cancelAt {
+		close(c.done)
+		c.closed = true
+	}
+	return c.done
+}
+
+func (c *cancelAfterDoneContext) Err() error {
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
 func assertPanics(t *testing.T, operation func()) {
 	t.Helper()
 	defer func() {

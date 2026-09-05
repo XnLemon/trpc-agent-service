@@ -166,6 +166,12 @@ func TestAgentExecutionSnapshotRejectsInvalidAdmissionState(t *testing.T) {
 			}
 		})
 	}
+
+	inactiveTenant := tenantSnapshot.Tenant()
+	inactiveTenant.Status = tenant.StatusSuspended
+	if err := validateExecutionState(inactiveTenant, app, revision); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("inactive tenant execution state error = %v", err)
+	}
 }
 
 func TestAgentExecutionSnapshotRequiresActiveTenantBoundary(t *testing.T) {
@@ -192,6 +198,9 @@ func TestZeroExecutionSnapshotCannotProduceFactoryState(t *testing.T) {
 	if _, err := snapshot.FactoryInput(); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("zero snapshot produced Factory input: %v", err)
 	}
+	if cloneTools(nil) != nil {
+		t.Fatal("nil tool set did not remain nil after cloning")
+	}
 }
 
 func executionFixture(t *testing.T) (*tenant.Tenant, tenant.ConfigurationSnapshot, *appmodel.App, *appmodel.Revision) {
@@ -216,7 +225,7 @@ func executionFixture(t *testing.T) (*tenant.Tenant, tenant.ConfigurationSnapsho
 		Configuration: appmodel.DraftConfiguration{
 			Description: "Immutable Agent description", Instruction: "Answer accurately.",
 			GlobalInstruction: "Follow policy.", ModelProfileID: "model-primary",
-			Generation: appmodel.GenerationConfig{Temperature: float64Pointer(0.2), MaxOutputTokens: intPointer(2048)},
+			Generation: appmodel.GenerationConfig{Temperature: float64Pointer(0.2), TopP: float64Pointer(0.8), MaxOutputTokens: intPointer(2048)},
 			Runtime:    appmodel.DefaultRuntimePolicy(),
 			Tools:      []appmodel.ToolAuthorization{{ToolID: "calculator", Required: true}, {ToolID: "search"}},
 		},
