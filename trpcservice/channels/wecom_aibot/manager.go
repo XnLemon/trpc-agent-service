@@ -687,7 +687,12 @@ func (m *Manager) handleCallback(parent context.Context, frame Frame) {
 	ctx, cancel := context.WithTimeout(parent, m.executionTimeout)
 	defer cancel()
 	stream, err := m.dispatcher.Dispatch(ctx, gateway.DispatchRequest{Principal: mustPrincipal(m.target), RequestID: frame.Headers.ReqID, Message: inbound})
-	if err != nil || stream == nil {
+	if err != nil {
+		logCallbackFailure("callback dispatch failed", frame.Headers.ReqID, "dispatch_failed", err)
+		return
+	}
+	if stream == nil {
+		logCallbackNilStream(frame.Headers.ReqID)
 		return
 	}
 	for event := range stream {
@@ -700,6 +705,7 @@ func (m *Manager) handleCallback(parent context.Context, frame Frame) {
 			Content string `json:"content,omitempty"`
 		}{ID: frame.Headers.ReqID, Content: event.Text, Finish: false}}
 		if err := m.sendReply(ctx, frame.Headers.ReqID, body); err != nil {
+			logCallbackFailure("callback reply failed", frame.Headers.ReqID, "reply_failed", err)
 			return
 		}
 	}

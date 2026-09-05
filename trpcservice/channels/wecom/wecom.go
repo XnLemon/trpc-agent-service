@@ -351,6 +351,7 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		inbound, buildErr := h.buildInboundMessage(executionCtx, state, message)
 		if buildErr != nil {
+			logIngressBuildFailure(requestID, traceID, buildErr)
 			result <- buildErr
 			return
 		}
@@ -616,7 +617,8 @@ func (w *statusCaptureWriter) Write(body []byte) (int, error) {
 }
 
 func (h *Handler) writeIngressSuccess(w http.ResponseWriter, ctx context.Context, principal gateway.Principal, message inboundXML, requestID, traceID string, eventType audit.EventType, decision audit.Decision, errorType string) {
-	if h.recordIngress(ctx, principal, message, requestID, traceID, eventType, decision, errorType) != nil {
+	if err := h.recordIngress(ctx, principal, message, requestID, traceID, eventType, decision, errorType); err != nil {
+		logIngressAuditFailure(requestID, traceID, err)
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		return
 	}

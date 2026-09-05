@@ -149,7 +149,11 @@ func (w *Worker) Start(ctx context.Context, pollInterval time.Duration) error {
 	if err != nil {
 		return err
 	}
-	go func() { _ = w.runLoop(runCtx, pollInterval) }()
+	go func() {
+		if err := w.runLoop(runCtx, pollInterval); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			logWorkerStopped(w, err)
+		}
+	}()
 	return nil
 }
 

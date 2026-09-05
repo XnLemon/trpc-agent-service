@@ -202,6 +202,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		span.RecordError(cause)
 		span.End()
 		_ = dispatcher.metrics.Operation(ctx, started, map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch}, cause)
+		logDispatchFailure(request.Principal, requestID, traceID, cause)
 	}
 
 	plan, err := dispatcher.resolver.Resolve(ctx, request.Principal)
@@ -686,6 +687,7 @@ func (dispatcher *Dispatcher) forwardExecution(ctx context.Context, requestID, t
 		span.SetStatus(observability.StatusOK, "")
 	}
 	_ = dispatcher.metrics.Operation(ctx, started, map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch}, terminalErr)
+	logDispatchFailure(principal, requestID, traceID, terminalErr)
 	span.End()
 }
 
