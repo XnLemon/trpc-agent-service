@@ -9,6 +9,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
@@ -249,6 +250,15 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, err
 	}
 	runtimeStore := runtimeStores.primary
+	replyBatchStore, ok := runtimeStore.(runtimestorage.ReplyBatchEnqueuer)
+	if !ok {
+		_ = delegateSessions.Close()
+		_ = runtimeStores.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("%w: runtime storage does not support atomic reply batches", ErrInvalidConfig)
+	}
+	attachments, _ := runtimeStore.(attachment.Reader)
+	attachmentStore, _ := runtimeStore.(runtimestorage.AttachmentStore)
 	tenantRepo, appRepo, channelRepo, auditWriter, err := environmentRepositories(config, db)
 	if err != nil {
 		_ = delegateSessions.Close()
@@ -307,6 +317,12 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		ModelFactory:        modelRegistry,
 		StorageFactory:      storageFactory,
 		Sessions:            delegateSessions,
+		SessionStore:        runtimeStore,
+		EventHistoryStore:   runtimeStore,
+		MessageStore:        runtimeStore,
+		ReplyBatchStore:     replyBatchStore,
+		Attachments:         attachments,
+		AttachmentStore:     attachmentStore,
 		RuntimeStore:        runtimeStore,
 		RuntimeTenantID:     "",
 		Authenticator:       authenticator,

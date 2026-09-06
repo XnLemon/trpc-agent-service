@@ -214,17 +214,18 @@ type RuntimeCapabilities interface {
 }
 
 // SessionStore is retained as a compatibility alias for the complete runtime
-// store contract.
+// store contract. New consumers should depend on SessionStateStore and
+// EventHistoryStore when they only need session-owned persistence.
 //
-// Deprecated: use SessionStateStore and EventHistoryStore for session-owned
-// dependencies, or RuntimeStore when the complete aggregate is required.
+// Deprecated: depend directly on SessionStateStore and EventHistoryStore when
+// a consumer only needs one half of the session boundary.
 type SessionStore = RuntimeStore
 
 // SessionRepository is retained as the repository naming alias for RuntimeStore.
 //
 // Deprecated: use SessionStateStore and EventHistoryStore for session-owned
 // dependencies.
-type SessionRepository = RuntimeStore
+type SessionRepository = SessionStore
 
 // MemoryRepository is the repository naming alias for MemoryStore.
 type MemoryRepository = MemoryStore

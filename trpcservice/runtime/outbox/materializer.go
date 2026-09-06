@@ -33,6 +33,8 @@ type Materializer struct {
 type MaterializerConfig struct {
 	// Store is retained for compatibility with callers that provide the
 	// historical RuntimeStore aggregate.
+	//
+	// Deprecated: use BatchStore.
 	Store runtimestorage.RuntimeStore
 	// BatchStore is the narrow reply materialization capability preferred by new
 	// callers. When omitted, NewMaterializer derives it from Store.

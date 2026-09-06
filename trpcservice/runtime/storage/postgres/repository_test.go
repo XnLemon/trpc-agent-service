@@ -100,6 +100,38 @@ func TestMethodsRespectCanceledContextBeforeDatabaseCall(t *testing.T) {
 	}
 }
 
+func TestNilStoreReturnsStorageError(t *testing.T) {
+	var store *runtimepostgres.Store
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{name: "correlation", call: func() error { _, err := store.GetReplyCorrelation(ctx, "tenant-a", "event-1"); return err }},
+		{name: "get session", call: func() error { _, err := store.GetSession(ctx, "tenant-a", "session-1"); return err }},
+		{name: "create session", call: func() error { _, err := store.CreateSession(ctx, "tenant-a", "session-1", nil); return err }},
+		{name: "message", call: func() error { _, err := store.GetMessage(ctx, "tenant-a", "event-1"); return err }},
+		{name: "record message", call: func() error {
+			_, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-a", EventID: "event-1", SessionID: "session-1", BindingID: "binding-1", ExternalMessageID: "external-1", IdempotencyKey: "idempotency-1"})
+			return err
+		}},
+		{name: "append event", call: func() error {
+			_, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-1", EventID: "event-1", Payload: []byte(`{}`)})
+			return err
+		}},
+		{name: "list events", call: func() error { _, err := store.ListEventPayloads(ctx, "tenant-a", "session-1"); return err }},
+		{name: "reply", call: func() error { _, err := store.GetReply(ctx, "tenant-a", "reply-1", 0); return err }},
+		{name: "list replies", call: func() error { _, err := store.ListReplyCandidates(ctx, "tenant-a"); return err }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.call(); !errors.Is(err, runtimestorage.ErrStorage) {
+				t.Fatalf("error = %v, want %v", err, runtimestorage.ErrStorage)
+			}
+		})
+	}
+}
+
 func TestRuntimeStoreMethodsRespectCanceledContext(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

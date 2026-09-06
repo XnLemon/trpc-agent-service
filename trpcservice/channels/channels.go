@@ -616,6 +616,11 @@ func hasControl(value string) bool {
 	return false
 }
 
+// ValidateTenantID validates the stable tenant identifier used by channel
+// adapter composition. It is intentionally the same validator used by the
+// channel domain and does not authorize access to a tenant.
+func ValidateTenantID(id string) error { return validateTenantID(id) }
+
 func validateTenantID(id string) error  { return validateCrockfordID(id, "t_", "tenant") }
 func validateAppID(id string) error     { return validateCrockfordID(id, "app_", "agent app") }
 func validateBindingID(id string) error { return validateCrockfordID(id, "cb_", "channel binding") }

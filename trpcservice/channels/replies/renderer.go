@@ -1,48 +1,35 @@
-// Package replies converts protocol-neutral dispatch events into a safe
-// protocol reply. It deliberately has no provider dependencies.
+// Package replies is a compatibility facade for the historical channel reply
+// renderer. New code should import gateway/replies because event rendering is a
+// Gateway boundary, not a Channel Binding domain concern.
 package replies
 
 import (
-	"strings"
-
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	gatewayreplies "github.com/XnLemon/trpc-agent-service/trpcservice/gateway/replies"
 )
 
 const (
 	// KindText identifies a rendered text reply.
-	KindText = "text"
+	//
+	// Deprecated: use gateway/replies.KindText.
+	KindText = gatewayreplies.KindText
 	// KindFallback identifies a deterministic safe fallback reply.
-	KindFallback = "fallback"
-
-	// StableFallback is used when a stream has no renderable text or contains a
-	// structured event that the destination cannot represent safely.
-	StableFallback = "Sorry, I couldn't process that message."
+	//
+	// Deprecated: use gateway/replies.KindFallback.
+	KindFallback = gatewayreplies.KindFallback
+	// StableFallback is the deterministic safe fallback reply.
+	//
+	// Deprecated: use gateway/replies.StableFallback.
+	StableFallback = gatewayreplies.StableFallback
 )
 
-// Reply is the provider-neutral result of rendering a dispatch stream.
-type Reply struct {
-	Kind string
-	Text string
-}
+// Reply is the historical channel reply result.
+//
+// Deprecated: use gateway/replies.Reply.
+type Reply = gatewayreplies.Reply
 
-// Render consumes all events and returns one deterministic reply. Status and
-// Done events are control signals; partial status updates are never emitted as
-// premature replies. Any execution error wins over accumulated text.
-func Render(events []gateway.DispatchEvent) Reply {
-	var b strings.Builder
-	for _, event := range events {
-		switch event.Type {
-		case gateway.DispatchEventError:
-			return Reply{Kind: KindFallback, Text: StableFallback}
-		case gateway.DispatchEventMessage:
-			b.WriteString(event.Text)
-		case gateway.DispatchEventStatus, gateway.DispatchEventDone:
-		default:
-			return Reply{Kind: KindFallback, Text: StableFallback}
-		}
-	}
-	if text := strings.TrimSpace(b.String()); text != "" {
-		return Reply{Kind: KindText, Text: text}
-	}
-	return Reply{Kind: KindFallback, Text: StableFallback}
-}
+// Render preserves the historical import path while delegating ownership to
+// the Gateway event boundary.
+//
+// Deprecated: use gateway/replies.Render.
+func Render(events []gateway.DispatchEvent) Reply { return gatewayreplies.Render(events) }

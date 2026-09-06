@@ -223,7 +223,7 @@ SecretResolver、fake ModelFactory 和 InMemory Session，不需要真实模型�
 
 - `migrations/migration_test.go`：干净 PostgreSQL migration、权限、跨租户 FK、published
   current pointer、延迟 binding 和嵌套凭据键检查；
-- `trpcservice/controlplane/postgres/integration_test.go`：五类 SQL Repository 的租户作用域、
+- `trpcservice/internal/testsupport/postgres/integration_test.go`：五类 SQL Repository 的租户作用域、
   生命周期、发布、候选消费、Outbox、Context 取消和深拷贝路径；CI 使用独立 PostgreSQL
   服务执行；
 - `scripts/coverage.sh`：使用单次原生 Go `-coverpkg` profile 执行各包单测及上述跨领域集成测试，

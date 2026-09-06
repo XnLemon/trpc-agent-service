@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
-	"sync"
 )
 
 var (
@@ -93,6 +92,25 @@ type Router interface {
 	Set(context.Context, string, Backend) error
 }
 
+// State is the durable phase state for one tenant migration. It contains no
+// record payloads and can be persisted by an operator-owned SQL, Redis, or
+// other strongly consistent adapter.
+type State struct {
+	TenantID        string
+	Barrier         int64
+	Copied          bool
+	CaughtUp        bool
+	PreviousBackend Backend
+	Cutover         bool
+}
+
+// StateStore persists migration phase state independently from source and
+// destination data. A Tool must not keep this state only in process memory.
+type StateStore interface {
+	Get(context.Context, string) (State, error)
+	Put(context.Context, State) error
+}
+
 // Report summarizes one migration phase without payload contents.
 type Report struct {
 	TenantID             string
@@ -113,19 +131,26 @@ type Tool struct {
 	source      Source
 	destination Destination
 	router      Router
-	mu          sync.Mutex
-	barriers    map[string]int64
-	copied      map[string]bool
-	caughtUp    map[string]bool
-	cutovers    map[string]Backend
+	state       StateStore
 }
 
-// NewTool validates migration adapters and creates a Tool.
+// NewTool validates migration adapters and creates a Tool with process-local
+// state. It is retained for tests and dry-runs; production callers should use
+// NewToolWithStateStore with shared durable state.
+//
+// Deprecated: use NewToolWithStateStore for a restart-safe migration.
 func NewTool(source Source, destination Destination, router Router) (*Tool, error) {
-	if source == nil || destination == nil || router == nil {
+	return NewToolWithStateStore(source, destination, router, NewMemoryStateStore())
+}
+
+// NewToolWithStateStore creates a migration Tool with caller-owned durable
+// phase state. New production integrations should use this constructor with a
+// shared StateStore so another process can resume after a restart.
+func NewToolWithStateStore(source Source, destination Destination, router Router, state StateStore) (*Tool, error) {
+	if source == nil || destination == nil || router == nil || state == nil {
 		return nil, ErrInvalid
 	}
-	return &Tool{source: source, destination: destination, router: router, barriers: map[string]int64{}, copied: map[string]bool{}, caughtUp: map[string]bool{}, cutovers: map[string]Backend{}}, nil
+	return &Tool{source: source, destination: destination, router: router, state: state}, nil
 }
 
 // Begin establishes the source dual-write watermark barrier.
@@ -137,12 +162,9 @@ func (t *Tool) Begin(ctx context.Context, tenantID string) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	t.mu.Lock()
-	t.barriers[tenantID] = watermark
-	t.copied[tenantID] = false
-	t.caughtUp[tenantID] = false
-	delete(t.cutovers, tenantID)
-	t.mu.Unlock()
+	if err := t.state.Put(ctx, State{TenantID: tenantID, Barrier: watermark}); err != nil {
+		return Report{}, err
+	}
 	return Report{TenantID: tenantID, Phase: PhaseDualWrite, SourceWatermark: watermark}, nil
 }
 
@@ -151,9 +173,10 @@ func (t *Tool) Copy(ctx context.Context, tenantID string) (Report, error) {
 	if err := validate(ctx, tenantID); err != nil {
 		return Report{}, err
 	}
-	t.mu.Lock()
-	barrier, ok := t.barriers[tenantID]
-	t.mu.Unlock()
+	state, ok, err := t.loadState(ctx, tenantID)
+	if err != nil {
+		return Report{}, err
+	}
 	if !ok {
 		return Report{}, ErrConflict
 	}
@@ -161,17 +184,18 @@ func (t *Tool) Copy(ctx context.Context, tenantID string) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	if snapshot.Watermark < barrier {
+	if snapshot.Watermark < state.Barrier {
 		return Report{}, ErrConflict
 	}
 	records := normalizeRecords(tenantID, snapshot.Records)
 	if err := t.destination.Apply(ctx, records); err != nil {
 		return Report{}, err
 	}
-	t.mu.Lock()
-	t.copied[tenantID] = true
-	t.caughtUp[tenantID] = false
-	t.mu.Unlock()
+	state.Copied = true
+	state.CaughtUp = false
+	if err := t.state.Put(ctx, state); err != nil {
+		return Report{}, err
+	}
 	return Report{TenantID: tenantID, Phase: PhaseCopy, Copied: len(records), SourceWatermark: snapshot.Watermark}, nil
 }
 
@@ -180,10 +204,11 @@ func (t *Tool) CatchUp(ctx context.Context, tenantID string) (Report, error) {
 	if err := validate(ctx, tenantID); err != nil {
 		return Report{}, err
 	}
-	t.mu.Lock()
-	barrier, ok := t.barriers[tenantID]
-	copied := t.copied[tenantID]
-	t.mu.Unlock()
+	state, ok, err := t.loadState(ctx, tenantID)
+	if err != nil {
+		return Report{}, err
+	}
+	barrier, copied := state.Barrier, state.Copied
 	if !ok || !copied {
 		return Report{}, ErrConflict
 	}
@@ -201,9 +226,10 @@ func (t *Tool) CatchUp(ctx context.Context, tenantID string) (Report, error) {
 	if err := t.destination.Apply(ctx, normalizeRecords(tenantID, records)); err != nil {
 		return Report{}, err
 	}
-	t.mu.Lock()
-	t.caughtUp[tenantID] = true
-	t.mu.Unlock()
+	state.CaughtUp = true
+	if err := t.state.Put(ctx, state); err != nil {
+		return Report{}, err
+	}
 	return Report{TenantID: tenantID, Phase: PhaseCatchUp, CaughtUp: len(records), SourceWatermark: watermark, DestinationWatermark: watermark}, nil
 }
 
@@ -234,12 +260,11 @@ func (t *Tool) Cutover(ctx context.Context, tenantID string) (Report, error) {
 	if err := validate(ctx, tenantID); err != nil {
 		return Report{}, err
 	}
-	t.mu.Lock()
-	_, barrierKnown := t.barriers[tenantID]
-	copied := t.copied[tenantID]
-	caughtUp := t.caughtUp[tenantID]
-	t.mu.Unlock()
-	if !barrierKnown || !copied || !caughtUp {
+	state, stateKnown, err := t.loadState(ctx, tenantID)
+	if err != nil {
+		return Report{}, err
+	}
+	if !stateKnown || !state.Copied || !state.CaughtUp {
 		return Report{}, ErrConflict
 	}
 	validation, err := t.Validate(ctx, tenantID)
@@ -251,10 +276,7 @@ func (t *Tool) Cutover(ctx context.Context, tenantID string) (Report, error) {
 		return Report{}, err
 	}
 	if previous == BackendDestination {
-		t.mu.Lock()
-		_, rollbackKnown := t.cutovers[tenantID]
-		t.mu.Unlock()
-		if !rollbackKnown {
+		if !state.Cutover || state.PreviousBackend == BackendDestination || state.PreviousBackend == "" {
 			return Report{}, ErrConflict
 		}
 		validation.Phase, validation.CutoverBackend, validation.RollbackAllowed = PhaseCutover, BackendDestination, true
@@ -263,9 +285,14 @@ func (t *Tool) Cutover(ctx context.Context, tenantID string) (Report, error) {
 	if err := t.router.Set(ctx, tenantID, BackendDestination); err != nil {
 		return Report{}, err
 	}
-	t.mu.Lock()
-	t.cutovers[tenantID] = previous
-	t.mu.Unlock()
+	state.PreviousBackend = previous
+	state.Cutover = true
+	if err := t.state.Put(ctx, state); err != nil {
+		// The route and phase marker form one operator-visible transition. If
+		// durable state cannot record the cutover, restore the previous route so
+		// a restart cannot observe an untracked destination.
+		return Report{}, errors.Join(err, t.router.Set(context.Background(), tenantID, previous))
+	}
 	validation.Phase, validation.CutoverBackend, validation.RollbackAllowed = PhaseCutover, BackendDestination, true
 	return validation, nil
 }
@@ -275,10 +302,12 @@ func (t *Tool) Rollback(ctx context.Context, tenantID string) (Report, error) {
 	if err := validate(ctx, tenantID); err != nil {
 		return Report{}, err
 	}
-	t.mu.Lock()
-	previous, ok := t.cutovers[tenantID]
-	t.mu.Unlock()
-	if !ok || previous == BackendDestination {
+	state, ok, err := t.loadState(ctx, tenantID)
+	if err != nil {
+		return Report{}, err
+	}
+	previous := state.PreviousBackend
+	if !ok || !state.Cutover || previous == BackendDestination || previous == "" {
 		return Report{}, ErrConflict
 	}
 	if _, err := t.Validate(ctx, tenantID); err != nil {
@@ -286,6 +315,12 @@ func (t *Tool) Rollback(ctx context.Context, tenantID string) (Report, error) {
 	}
 	if err := t.router.Set(ctx, tenantID, previous); err != nil {
 		return Report{}, err
+	}
+	state.Cutover = false
+	if err := t.state.Put(ctx, state); err != nil {
+		// Keep the durable cutover marker truthful when rollback state cannot be
+		// persisted. The destination is the only route that matches that marker.
+		return Report{}, errors.Join(err, t.router.Set(context.Background(), tenantID, BackendDestination))
 	}
 	return Report{TenantID: tenantID, Phase: PhaseRollback, CutoverBackend: previous, RollbackAllowed: false, Validated: true}, nil
 }
@@ -334,4 +369,21 @@ func validate(ctx context.Context, tenantID string) error {
 		return ErrInvalid
 	}
 	return ctx.Err()
+}
+
+func (t *Tool) loadState(ctx context.Context, tenantID string) (State, bool, error) {
+	if t == nil || t.state == nil {
+		return State{}, false, ErrInvalid
+	}
+	state, err := t.state.Get(ctx, tenantID)
+	if errors.Is(err, ErrNotFound) {
+		return State{}, false, nil
+	}
+	if err != nil {
+		return State{}, false, err
+	}
+	if state.TenantID != tenantID {
+		return State{}, false, ErrConflict
+	}
+	return state, true, nil
 }

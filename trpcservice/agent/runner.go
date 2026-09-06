@@ -36,6 +36,10 @@ type RunnerInput struct {
 // NewRunner resolves a model from a fixed RunnerInput and assembles the
 // minimum tRPC-Agent-Go LLMAgent/Runner spine. The supplied Session service is
 // borrowed by the returned Runner and remains owned by the caller.
+//
+// Deprecated: use NewRunnerWithConfig. This positional constructor remains as
+// a source-compatible adapter for callers that have not migrated their
+// dependency group yet.
 func NewRunner(
 	ctx context.Context,
 	input RunnerInput,
@@ -48,6 +52,10 @@ func NewRunner(
 }
 
 // NewRunnerWithObservability is NewRunner with provider-neutral model and tool telemetry.
+//
+// Deprecated: use NewRunnerWithConfig. This positional constructor remains as
+// a source-compatible adapter for callers that have not migrated their
+// dependency group yet.
 func NewRunnerWithObservability(
 	ctx context.Context,
 	input RunnerInput,
@@ -63,6 +71,10 @@ func NewRunnerWithObservability(
 // NewRunnerWithToolRegistry is NewRunnerWithObservability with an explicit
 // installed-tool registry. A nil registry uses the built-in platform tools.
 // The returned Runner borrows the registry and never mutates it.
+//
+// Deprecated: use NewRunnerWithConfig. This positional constructor remains as
+// a source-compatible adapter for callers that have not migrated their
+// dependency group yet.
 //
 //nolint:gocyclo // Runner construction validates and wires several independent capability boundaries.
 func NewRunnerWithToolRegistry(

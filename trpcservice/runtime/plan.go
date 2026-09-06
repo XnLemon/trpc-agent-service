@@ -58,6 +58,10 @@ type ExecutionPlanInput struct {
 // NewExecutionPlan validates and freezes one Tenant, current Agent Revision,
 // active Model Profile, and active Backend Profile. All objects must belong to
 // the same tenant and the Model Profile must satisfy the Revision reference.
+//
+// Deprecated: use NewExecutionPlanFromInput. The input constructor keeps the
+// plan boundary explicit as the snapshot grows and prevents another long
+// positional parameter list.
 func NewExecutionPlan(
 	tenantSnapshot tenant.ConfigurationSnapshot,
 	appRoot *appmodel.App,

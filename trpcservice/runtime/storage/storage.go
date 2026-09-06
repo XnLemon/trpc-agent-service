@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
-	storageerrors "github.com/XnLemon/trpc-agent-service/trpcservice/storage/errors"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 )
 
 // ValidateText enforces the same character bounds used by the runtime DDL.
@@ -61,19 +61,19 @@ type ReplyTarget struct {
 
 var (
 	// ErrNotFound reports a missing tenant-scoped runtime record.
-	ErrNotFound = errors.New("runtime record not found")
+	ErrNotFound = sessionstorage.ErrNotFound
 	// ErrDuplicate reports an existing runtime record with the same identity.
-	ErrDuplicate = errors.New("runtime record already exists")
+	ErrDuplicate = sessionstorage.ErrDuplicate
 	// ErrConflict reports an optimistic-concurrency conflict.
 	ErrConflict = errors.New("runtime version conflict")
 	// ErrInvalid reports malformed runtime input.
-	ErrInvalid = errors.New("invalid runtime record")
+	ErrInvalid = sessionstorage.ErrInvalid
 	// ErrIllegalTransition reports a disallowed runtime lifecycle change.
 	ErrIllegalTransition = errors.New("illegal runtime state transition")
 	// ErrStorage reports unavailable runtime persistence without coupling the
 	// runtime contract to a particular database adapter. The legacy error text is
 	// retained for callers that expose it in diagnostics.
-	ErrStorage = storageerrors.ErrPostgres
+	ErrStorage = sessionstorage.ErrStorage
 )
 
 const (
@@ -110,15 +110,7 @@ const (
 )
 
 // Session is the durable tenant-scoped conversation state.
-type Session struct {
-	TenantID  string
-	SessionID string
-	Status    string
-	Version   int64
-	State     map[string]any
-	CreatedAt time.Time
-	UpdatedAt time.Time
-}
+type Session = sessionstorage.Session
 
 // MessageEvent is the durable inbound message lifecycle record.
 type MessageEvent struct {
@@ -154,14 +146,7 @@ type MessageEventInput struct {
 // EventPayload is one immutable upstream Runner event retained for durable
 // session recovery. Payload is JSON and must never be included in logs or
 // returned through an unauthorised HTTP surface.
-type EventPayload struct {
-	TenantID   string
-	SessionID  string
-	EventID    string
-	Payload    []byte
-	HistorySeq int64
-	CreatedAt  time.Time
-}
+type EventPayload = sessionstorage.EventPayload
 
 // MessageTransition advances a persisted inbound message through its execution
 // lifecycle. Transitions out of running require the current owner and fence.
@@ -240,19 +225,11 @@ type ReplyTransition struct {
 
 // SessionStateStore is the tenant-scoped persistence contract for session
 // state. It deliberately excludes message lifecycle and reply delivery.
-type SessionStateStore interface {
-	GetSession(context.Context, string, string) (Session, error)
-	CreateSession(context.Context, string, string, map[string]any) (Session, error)
-	UpdateSessionState(context.Context, string, string, int64, map[string]any) (Session, error)
-	DeleteSession(context.Context, string, string) error
-}
+type SessionStateStore = sessionstorage.SessionStateStore
 
 // EventHistoryStore is the immutable event-history contract used to recover a
 // session's upstream Runner state.
-type EventHistoryStore interface {
-	AppendEventPayload(context.Context, EventPayload) (EventPayload, error)
-	ListEventPayloads(context.Context, string, string) ([]EventPayload, error)
-}
+type EventHistoryStore = sessionstorage.EventHistoryStore
 
 // MessageStore is the durable inbound message lifecycle contract. It owns
 // idempotency, execution leases, and fenced message transitions.
@@ -276,6 +253,9 @@ type ReplyStore interface {
 // RuntimeStore is the tenant-scoped compatibility aggregate used by the
 // runtime persistence implementations. Consumers should depend on the
 // narrowest capability interface they need.
+//
+// Deprecated: use the narrow capability interfaces such as SessionStateStore,
+// EventHistoryStore, MessageStore, ReplyStore, and ReplyBatchEnqueuer.
 type RuntimeStore interface {
 	SessionStateStore
 	EventHistoryStore

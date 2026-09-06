@@ -407,8 +407,11 @@ func (r *ChannelRepository) LookupCandidates(ctx context.Context, channel channe
 		if err != nil {
 			return nil, channels.ErrCandidateUnavailable
 		}
-		candidate, err := channels.NewCandidateBindingContext(channel, routeDigest, value.version, value.digest,
-			channels.PurposeWebhookVerification, token, now, now.Add(mysqlCandidateTTL))
+		candidate, err := channels.NewCandidateBindingContextFromInput(channels.CandidateBindingInput{
+			Channel: channel, PublicRouteKeyDigest: routeDigest, BindingVersion: value.version,
+			ConfigDigest: value.digest, Purpose: channels.PurposeWebhookVerification,
+			CandidateToken: token, IssuedAt: now, ExpiresAt: now.Add(mysqlCandidateTTL),
+		})
 		if err != nil {
 			return nil, channels.ErrCandidateUnavailable
 		}
