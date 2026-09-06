@@ -1073,6 +1073,16 @@ func TestNewFromEnvironmentRuntimeStoreFailureBoundaries(t *testing.T) {
 			},
 			wantError: errEnvironmentRuntimeStore,
 		},
+		{
+			name:           "runtime store lacks reply batches",
+			runtimeStorage: "inmemory",
+			configureStore: func(context.CancelFunc) {
+				newEnvironmentRuntimeStore = func(string, *sql.DB) (runtimestorage.RuntimeStore, error) {
+					return &environmentRuntimeStoreSpy{}, nil
+				}
+			},
+			wantError: ErrInvalidConfig,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -45,8 +45,15 @@ func TestRegistryCancellationAndClose(t *testing.T) {
 	if err := registry.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if err := registry.Close(); err != nil {
+		t.Fatalf("second Close() = %v", err)
+	}
 	if err := registry.Register("t_00000000000000000000000000", channels.ChannelWeCom, "corp", registryProviderFactory{}); !errors.Is(err, ErrProviderRegistryClosed) {
 		t.Fatalf("Register after Close() = %v", err)
+	}
+	var nilRegistry *Registry
+	if err := nilRegistry.Close(); err != nil {
+		t.Fatalf("nil Close() = %v", err)
 	}
 }
 

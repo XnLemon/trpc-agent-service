@@ -234,6 +234,39 @@ func TestNewRejectsAlreadyRunningOutboxWorker(t *testing.T) {
 	}
 }
 
+func TestStartExecutionQueueRejectsRunningWorker(t *testing.T) {
+	store := runtimequeue.NewMemory()
+	worker, err := runtimequeue.New(runtimequeue.Config{
+		Store: store, Handler: func(context.Context, runtimequeue.Task) error { return nil },
+		Owner: "bootstrap-queue-error", LeaseDuration: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = worker.Close()
+		_ = store.Close()
+	})
+	if err := startExecutionQueue(&Runtime{ExecutionQueue: worker}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("running queue error = %v", err)
+	}
+}
+
+func TestConfigureRuntimeChannelsClosesWorkerReturnedWithError(t *testing.T) {
+	worker := &outbox.Worker{}
+	config := Config{
+		OutboxWorkerFactory: func([]channels.PollingAdapter) (*outbox.Worker, error) {
+			return worker, errors.New("worker factory failed")
+		},
+	}
+	if _, err := configureRuntimeChannels(&config, nil); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("worker factory error = %v", err)
+	}
+}
+
 func TestNewRejectsMissingExplicitDependency(t *testing.T) {
 	if _, err := New(context.Background(), Config{}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("missing dependency error = %v", err)
