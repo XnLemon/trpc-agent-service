@@ -375,7 +375,7 @@ func TestMemoryStoreSharedBackendLifecycle(t *testing.T) {
 	_ = second.Close()
 }
 
-func TestQueueErrorHelpersAndInvalidContext(t *testing.T) {
+func TestQueueErrorHelpers(t *testing.T) {
 	var nilRetry *RetryableError
 	if nilRetry.Error() == "" || nilRetry.Unwrap() != nil || Retry(nil) != nil {
 		t.Fatal("nil retry helper contract failed")
@@ -395,6 +395,9 @@ func TestQueueErrorHelpersAndInvalidContext(t *testing.T) {
 	if got, ok := retryAt(forever); !ok || !got.Equal(due) {
 		t.Fatalf("retry deadline = %v, want %v", got, due)
 	}
+}
+
+func TestWorkerCancellationCause(t *testing.T) {
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	if got := WorkerCancellationCause(canceled); got != nil {
@@ -411,6 +414,9 @@ func TestQueueErrorHelpersAndInvalidContext(t *testing.T) {
 	if got := WorkerCancellationCause(workerDeadline); got != nil {
 		t.Fatalf("worker child deadline cause = %v", got)
 	}
+}
+
+func TestQueueStoreRejectsInvalidInputs(t *testing.T) {
 	store := NewMemory()
 	defer store.Close()
 	if _, err := store.Get(nil, "tenant", "task"); !errors.Is(err, ErrInvalid) {
@@ -428,6 +434,9 @@ func TestQueueErrorHelpersAndInvalidContext(t *testing.T) {
 	if _, err := store.Renew(context.Background(), "tenant", "missing", "worker", 1, time.Second); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing renew = %v", err)
 	}
+}
+
+func TestTaskTenantHint(t *testing.T) {
 	if got := taskTenantHint(WithTenant(context.Background(), "tenant-a")); got != "tenant-a" {
 		t.Fatalf("tenant hint = %q", got)
 	}
