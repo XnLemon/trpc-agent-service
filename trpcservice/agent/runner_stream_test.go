@@ -106,6 +106,115 @@ func TestInvokeRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestInvokePropagatesRunnerFailureAndRejectsNilStream(t *testing.T) {
+	providerErr := errors.New("runner provider detail")
+	for _, test := range []struct {
+		name   string
+		runner *runnerStreamTestRunner
+	}{
+		{name: "runner failure", runner: &runnerStreamTestRunner{err: providerErr}},
+		{name: "nil event stream", runner: &runnerStreamTestRunner{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Invoke(context.Background(), test.runner, Invocation{UserID: "user", SessionID: "session", RequestID: "request"}, time.Millisecond)
+			if test.runner.err != nil {
+				if !errors.Is(err, providerErr) {
+					t.Fatalf("Invoke() error=%v, want provider error", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("Invoke() error=%v, want invalid stream error", err)
+			}
+		})
+	}
+}
+
+func TestMapExternalRunnerEventNormalizesResponseVariants(t *testing.T) {
+	tests := []struct {
+		name       string
+		event      *trpcevent.Event
+		want       []RunnerEvent
+		wantClosed bool
+	}{
+		{
+			name:  "nil event",
+			event: nil,
+			want:  []RunnerEvent{{Type: RunnerEventStatus, Status: "progress"}},
+		},
+		{
+			name:  "nil response",
+			event: &trpcevent.Event{},
+			want:  []RunnerEvent{{Type: RunnerEventStatus, Status: "progress"}},
+		},
+		{
+			name:  "partial progress",
+			event: &trpcevent.Event{Response: &trpcmodel.Response{IsPartial: true}},
+			want:  []RunnerEvent{{Type: RunnerEventStatus, Status: "partial"}},
+		},
+		{
+			name: "message fallback and delta",
+			event: &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{
+				{Delta: trpcmodel.Message{Content: "hello"}},
+				{Message: trpcmodel.Message{Content: " world"}},
+			}}},
+			want: []RunnerEvent{{Type: RunnerEventMessage, Text: "hello world"}},
+		},
+		{
+			name: "message followed by terminal",
+			event: &trpcevent.Event{Response: &trpcmodel.Response{
+				Choices: []trpcmodel.Choice{{Message: trpcmodel.Message{Content: "done"}}}, Done: true,
+			}},
+			want:       []RunnerEvent{{Type: RunnerEventMessage, Text: "done"}, {Type: RunnerEventDone, Status: "complete", Done: true}},
+			wantClosed: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, closed := mapExternalRunnerEvent(test.event)
+			if closed != test.wantClosed {
+				t.Fatalf("terminal=%v, want %v", closed, test.wantClosed)
+			}
+			if len(got) != len(test.want) {
+				t.Fatalf("events=%+v, want %+v", got, test.want)
+			}
+			for index := range got {
+				if got[index].Type != test.want[index].Type || got[index].Text != test.want[index].Text || got[index].Status != test.want[index].Status || got[index].Done != test.want[index].Done {
+					t.Fatalf("event[%d]=%+v, want %+v", index, got[index], test.want[index])
+				}
+			}
+		})
+	}
+}
+
+func TestForwardRunnerEventsHandlesSourceClosure(t *testing.T) {
+	source := make(chan *trpcevent.Event)
+	close(source)
+	output := make(chan RunnerEvent, 1)
+	forwardRunnerEvents(context.Background(), source, output, time.Millisecond)
+	if _, ok := <-output; ok {
+		t.Fatal("closed source produced an event")
+	}
+}
+
+func TestRunnerStreamHelpersHonorCancellationAndDrainBounds(t *testing.T) {
+	if sendRunnerEvent(nil, make(chan RunnerEvent, 1), RunnerEvent{Type: RunnerEventStatus}) {
+		t.Fatal("nil context unexpectedly accepted an event")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if sendRunnerEvent(ctx, make(chan RunnerEvent, 1), RunnerEvent{Type: RunnerEventStatus}) {
+		t.Fatal("canceled context unexpectedly accepted an event")
+	}
+
+	drainRunnerEvents(nil, time.Millisecond)
+	drainRunnerEvents(make(chan *trpcevent.Event), 0)
+	closed := make(chan *trpcevent.Event)
+	close(closed)
+	drainRunnerEvents(closed, time.Millisecond)
+	drainRunnerEvents(make(chan *trpcevent.Event), time.Millisecond)
+}
+
 func collectRunnerStreamEvents(stream <-chan RunnerEvent) []RunnerEvent {
 	events := make([]RunnerEvent, 0, 4)
 	for event := range stream {
