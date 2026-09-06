@@ -204,10 +204,10 @@ func TestEnvironmentComponentSelectionErrorBranches(t *testing.T) {
 	if status, receipt, err := router.Reconcile(context.Background(), runtimestorage.ReplyOutbox{ReplyTarget: runtimestorage.ReplyTarget{BindingID: "legacy"}}); err != nil || status != "accepted" || receipt != "legacy" {
 		t.Fatalf("legacy reply reconciliation = %q %q %v", status, receipt, err)
 	}
-	if _, err := environmentRuntimeProviders(environmentConfig{runtimeStorage: "inmemory"}, environmentRuntimeStores{providers: map[string]runtimestorage.RuntimeStore{}}); !errors.Is(err, ErrInvalidConfig) {
+	if _, err := environmentRuntimeProviders(environmentConfig{runtimeStorage: "inmemory"}, environmentRuntimeStores{providers: map[string]environmentStorage{}}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("missing primary runtime provider error = %v", err)
 	}
-	if _, err := environmentRuntimeProviders(environmentConfig{runtimeStorage: "redis"}, environmentRuntimeStores{providers: map[string]runtimestorage.RuntimeStore{"redis": store}}); !errors.Is(err, ErrInvalidConfig) {
+	if _, err := environmentRuntimeProviders(environmentConfig{runtimeStorage: "redis"}, environmentRuntimeStores{providers: map[string]environmentStorage{"redis": store}}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("missing in-memory runtime fallback error = %v", err)
 	}
 	registry := storagefactory.NewProviderRegistry()
@@ -282,7 +282,7 @@ func TestEnvironmentProviderValidationBranches(t *testing.T) {
 }
 
 type bootstrapPingRuntimeStore struct {
-	runtimestorage.RuntimeStore
+	environmentStorage
 	err error
 }
 

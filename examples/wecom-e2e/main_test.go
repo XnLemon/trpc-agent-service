@@ -124,7 +124,7 @@ func TestWeComCallbackOutboxE2E(t *testing.T) {
 	}
 }
 
-func waitForReplyCandidates(ctx context.Context, store runtimestorage.RuntimeStore, tenantID, payload string) ([]runtimestorage.ReplyOutbox, error) {
+func waitForReplyCandidates(ctx context.Context, store runtimestorage.ReplyStore, tenantID, payload string) ([]runtimestorage.ReplyOutbox, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	ticker := time.NewTicker(10 * time.Millisecond)

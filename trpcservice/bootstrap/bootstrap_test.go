@@ -1717,7 +1717,7 @@ func (bootstrapPingConn) Begin() (driver.Tx, error)           { return nil, driv
 func (bootstrapPingConn) Ping(context.Context) error          { return nil }
 
 type trackingRuntimeStore struct {
-	runtimestorage.RuntimeStore
+	environmentStorage
 	closed atomic.Bool
 }
 

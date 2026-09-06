@@ -41,7 +41,7 @@ type Config struct {
 	PoolSize     int
 }
 
-// Store implements RuntimeStore and MemoryStore over Redis.
+// Store implements the tenant-scoped runtime capabilities and MemoryStore over Redis.
 type Store struct {
 	client    redisclient.UniversalClient
 	keyPrefix string
@@ -1166,7 +1166,10 @@ func (s *Store) Close() error {
 	return s.closeErr
 }
 
-var _ runtimestorage.RuntimeStore = (*Store)(nil)
+var _ runtimestorage.SessionStateStore = (*Store)(nil)
+var _ runtimestorage.EventHistoryStore = (*Store)(nil)
+var _ runtimestorage.MessageStore = (*Store)(nil)
+var _ runtimestorage.ReplyStore = (*Store)(nil)
 var _ runtimestorage.MemoryStore = (*Store)(nil)
 var _ runtimestorage.ReplyBatchEnqueuer = (*Store)(nil)
 var _ runtimestorage.ReplyBatchCorrelationEnqueuer = (*Store)(nil)

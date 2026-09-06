@@ -101,7 +101,7 @@ type environmentModelFactory struct{}
 
 type environmentSessionCapabilityProvider struct {
 	delegate  session.Service
-	store     runtimestorage.RuntimeStore
+	store     environmentStorage
 	telemetry observability.Provider
 	backend   string
 }
@@ -109,7 +109,7 @@ type environmentSessionCapabilityProvider struct {
 type environmentRuntimeCapabilityProvider struct {
 	capability            backend.Capability
 	delegate              session.Service
-	store                 runtimestorage.RuntimeStore
+	store                 environmentStorage
 	telemetry             observability.Provider
 	backend               string
 	redisEndpoint         string
