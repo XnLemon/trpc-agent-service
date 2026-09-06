@@ -171,17 +171,9 @@ func environmentOutboxWorkerFactory(dependencies environmentOutboxWorkerDependen
 	}
 }
 
-func environmentPrimaryDeliveryCapabilities(runtimeStore environmentStorage) (runtimestorage.ReplyStore, runtimestorage.MessageStore, wecom_aibot.DeliveryStore, error) {
-	if runtimeStore == nil {
-		return nil, nil, nil, fmt.Errorf("%w: runtime delivery store is required", ErrInvalidConfig)
-	}
-	replyStore, replyOK := runtimeStore.(runtimestorage.ReplyStore)
-	messageStore, messageOK := runtimeStore.(runtimestorage.MessageStore)
-	if !replyOK || !messageOK {
-		return nil, nil, nil, fmt.Errorf("%w: runtime storage does not support reply delivery", ErrInvalidConfig)
-	}
+func environmentPrimaryDeliveryCapabilities(runtimeStore environmentStorage) (runtimestorage.ReplyStore, runtimestorage.MessageStore, wecom_aibot.DeliveryStore) {
 	deliveryStore, _ := runtimeStore.(wecom_aibot.DeliveryStore)
-	return replyStore, messageStore, deliveryStore, nil
+	return runtimeStore, runtimeStore, deliveryStore
 }
 
 type environmentReplyProvider struct {

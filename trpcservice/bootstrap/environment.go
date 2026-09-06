@@ -285,13 +285,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	replyStore, messageStore, deliveryStore, err := environmentPrimaryDeliveryCapabilities(runtimeStore)
-	if err != nil {
-		_ = delegateSessions.Close()
-		_ = runtimeStores.Close()
-		_ = db.Close()
-		return nil, err
-	}
+	replyStore, messageStore, deliveryStore := environmentPrimaryDeliveryCapabilities(runtimeStore)
 	tenantRepo, appRepo, channelRepo, auditWriter, err := environmentRepositories(config, db)
 	if err != nil {
 		_ = delegateSessions.Close()

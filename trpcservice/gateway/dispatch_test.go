@@ -1129,8 +1129,10 @@ func TestDispatcherDurableInboundLeaseCoversAgentRuntimeTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = registry.Close() })
-	store := &transitionCaptureStore{gatewayStore: inmemory.New()}
-	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, DrainTimeout: time.Millisecond})
+	baseStore := inmemory.New()
+	t.Cleanup(func() { _ = baseStore.Close() })
+	store := &transitionCaptureStore{gatewayStore: baseStore}
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: baseStore, DrainTimeout: time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1515,7 +1517,7 @@ func TestDispatcherDurableAttachmentFailurePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	reference := testAttachmentReference(t, attachment.KindImage, "image/png", []byte("image"))
-	newDispatcher := func(t *testing.T, store gatewayStore, attachments attachment.Reader) (*Dispatcher, *runtimerunner.RunnerRegistry, *atomic.Int32) {
+	newDispatcher := func(t *testing.T, store *inmemory.Store, attachments attachment.Reader) (*Dispatcher, *runtimerunner.RunnerRegistry, *atomic.Int32) {
 		t.Helper()
 		var runnerCalls atomic.Int32
 		registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
@@ -1528,7 +1530,7 @@ func TestDispatcherDurableAttachmentFailurePaths(t *testing.T) {
 			t.Fatal(err)
 		}
 		dispatcher, err := NewDispatcher(DispatchConfig{
-			Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store,
+			Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store,
 			Attachments: attachments, DrainTimeout: time.Millisecond,
 		})
 		if err != nil {
@@ -1745,6 +1747,12 @@ func TestDispatcherConfigurationAndEventMappingEdges(t *testing.T) {
 	}
 	narrowStore := inmemory.New()
 	t.Cleanup(func() { _ = narrowStore.Close() })
+	if _, err := NewDispatcher(DispatchConfig{
+		Resolver: dispatcher.resolver, Registry: registry,
+		SessionStore: narrowStore, MessageStore: narrowStore,
+	}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("incomplete durable capabilities error = %v", err)
+	}
 	narrowDispatcher, err := NewDispatcher(DispatchConfig{
 		Resolver: dispatcher.resolver, Registry: registry,
 		SessionStore: narrowStore, MessageStore: narrowStore, ReplyBatchStore: narrowStore,
