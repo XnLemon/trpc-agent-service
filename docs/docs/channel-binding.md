@@ -39,7 +39,7 @@ Issue #60 在控制面模型之上定义了窄的运行时边界：`channels.Ada
 
 该边界不把 Telegram long polling 和 WeCom HTTP callback 伪装成相同的传输协议。
 验签、解密、供应商 SDK、poll loop 和 HTTP 生命周期继续由具体 Adapter 负责；
-Gateway 的 `InboundMessage` 是共享入站契约，`runtime/outbox.Provider` 是由
+Gateway 的 `InboundMessage` 是共享入站契约，`outbox.Provider` 是由
 Channel Provider 适配到的协议中立出站回复契约。Binding 根包只定义候选、验证和
 可信路由；Provider 与回复渲染分别由 `channels/provider` 和 `gateway/replies`
 拥有。Telegram 与 WeCom Provider 都以稳定的 reply/segment identity 实现出站交付。

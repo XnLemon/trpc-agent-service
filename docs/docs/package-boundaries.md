@@ -42,7 +42,7 @@ bootstrap 负责把 app、agent、runtime、storage 和 Gateway 的具体实现�
 | `trpcservice/runtime/model` | SecretResolver、ModelProviderRegistry 和 ModelFactory 的运行时物化 | Model Profile 持久化、配置生命周期和带凭据的计划状态 |
 | `trpcservice/runtime/storage` | 租户范围内的 Session、Event、Memory、Artifact 等能力契约及其后端适配 | 选择执行租户、解析 Plan、驱动 Runner、回复发送策略 |
 | `trpcservice/runtime/storage/factory` | Backend ProviderRegistry、StorageFactory、CapabilitySet 及 capability 生命周期 | Backend Profile 领域校验和持久化 |
-| `trpcservice/runtime/outbox` | 回复物化、发送、重试和死信边界 | Agent 编排、控制面配置和执行调度 |
+| `trpcservice/outbox` | 回复物化、发送、重试和死信边界 | Agent 编排、控制面配置和执行调度 |
 | `trpcservice/runtime/migration` | 后端迁移、双写、校验和切换工具 | 在线执行、Runner 生命周期和请求路由 |
 | `trpcservice/gateway` | 可信身份建立、协议中立的请求/事件转换、入口幂等和调用 runtime | Agent/Runner 的具体构造、控制面领域变更 |
 | `trpcservice/bootstrap` | 具体 Repository、Provider、Registry、Dispatcher 和 Worker 的组合装配 | 业务领域规则和新的跨层抽象 |
@@ -63,7 +63,7 @@ Agent 的实现。
 `RuntimeStore` 暂时保留为兼容性组合接口；Bootstrap 和 Gateway 的新生产路径已经
 显式注入自己需要的最窄接口。旧字段只在兼容调用没有提供窄能力时回退。
 
-`runtime/outbox` 的 Worker 现在分别接收 `ReplyStore` 和
+`trpcservice/outbox` 的 Worker 现在分别接收 `ReplyStore` 和
 `MessageStore`：前者拥有回复分片的 claim/transition，后者只负责所有分片
 投递完成后的 inbound message 状态推进。Worker 不再从一个聚合存储中探测
 隐式能力；组合根必须显式注入两个能力。
@@ -92,9 +92,9 @@ Agent 的实现。
    `llmagent`、模型 Provider 或 Session 实现。
 5. `runtime/model` 和 `runtime/storage/factory` 负责运行时物化；它们只消费
    `model`/`backend` 的无密钥契约，不把物化实现放回领域包。
-6. `runtime/storage`、`runtime/outbox` 和 `runtime/migration` 是 runtime
-   的子边界。它们可以提供能力给调用方，但不能把调度、认证或控制面
-   生命周期带回存储实现。
+6. `runtime/storage` 是 runtime 的持久化子边界；`trpcservice/outbox` 和
+   `trpcservice/runtime/migration` 是服务级的交付/迁移边界。它们可以提供
+   能力给调用方，但不能把调度、认证或控制面生命周期带回存储实现。
 7. `bootstrap` 是具体实现的组合根。新的跨包依赖优先在组合根注入，
    不通过全局变量、隐式 Context 值或跨层反向调用建立。
 8. 新增接口应放在实际消费者所属的包；只有同一契约确实被多个独立
@@ -135,7 +135,7 @@ agent
   - 绑定租户范围的 Model、Tool、Session 和 Storage 能力
   - 调用上游 Runner，归一化事件和错误，并在取消/终止时有界排空 upstream source
 
-runtime/storage 与 runtime/outbox
+runtime/storage 与 trpcservice/outbox
   - 分别负责持久化能力和回复交付
   - 不拥有 Gateway 的协议输出或 Runner 的生命周期
 ```
