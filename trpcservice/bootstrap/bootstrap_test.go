@@ -1155,9 +1155,9 @@ func TestEnvironmentRuntimeCapabilities(t *testing.T) {
 		if attachments == nil || attachmentStore == nil {
 			t.Fatal("attachment capabilities are nil")
 		}
-		replyStore, messageStore, deliveryStore, err := environmentPrimaryDeliveryCapabilities(store)
-		if err != nil || replyStore == nil || messageStore == nil || deliveryStore == nil {
-			t.Fatalf("delivery capabilities = reply:%T message:%T delivery:%T err:%v", replyStore, messageStore, deliveryStore, err)
+		replyStore, messageStore, deliveryStore := environmentPrimaryDeliveryCapabilities(store)
+		if replyStore != store || messageStore != store || deliveryStore != store {
+			t.Fatalf("delivery capabilities = reply:%T message:%T delivery:%T", replyStore, messageStore, deliveryStore)
 		}
 	})
 }
