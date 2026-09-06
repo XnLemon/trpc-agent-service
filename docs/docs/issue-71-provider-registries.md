@@ -21,7 +21,7 @@ HTTP header；Vault 的状态码、响应体和 transport 错误均转换为稳�
 ## Channel Provider
 
 `channels/provider.Registry` 使用 `(tenant_id, channel, provider_account_id)` 路由 `Factory`。
-它是组合层适配器，只有这里依赖 `runtime/outbox.Provider`；`channels` 根包不再反向依赖
+它是组合层适配器，只有这里依赖 `outbox.Provider`；`channels` 根包不再反向依赖
 回复投递实现，因此 Telegram、WeCom 等具体 adapter 不会污染绑定领域模型。
 
 ## Storage / Session materialization

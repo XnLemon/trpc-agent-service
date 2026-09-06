@@ -32,8 +32,8 @@ func TestStartLogsUnexpectedWorkerFailure(t *testing.T) {
 	if err := worker.Start(context.Background(), time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	waitForObservedMessage(t, logs, "[runtime/outbox] worker stopped")
-	entry := logs.FilterMessage("[runtime/outbox] worker stopped").All()[0]
+	waitForObservedMessage(t, logs, "[outbox] worker stopped")
+	entry := logs.FilterMessage("[outbox] worker stopped").All()[0]
 	if got := entry.ContextMap()["error_type"]; got != "worker_stopped" {
 		t.Fatalf("error_type = %v, want worker_stopped", got)
 	}

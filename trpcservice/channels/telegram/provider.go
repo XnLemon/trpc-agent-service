@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
