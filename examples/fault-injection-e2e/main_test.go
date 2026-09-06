@@ -290,7 +290,7 @@ func newFixture(t *testing.T) fixture {
 	t.Cleanup(func() { _ = registry.Close() })
 	store := runtimestorageinmemory.New()
 	t.Cleanup(func() { _ = store.Close() })
-	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store})
+	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store, Attachments: store, AttachmentStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}

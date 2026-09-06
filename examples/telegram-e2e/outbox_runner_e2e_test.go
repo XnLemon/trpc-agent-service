@@ -94,7 +94,7 @@ func runTelegramOutboxScenario(t *testing.T, ctx context.Context, provider outbo
 		t.Fatal(err)
 	}
 	defer func() { _ = registry.Close() }()
-	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: fixture.resolver, Registry: registry, RuntimeStore: store})
+	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: fixture.resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store, Attachments: store, AttachmentStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -91,14 +91,6 @@ type DispatchConfig struct {
 	Registry      *runtimerunner.RunnerRegistry
 	DrainTimeout  time.Duration
 	Observability observability.Provider
-	// RuntimeStore enables durable inbound claims for verified Channel principals.
-	// API principals remain protected by the HTTP IdempotencyStore. It is kept as
-	// a compatibility aggregate; new callers should provide the narrow fields
-	// below.
-	//
-	// Deprecated: provide SessionStore, MessageStore, and ReplyBatchStore
-	// explicitly.
-	RuntimeStore runtimestorage.RuntimeStore
 	// SessionStore is the session-state capability used by durable dispatch.
 	SessionStore runtimestorage.SessionStateStore
 	// MessageStore is the inbound message lifecycle capability used by durable
@@ -238,48 +230,19 @@ func resolveDispatchCapabilities(config DispatchConfig) dispatchCapabilities {
 		messages:     config.MessageStore,
 		replyBatches: config.ReplyBatchStore,
 	}
-	if config.RuntimeStore == nil {
-		return capabilities
-	}
-	if capabilities.sessions == nil {
-		capabilities.sessions, _ = config.RuntimeStore.(runtimestorage.SessionStateStore)
-	}
-	if capabilities.messages == nil {
-		capabilities.messages, _ = config.RuntimeStore.(runtimestorage.MessageStore)
-	}
-	if capabilities.replyBatches == nil {
-		capabilities.replyBatches, _ = config.RuntimeStore.(runtimestorage.ReplyBatchEnqueuer)
-	}
 	return capabilities
 }
 
 func resolveDispatchAttachments(config DispatchConfig) (attachment.Reader, runtimestorage.AttachmentStore) {
 	reader := config.Attachments
-	if reader == nil {
-		reader, _ = config.RuntimeStore.(attachment.Reader)
-	}
-	store := config.AttachmentStore
-	if store != nil {
-		return reader, store
-	}
-	if value, ok := config.RuntimeStore.(runtimestorage.AttachmentStore); ok {
-		return reader, value
-	}
-	if value, ok := reader.(runtimestorage.AttachmentStore); ok {
-		return reader, value
-	}
-	return reader, nil
+	return reader, config.AttachmentStore
 }
 
-func newDispatchStore(config DispatchConfig, capabilities dispatchCapabilities) dispatchStore {
+func newDispatchStore(capabilities dispatchCapabilities) dispatchStore {
 	if capabilities.sessions != nil && capabilities.messages != nil {
 		return dispatchStoreView{sessions: capabilities.sessions, messages: capabilities.messages}
 	}
-	if config.RuntimeStore == nil {
-		return nil
-	}
-	store, _ := config.RuntimeStore.(dispatchStore)
-	return store
+	return nil
 }
 
 func newDispatchMaterializer(config DispatchConfig, batchStore runtimestorage.ReplyBatchEnqueuer) (*outbox.Materializer, error) {
@@ -321,7 +284,7 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Dispatcher{resolver: config.Resolver, executor: executor, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: newDispatchStore(config, capabilities), materializer: materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore, attachments: config.Attachments, attachmentStore: config.AttachmentStore}, nil
+	return &Dispatcher{resolver: config.Resolver, executor: executor, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: newDispatchStore(capabilities), materializer: materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore, attachments: config.Attachments, attachmentStore: config.AttachmentStore}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.
