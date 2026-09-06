@@ -39,7 +39,8 @@ func TestWorkerInternalBranchCoverage(t *testing.T) {
 func ptrTime(value time.Time) *time.Time { return &value }
 
 type branchStore struct {
-	runtimestorage.RuntimeStore
+	runtimestorage.ReplyStore
+	runtimestorage.MessageStore
 	candidates         []runtimestorage.ReplyOutbox
 	listErr            error
 	event              runtimestorage.MessageEvent

@@ -104,7 +104,7 @@ var (
 	verifyMySQLEnvironmentMigrations                = migrations.VerifyMySQL
 	newEnvironmentRuntimeStore                      = environmentRuntimeStore
 	newEnvironmentRedisRuntimeStore                 = environmentRedisRuntimeStore
-	newEnvironmentInMemoryFallback                  = func() runtimestorage.RuntimeStore { return runtimestorageinmemory.New() }
+	newEnvironmentInMemoryFallback                  = func() environmentStorage { return runtimestorageinmemory.New() }
 	newEnvironmentS3Store            s3StoreFactory = newEnvironmentS3StoreFromConfig
 	environmentWeComOwnerFunc                       = environmentWeComOwner
 	newEnvironmentWeComWorker                       = outbox.New
@@ -173,9 +173,20 @@ type environmentWeComAIBotConfig struct {
 // store serves ingress and outbox processing; provider stores serve Backend
 // Profile capability materialization.
 type environmentRuntimeStores struct {
-	primary   runtimestorage.RuntimeStore
-	providers map[string]runtimestorage.RuntimeStore
-	owned     []runtimestorage.RuntimeStore
+	primary   environmentStorage
+	providers map[string]environmentStorage
+	owned     []environmentStorage
+}
+
+// environmentStorage is the private composition shape used while Bootstrap
+// builds runtime providers. It is deliberately not exported from runtime
+// storage: callers receive the narrow capability interfaces they need.
+type environmentStorage interface {
+	runtimestorage.SessionStateStore
+	runtimestorage.EventHistoryStore
+	runtimestorage.MessageStore
+	runtimestorage.ReplyStore
+	Close() error
 }
 
 func (stores environmentRuntimeStores) Close() error {
@@ -188,7 +199,7 @@ func (stores environmentRuntimeStores) Close() error {
 	return errors.Join(errs...)
 }
 
-func environmentPrimaryRuntimeCapabilities(runtimeStore runtimestorage.RuntimeStore) (runtimestorage.ReplyBatchEnqueuer, attachment.Reader, runtimestorage.AttachmentStore, error) {
+func environmentPrimaryRuntimeCapabilities(runtimeStore environmentStorage) (runtimestorage.ReplyBatchEnqueuer, attachment.Reader, runtimestorage.AttachmentStore, error) {
 	replyBatchStore, ok := runtimeStore.(runtimestorage.ReplyBatchEnqueuer)
 	if !ok {
 		return nil, nil, nil, fmt.Errorf("%w: runtime storage does not support atomic reply batches", ErrInvalidConfig)

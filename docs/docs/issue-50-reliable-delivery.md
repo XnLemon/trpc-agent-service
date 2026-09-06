@@ -19,9 +19,10 @@ supports it. Database fencing protects the commit race; it does not promise
 external exactly-once delivery.
 
 The worker owns no Runner, Telegram SDK, request body, secret, or provider raw
-error. It receives a tenant-scoped RuntimeStore, a Provider, a context, and
-bounded retry/shutdown configuration. A provider may be Telegram, a test fake,
-or a future channel implementation.
+error. It receives the tenant-scoped ReplyStore, MessageStore, and explicit
+delivery provider capabilities it needs, plus a context and bounded
+retry/shutdown configuration. A provider may be Telegram, a test fake, or a
+future channel implementation.
 
 Reply materialization is an atomic batch operation. Every segment is validated
 against the same event/reply identity before any new row is committed. A failed

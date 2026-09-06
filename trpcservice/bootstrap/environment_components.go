@@ -171,7 +171,7 @@ func environmentOutboxWorkerFactory(dependencies environmentOutboxWorkerDependen
 	}
 }
 
-func environmentPrimaryDeliveryCapabilities(runtimeStore runtimestorage.RuntimeStore) (runtimestorage.ReplyStore, runtimestorage.MessageStore, wecom_aibot.DeliveryStore, error) {
+func environmentPrimaryDeliveryCapabilities(runtimeStore environmentStorage) (runtimestorage.ReplyStore, runtimestorage.MessageStore, wecom_aibot.DeliveryStore, error) {
 	if runtimeStore == nil {
 		return nil, nil, nil, fmt.Errorf("%w: runtime delivery store is required", ErrInvalidConfig)
 	}
@@ -204,18 +204,18 @@ func (p environmentReplyProvider) Reconcile(ctx context.Context, value runtimest
 	return p.legacy.Reconcile(ctx, value)
 }
 
-func environmentRegistries(config environmentConfig, delegateSessions session.Service, runtimeStore runtimestorage.RuntimeStore) (*modelruntime.SecretRegistry, *modelruntime.ModelProviderRegistry, *storagefactory.ProviderRegistry, error) {
+func environmentRegistries(config environmentConfig, delegateSessions session.Service, runtimeStore environmentStorage) (*modelruntime.SecretRegistry, *modelruntime.ModelProviderRegistry, *storagefactory.ProviderRegistry, error) {
 	providerName := environmentRuntimeProviderName(config.runtimeStorage)
 	return environmentRegistriesForStores(config, delegateSessions, environmentRuntimeStores{
 		primary:   runtimeStore,
-		providers: map[string]runtimestorage.RuntimeStore{providerName: runtimeStore},
+		providers: map[string]environmentStorage{providerName: runtimeStore},
 	})
 }
 
 type environmentRuntimeProviderSpec struct {
 	name         string
 	capabilities []backend.Capability
-	store        runtimestorage.RuntimeStore
+	store        environmentStorage
 }
 
 func environmentRegistriesForStores(config environmentConfig, delegateSessions session.Service, runtimeStores environmentRuntimeStores) (*modelruntime.SecretRegistry, *modelruntime.ModelProviderRegistry, *storagefactory.ProviderRegistry, error) {

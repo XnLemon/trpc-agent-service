@@ -2,7 +2,7 @@
 
 本页是 Issue #76 的 docs-first 合约和实现 ledger。目标是让 Gateway 只负责鉴权、
 限流和投递，Worker 只消费不可变执行任务；所有跨节点状态都落在共享的耐久后端。
-本 Issue 不改变已有 `RuntimeStore`/Reply Outbox 状态机，也不把 InMemory 声称为生产
+本 Issue 不改变已有运行时存储能力/Reply Outbox 状态机，也不把 InMemory 声称为生产
 耐久存储。`runtime/queue` 是可注入的异步执行边界；当前同步 Gateway 不会隐式把请求
 改成排队语义，Bootstrap 只在显式提供 Worker 时接管其生命周期。
 

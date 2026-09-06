@@ -84,13 +84,19 @@ func (*durableOutboxProvider) Reconcile(context.Context, runtimestorage.ReplyOut
 	return outbox.DeliveryUnknown, "", nil
 }
 
+type gatewayStore interface {
+	runtimestorage.SessionStateStore
+	runtimestorage.MessageStore
+	runtimestorage.ReplyStore
+}
+
 type claimStoreStub struct {
-	runtimestorage.RuntimeStore
+	gatewayStore
 	getErr, createErr, recordErr, transitionErr error
 }
 
 type transitionCaptureStore struct {
-	runtimestorage.RuntimeStore
+	gatewayStore
 	mu          sync.Mutex
 	transitions []runtimestorage.MessageTransition
 }
@@ -125,13 +131,13 @@ func (s *claimStoreStub) GetSession(context.Context, string, string) (runtimesto
 	if s.getErr != nil {
 		return runtimestorage.Session{}, s.getErr
 	}
-	return s.RuntimeStore.GetSession(context.Background(), "unused", "unused")
+	return s.gatewayStore.GetSession(context.Background(), "unused", "unused")
 }
 func (s *claimStoreStub) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (runtimestorage.Session, error) {
 	if s.createErr != nil {
 		return runtimestorage.Session{}, s.createErr
 	}
-	return s.RuntimeStore.CreateSession(ctx, tenantID, sessionID, state)
+	return s.gatewayStore.CreateSession(ctx, tenantID, sessionID, state)
 }
 func (s *claimStoreStub) RecordMessage(context.Context, runtimestorage.MessageEventInput) (runtimestorage.MessageEvent, bool, error) {
 	if s.recordErr != nil {
@@ -150,7 +156,7 @@ func (s *transitionCaptureStore) TransitionMessage(ctx context.Context, transiti
 	s.mu.Lock()
 	s.transitions = append(s.transitions, transition)
 	s.mu.Unlock()
-	return s.RuntimeStore.TransitionMessage(ctx, transition)
+	return s.gatewayStore.TransitionMessage(ctx, transition)
 }
 
 func (s *transitionCaptureStore) runningLease() (time.Duration, bool) {
@@ -1123,7 +1129,7 @@ func TestDispatcherDurableInboundLeaseCoversAgentRuntimeTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = registry.Close() })
-	store := &transitionCaptureStore{RuntimeStore: inmemory.New()}
+	store := &transitionCaptureStore{gatewayStore: inmemory.New()}
 	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, DrainTimeout: time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
@@ -1199,7 +1205,7 @@ func TestDispatcherDurableChannelModelErrorMaterializesFallbackReply(t *testing.
 	assertDurableReplyWorkerCompletesCount(t, store, principal.TenantID(), row.EventID, 1)
 }
 
-func dispatchAndAssertDurableReply(t *testing.T, dispatcher *Dispatcher, principal Principal, store runtimestorage.RuntimeStore) runtimestorage.MessageEvent {
+func dispatchAndAssertDurableReply(t *testing.T, dispatcher *Dispatcher, principal Principal, store gatewayStore) runtimestorage.MessageEvent {
 	t.Helper()
 	target, ok := principal.RoutingTarget()
 	if !ok {
@@ -1235,12 +1241,12 @@ func dispatchAndAssertDurableReply(t *testing.T, dispatcher *Dispatcher, princip
 	return message
 }
 
-func assertDurableReplyWorkerCompletes(t *testing.T, store runtimestorage.RuntimeStore, tenantID, eventID string) {
+func assertDurableReplyWorkerCompletes(t *testing.T, store gatewayStore, tenantID, eventID string) {
 	t.Helper()
 	assertDurableReplyWorkerCompletesCount(t, store, tenantID, eventID, 2)
 }
 
-func assertDurableReplyWorkerCompletesCount(t *testing.T, store runtimestorage.RuntimeStore, tenantID, eventID string, want int) {
+func assertDurableReplyWorkerCompletesCount(t *testing.T, store gatewayStore, tenantID, eventID string, want int) {
 	t.Helper()
 	provider := &durableOutboxProvider{}
 	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: tenantID, Owner: "worker", LeaseDuration: time.Second})
@@ -1303,7 +1309,7 @@ func TestDurableInboundLeaseUsesRuntimePolicyDefaults(t *testing.T) {
 	}
 }
 
-func assertDurableClaimReclaimsLeases(t *testing.T, dispatcher *Dispatcher, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, store runtimestorage.RuntimeStore, bindingID string) {
+func assertDurableClaimReclaimsLeases(t *testing.T, dispatcher *Dispatcher, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, store gatewayStore, bindingID string) {
 	t.Helper()
 	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: principal.TenantID(), EventID: "received-event", SessionID: identity.SessionID, BindingID: bindingID, ExternalMessageID: message.ExternalMessageID}); err != nil {
 		t.Fatal(err)
@@ -1330,7 +1336,7 @@ func assertDurableClaimReclaimsLeases(t *testing.T, dispatcher *Dispatcher, prin
 	}
 }
 
-func assertDurableClaimRejectsTerminalStates(t *testing.T, dispatcher *Dispatcher, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, store runtimestorage.RuntimeStore, bindingID string) {
+func assertDurableClaimRejectsTerminalStates(t *testing.T, dispatcher *Dispatcher, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, store gatewayStore, bindingID string) {
 	t.Helper()
 	seedClaimEvent := func(eventID, externalID string, status string) {
 		t.Helper()
@@ -1369,7 +1375,7 @@ func assertDurableClaimRejectsTerminalStates(t *testing.T, dispatcher *Dispatche
 	}
 }
 
-func assertDurableClaimReclaimsReconcilingAndValidatesIDs(t *testing.T, dispatcher *Dispatcher, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, store runtimestorage.RuntimeStore, bindingID string) {
+func assertDurableClaimReclaimsReconcilingAndValidatesIDs(t *testing.T, dispatcher *Dispatcher, principal Principal, message InboundMessage, identity tenant.RunnerIdentity, store gatewayStore, bindingID string) {
 	t.Helper()
 	message.ExternalMessageID = "claim-reconciling"
 	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: principal.TenantID(), EventID: "reconciling-event", SessionID: identity.SessionID, BindingID: bindingID, ExternalMessageID: message.ExternalMessageID}); err != nil {
@@ -1411,20 +1417,20 @@ func TestDispatcherDurableClaimMapsStorageErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := inmemory.New()
-	claim := func(store runtimestorage.RuntimeStore) error {
+	claim := func(store gatewayStore) error {
 		_, err := (&Dispatcher{runtimeStore: store}).claimInbound(context.Background(), dispatchMetadata{principal: principal, message: message, identity: identity})
 		return err
 	}
-	if err := claim(&claimStoreStub{RuntimeStore: base, getErr: errors.New("storage")}); err == nil {
+	if err := claim(&claimStoreStub{gatewayStore: base, getErr: errors.New("storage")}); err == nil {
 		t.Fatal("expected GetSession storage error")
 	}
-	if err := claim(&claimStoreStub{RuntimeStore: base, getErr: runtimestorage.ErrNotFound, createErr: errors.New("create")}); err == nil {
+	if err := claim(&claimStoreStub{gatewayStore: base, getErr: runtimestorage.ErrNotFound, createErr: errors.New("create")}); err == nil {
 		t.Fatal("expected CreateSession storage error")
 	}
-	if err := claim(&claimStoreStub{RuntimeStore: base, recordErr: errors.New("record")}); err == nil {
+	if err := claim(&claimStoreStub{gatewayStore: base, recordErr: errors.New("record")}); err == nil {
 		t.Fatal("expected RecordMessage storage error")
 	}
-	if err := claim(&claimStoreStub{RuntimeStore: base, transitionErr: errors.New("transition")}); err == nil {
+	if err := claim(&claimStoreStub{gatewayStore: base, transitionErr: errors.New("transition")}); err == nil {
 		t.Fatal("expected TransitionMessage storage error")
 	}
 }
@@ -1509,7 +1515,7 @@ func TestDispatcherDurableAttachmentFailurePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	reference := testAttachmentReference(t, attachment.KindImage, "image/png", []byte("image"))
-	newDispatcher := func(t *testing.T, store runtimestorage.RuntimeStore, attachments attachment.Reader) (*Dispatcher, *runtimerunner.RunnerRegistry, *atomic.Int32) {
+	newDispatcher := func(t *testing.T, store gatewayStore, attachments attachment.Reader) (*Dispatcher, *runtimerunner.RunnerRegistry, *atomic.Int32) {
 		t.Helper()
 		var runnerCalls atomic.Int32
 		registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
@@ -1584,7 +1590,7 @@ func TestDispatcherDurableAttachmentFailurePaths(t *testing.T) {
 	}
 }
 
-func assertDurableMessageStatus(t *testing.T, store runtimestorage.RuntimeStore, principal Principal, target channels.RoutingTarget, message InboundMessage, status string) {
+func assertDurableMessageStatus(t *testing.T, store gatewayStore, principal Principal, target channels.RoutingTarget, message InboundMessage, status string) {
 	t.Helper()
 	identity, err := dispatchRunnerIdentity(principal, message)
 	if err != nil {

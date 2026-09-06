@@ -17,7 +17,6 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
-	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	runtimestorageredis "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
@@ -427,7 +426,7 @@ func (config *environmentConfig) loadWeComAIBots() error {
 	return nil
 }
 
-func environmentRuntimeStore(kind string, db *sql.DB) (runtimestorage.RuntimeStore, error) {
+func environmentRuntimeStore(kind string, db *sql.DB) (environmentStorage, error) {
 	switch kind {
 	case "postgres":
 		if db == nil {
@@ -441,7 +440,7 @@ func environmentRuntimeStore(kind string, db *sql.DB) (runtimestorage.RuntimeSto
 	}
 }
 
-func newEnvironmentRuntimeStoreForConfig(ctx context.Context, config environmentConfig, db *sql.DB) (runtimestorage.RuntimeStore, error) {
+func newEnvironmentRuntimeStoreForConfig(ctx context.Context, config environmentConfig, db *sql.DB) (environmentStorage, error) {
 	if config.runtimeStorage == "redis" {
 		return newEnvironmentRedisRuntimeStore(ctx, config)
 	}
@@ -456,8 +455,8 @@ func newEnvironmentRuntimeStoresForConfig(ctx context.Context, config environmen
 	providerName := environmentRuntimeProviderName(config.runtimeStorage)
 	stores := environmentRuntimeStores{
 		primary:   primary,
-		providers: map[string]runtimestorage.RuntimeStore{providerName: primary},
-		owned:     []runtimestorage.RuntimeStore{primary},
+		providers: map[string]environmentStorage{providerName: primary},
+		owned:     []environmentStorage{primary},
 	}
 	if config.runtimeStorage != "redis" {
 		return stores, nil
@@ -468,7 +467,7 @@ func newEnvironmentRuntimeStoresForConfig(ctx context.Context, config environmen
 	return stores, nil
 }
 
-func environmentRedisRuntimeStore(ctx context.Context, config environmentConfig) (runtimestorage.RuntimeStore, error) {
+func environmentRedisRuntimeStore(ctx context.Context, config environmentConfig) (environmentStorage, error) {
 	store, err := runtimestorageredis.NewFromConfig(ctx, config.redis)
 	if err != nil {
 		return nil, err

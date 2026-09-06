@@ -151,7 +151,7 @@ func TestClaimInboundAndPrepareInboundEventDefensiveBranches(t *testing.T) {
 		t.Fatalf("missing external message ID error = %v", err)
 	}
 
-	transitionStore := &duplicateClaimStore{RuntimeStore: store, event: runtimestorage.MessageEvent{TenantID: principal.TenantID(), EventID: "event", SessionID: "session", Status: runtimestorage.EventReceived, ReplyTarget: runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: string(channels.ConversationDirect), ReceiverID: "peer"}}, transitionErr: runtimestorage.ErrConflict}
+	transitionStore := &duplicateClaimStore{gatewayStore: store, event: runtimestorage.MessageEvent{TenantID: principal.TenantID(), EventID: "event", SessionID: "session", Status: runtimestorage.EventReceived, ReplyTarget: runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: string(channels.ConversationDirect), ReceiverID: "peer"}}, transitionErr: runtimestorage.ErrConflict}
 	dispatcher.runtimeStore = transitionStore
 	metadata.message.ExternalMessageID = "external"
 	if _, err := dispatcher.claimInboundWithLease(context.Background(), metadata, time.Minute); !errors.Is(err, ErrDuplicateMessage) {
@@ -308,7 +308,7 @@ func TestMapExecutionEventAndCorrelationCancellationVariants(t *testing.T) {
 }
 
 type duplicateClaimStore struct {
-	runtimestorage.RuntimeStore
+	gatewayStore
 	event         runtimestorage.MessageEvent
 	transitionErr error
 }

@@ -126,7 +126,7 @@ func TestFaultInjectionOutboxRetryAndConcurrencyE2E(t *testing.T) {
 func TestFaultInjectionMaterializationFailureE2E(t *testing.T) {
 	base := runtimestorageinmemory.New()
 	t.Cleanup(func() { _ = base.Close() })
-	store := &failingBatchStore{RuntimeStore: base, err: errors.New("database password=" + injectedSecret)}
+	store := &failingBatchStore{ReplyStore: base, err: errors.New("database password=" + injectedSecret)}
 	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{BatchStore: store, SegmentSize: 3})
 	if err != nil {
 		t.Fatal(err)
@@ -528,7 +528,7 @@ func (p *faultProvider) CallsFor(replyID string) int {
 }
 
 type failingBatchStore struct {
-	runtimestorage.RuntimeStore
+	runtimestorage.ReplyStore
 	err       error
 	attempted int
 }
@@ -543,7 +543,13 @@ func (s *failingBatchStore) EnqueueRepliesWithCorrelation(_ context.Context, _ r
 	return nil, s.err
 }
 
-func seedCompletedReply(t *testing.T, store runtimestorage.RuntimeStore, tenantID, eventID, replyID string) {
+type seedReplyStore interface {
+	runtimestorage.SessionStateStore
+	runtimestorage.MessageStore
+	runtimestorage.ReplyStore
+}
+
+func seedCompletedReply(t *testing.T, store seedReplyStore, tenantID, eventID, replyID string) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := store.CreateSession(ctx, tenantID, "session-"+eventID, nil); err != nil {
