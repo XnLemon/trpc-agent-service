@@ -318,7 +318,7 @@ func prepareMySQLDatabaseConfig(ctx context.Context, config *Config) error {
 		config.Tenants = tenantmysql.NewRepository(config.DB)
 	}
 	if config.Apps == nil {
-		config.Apps = appmysql.NewRepository(config.DB)
+		config.Apps = appmysql.NewAppRepository(config.DB)
 	}
 	if config.Models == nil {
 		config.Models = modelmysql.NewRepository(config.DB, config.ModelCatalog)
@@ -342,7 +342,7 @@ func preparePostgresDatabaseConfig(ctx context.Context, config *Config) error {
 		config.Tenants = tenantpostgres.NewRepository(config.DB)
 	}
 	if config.Apps == nil {
-		config.Apps = apppostgres.NewRepository(config.DB)
+		config.Apps = apppostgres.NewAppRepository(config.DB)
 	}
 	if config.Models == nil {
 		config.Models = modelpostgres.NewRepository(config.DB, config.ModelCatalog)

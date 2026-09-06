@@ -33,10 +33,10 @@ import (
 
 func environmentRepositories(config environmentConfig, db *sql.DB) (tenant.Repository, appmodel.Repository, channels.CandidateConsumer, audit.Writer, error) {
 	if config.driver == ControlPlaneDriverMySQL {
-		return tenantmysql.NewRepository(db), appmysql.NewRepository(db), channelmysql.NewRepository(db), nil, nil
+		return tenantmysql.NewRepository(db), appmysql.NewAppRepository(db), channelmysql.NewRepository(db), nil, nil
 	}
 	tenantRepo := tenantpostgres.NewRepository(db)
-	appRepo := apppostgres.NewRepository(db)
+	appRepo := apppostgres.NewAppRepository(db)
 	channelRepo := channelpostgres.NewRepository(db)
 	var auditWriter audit.Writer
 	var err error

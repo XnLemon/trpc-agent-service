@@ -162,7 +162,7 @@ func TestModelProviderRegistryFailureAndLifecycleBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := ModelFactoryInput{TenantID: registryTenant, Provider: "fake", Model: "chat"}
-	registry := NewProviderRegistry()
+	registry := NewModelProviderRegistry()
 	if err := registry.Register(registryTenant, "", &registryModelFactory{}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("empty provider Register() = %v", err)
 	}
@@ -211,7 +211,7 @@ func TestModelProviderRegistryCancellationAndClosedRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry := NewProviderRegistry()
+	registry := NewModelProviderRegistry()
 	cancelCtx, cancel := context.WithCancel(context.Background())
 	if err := registry.Register(registryTenant, "cancel", modelFactoryFunc(func(context.Context, ModelFactoryInput, SecretValue) (trpcmodel.Model, error) {
 		cancel()

@@ -157,15 +157,8 @@ type AppRepository struct {
 
 var _ appmodel.Repository = (*AppRepository)(nil)
 
-// AgentRepository is retained as a source-compatible alias for callers that
-// used the pre-app-boundary name.
-type AgentRepository = AppRepository
-
 // NewAppRepository creates an App repository over a PostgreSQL pool.
 func NewAppRepository(db *sql.DB) *AppRepository { return &AppRepository{db: db} }
-
-// NewRepository is the compatibility constructor for the App repository.
-func NewRepository(db *sql.DB) *AppRepository { return NewAppRepository(db) }
 
 func (r *AppRepository) checkList(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {

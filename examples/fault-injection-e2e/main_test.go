@@ -328,7 +328,11 @@ func (fixture controlPlaneFixture) buildPlan(ctx context.Context, root *tenant.T
 	if err != nil {
 		return runtime.ExecutionPlan{}, err
 	}
-	return runtime.NewExecutionPlan(snapshot, app, revision, modelProfile, fixture.modelCatalog, backendProfile, fixture.backendCatalog)
+	return runtime.NewExecutionPlanFromInput(runtime.ExecutionPlanInput{
+		TenantSnapshot: snapshot, AppRoot: app, Revision: revision,
+		ModelProfile: modelProfile, ModelCatalog: fixture.modelCatalog,
+		BackendProfile: backendProfile, BackendCatalog: fixture.backendCatalog,
+	})
 }
 
 func (fixture controlPlaneFixture) publishDraft(ctx context.Context, root *tenant.Tenant, app *appmodel.App, draft *appmodel.Revision) (*appmodel.App, error) {

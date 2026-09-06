@@ -160,7 +160,11 @@ func newRunnerFactoryTestPlan(t *testing.T) runtime.ExecutionPlan {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := runtime.NewExecutionPlan(snapshot, appRoot, &published, modelValue, modelCatalog, backendValue, backendCatalog)
+	plan, err := runtime.NewExecutionPlanFromInput(runtime.ExecutionPlanInput{
+		TenantSnapshot: snapshot, AppRoot: appRoot, Revision: &published,
+		ModelProfile: modelValue, ModelCatalog: modelCatalog,
+		BackendProfile: backendValue, BackendCatalog: backendCatalog,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

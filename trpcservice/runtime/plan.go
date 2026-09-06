@@ -55,36 +55,9 @@ type ExecutionPlanInput struct {
 	BackendCatalog *backend.ProviderCatalog
 }
 
-// NewExecutionPlan validates and freezes one Tenant, current Agent Revision,
-// active Model Profile, and active Backend Profile. All objects must belong to
-// the same tenant and the Model Profile must satisfy the Revision reference.
-//
-// Deprecated: use NewExecutionPlanFromInput. The input constructor keeps the
-// plan boundary explicit as the snapshot grows and prevents another long
-// positional parameter list.
-func NewExecutionPlan(
-	tenantSnapshot tenant.ConfigurationSnapshot,
-	appRoot *appmodel.App,
-	revision *appmodel.Revision,
-	modelProfile *modelprofile.Profile,
-	modelCatalog *modelprofile.ProviderCatalog,
-	backendProfile *backend.Profile,
-	backendCatalog *backend.ProviderCatalog,
-) (ExecutionPlan, error) {
-	return NewExecutionPlanFromInput(ExecutionPlanInput{
-		TenantSnapshot: tenantSnapshot,
-		AppRoot:        appRoot,
-		Revision:       revision,
-		ModelProfile:   modelProfile,
-		ModelCatalog:   modelCatalog,
-		BackendProfile: backendProfile,
-		BackendCatalog: backendCatalog,
-	})
-}
-
 // NewExecutionPlanFromInput validates and freezes one explicit execution-plan
-// input group. New callers should prefer this constructor over positional
-// arguments so adding another snapshot cannot silently reorder call sites.
+// input group. The grouped input keeps the plan boundary explicit as the
+// snapshot grows and prevents callers from silently reordering dependencies.
 func NewExecutionPlanFromInput(input ExecutionPlanInput) (ExecutionPlan, error) {
 	tenantValue := input.TenantSnapshot.Tenant()
 	if err := tenantValue.Validate(); err != nil {
@@ -181,36 +154,6 @@ func (plan ExecutionPlan) StorageFactoryInput() (backend.StorageFactoryInput, er
 		return backend.StorageFactoryInput{}, err
 	}
 	return plan.backend.FactoryInput()
-}
-
-// AgentRunnerInput projects a validated plan into the external-agent adapter
-// boundary. Runtime owns the complete plan; agent owns tRPC-Agent-Go wiring.
-//
-// Deprecated: use the agent/runnerfactory adapter to project a plan. This
-// compatibility method remains for callers that still assemble a Runner
-// outside the standard runtime registry.
-func (plan ExecutionPlan) AgentRunnerInput() (agent.RunnerInput, error) {
-	if err := plan.validate(); err != nil {
-		return agent.RunnerInput{}, err
-	}
-	agentInput, err := plan.agent.FactoryInput()
-	if err != nil {
-		return agent.RunnerInput{}, err
-	}
-	modelInput, err := plan.model.FactoryInput()
-	if err != nil {
-		return agent.RunnerInput{}, err
-	}
-	storageInput, err := plan.backend.FactoryInput()
-	if err != nil {
-		return agent.RunnerInput{}, err
-	}
-	return agent.RunnerInput{
-		Tenant:  plan.Tenant(),
-		Agent:   agentInput,
-		Model:   modelInput,
-		Storage: storageInput,
-	}, nil
 }
 
 // WithExecutionPlan carries a validated defensive plan in a Context.

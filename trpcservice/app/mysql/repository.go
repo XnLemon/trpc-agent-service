@@ -22,10 +22,6 @@ type AppRepository struct {
 
 var _ appmodel.Repository = (*AppRepository)(nil)
 
-// AgentRepository is retained as a source-compatible alias for callers that
-// used the pre-app-boundary name.
-type AgentRepository = AppRepository
-
 // List returns a stable page of Apps belonging to one tenant.
 func (r *AppRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*appmodel.App, string, error) {
 	if err := ctx.Err(); err != nil {
@@ -175,9 +171,6 @@ func pageRevisions(items []*appmodel.Revision, offset, limit int) ([]*appmodel.R
 
 // NewAppRepository creates an App repository over a MySQL pool.
 func NewAppRepository(db *sql.DB) *AppRepository { return &AppRepository{db: db} }
-
-// NewRepository is the compatibility constructor for the App repository.
-func NewRepository(db *sql.DB) *AppRepository { return NewAppRepository(db) }
 
 // Create persists a new agent application.
 func (r *AppRepository) Create(ctx context.Context, input appmodel.CreateInput) (*appmodel.App, error) {

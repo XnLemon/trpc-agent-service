@@ -434,7 +434,11 @@ func TestChannelRepositoryCandidateAndScanGuards(t *testing.T) {
 	binding := newStoredChannelBinding(t)
 	repository := NewRepository(nil)
 	now := time.Now().UTC()
-	candidate, err := channels.NewCandidateBindingContext(binding.Channel, binding.PublicRouteKeyDigest, binding.Version, binding.ConfigDigest, channels.PurposeWebhookVerification, "token", now, now.Add(time.Minute))
+	candidate, err := channels.NewCandidateBindingContextFromInput(channels.CandidateBindingInput{
+		Channel: binding.Channel, PublicRouteKeyDigest: binding.PublicRouteKeyDigest, BindingVersion: binding.Version,
+		ConfigDigest: binding.ConfigDigest, Purpose: channels.PurposeWebhookVerification, CandidateToken: "token",
+		IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,7 +467,11 @@ func TestChannelRepositoryCandidateAndScanGuards(t *testing.T) {
 	}
 	mock.ExpectQuery(".*").WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "binding_id", "version", "config_digest"}).AddRow(binding.TenantID, binding.BindingID, binding.Version, binding.ConfigDigest))
 	full := NewRepository(db)
-	valid, err := channels.NewCandidateBindingContext(binding.Channel, binding.PublicRouteKeyDigest, binding.Version, binding.ConfigDigest, channels.PurposeWebhookVerification, "seed", now, now.Add(time.Minute))
+	valid, err := channels.NewCandidateBindingContextFromInput(channels.CandidateBindingInput{
+		Channel: binding.Channel, PublicRouteKeyDigest: binding.PublicRouteKeyDigest, BindingVersion: binding.Version,
+		ConfigDigest: binding.ConfigDigest, Purpose: channels.PurposeWebhookVerification, CandidateToken: "seed",
+		IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

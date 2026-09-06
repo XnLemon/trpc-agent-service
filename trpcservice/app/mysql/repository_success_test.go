@@ -29,7 +29,7 @@ func TestAgentRepositoryGetDecodesStoredApp(t *testing.T) {
 		app.TenantID, app.AppID, app.AppKey, app.DisplayName, app.Description, string(app.Status), nil, nil, app.Version, app.CreatedAt, app.UpdatedAt,
 	))
 
-	stored, err := NewRepository(db).Get(context.Background(), app.TenantID, app.AppID)
+	stored, err := NewAppRepository(db).Get(context.Background(), app.TenantID, app.AppID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,13 +50,13 @@ func TestAgentRepositoryListsAppsAndRevisions(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	mock.ExpectQuery(`SELECT tenant_id, app_id, app_key, display_name, description, status, current_revision, canary_revision, version, created_at, updated_at FROM agent_app WHERE tenant_id = \?`).WithArgs(app.TenantID).WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "app_id", "app_key", "display_name", "description", "status", "current_revision", "canary_revision", "version", "created_at", "updated_at"}).AddRow(app.TenantID, app.AppID, app.AppKey, app.DisplayName, app.Description, string(app.Status), nil, nil, app.Version, app.CreatedAt, app.UpdatedAt))
-	items, next, err := NewRepository(db).List(context.Background(), app.TenantID, "workflow", string(app.Status), "", 50)
+	items, next, err := NewAppRepository(db).List(context.Background(), app.TenantID, "workflow", string(app.Status), "", 50)
 	if err != nil || len(items) != 1 || items[0].AppID != app.AppID || next != "" {
 		t.Fatalf("listed apps = items=%+v next=%q err=%v", items, next, err)
 	}
 	mock.ExpectQuery(`SELECT revision FROM agent_app_revision WHERE tenant_id = \? AND app_id = \?`).WithArgs(app.TenantID, app.AppID).WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(draft.Revision))
 	expectAgentRevision(t, mock, draft)
-	revisions, next, err := NewRepository(db).ListRevisions(context.Background(), app.TenantID, app.AppID, "answer", string(draft.State), "", 50)
+	revisions, next, err := NewAppRepository(db).ListRevisions(context.Background(), app.TenantID, app.AppID, "answer", string(draft.State), "", 50)
 	if err != nil || len(revisions) != 1 || revisions[0].Revision != draft.Revision || next != "" {
 		t.Fatalf("listed revisions = items=%+v next=%q err=%v", revisions, next, err)
 	}
@@ -79,7 +79,7 @@ func TestAgentRepositoryRevisionSearchIncludesGlobalInstruction(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(revision.Revision))
 	expectAgentRevision(t, mock, revision)
 
-	items, next, err := NewRepository(db).ListRevisions(context.Background(), app.TenantID, app.AppID, "tenant policy", "", "", 50)
+	items, next, err := NewAppRepository(db).ListRevisions(context.Background(), app.TenantID, app.AppID, "tenant policy", "", "", 50)
 	if err != nil || len(items) != 1 || items[0].Revision != revision.Revision || next != "" {
 		t.Fatalf("global instruction search = items=%+v next=%q err=%v", items, next, err)
 	}
@@ -91,10 +91,10 @@ func TestAgentRepositoryRevisionSearchIncludesGlobalInstruction(t *testing.T) {
 func TestAgentRepositoryListBoundaries(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := NewRepository(nil).List(ctx, "tenant", "", "", "", 50); err == nil {
+	if _, _, err := NewAppRepository(nil).List(ctx, "tenant", "", "", "", 50); err == nil {
 		t.Fatal("canceled app list was accepted")
 	}
-	if _, _, err := NewRepository(nil).List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+	if _, _, err := NewAppRepository(nil).List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
 		t.Fatalf("nil app list error = %v", err)
 	}
 	db, mock, err := sqlmock.New()
@@ -102,7 +102,7 @@ func TestAgentRepositoryListBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	repository := NewRepository(db)
+	repository := NewAppRepository(db)
 	if _, _, err := repository.List(context.Background(), "tenant", "", "", "bad", 50); err == nil {
 		t.Fatal("invalid app cursor was accepted")
 	}
@@ -123,7 +123,7 @@ func TestAgentRepositoryListBoundaries(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = revisionDB.Close() })
 	revisionMock.ExpectQuery(`SELECT revision FROM agent_app_revision WHERE tenant_id = \? AND app_id = \? ORDER BY revision`).WithArgs("tenant", "app").WillReturnError(errors.New("query down"))
-	if _, _, err := NewRepository(revisionDB).ListRevisions(context.Background(), "tenant", "app", "", "", "", 50); !errors.Is(err, appmodel.ErrNotFound) && !errors.Is(err, ErrStorage) {
+	if _, _, err := NewAppRepository(revisionDB).ListRevisions(context.Background(), "tenant", "app", "", "", "", 50); !errors.Is(err, appmodel.ErrNotFound) && !errors.Is(err, ErrStorage) {
 		t.Fatalf("revision query error = %v", err)
 	}
 }
@@ -139,7 +139,7 @@ func TestAgentRepositoryGetRevisionDecodesStoredDraft(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	expectAgentRevision(t, mock, draft)
 
-	stored, err := NewRepository(db).GetRevision(context.Background(), app.TenantID, app.AppID, draft.Revision)
+	stored, err := NewAppRepository(db).GetRevision(context.Background(), app.TenantID, app.AppID, draft.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestAgentRepositoryMapsMissingRevisionToNotFound(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	mock.ExpectQuery(".*").WithArgs("tenant", "app", int64(1)).WillReturnError(sql.ErrNoRows)
 
-	_, err = NewRepository(db).GetRevision(context.Background(), "tenant", "app", 1)
+	_, err = NewAppRepository(db).GetRevision(context.Background(), "tenant", "app", 1)
 	if !errors.Is(err, appmodel.ErrNotFound) {
 		t.Fatalf("missing revision error = %v", err)
 	}
@@ -174,7 +174,7 @@ func TestAgentRepositoryRejectsInvalidInputsBeforeTransactions(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	repository := NewRepository(db)
+	repository := NewAppRepository(db)
 	ctx := context.Background()
 	if _, err := repository.Create(ctx, appmodel.CreateInput{}); !errors.Is(err, appmodel.ErrInvalid) {
 		t.Fatalf("Create invalid input error = %v", err)
@@ -204,7 +204,7 @@ func TestAgentRepositoryRejectsInvalidMetadataUpdate(t *testing.T) {
 	expectAgentApp(mock, current)
 	mock.ExpectRollback()
 
-	_, err = NewRepository(db).UpdateMetadata(context.Background(), appmodel.UpdateMetadataInput{
+	_, err = NewAppRepository(db).UpdateMetadata(context.Background(), appmodel.UpdateMetadataInput{
 		TenantID: current.TenantID, AppID: current.AppID, ExpectedVersion: current.Version, DisplayName: " ", Description: current.Description,
 	})
 	if !errors.Is(err, appmodel.ErrInvalid) {
@@ -236,7 +236,7 @@ func TestAgentRepositoryCreatesApp(t *testing.T) {
 	}).AddRow(stored.TenantID, stored.AppID, stored.AppKey, stored.DisplayName, stored.Description, string(stored.Status), nil, nil, stored.Version, stored.CreatedAt, stored.UpdatedAt))
 	mock.ExpectCommit()
 
-	value, err := NewRepository(db).Create(context.Background(), input)
+	value, err := NewAppRepository(db).Create(context.Background(), input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestAgentRepositoryUpdatesMetadata(t *testing.T) {
 	expectAgentApp(mock, &stored)
 	mock.ExpectCommit()
 
-	value, err := NewRepository(db).UpdateMetadata(context.Background(), appmodel.UpdateMetadataInput{
+	value, err := NewAppRepository(db).UpdateMetadata(context.Background(), appmodel.UpdateMetadataInput{
 		TenantID: current.TenantID, AppID: current.AppID, ExpectedVersion: current.Version,
 		DisplayName: stored.DisplayName, Description: stored.Description,
 	})
@@ -299,7 +299,7 @@ func TestAgentRepositoryCreatesAndUpdatesDraft(t *testing.T) {
 	expectAgentRevision(t, createMock, draft)
 	createMock.ExpectCommit()
 
-	created, err := NewRepository(createDB).CreateDraft(context.Background(), appmodel.CreateDraftInput{
+	created, err := NewAppRepository(createDB).CreateDraft(context.Background(), appmodel.CreateDraftInput{
 		TenantID: app.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version, Kind: draft.Kind, SchemaVersion: draft.SchemaVersion,
 		Configuration: appmodel.DraftConfiguration{Instruction: draft.Instruction, ModelProfileID: draft.ModelProfileID, Runtime: draft.Runtime},
 	})
@@ -337,7 +337,7 @@ func TestAgentRepositoryCreatesAndUpdatesDraft(t *testing.T) {
 	expectAgentRevision(t, updateMock, updated)
 	updateMock.ExpectCommit()
 
-	value, err := NewRepository(updateDB).UpdateDraft(context.Background(), appmodel.UpdateDraftInput{
+	value, err := NewAppRepository(updateDB).UpdateDraft(context.Background(), appmodel.UpdateDraftInput{
 		TenantID: app.TenantID, AppID: app.AppID, Revision: draft.Revision, ExpectedAppVersion: app.Version, ExpectedDraftVersion: draft.DraftVersion,
 		Configuration: appmodel.DraftConfiguration{Instruction: updated.Instruction, ModelProfileID: updated.ModelProfileID, Runtime: updated.Runtime},
 	})
@@ -378,7 +378,7 @@ func TestAgentRepositoryTransitionsStatus(t *testing.T) {
 	expectAgentEvent(mock, current, appmodel.ChangeSuspended, appmodel.StatusActive, appmodel.StatusSuspended, current.CurrentRevision, stored.CurrentRevision, published.ContentDigest, current.Version, stored.Version, stored.UpdatedAt)
 	mock.ExpectCommit()
 
-	value, event, err := NewRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{
+	value, event, err := NewAppRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{
 		TenantID: current.TenantID, AppID: current.AppID, ExpectedVersion: current.Version, NextStatus: appmodel.StatusSuspended,
 		Metadata: appmodel.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "suspend", CorrelationID: "agent-suspend"},
 	})
@@ -450,7 +450,7 @@ func TestAgentRepositoryPublishesDraftAndMovesCurrentRevision(t *testing.T) {
 	expectAgentEvent(mock, app, appmodel.ChangePublished, appmodel.StatusDraft, appmodel.StatusActive, nil, storedApp.CurrentRevision, publishedValue.ContentDigest, app.Version, storedApp.Version, publishedValue.UpdatedAt)
 	mock.ExpectCommit()
 
-	storedRevisionApp, storedRevision, event, err := NewRepository(db).Publish(context.Background(), appmodel.PublishInput{
+	storedRevisionApp, storedRevision, event, err := NewAppRepository(db).Publish(context.Background(), appmodel.PublishInput{
 		TenantID: app.TenantID, AppID: app.AppID, Revision: draft.Revision, ExpectedAppVersion: app.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true,
 		Metadata: appmodel.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "publish", CorrelationID: "agent-publish"},
 	})
@@ -492,7 +492,7 @@ func TestAgentRepositoryRollsBackToPublishedRevision(t *testing.T) {
 	expectAgentEvent(mock, app, appmodel.ChangeRolledBack, appmodel.StatusActive, appmodel.StatusActive, app.CurrentRevision, stored.CurrentRevision, target.ContentDigest, app.Version, stored.Version, stored.UpdatedAt)
 	mock.ExpectCommit()
 
-	result, event, err := NewRepository(db).Rollback(context.Background(), appmodel.RollbackInput{
+	result, event, err := NewAppRepository(db).Rollback(context.Background(), appmodel.RollbackInput{
 		TenantID: app.TenantID, AppID: app.AppID, TargetRevision: target.Revision, ExpectedAppVersion: app.Version,
 		Metadata: appmodel.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "rollback", CorrelationID: "agent-rollback"},
 	})
@@ -533,7 +533,7 @@ func TestAgentRepositorySetsCanaryRevision(t *testing.T) {
 	expectAgentEvent(mock, app, appmodel.ChangeCanaryStarted, appmodel.StatusActive, appmodel.StatusActive, nil, stored.CanaryRevision, candidate.ContentDigest, app.Version, stored.Version, stored.UpdatedAt)
 	mock.ExpectCommit()
 
-	result, event, err := NewRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{
+	result, event, err := NewAppRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{
 		TenantID: app.TenantID, AppID: app.AppID, CandidateRevision: agentInt64(candidate.Revision), ExpectedAppVersion: app.Version, TenantActive: true,
 		Metadata: appmodel.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "canary", CorrelationID: "agent-canary"},
 	})
@@ -570,7 +570,7 @@ func TestAgentRepositoryClearsCanaryRevision(t *testing.T) {
 	expectAgentEvent(mock, app, appmodel.ChangeCanaryStopped, appmodel.StatusActive, appmodel.StatusActive, app.CanaryRevision, nil, "", app.Version, stored.Version, stored.UpdatedAt)
 	mock.ExpectCommit()
 
-	result, event, err := NewRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{
+	result, event, err := NewAppRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{
 		TenantID: app.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version, TenantActive: true,
 		Metadata: appmodel.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "rollback canary", CorrelationID: "agent-canary-clear"},
 	})
@@ -591,7 +591,7 @@ func TestAgentRepositorySetCanaryRejectsInvalidState(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if _, _, err := NewRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantActive: true}); !errors.Is(err, appmodel.ErrInvalid) {
+	if _, _, err := NewAppRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantActive: true}); !errors.Is(err, appmodel.ErrInvalid) {
 		t.Fatalf("invalid metadata error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -600,7 +600,7 @@ func TestAgentRepositorySetCanaryRejectsInvalidState(t *testing.T) {
 }
 
 func TestAgentRepositoryRequiresStorage(t *testing.T) {
-	repository := NewRepository(nil)
+	repository := NewAppRepository(nil)
 	ctx := context.Background()
 	if _, err := repository.Create(ctx, appmodel.CreateInput{}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("Create nil-storage error = %v", err)
@@ -647,47 +647,47 @@ func TestAgentRepositoryBeginAndReadErrors(t *testing.T) {
 	metadata := appmodel.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "error", CorrelationID: "agent-error"}
 	db, mock := newDB(t)
 	mock.ExpectBegin().WillReturnError(errors.New("begin"))
-	if _, err := NewRepository(db).Create(context.Background(), appmodel.CreateInput{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", AppKey: "error", DisplayName: "Error"}); !errors.Is(err, ErrStorage) {
+	if _, err := NewAppRepository(db).Create(context.Background(), appmodel.CreateInput{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", AppKey: "error", DisplayName: "Error"}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("Create begin error = %v", err)
 	}
 	db, mock = newDB(t)
 	mock.ExpectBegin().WillReturnError(errors.New("begin"))
-	if _, err := NewRepository(db).UpdateMetadata(context.Background(), appmodel.UpdateMetadataInput{}); !errors.Is(err, ErrStorage) {
+	if _, err := NewAppRepository(db).UpdateMetadata(context.Background(), appmodel.UpdateMetadataInput{}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("UpdateMetadata begin error = %v", err)
 	}
 	db, mock = newDB(t)
 	mock.ExpectBegin().WillReturnError(errors.New("begin"))
-	if _, err := NewRepository(db).CreateDraft(context.Background(), appmodel.CreateDraftInput{}); !errors.Is(err, ErrStorage) {
+	if _, err := NewAppRepository(db).CreateDraft(context.Background(), appmodel.CreateDraftInput{}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("CreateDraft begin error = %v", err)
 	}
 	db, mock = newDB(t)
 	mock.ExpectBegin().WillReturnError(errors.New("begin"))
-	if _, err := NewRepository(db).UpdateDraft(context.Background(), appmodel.UpdateDraftInput{}); !errors.Is(err, ErrStorage) {
+	if _, err := NewAppRepository(db).UpdateDraft(context.Background(), appmodel.UpdateDraftInput{}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("UpdateDraft begin error = %v", err)
 	}
 	db, mock = newDB(t)
 	mock.ExpectBegin().WillReturnError(errors.New("begin"))
-	if _, _, _, err := NewRepository(db).Publish(context.Background(), appmodel.PublishInput{TenantID: "tenant", AppID: "app", Revision: 1, ExpectedAppVersion: 1, ExpectedDraftVersion: 1, TenantActive: true, Metadata: metadata}); !errors.Is(err, ErrStorage) {
+	if _, _, _, err := NewAppRepository(db).Publish(context.Background(), appmodel.PublishInput{TenantID: "tenant", AppID: "app", Revision: 1, ExpectedAppVersion: 1, ExpectedDraftVersion: 1, TenantActive: true, Metadata: metadata}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("Publish begin error = %v", err)
 	}
 	db, mock = newDB(t)
 	mock.ExpectBegin().WillReturnError(errors.New("begin"))
-	if _, _, err := NewRepository(db).Rollback(context.Background(), appmodel.RollbackInput{TenantID: "tenant", AppID: "app", TargetRevision: 1, ExpectedAppVersion: 1, Metadata: metadata}); !errors.Is(err, ErrStorage) {
+	if _, _, err := NewAppRepository(db).Rollback(context.Background(), appmodel.RollbackInput{TenantID: "tenant", AppID: "app", TargetRevision: 1, ExpectedAppVersion: 1, Metadata: metadata}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("Rollback begin error = %v", err)
 	}
 	db, mock = newDB(t)
 	mock.ExpectBegin().WillReturnError(errors.New("begin"))
-	if _, _, err := NewRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: "tenant", AppID: "app", ExpectedVersion: 1, NextStatus: appmodel.StatusSuspended, Metadata: metadata}); !errors.Is(err, ErrStorage) {
+	if _, _, err := NewAppRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: "tenant", AppID: "app", ExpectedVersion: 1, NextStatus: appmodel.StatusSuspended, Metadata: metadata}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("Transition begin error = %v", err)
 	}
 	db, mock = newDB(t)
 	mock.ExpectQuery(".*").WillReturnError(errors.New("read"))
-	if _, err := NewRepository(db).Get(context.Background(), "tenant", "app"); !errors.Is(err, ErrStorage) {
+	if _, err := NewAppRepository(db).Get(context.Background(), "tenant", "app"); !errors.Is(err, ErrStorage) {
 		t.Fatalf("Get read error = %v", err)
 	}
 	db, mock = newDB(t)
 	mock.ExpectQuery(".*").WillReturnError(errors.New("read"))
-	if _, err := NewRepository(db).GetRevision(context.Background(), "tenant", "app", 1); !errors.Is(err, ErrStorage) {
+	if _, err := NewAppRepository(db).GetRevision(context.Background(), "tenant", "app", 1); !errors.Is(err, ErrStorage) {
 		t.Fatalf("GetRevision read error = %v", err)
 	}
 }
@@ -780,7 +780,7 @@ func TestAgentRepositoryDraftAndPublishGuardBranches(t *testing.T) {
 	stale.Version++
 	expectAgentApp(mock, &stale)
 	mock.ExpectRollback()
-	if _, err := NewRepository(db).CreateDraft(context.Background(), appmodel.CreateDraftInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Configuration: appmodel.DraftConfiguration{Instruction: "draft", ModelProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", Runtime: appmodel.DefaultRuntimePolicy()}}); !errors.Is(err, appmodel.ErrConflict) {
+	if _, err := NewAppRepository(db).CreateDraft(context.Background(), appmodel.CreateDraftInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Configuration: appmodel.DraftConfiguration{Instruction: "draft", ModelProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", Runtime: appmodel.DefaultRuntimePolicy()}}); !errors.Is(err, appmodel.ErrConflict) {
 		t.Fatalf("stale CreateDraft = %v", err)
 	}
 	db, mock, err = sqlmock.New()
@@ -791,7 +791,7 @@ func TestAgentRepositoryDraftAndPublishGuardBranches(t *testing.T) {
 	mock.ExpectBegin()
 	expectAgentApp(mock, &stale)
 	mock.ExpectRollback()
-	if _, err := NewRepository(db).UpdateDraft(context.Background(), appmodel.UpdateDraftInput{TenantID: app.TenantID, AppID: app.AppID, Revision: 1, ExpectedAppVersion: app.Version, ExpectedDraftVersion: 1, Configuration: appmodel.DraftConfiguration{Instruction: "draft", ModelProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", Runtime: appmodel.DefaultRuntimePolicy()}}); !errors.Is(err, appmodel.ErrConflict) {
+	if _, err := NewAppRepository(db).UpdateDraft(context.Background(), appmodel.UpdateDraftInput{TenantID: app.TenantID, AppID: app.AppID, Revision: 1, ExpectedAppVersion: app.Version, ExpectedDraftVersion: 1, Configuration: appmodel.DraftConfiguration{Instruction: "draft", ModelProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", Runtime: appmodel.DefaultRuntimePolicy()}}); !errors.Is(err, appmodel.ErrConflict) {
 		t.Fatalf("stale UpdateDraft = %v", err)
 	}
 	db, mock, err = sqlmock.New()
@@ -802,7 +802,7 @@ func TestAgentRepositoryDraftAndPublishGuardBranches(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT status FROM tenant").WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("suspended"))
 	mock.ExpectRollback()
-	if _, _, _, err := NewRepository(db).Publish(context.Background(), appmodel.PublishInput{TenantID: app.TenantID, AppID: app.AppID, Revision: 1, ExpectedAppVersion: app.Version, ExpectedDraftVersion: 1, TenantActive: true, Metadata: metadata}); !errors.Is(err, appmodel.ErrInvalid) {
+	if _, _, _, err := NewAppRepository(db).Publish(context.Background(), appmodel.PublishInput{TenantID: app.TenantID, AppID: app.AppID, Revision: 1, ExpectedAppVersion: app.Version, ExpectedDraftVersion: 1, TenantActive: true, Metadata: metadata}); !errors.Is(err, appmodel.ErrInvalid) {
 		t.Fatalf("inactive publish tenant = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -827,7 +827,7 @@ func TestAgentRepositoryTransitionsDraftAppWithoutRevision(t *testing.T) {
 	expectAgentApp(mock, &stored)
 	expectAgentEvent(mock, app, appmodel.ChangeDisabled, appmodel.StatusDraft, appmodel.StatusDisabled, nil, nil, "", app.Version, stored.Version, stored.UpdatedAt)
 	mock.ExpectCommit()
-	result, event, err := NewRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: appmodel.StatusDisabled, Metadata: appmodel.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "disable", CorrelationID: "agent-draft-disable"}})
+	result, event, err := NewAppRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: appmodel.StatusDisabled, Metadata: appmodel.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "disable", CorrelationID: "agent-draft-disable"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -872,7 +872,7 @@ func TestAgentRepositoryDraftAndMetadataConflictBranches(t *testing.T) {
 	expectAgentApp(mock, app)
 	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectRollback()
-	if _, err := NewRepository(db).UpdateMetadata(context.Background(), appmodel.UpdateMetadataInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, DisplayName: "Updated", Description: app.Description}); !errors.Is(err, appmodel.ErrConflict) {
+	if _, err := NewAppRepository(db).UpdateMetadata(context.Background(), appmodel.UpdateMetadataInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, DisplayName: "Updated", Description: app.Description}); !errors.Is(err, appmodel.ErrConflict) {
 		t.Fatalf("metadata conflict = %v", err)
 	}
 	db, mock, err = sqlmock.New()
@@ -884,7 +884,7 @@ func TestAgentRepositoryDraftAndMetadataConflictBranches(t *testing.T) {
 	expectAgentApp(mock, app)
 	mock.ExpectQuery("COALESCE\\(MAX\\(revision\\)").WillReturnError(errors.New("revision query"))
 	mock.ExpectRollback()
-	if _, err := NewRepository(db).CreateDraft(context.Background(), appmodel.CreateDraftInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Configuration: appmodel.DraftConfiguration{Instruction: "draft", ModelProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", Runtime: appmodel.DefaultRuntimePolicy()}}); !errors.Is(err, ErrStorage) {
+	if _, err := NewAppRepository(db).CreateDraft(context.Background(), appmodel.CreateDraftInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version, Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Configuration: appmodel.DraftConfiguration{Instruction: "draft", ModelProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", Runtime: appmodel.DefaultRuntimePolicy()}}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("draft revision query error = %v", err)
 	}
 	draft := newStoredAgentRevision(t, app, 1, true)
@@ -897,7 +897,7 @@ func TestAgentRepositoryDraftAndMetadataConflictBranches(t *testing.T) {
 	expectAgentApp(mock, app)
 	expectAgentRevision(t, mock, draft)
 	mock.ExpectRollback()
-	if _, err := NewRepository(db).UpdateDraft(context.Background(), appmodel.UpdateDraftInput{TenantID: app.TenantID, AppID: app.AppID, Revision: draft.Revision, ExpectedAppVersion: app.Version, ExpectedDraftVersion: draft.DraftVersion, Configuration: appmodel.DraftConfiguration{Instruction: "draft", ModelProfileID: draft.ModelProfileID, Runtime: draft.Runtime}}); !errors.Is(err, appmodel.ErrImmutableRevision) {
+	if _, err := NewAppRepository(db).UpdateDraft(context.Background(), appmodel.UpdateDraftInput{TenantID: app.TenantID, AppID: app.AppID, Revision: draft.Revision, ExpectedAppVersion: app.Version, ExpectedDraftVersion: draft.DraftVersion, Configuration: appmodel.DraftConfiguration{Instruction: "draft", ModelProfileID: draft.ModelProfileID, Runtime: draft.Runtime}}); !errors.Is(err, appmodel.ErrImmutableRevision) {
 		t.Fatalf("immutable draft update = %v", err)
 	}
 }
@@ -975,20 +975,20 @@ func TestAgentRepositoryReadAndToolErrorBranches(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	mock.ExpectQuery(".*").WillReturnError(sql.ErrNoRows)
-	if _, err := NewRepository(db).Get(context.Background(), app.TenantID, app.AppID); !errors.Is(err, appmodel.ErrNotFound) {
+	if _, err := NewAppRepository(db).Get(context.Background(), app.TenantID, app.AppID); !errors.Is(err, appmodel.ErrNotFound) {
 		t.Fatalf("missing app = %v", err)
 	}
 	mock.ExpectBegin()
 	mock.ExpectQuery(".*").WillReturnError(errors.New("current app"))
 	mock.ExpectRollback()
-	if _, err := NewRepository(db).UpdateMetadata(context.Background(), appmodel.UpdateMetadataInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, DisplayName: app.DisplayName, Description: app.Description}); !errors.Is(err, ErrStorage) {
+	if _, err := NewAppRepository(db).UpdateMetadata(context.Background(), appmodel.UpdateMetadataInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, DisplayName: app.DisplayName, Description: app.Description}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("metadata read error = %v", err)
 	}
 	mock.ExpectBegin()
 	mock.ExpectExec(".*").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(".*").WillReturnError(errors.New("readback"))
 	mock.ExpectRollback()
-	if _, err := NewRepository(db).Create(context.Background(), appmodel.CreateInput{TenantID: app.TenantID, AppKey: "readback", DisplayName: "Readback"}); !errors.Is(err, ErrStorage) {
+	if _, err := NewAppRepository(db).Create(context.Background(), appmodel.CreateInput{TenantID: app.TenantID, AppKey: "readback", DisplayName: "Readback"}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("create readback error = %v", err)
 	}
 	shortDB, shortMock, err := sqlmock.New()

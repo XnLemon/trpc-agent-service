@@ -124,7 +124,7 @@ func newDemoRepositories(db *sql.DB, loadCatalogs demoCatalogLoader) (tenant.Rep
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("%w: demo catalogs", ErrDemoInitialization)
 	}
-	return tenantpostgres.NewRepository(db), apppostgres.NewRepository(db), modelpostgres.NewRepository(db, modelCatalog), backendpostgres.NewRepository(db, backendCatalog), nil
+	return tenantpostgres.NewRepository(db), apppostgres.NewAppRepository(db), modelpostgres.NewRepository(db, modelCatalog), backendpostgres.NewRepository(db, backendCatalog), nil
 }
 
 type demoGraphDependencies struct {
