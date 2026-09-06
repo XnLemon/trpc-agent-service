@@ -39,7 +39,6 @@ func isExpectedDispatchFailure(err error) bool {
 		errors.Is(err, ErrNotReady) ||
 		errors.Is(err, ErrClosed) ||
 		errors.Is(err, ErrRateLimited) ||
-		isBudgetRejection(err) ||
 		errors.Is(err, ErrDuplicateMessage) ||
 		errors.Is(err, runtimerunner.ErrNotReady) ||
 		errors.Is(err, runtimerunner.ErrClosed)
@@ -53,8 +52,6 @@ func dispatchErrorType(err error) string {
 		return ErrPlanUnavailable.Error()
 	case errors.Is(err, ErrExecution), errors.Is(err, runtimerunner.ErrRunnerUnavailable):
 		return ErrExecution.Error()
-	case isBudgetRejection(err):
-		return "budget"
 	case errors.Is(err, runtimerunner.ErrRunnerCapacity):
 		return runtimerunner.ErrRunnerCapacity.Error()
 	default:

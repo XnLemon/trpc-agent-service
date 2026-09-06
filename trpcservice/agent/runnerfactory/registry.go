@@ -22,15 +22,13 @@ import (
 // registry. Session, Secret Resolver, Model Factory, and Storage Factory are
 // borrowed by the resulting Runners and remain owned by the caller.
 type Config struct {
-	Registry             runtimerunner.RunnerRegistryConfig
-	SecretResolver       modelprofile.SecretResolver
-	ModelFactory         modelprofile.ModelFactory
-	Sessions             session.Service
-	StorageFactory       storagefactory.StorageFactory
-	Observability        observability.Provider
-	ToolRegistry         *servicetool.Registry
-	AgentFactories       *serviceagent.AgentFactoryRegistry
-	EnableUsageCallbacks bool
+	Registry       runtimerunner.RunnerRegistryConfig
+	SecretResolver modelprofile.SecretResolver
+	ModelFactory   modelprofile.ModelFactory
+	Sessions       session.Service
+	StorageFactory storagefactory.StorageFactory
+	Observability  observability.Provider
+	ToolRegistry   *servicetool.Registry
 }
 
 // NewRuntimeRunnerRegistry creates a generic Runner registry backed by the
@@ -49,14 +47,12 @@ func NewRuntimeRunnerRegistry(config Config) (*runtimerunner.RunnerRegistry, err
 			return serviceagent.NewRunnerWithConfig(ctx, serviceagent.RunnerConfig{
 				Input: input, SecretResolver: config.SecretResolver, ModelFactory: config.ModelFactory,
 				Sessions: config.Sessions, StorageFactory: config.StorageFactory,
-				Observability: config.Observability, ToolRegistry: config.ToolRegistry, AgentFactories: config.AgentFactories,
-				EnableUsageCallbacks: config.EnableUsageCallbacks,
+				Observability: config.Observability, ToolRegistry: config.ToolRegistry,
 			})
 		}
 		return serviceagent.NewRunnerWithConfig(ctx, serviceagent.RunnerConfig{
 			Input: input, SecretResolver: config.SecretResolver, ModelFactory: config.ModelFactory,
-			Sessions: config.Sessions, Observability: config.Observability, ToolRegistry: config.ToolRegistry, AgentFactories: config.AgentFactories,
-			EnableUsageCallbacks: config.EnableUsageCallbacks,
+			Sessions: config.Sessions, Observability: config.Observability, ToolRegistry: config.ToolRegistry,
 		})
 	}
 	return runtimerunner.NewRunnerRegistry(config.Registry)

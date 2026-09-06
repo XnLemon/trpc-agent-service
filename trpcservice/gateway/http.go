@@ -15,7 +15,6 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
-	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 )
 
@@ -572,12 +571,6 @@ func mapHTTPError(err error) (int, string) {
 		return http.StatusBadRequest, "invalid request"
 	case errors.Is(err, ErrRateLimited):
 		return http.StatusTooManyRequests, "rate limited"
-	case errors.Is(err, runtimebudget.ErrExceeded):
-		return http.StatusTooManyRequests, "budget exceeded"
-	case errors.Is(err, runtimebudget.ErrCostUnavailable):
-		return http.StatusServiceUnavailable, "cost configuration unavailable"
-	case errors.Is(err, runtimebudget.ErrUnavailable):
-		return http.StatusServiceUnavailable, "budget unavailable"
 	case errors.Is(err, ErrDuplicateMessage):
 		return http.StatusConflict, "duplicate message"
 	case errors.Is(err, ErrNotReady), errors.Is(err, ErrClosed), errors.Is(err, runtimerunner.ErrNotReady), errors.Is(err, runtimerunner.ErrClosed):
