@@ -53,6 +53,7 @@ nav:
       - Runtime Capabilities (#75): runtime-capabilities.md
       - "Issue #76 Stateless Worker and Migration": issue-76-stateless-worker.md
       - PostgreSQL 控制面与启动装配: postgresql-control-plane.md
+      - 包级数据库 Schema: schema-modules.md
       - "Issue #81 MySQL 控制面 Repository": issue-81-mysql-control-plane.md
       - 可重启控制面与 Admin API: issue-41-runtime-bootstrap-admin-api.md
       - Admin Web UI 开发准备: admin-web-ui.md

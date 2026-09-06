@@ -22,8 +22,9 @@
 
 ### PostgreSQL DDL
 
-下面的 DDL 是根表逻辑契约；可执行的完整定义、复合外键、延迟约束和角色权限以
-Issue #37 的 `migrations/0001_control_plane.up.sql` 为唯一权威。
+下面的 DDL 是根表逻辑契约；可执行的表和索引定义由
+`trpcservice/tenant/postgres/schema.sql` 等包级 schema 持有，复合外键、延迟约束、函数和
+角色权限由行为 migration 补齐。
 
 ```sql
 CREATE TABLE tenant (
@@ -395,7 +396,7 @@ owner 和 migration role 是受控管理身份，不属于生产流量路径。
 ## Channel Binding 与消息数据模型
 
 本节是 Issue #24 的逻辑模型设计。Issue #37 已将 `channel_binding` 与 Tenant、Agent
-App/Revision、Model Profile、Backend Profile 一起落入控制面 migration；下面的
+App/Revision、Model Profile、Backend Profile 一起落入包级 schema 与控制面行为 migration；下面的
 Session/Event/Memory/Summary/Audit 表仍属于**平台新增**。所有生产 Repository 都必须
 把 `tenant_id` 作为显式参数和列，字符串 namespace 只能防碰撞，不能替代授权或复合约束。
 
@@ -593,5 +594,5 @@ Adapter 必须使用经过验证的 Lua/Stream/事务边界；无法原子提交
 | Agent 执行 | Runner、LLMAgent、Tool/MCP、Plugin/Guardrail | Gateway、Binding、幂等、策略和回复 Outbox |
 
 Issue #37 已将 Tenant、Agent App/Revision、Model Profile、Backend Profile 和 Channel Binding
-的控制面表与跨租户复合约束落入 migration；当前 Go 代码仍没有实现 Session/Memory/Audit
-生产表或客户端。本文剩余逻辑模型用于约束后续 issue，不能替代后续平台表的数据库交付物。
+的控制面表与跨租户复合约束落入包级 schema 与行为 migration；当前 Go 代码仍没有实现
+Session/Memory/Audit 生产客户端。本文剩余逻辑模型用于约束后续 issue，不能替代后续平台表的数据库交付物。

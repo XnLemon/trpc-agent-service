@@ -139,9 +139,10 @@ forward-only、幂等且可恢复的，不能承诺通过用户 `ROLLBACK` 撤�
 固定连接上串行化“空控制面检查 + 创建”，提交或回滚后显式释放；它不能与 migration-history
 锁复用生命周期或命名空间。
 
-迁移至少创建 `tenant`、`agent_app`、`agent_app_revision`、`agent_app_revision_tool`、
-`model_profile`、`backend_profile`、`backend_profile_binding`、`channel_binding` 及各自
-Change Outbox 表，并保留 `runtime_*`/audit 表所需的同租户复合键形状。表和索引使用
+包级 MySQL schema 至少创建 `tenant`、`agent_app`、`agent_app_revision`、
+`agent_app_revision_tool`、`model_profile`、`backend_profile`、`backend_profile_binding`、
+`channel_binding` 及各自 Change Outbox 表；行为 migration 保留 `runtime_*`/audit 表所需的
+同租户复合键形状。表和索引使用
 `utf8mb4`、`utf8mb4_bin`、InnoDB；`tenant_id`、各类 `*_id`、`*_key`、
 `provider_account_id`、route digest 和所有参与唯一键/外键/精确查找的列在列级固定该 binary
 collation（不得依赖服务器默认的 `utf8mb4_0900_ai_ci`）。外键显式包含 `tenant_id`。迁移账号与

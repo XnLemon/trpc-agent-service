@@ -164,7 +164,7 @@ POST   /admin/v1/tenants/{tenant_id}/apps/{app_id}/rollback
 
 ## 重启恢复时序
 
-完整验收必须证明“同一 PostgreSQL 数据 + 两次独立 Bootstrap”而非仅测试 Repository。生产 Bootstrap 是 migration 唯一 owner：先取得 advisory lock，再按文件名顺序执行 0001_control_plane.up.sql、0002_control_plane_repository_functions.up.sql，在 schema_migrations 写入版本；重复启动只验证已应用版本，版本缺失、超前或内容 digest 不一致均失败。迁移事务失败时不构造可接流量的 Runtime。
+完整验收必须证明“同一 PostgreSQL 数据 + 两次独立 Bootstrap”而非仅测试 Repository。生产 Bootstrap 是 schema/migration 的唯一 owner：先取得 advisory lock，按依赖顺序执行包级 schema，再按文件名顺序执行 0001_control_plane.up.sql、0002_control_plane_repository_functions.up.sql，在 schema_migrations 写入版本；重复启动只验证已应用版本，版本缺失、超前或内容 digest 不一致均失败。迁移事务失败时不构造可接流量的 Runtime。
 
 ~~~text
 Process A

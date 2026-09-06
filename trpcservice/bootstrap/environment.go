@@ -9,19 +9,34 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
+	agentmysql "github.com/XnLemon/trpc-agent-service/trpcservice/app/mysql"
+	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
+	auditpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/audit/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
+	backendmysql "github.com/XnLemon/trpc-agent-service/trpcservice/backend/mysql"
+	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
+	channelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/channels/mysql"
+	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	modelprofilemysql "github.com/XnLemon/trpc-agent-service/trpcservice/model/mysql"
+	modelprofilepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	runtimequeuepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue/postgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	runtimestorageredis "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
+	sharedschema "github.com/XnLemon/trpc-agent-service/trpcservice/schema"
+	commonpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/schema/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	tenantmysql "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/mysql"
+	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
@@ -98,10 +113,10 @@ const (
 var (
 	openEnvironmentDatabase                         = postgres.Open
 	openMySQLEnvironmentDatabase                    = mysql.Open
-	applyEnvironmentMigrations                      = migrations.Apply
-	applyMySQLEnvironmentMigrations                 = migrations.ApplyMySQL
-	verifyEnvironmentMigrations                     = migrations.Verify
-	verifyMySQLEnvironmentMigrations                = migrations.VerifyMySQL
+	applyEnvironmentMigrations                      = applyPostgresEnvironmentMigrations
+	applyMySQLEnvironmentMigrations                 = applyMySQLEnvironmentMigrationsWithModules
+	verifyEnvironmentMigrations                     = verifyPostgresEnvironmentMigrations
+	verifyMySQLEnvironmentMigrations                = verifyMySQLEnvironmentMigrationsWithModules
 	newEnvironmentRuntimeStore                      = environmentRuntimeStore
 	newEnvironmentRedisRuntimeStore                 = environmentRedisRuntimeStore
 	newEnvironmentInMemoryFallback                  = func() runtimestorage.RuntimeStore { return runtimestorageinmemory.New() }
@@ -109,6 +124,71 @@ var (
 	environmentWeComOwnerFunc                       = environmentWeComOwner
 	newEnvironmentWeComWorker                       = outbox.New
 )
+
+// ApplyPostgresMigrations initializes all package-owned PostgreSQL schemas and
+// then applies the cross-package behavior migrations. It is exported for the
+// init/demo commands and for operators that bootstrap a database explicitly.
+func ApplyPostgresMigrations(ctx context.Context, db *sql.DB) error {
+	return applyPostgresEnvironmentMigrations(ctx, db)
+}
+
+// VerifyPostgresMigrations verifies both package-owned PostgreSQL schemas and
+// the cross-package migration history.
+func VerifyPostgresMigrations(ctx context.Context, db *sql.DB) error {
+	return verifyPostgresEnvironmentMigrations(ctx, db)
+}
+
+// ApplyMySQLMigrations initializes all package-owned MySQL schemas and then
+// applies the cross-package behavior migrations with the migration account.
+func ApplyMySQLMigrations(ctx context.Context, db *sql.DB) error {
+	return applyMySQLEnvironmentMigrationsWithModules(ctx, db)
+}
+
+// VerifyMySQLMigrations verifies both package-owned MySQL schemas and the
+// cross-package migration history.
+func VerifyMySQLMigrations(ctx context.Context, db *sql.DB) error {
+	return verifyMySQLEnvironmentMigrationsWithModules(ctx, db)
+}
+
+func postgresEnvironmentSchemaModules() []sharedschema.Module {
+	return []sharedschema.Module{
+		commonpostgres.SchemaModule(),
+		tenantpostgres.SchemaModule(),
+		modelprofilepostgres.SchemaModule(),
+		agentpostgres.SchemaModule(),
+		backendpostgres.SchemaModule(),
+		channelpostgres.SchemaModule(),
+		runtimestoragepostgres.SchemaModule(),
+		runtimequeuepostgres.SchemaModule(),
+		auditpostgres.SchemaModule(),
+	}
+}
+
+func mysqlEnvironmentSchemaModules() []sharedschema.Module {
+	return []sharedschema.Module{
+		tenantmysql.SchemaModule(),
+		modelprofilemysql.SchemaModule(),
+		agentmysql.SchemaModule(),
+		backendmysql.SchemaModule(),
+		channelmysql.SchemaModule(),
+	}
+}
+
+func applyPostgresEnvironmentMigrations(ctx context.Context, db *sql.DB) error {
+	return migrations.Apply(ctx, db, postgresEnvironmentSchemaModules()...)
+}
+
+func verifyPostgresEnvironmentMigrations(ctx context.Context, db *sql.DB) error {
+	return migrations.Verify(ctx, db, postgresEnvironmentSchemaModules()...)
+}
+
+func applyMySQLEnvironmentMigrationsWithModules(ctx context.Context, db *sql.DB) error {
+	return migrations.ApplyMySQL(ctx, db, mysqlEnvironmentSchemaModules()...)
+}
+
+func verifyMySQLEnvironmentMigrationsWithModules(ctx context.Context, db *sql.DB) error {
+	return migrations.VerifyMySQL(ctx, db, mysqlEnvironmentSchemaModules()...)
+}
 
 type s3StoreFactory func(context.Context, string, backend.CapabilityBinding, modelprofile.SecretValue) (environmentS3Store, error)
 

@@ -8,9 +8,17 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
+	apppostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
+	auditpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/audit/postgres"
+	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
+	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
+	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	runtimequeuepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue/postgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	commonpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/schema/postgres"
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
 	"github.com/google/uuid"
 )
 
@@ -25,7 +33,7 @@ func TestRuntimeStorePostgreSQLConformanceAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := migrations.Apply(ctx, db); err != nil {
+	if err := migrations.Apply(ctx, db, commonpostgres.SchemaModule(), tenantpostgres.SchemaModule(), modelpostgres.SchemaModule(), apppostgres.SchemaModule(), backendpostgres.SchemaModule(), channelpostgres.SchemaModule(), SchemaModule(), runtimequeuepostgres.SchemaModule(), auditpostgres.SchemaModule()); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -144,7 +152,7 @@ func TestRuntimeStorePostgreSQLOutboxWorkerRestartRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := migrations.Apply(ctx, db); err != nil {
+	if err := migrations.Apply(ctx, db, commonpostgres.SchemaModule(), tenantpostgres.SchemaModule(), modelpostgres.SchemaModule(), apppostgres.SchemaModule(), backendpostgres.SchemaModule(), channelpostgres.SchemaModule(), SchemaModule(), runtimequeuepostgres.SchemaModule(), auditpostgres.SchemaModule()); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}

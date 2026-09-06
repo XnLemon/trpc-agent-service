@@ -11,6 +11,11 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	appmysql "github.com/XnLemon/trpc-agent-service/trpcservice/app/mysql"
+	backendmysql "github.com/XnLemon/trpc-agent-service/trpcservice/backend/mysql"
+	channelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/channels/mysql"
+	modelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/model/mysql"
+	tenantmysql "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/mysql"
 	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
@@ -65,7 +70,10 @@ func TestMySQLMigrationSetUsesBinaryIdentityAndRecoveryMarkers(t *testing.T) {
 		t.Fatalf("MySQL files = %#v", files)
 	}
 	script := files[0].statements
-	joined := strings.Join(script, "\n")
+	joined := strings.Join(script, "\n") + "\n" + strings.Join([]string{
+		tenantmysql.SchemaSQL, modelmysql.SchemaSQL, appmysql.SchemaSQL,
+		backendmysql.SchemaSQL, channelmysql.SchemaSQL,
+	}, "\n")
 	canaryScript := strings.Join(files[1].statements, "\n")
 	aibotScript := strings.Join(files[2].statements, "\n")
 	if !strings.Contains(canaryScript, "ADD COLUMN canary_revision") || len(files[1].statements) != 4 {

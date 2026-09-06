@@ -14,13 +14,14 @@ import (
 	"strings"
 	"time"
 
+	sharedschema "github.com/XnLemon/trpc-agent-service/trpcservice/schema"
 	storage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	driver "github.com/go-sql-driver/mysql"
 )
 
-// MySQLFiles is the ordered, immutable MySQL control-plane migration set.
-// Runtime-storage migrations remain PostgreSQL-owned until their own adapter
-// contract is introduced.
+// MySQLFiles is the ordered MySQL control-plane behavior migration history.
+// Control-plane table and index definitions are owned by the MySQL adapter
+// packages and are supplied to ApplyMySQL/VerifyMySQL as schema modules.
 //
 //go:embed mysql/000*_*.sql
 var MySQLFiles embed.FS
@@ -41,11 +42,14 @@ type mysqlMigrationHistory struct {
 // ApplyMySQL runs MySQL control-plane migrations under a connection-scoped
 // advisory lock. MySQL DDL implicitly commits, so each statement is
 // checkpointed and failed versions remain recoverable on restart.
-func ApplyMySQL(ctx context.Context, db *sql.DB) error {
+func ApplyMySQL(ctx context.Context, db *sql.DB, modules ...sharedschema.Module) error {
 	if ctx == nil || db == nil {
 		return ErrMigration
 	}
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateModules(modules, sharedschema.DriverMySQL); err != nil {
 		return err
 	}
 	files, err := orderedMySQLFiles()
@@ -63,6 +67,9 @@ func ApplyMySQL(ctx context.Context, db *sql.DB) error {
 	defer func() {
 		_ = storage.ReleaseLock(context.Background(), conn, mysqlMigrationLock)
 	}()
+	if err := sharedschema.ExecuteModules(ctx, conn, modules); err != nil {
+		return fmt.Errorf("%w: initialize MySQL schema modules", ErrMigration)
+	}
 	if err := ensureMySQLHistory(ctx, conn); err != nil {
 		return err
 	}
@@ -136,9 +143,12 @@ func applyMySQLStatement(ctx context.Context, conn *sql.Conn, history map[int]my
 }
 
 // VerifyMySQL checks MySQL migration history without mutating the database.
-func VerifyMySQL(ctx context.Context, db *sql.DB) error {
+func VerifyMySQL(ctx context.Context, db *sql.DB, modules ...sharedschema.Module) error {
 	if ctx == nil || db == nil {
 		return ErrMigration
+	}
+	if err := validateModules(modules, sharedschema.DriverMySQL); err != nil {
+		return err
 	}
 	files, err := orderedMySQLFiles()
 	if err != nil {
@@ -162,7 +172,13 @@ func VerifyMySQL(ctx context.Context, db *sql.DB) error {
 			return ErrInvalidHistory
 		}
 	}
-	return verifyMySQLSchema(ctx, conn)
+	if err := verifyMySQLSchema(ctx, conn); err != nil {
+		return err
+	}
+	if err := sharedschema.VerifyModules(ctx, db, modules); err != nil {
+		return fmt.Errorf("%w: verify MySQL schema modules", ErrInvalidHistory)
+	}
+	return nil
 }
 
 type mysqlSchemaTable struct {

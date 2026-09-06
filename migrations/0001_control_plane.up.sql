@@ -127,42 +127,6 @@ AS $$
        AND value !~ '[[:space:]]'
 $$;
 
-CREATE TABLE public.tenant (
-    tenant_id       TEXT PRIMARY KEY
-                    CHECK (tenant_id ~ '^t_[0-7][0-9A-HJKMNP-TV-Z]{25}$'),
-    tenant_key      TEXT NOT NULL UNIQUE
-                    CHECK (tenant_key ~ '^[a-z][a-z0-9-]{1,63}$'),
-    display_name    TEXT NOT NULL
-                    CHECK (display_name = public.trim_control_plane_text(display_name)
-                           AND pg_catalog.length(display_name) BETWEEN 1 AND 200),
-    status          TEXT NOT NULL DEFAULT 'active'
-                    CHECK (status IN ('active', 'suspended', 'disabled')),
-
-    rate_limit_rpm             BIGINT,
-    max_concurrent_executions  BIGINT,
-    monthly_token_budget       BIGINT,
-    monthly_spend_limit_minor  BIGINT,
-    billing_currency            CHAR(3),
-    CHECK (rate_limit_rpm IS NULL OR rate_limit_rpm >= 0),
-    CHECK (max_concurrent_executions IS NULL OR max_concurrent_executions > 0),
-    CHECK (monthly_token_budget IS NULL OR monthly_token_budget >= 0),
-    CHECK (monthly_spend_limit_minor IS NULL OR monthly_spend_limit_minor >= 0),
-    CHECK (monthly_spend_limit_minor IS NULL OR billing_currency IS NOT NULL),
-    CHECK (billing_currency IS NULL OR billing_currency ~ '^[A-Z]{3}$'),
-
-    audit_retention_days  INT NOT NULL DEFAULT 90 CHECK (audit_retention_days > 0),
-    log_masking_level     TEXT NOT NULL DEFAULT 'basic'
-                          CHECK (log_masking_level IN ('none', 'basic', 'strict')),
-    trace_sampling_rate   REAL NOT NULL DEFAULT 1.0
-                          CHECK (trace_sampling_rate BETWEEN 0 AND 1),
-
-    default_agent_app_id       TEXT,
-    default_backend_profile_id TEXT,
-    version         BIGINT NOT NULL DEFAULT 1 CHECK (version >= 1),
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 CREATE OR REPLACE FUNCTION public.tenant_reject_identity_change()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -179,41 +143,6 @@ $$;
 CREATE TRIGGER tenant_identity_immutable
 BEFORE UPDATE ON public.tenant
 FOR EACH ROW EXECUTE FUNCTION public.tenant_reject_identity_change();
-
-CREATE TABLE public.model_profile (
-    tenant_id       TEXT NOT NULL REFERENCES public.tenant(tenant_id),
-    profile_id      TEXT NOT NULL
-                    CHECK (profile_id ~ '^mp_[0-7][0-9A-HJKMNP-TV-Z]{25}$'),
-    profile_key     TEXT NOT NULL
-                    CHECK (profile_key ~ '^[a-z][a-z0-9-]{1,63}$'),
-    display_name    TEXT NOT NULL
-                    CHECK (display_name = public.trim_control_plane_text(display_name)
-                           AND pg_catalog.length(display_name) BETWEEN 1 AND 200),
-    description     TEXT NOT NULL DEFAULT ''
-                    CHECK (description = public.trim_control_plane_text(description)
-                           AND pg_catalog.length(description) <= 2000),
-    status          TEXT NOT NULL DEFAULT 'active'
-                    CHECK (status IN ('active', 'suspended', 'disabled')),
-    schema_version  INT NOT NULL DEFAULT 1 CHECK (schema_version = 1),
-    provider        TEXT NOT NULL CHECK (provider ~ '^[a-z][a-z0-9_-]{0,63}$'),
-    model           TEXT NOT NULL CHECK (model ~ '^[a-z][a-z0-9._:-]{0,127}$'),
-    endpoint        TEXT NOT NULL DEFAULT '' CHECK (public.control_plane_endpoint_is_safe(endpoint)),
-    options         JSONB NOT NULL DEFAULT '{}'::jsonb
-                    CHECK (public.jsonb_object_string_values(options)
-                           AND public.jsonb_has_safe_keys(options)),
-    secret_ref      TEXT NOT NULL DEFAULT ''
-                    CHECK (public.control_plane_secret_ref_is_safe(secret_ref)),
-    generation      JSONB NOT NULL DEFAULT '{}'::jsonb
-                    CHECK (pg_catalog.jsonb_typeof(generation) = 'object'
-                           AND public.jsonb_has_safe_keys(generation)),
-    content_digest  TEXT NOT NULL CHECK (content_digest ~ '^[0-9a-f]{64}$'),
-    version         BIGINT NOT NULL DEFAULT 1 CHECK (version >= 1),
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    PRIMARY KEY (tenant_id, profile_id),
-    UNIQUE (tenant_id, profile_key)
-);
 
 CREATE OR REPLACE FUNCTION public.model_profile_reject_identity_change()
 RETURNS TRIGGER
@@ -233,34 +162,6 @@ CREATE TRIGGER model_profile_identity_immutable
 BEFORE UPDATE ON public.model_profile
 FOR EACH ROW EXECUTE FUNCTION public.model_profile_reject_identity_change();
 
-CREATE TABLE public.agent_app (
-    tenant_id        TEXT NOT NULL REFERENCES public.tenant(tenant_id),
-    app_id           TEXT NOT NULL
-                     CHECK (app_id ~ '^app_[0-7][0-9A-HJKMNP-TV-Z]{25}$'),
-    app_key          TEXT NOT NULL
-                     CHECK (app_key ~ '^[a-z][a-z0-9-]{1,63}$'),
-    display_name     TEXT NOT NULL
-                     CHECK (display_name = public.trim_control_plane_text(display_name)
-                            AND pg_catalog.length(display_name) BETWEEN 1 AND 200),
-    description      TEXT NOT NULL DEFAULT ''
-                     CHECK (description = public.trim_control_plane_text(description)
-                            AND pg_catalog.length(description) <= 2000),
-    status           TEXT NOT NULL DEFAULT 'draft'
-                     CHECK (status IN ('draft', 'active', 'suspended', 'disabled')),
-    current_revision BIGINT,
-    version          BIGINT NOT NULL DEFAULT 1 CHECK (version >= 1),
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    PRIMARY KEY (tenant_id, app_id),
-    UNIQUE (tenant_id, app_key),
-    CHECK (
-        (status = 'draft' AND current_revision IS NULL)
-        OR (status IN ('active', 'suspended') AND current_revision IS NOT NULL)
-        OR status = 'disabled'
-    )
-);
-
 CREATE OR REPLACE FUNCTION public.agent_app_reject_identity_change()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -278,48 +179,6 @@ $$;
 CREATE TRIGGER agent_app_identity_immutable
 BEFORE UPDATE ON public.agent_app
 FOR EACH ROW EXECUTE FUNCTION public.agent_app_reject_identity_change();
-
-CREATE TABLE public.agent_app_revision (
-    tenant_id          TEXT NOT NULL,
-    app_id             TEXT NOT NULL,
-    revision           BIGINT NOT NULL CHECK (revision >= 1),
-    state              TEXT NOT NULL DEFAULT 'draft'
-                       CHECK (state IN ('draft', 'published')),
-    draft_version      BIGINT NOT NULL DEFAULT 1 CHECK (draft_version >= 1),
-    agent_kind         TEXT NOT NULL CHECK (agent_kind = 'llm'),
-    schema_version     INT NOT NULL DEFAULT 1 CHECK (schema_version = 1),
-    description        TEXT NOT NULL DEFAULT ''
-                       CHECK (description = public.trim_control_plane_text(description)
-                              AND pg_catalog.length(description) <= 2000),
-    instruction        TEXT NOT NULL
-                       CHECK (pg_catalog.length(public.trim_control_plane_text(instruction)) BETWEEN 1 AND 65536),
-    global_instruction TEXT NOT NULL DEFAULT ''
-                       CHECK (pg_catalog.length(global_instruction) <= 65536),
-    model_profile_id   TEXT NOT NULL,
-    generation_config  JSONB NOT NULL DEFAULT '{}'::jsonb
-                       CHECK (pg_catalog.jsonb_typeof(generation_config) = 'object'
-                              AND public.jsonb_has_safe_keys(generation_config)),
-    runtime_policy     JSONB NOT NULL DEFAULT '{}'::jsonb
-                       CHECK (pg_catalog.jsonb_typeof(runtime_policy) = 'object'
-                              AND public.jsonb_has_safe_keys(runtime_policy)),
-    content_digest     TEXT,
-    published_at       TIMESTAMPTZ,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    PRIMARY KEY (tenant_id, app_id, revision),
-    FOREIGN KEY (tenant_id, app_id)
-        REFERENCES public.agent_app(tenant_id, app_id),
-    FOREIGN KEY (tenant_id, model_profile_id)
-        REFERENCES public.model_profile(tenant_id, profile_id),
-    CHECK (
-        (state = 'draft' AND content_digest IS NULL AND published_at IS NULL)
-        OR
-        (state = 'published'
-         AND content_digest ~ '^[0-9a-f]{64}$'
-         AND published_at IS NOT NULL)
-    )
-);
 
 ALTER TABLE public.agent_app
     ADD CONSTRAINT fk_agent_app_current_revision
@@ -385,18 +244,6 @@ CREATE TRIGGER agent_app_revision_published_immutable
 BEFORE UPDATE OR DELETE ON public.agent_app_revision
 FOR EACH ROW EXECUTE FUNCTION public.agent_app_revision_reject_published_change();
 
-CREATE TABLE public.agent_app_revision_tool (
-    tenant_id TEXT NOT NULL,
-    app_id    TEXT NOT NULL,
-    revision  BIGINT NOT NULL,
-    tool_id   TEXT NOT NULL CHECK (pg_catalog.length(public.trim_control_plane_text(tool_id)) > 0),
-    required  BOOLEAN NOT NULL DEFAULT false,
-    PRIMARY KEY (tenant_id, app_id, revision, tool_id),
-    FOREIGN KEY (tenant_id, app_id, revision)
-        REFERENCES public.agent_app_revision(tenant_id, app_id, revision)
-        ON DELETE CASCADE
-);
-
 CREATE OR REPLACE FUNCTION public.agent_app_revision_tool_guard()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -432,48 +279,6 @@ $$;
 CREATE TRIGGER agent_app_revision_tool_immutable
 BEFORE INSERT OR UPDATE OR DELETE ON public.agent_app_revision_tool
 FOR EACH ROW EXECUTE FUNCTION public.agent_app_revision_tool_guard();
-
-CREATE TABLE public.backend_profile (
-    tenant_id      TEXT NOT NULL REFERENCES public.tenant(tenant_id),
-    profile_id     TEXT NOT NULL
-                   CHECK (profile_id ~ '^bp_[0-7][0-9A-HJKMNP-TV-Z]{25}$'),
-    profile_key    TEXT NOT NULL
-                   CHECK (profile_key ~ '^[a-z][a-z0-9-]{1,63}$'),
-    display_name   TEXT NOT NULL
-                   CHECK (display_name = public.trim_control_plane_text(display_name)
-                          AND pg_catalog.length(display_name) BETWEEN 1 AND 200),
-    description    TEXT NOT NULL DEFAULT ''
-                   CHECK (description = public.trim_control_plane_text(description)
-                          AND pg_catalog.length(description) <= 2000),
-    status         TEXT NOT NULL DEFAULT 'active'
-                   CHECK (status IN ('active', 'suspended', 'disabled')),
-    schema_version INT NOT NULL DEFAULT 1 CHECK (schema_version = 1),
-    content_digest TEXT NOT NULL CHECK (content_digest ~ '^[0-9a-f]{64}$'),
-    version        BIGINT NOT NULL DEFAULT 1 CHECK (version >= 1),
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    PRIMARY KEY (tenant_id, profile_id),
-    UNIQUE (tenant_id, profile_key)
-);
-
-CREATE TABLE public.backend_profile_binding (
-    tenant_id  TEXT NOT NULL,
-    profile_id TEXT NOT NULL,
-    capability TEXT NOT NULL
-               CHECK (capability IN ('session', 'memory', 'knowledge', 'artifact', 'audit')),
-    provider   TEXT NOT NULL CHECK (provider ~ '^[a-z][a-z0-9_-]{0,63}$'),
-    endpoint   TEXT NOT NULL DEFAULT '' CHECK (public.control_plane_endpoint_is_safe(endpoint)),
-    options    JSONB NOT NULL DEFAULT '{}'::jsonb
-               CHECK (public.jsonb_object_string_values(options)
-                      AND public.jsonb_has_safe_keys(options)),
-    secret_ref TEXT NOT NULL DEFAULT ''
-               CHECK (public.control_plane_secret_ref_is_safe(secret_ref)),
-    PRIMARY KEY (tenant_id, profile_id, capability),
-    FOREIGN KEY (tenant_id, profile_id)
-        REFERENCES public.backend_profile(tenant_id, profile_id)
-        ON DELETE RESTRICT
-);
 
 CREATE OR REPLACE FUNCTION public.backend_profile_reject_disabled_insert()
 RETURNS TRIGGER
@@ -576,47 +381,6 @@ AFTER INSERT OR UPDATE OR DELETE ON public.backend_profile_binding
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION public.backend_profile_require_valid_bindings();
 
-CREATE TABLE public.channel_binding (
-    tenant_id               TEXT NOT NULL REFERENCES public.tenant(tenant_id),
-    binding_id              TEXT NOT NULL
-                            CHECK (binding_id ~ '^cb_[0-7][0-9A-HJKMNP-TV-Z]{25}$'),
-    binding_key             TEXT NOT NULL
-                            CHECK (binding_key ~ '^[a-z][a-z0-9-]{1,63}$'),
-    channel                 TEXT NOT NULL CHECK (channel IN ('wecom', 'telegram')),
-    provider_account_id     TEXT NOT NULL
-                            CHECK (provider_account_id = public.trim_control_plane_text(provider_account_id)
-                                   AND pg_catalog.length(provider_account_id) BETWEEN 1 AND 256),
-    public_route_key_digest TEXT NOT NULL CHECK (public_route_key_digest ~ '^[0-9a-f]{64}$'),
-    app_id                  TEXT NOT NULL
-                            CHECK (app_id ~ '^app_[0-7][0-9A-HJKMNP-TV-Z]{25}$'),
-    secret_ref              TEXT NOT NULL
-                            CHECK (public.control_plane_secret_ref_is_safe(secret_ref)
-                                   AND pg_catalog.length(secret_ref) BETWEEN 1 AND 256),
-    protocol_config         JSONB NOT NULL DEFAULT '{}'::jsonb
-                            CHECK (pg_catalog.jsonb_typeof(protocol_config) = 'object'
-                                   AND public.jsonb_has_safe_keys(protocol_config)),
-    schema_version          INT NOT NULL DEFAULT 1 CHECK (schema_version = 1),
-    status                  TEXT NOT NULL DEFAULT 'draft'
-                            CHECK (status IN ('draft', 'active', 'suspended', 'disabled')),
-    version                 BIGINT NOT NULL DEFAULT 1 CHECK (version >= 1),
-    config_digest           TEXT NOT NULL CHECK (config_digest ~ '^[0-9a-f]{64}$'),
-    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    PRIMARY KEY (tenant_id, binding_id),
-    UNIQUE (tenant_id, binding_key),
-    FOREIGN KEY (tenant_id, app_id)
-        REFERENCES public.agent_app(tenant_id, app_id)
-);
-
-CREATE INDEX channel_binding_candidate_idx
-    ON public.channel_binding (channel, public_route_key_digest)
-    WHERE status = 'active';
-
-CREATE UNIQUE INDEX channel_binding_active_account_idx
-    ON public.channel_binding (channel, provider_account_id)
-    WHERE status = 'active';
-
 CREATE OR REPLACE FUNCTION public.channel_binding_reject_identity_change()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -645,170 +409,6 @@ ALTER TABLE public.tenant
     ADD CONSTRAINT fk_tenant_default_backend_profile
     FOREIGN KEY (tenant_id, default_backend_profile_id)
     REFERENCES public.backend_profile(tenant_id, profile_id);
-
-CREATE TABLE public.tenant_status_change_outbox (
-    event_id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    tenant_id         TEXT NOT NULL REFERENCES public.tenant(tenant_id),
-    previous_status   TEXT NOT NULL CHECK (previous_status IN ('active', 'suspended')),
-    next_status       TEXT NOT NULL CHECK (next_status IN ('active', 'suspended', 'disabled')),
-    actor_type        TEXT NOT NULL CHECK (pg_catalog.length(public.trim_control_plane_text(actor_type)) > 0),
-    actor_id          TEXT NOT NULL CHECK (pg_catalog.length(public.trim_control_plane_text(actor_id)) > 0),
-    reason            TEXT NOT NULL CHECK (pg_catalog.length(public.trim_control_plane_text(reason)) BETWEEN 1 AND 1000),
-    previous_version  BIGINT NOT NULL,
-    next_version      BIGINT NOT NULL CHECK (next_version = previous_version + 1),
-    correlation_id    TEXT NOT NULL CHECK (pg_catalog.length(public.trim_control_plane_text(correlation_id)) > 0),
-    occurred_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK ((previous_status, next_status) IN (
-        ('active', 'suspended'), ('active', 'disabled'),
-        ('suspended', 'active'), ('suspended', 'disabled')
-    ))
-);
-
-CREATE TABLE public.model_profile_change_outbox (
-    event_id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    event_type        TEXT NOT NULL CHECK (event_type IN (
-                          'created', 'configuration_updated', 'suspended', 'resumed', 'disabled'
-                      )),
-    tenant_id         TEXT NOT NULL,
-    profile_id        TEXT NOT NULL,
-    previous_status   TEXT CHECK (previous_status IS NULL OR previous_status IN ('active', 'suspended')),
-    current_status    TEXT NOT NULL CHECK (current_status IN ('active', 'suspended', 'disabled')),
-    previous_digest   TEXT,
-    current_digest    TEXT NOT NULL CHECK (current_digest ~ '^[0-9a-f]{64}$'),
-    actor_type        TEXT NOT NULL,
-    actor_id          TEXT NOT NULL,
-    reason            TEXT NOT NULL,
-    correlation_id    TEXT NOT NULL,
-    previous_version  BIGINT NOT NULL CHECK (previous_version >= 0),
-    next_version      BIGINT NOT NULL CHECK (next_version = previous_version + 1),
-    occurred_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    FOREIGN KEY (tenant_id, profile_id)
-        REFERENCES public.model_profile(tenant_id, profile_id),
-    CHECK ((event_type = 'created'
-            AND previous_status IS NULL AND previous_digest IS NULL
-            AND current_status IN ('active', 'suspended')
-            AND previous_version = 0 AND next_version = 1)
-           OR (event_type <> 'created'
-               AND previous_status IS NOT NULL
-               AND previous_digest ~ '^[0-9a-f]{64}$'
-               AND previous_version >= 1)),
-    CHECK (actor_type = public.trim_control_plane_text(actor_type)
-           AND actor_id = public.trim_control_plane_text(actor_id)
-           AND reason = public.trim_control_plane_text(reason)
-           AND correlation_id = public.trim_control_plane_text(correlation_id)
-           AND pg_catalog.length(actor_type) > 0
-           AND pg_catalog.length(actor_id) > 0
-           AND pg_catalog.length(reason) BETWEEN 1 AND 1000
-           AND pg_catalog.length(correlation_id) > 0)
-);
-
-CREATE TABLE public.backend_profile_change_outbox (
-    event_id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    event_type        TEXT NOT NULL CHECK (event_type IN (
-                          'created', 'configuration_updated', 'suspended', 'resumed', 'disabled'
-                      )),
-    tenant_id         TEXT NOT NULL,
-    profile_id        TEXT NOT NULL,
-    previous_status   TEXT CHECK (previous_status IS NULL OR previous_status IN ('active', 'suspended')),
-    current_status    TEXT NOT NULL CHECK (current_status IN ('active', 'suspended', 'disabled')),
-    previous_digest   TEXT,
-    current_digest    TEXT NOT NULL CHECK (current_digest ~ '^[0-9a-f]{64}$'),
-    actor_type        TEXT NOT NULL,
-    actor_id          TEXT NOT NULL,
-    reason            TEXT NOT NULL,
-    correlation_id    TEXT NOT NULL,
-    previous_version  BIGINT NOT NULL CHECK (previous_version >= 0),
-    next_version      BIGINT NOT NULL CHECK (next_version = previous_version + 1),
-    occurred_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    FOREIGN KEY (tenant_id, profile_id)
-        REFERENCES public.backend_profile(tenant_id, profile_id),
-    CHECK ((event_type = 'created'
-            AND previous_status IS NULL AND previous_digest IS NULL
-            AND current_status IN ('active', 'suspended')
-            AND previous_version = 0 AND next_version = 1)
-           OR (event_type <> 'created'
-               AND previous_status IS NOT NULL
-               AND previous_digest ~ '^[0-9a-f]{64}$'
-               AND previous_version >= 1)),
-    CHECK (actor_type = public.trim_control_plane_text(actor_type)
-           AND actor_id = public.trim_control_plane_text(actor_id)
-           AND reason = public.trim_control_plane_text(reason)
-           AND correlation_id = public.trim_control_plane_text(correlation_id)
-           AND pg_catalog.length(actor_type) > 0
-           AND pg_catalog.length(actor_id) > 0
-           AND pg_catalog.length(reason) BETWEEN 1 AND 1000
-           AND pg_catalog.length(correlation_id) > 0)
-);
-
-CREATE TABLE public.agent_app_change_outbox (
-    event_id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    event_type        TEXT NOT NULL CHECK (event_type IN (
-                          'published', 'rolled_back', 'suspended', 'resumed', 'disabled'
-                      )),
-    tenant_id         TEXT NOT NULL,
-    app_id            TEXT NOT NULL,
-    previous_status   TEXT,
-    current_status    TEXT NOT NULL CHECK (current_status IN ('draft', 'active', 'suspended', 'disabled')),
-    previous_revision BIGINT,
-    current_revision  BIGINT,
-    content_digest    TEXT CHECK (content_digest IS NULL OR content_digest ~ '^[0-9a-f]{64}$'),
-    actor_type        TEXT NOT NULL,
-    actor_id          TEXT NOT NULL,
-    reason            TEXT NOT NULL,
-    correlation_id    TEXT NOT NULL,
-    previous_version  BIGINT NOT NULL CHECK (previous_version >= 0),
-    next_version      BIGINT NOT NULL CHECK (next_version = previous_version + 1),
-    occurred_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    FOREIGN KEY (tenant_id, app_id)
-        REFERENCES public.agent_app(tenant_id, app_id),
-    CHECK (actor_type = public.trim_control_plane_text(actor_type)
-           AND actor_id = public.trim_control_plane_text(actor_id)
-           AND reason = public.trim_control_plane_text(reason)
-           AND correlation_id = public.trim_control_plane_text(correlation_id)
-           AND pg_catalog.length(actor_type) > 0
-           AND pg_catalog.length(actor_id) > 0
-           AND pg_catalog.length(reason) BETWEEN 1 AND 1000
-           AND pg_catalog.length(correlation_id) > 0)
-);
-
-CREATE TABLE public.channel_binding_change_outbox (
-    event_id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    event_type        TEXT NOT NULL CHECK (event_type IN (
-                          'created', 'configuration_updated', 'activated',
-                          'suspended', 'resumed', 'disabled'
-                      )),
-    tenant_id         TEXT NOT NULL,
-    binding_id        TEXT NOT NULL,
-    previous_status   TEXT,
-    current_status    TEXT NOT NULL CHECK (current_status IN ('draft', 'active', 'suspended', 'disabled')),
-    previous_digest   TEXT,
-    current_digest    TEXT NOT NULL CHECK (current_digest ~ '^[0-9a-f]{64}$'),
-    actor_type        TEXT NOT NULL,
-    actor_id          TEXT NOT NULL,
-    reason            TEXT NOT NULL,
-    correlation_id    TEXT NOT NULL,
-    previous_version  BIGINT NOT NULL CHECK (previous_version >= 0),
-    next_version      BIGINT NOT NULL CHECK (next_version = previous_version + 1),
-    occurred_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    FOREIGN KEY (tenant_id, binding_id)
-        REFERENCES public.channel_binding(tenant_id, binding_id),
-    CHECK (actor_type = public.trim_control_plane_text(actor_type)
-           AND actor_id = public.trim_control_plane_text(actor_id)
-           AND reason = public.trim_control_plane_text(reason)
-           AND correlation_id = public.trim_control_plane_text(correlation_id)
-           AND pg_catalog.length(actor_type) > 0
-           AND pg_catalog.length(actor_id) > 0
-           AND pg_catalog.length(reason) BETWEEN 1 AND 1000
-           AND pg_catalog.length(correlation_id) > 0)
-);
-
-CREATE TABLE public.tenant_configuration_outbox (
-    event_id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    tenant_id         TEXT NOT NULL REFERENCES public.tenant(tenant_id),
-    previous_version  BIGINT NOT NULL,
-    next_version      BIGINT NOT NULL CHECK (next_version = previous_version + 1),
-    occurred_at       TIMESTAMPTZ NOT NULL DEFAULT now()
-);
 
 CREATE OR REPLACE FUNCTION public.transition_tenant_status(
     p_tenant_id TEXT,

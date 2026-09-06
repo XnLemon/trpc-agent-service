@@ -36,6 +36,7 @@
   Issue #33 的真实 Bot API 传输冒烟测试和手动 CI 运行说明。
 - [PostgreSQL 控制面与启动装配](postgresql-control-plane.md)：Issue #37 的实现契约，
   复用既有表设计并统一 migration、Repository 事务边界、bootstrap、readiness 和 shutdown。
+- [包级数据库 Schema](schema-modules.md)：按领域/后端归属的表 schema、依赖顺序和 breaking 边界。
 - [Issue #81：MySQL 控制面 Repository](issue-81-mysql-control-plane.md)：MySQL 与 PostgreSQL
   的 SQL 语义映射、事务/锁、迁移、Bootstrap 选择和验证矩阵。
 - [Issue #41：可重启控制面与 Admin API](issue-41-runtime-bootstrap-admin-api.md)：已合并的实现契约，
@@ -80,7 +81,7 @@ cd trpc-agent-service
 - [企业微信 AI Bot 长连接](wecom-aibot.md) — `wecom_aibot` WebSocket、认证、重连与流式回复
 - [Gateway、Execution Plan 与 HTTP/SSE](gateway.md) — 可信主体、固定执行计划、Runner Registry、
   Dispatch、健康检查、优雅停机和普通/流式 API
-- [PostgreSQL 控制面与启动装配](postgresql-control-plane.md) — 六类控制面表的 migration 顺序、
+- [PostgreSQL 控制面与启动装配](postgresql-control-plane.md) — 六类控制面表的 schema/migration 顺序、
   SQL Repository 事务和真实运行时启动装配
 - [Issue #81：MySQL 控制面 Repository](issue-81-mysql-control-plane.md) — MySQL 适配器、迁移、
   Bootstrap 驱动选择和租户隔离验证

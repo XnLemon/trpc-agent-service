@@ -22,11 +22,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/migrations"
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	agentinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelsinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom"
@@ -70,7 +70,7 @@ func TestWeComCallbackOutboxE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
-	if err := migrations.Apply(ctx, db); err != nil {
+	if err := bootstrap.ApplyPostgresMigrations(ctx, db); err != nil {
 		t.Fatal(err)
 	}
 	fixture := newWeComFixture(t, ctx, db)

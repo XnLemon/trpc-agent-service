@@ -3,7 +3,9 @@ package migrations
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
+	"regexp"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -25,6 +27,34 @@ func TestOrderedFilesAreContiguousAndDigestable(t *testing.T) {
 		if migration.name == "" || len(migration.digest) != 64 || migration.sql == "" {
 			t.Fatalf("invalid migration metadata = %+v", migration)
 		}
+	}
+}
+
+func TestBehaviorMigrationsDoNotOwnTablesOrIndexes(t *testing.T) {
+	definitionPattern := regexp.MustCompile(`(?im)^\s*CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX)\b`)
+	for _, source := range []struct {
+		name  string
+		files fs.FS
+		glob  string
+	}{
+		{name: "postgres", files: Files, glob: "0*_*.sql"},
+		{name: "mysql", files: MySQLFiles, glob: "mysql/000*_*.sql"},
+	} {
+		t.Run(source.name, func(t *testing.T) {
+			entries, err := fs.Glob(source.files, source.glob)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range entries {
+				contents, err := fs.ReadFile(source.files, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if match := definitionPattern.Find(contents); match != nil {
+					t.Fatalf("%s still owns a table/index definition: %q", name, match)
+				}
+			}
+		})
 	}
 }
 
@@ -140,7 +170,7 @@ func TestApplyAcceptsReleasedTraceAndRuntimeHistory(t *testing.T) {
 	}
 	const (
 		releasedTraceDigest   = "6022eecd427ab1f6528f77284874ea97f85370f9dba646cd1c9de3ee93975557"
-		releasedRuntimeDigest = "b4cc9f948d2595e5552cfef58c1f6be668f79f783463db006a5123627c95632c"
+		releasedRuntimeDigest = "7fe5e1d8095e66a6f5c0515ac334eca8f2bd4405666facfebf3c1893abe71d7d"
 	)
 	if files[10].digest != releasedTraceDigest || files[11].digest != releasedRuntimeDigest {
 		t.Fatalf("released migration digest changed = %q, %q", files[10].digest, files[11].digest)
@@ -335,10 +365,10 @@ func TestZZApplyAndVerifyAgainstMigratedPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
-	if err := Apply(context.Background(), db); err != nil {
+	if err := Apply(context.Background(), db, allPostgresSchemaModules()...); err != nil {
 		t.Fatalf("Apply error = %v", err)
 	}
-	if err := Verify(context.Background(), db); err != nil {
+	if err := Verify(context.Background(), db, allPostgresSchemaModules()...); err != nil {
 		t.Fatalf("Verify error = %v", err)
 	}
 }

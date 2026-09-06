@@ -1,12 +1,13 @@
 # PostgreSQL 控制面持久化与启动装配
 
 > 本页是 Issue #37 的实现契约。它复用已经合入的 Tenant、Agent App/Revision、Backend
-> Profile 和 Channel Binding 设计，并补齐 Model Profile 的持久化形状、统一 migration 顺序、
-> Repository 事务边界和进程启动装配。控制面 DDL 与受控 Repository 写入口分别落在
-> `0001`、`0002` 两个有序 migration；Go Repository 和 bootstrap 实现在
-> `trpcservice/{tenant,agent,model,backend,channels}/postgres`；每个领域包拥有自己的
-> SQL Repository、行解码和领域 codec。`trpcservice/storage/postgres` 只提供不依赖任何
-> 控制面领域的连接池、事务、错误映射与 JSON 基础设施；`trpcservice/bootstrap` 负责装配。
+> Profile 和 Channel Binding 设计，并补齐 Model Profile 的持久化形状、统一 schema/migration
+> 顺序、Repository 事务边界和进程启动装配。控制面表与基础索引由各领域后端包的
+> `schema.sql` 持有，`0001`、`0002` 等有序 migration 负责跨包行为和受控 Repository 写入口；
+> Go Repository 和 bootstrap 实现在 `trpcservice/{tenant,model,app,backend,channels}/postgres`；
+> 每个领域包拥有自己的 SQL Repository、行解码和领域 codec。`trpcservice/storage/postgres`
+> 只提供不依赖任何控制面领域的连接池、事务、错误映射与 JSON 基础设施；`trpcservice/bootstrap`
+> 负责装配。
 
 ## 目标与边界
 
@@ -40,16 +41,16 @@ KMS/Vault、Admin API 和分布式 Outbox 消费仍由后续 Issue 负责。
 
 ## 既有表设计的复用关系
 
-前置设计已经定义了领域字段和安全不变量；Issue #37 的 migration 不重新发明这些模型，
-而是把它们整理成一套有明确依赖顺序的 PostgreSQL 变更：
+前置设计已经定义了领域字段和安全不变量；Issue #37 的包级 schema 与行为 migration 不重新
+发明这些模型，而是把它们整理成一套有明确依赖顺序的 PostgreSQL 变更：
 
 | 对象 | 既有规范 | 本 Issue 的落地责任 |
 | --- | --- | --- |
-| `tenant` | [数据模型](data-model.md) 的根表、生命周期函数、Outbox 和角色边界 | 建表、状态/配置受控函数和默认引用外键 |
-| `agent_app` / `agent_app_revision` | [Agent App 模型](agent-app-model.md) 的发布、回滚和不可变 Revision | 建表、复合外键、发布/回滚事务和 Outbox |
-| `model_profile` | 本页补齐的目标形状；领域契约见 [Model Profile](model-profile.md) | 建表、无密钥配置列、生命周期和 Outbox |
-| `backend_profile` | [Backend Profile 模型](backend-profile.md) 的 binding、延迟约束和状态函数 | 建表、复合外键、binding 完整性和 Outbox |
-| `channel_binding` | [Channel Binding](channel-binding.md) 的候选索引和 active account 约束 | 建表、同租户 App 外键和候选查询索引 |
+| `tenant` | [数据模型](data-model.md) 的根表、生命周期函数、Outbox 和角色边界 | `schema.sql` 建表/基础索引；行为 migration 提供状态/配置函数和默认引用外键 |
+| `agent_app` / `agent_app_revision` | [Agent App 模型](agent-app-model.md) 的发布、回滚和不可变 Revision | `schema.sql` 建表/基础索引；行为 migration 提供复合外键、发布/回滚事务和 Outbox |
+| `model_profile` | 本页补齐的目标形状；领域契约见 [Model Profile](model-profile.md) | `schema.sql` 建表/基础索引；行为 migration 提供无密钥配置边界、生命周期和 Outbox |
+| `backend_profile` | [Backend Profile 模型](backend-profile.md) 的 binding、延迟约束和状态函数 | `schema.sql` 建表/基础索引；行为 migration 提供复合外键、binding 完整性和 Outbox |
+| `channel_binding` | [Channel Binding](channel-binding.md) 的候选索引和 active account 约束 | `schema.sql` 建表/候选索引；行为 migration 提供同租户 App 外键和约束 |
 
 所有关联对象都显式携带 `tenant_id`。单列 `tenant_id → tenant(tenant_id)` 只表达根租户
 存在；对象之间的引用必须使用 `(tenant_id, object_id)` 复合外键，不能让一个租户的 App、
@@ -58,18 +59,29 @@ Profile 或 Binding 被另一个租户引用。key 的唯一性也都限定在�
 
 ## Migration 组织与执行前提
 
-迁移文件不依赖具体迁移工具，调用方负责按文件名顺序执行；迁移工具不是本 Issue 的范围。
-第一版使用两个有序 migration，目标目录为：
+迁移文件不依赖具体迁移工具，调用方负责先按包级 schema module 的依赖顺序初始化基础对象，
+再按文件名顺序执行行为 migration；迁移工具不是本 Issue 的范围。当前目标目录为：
 
 ```text
 migrations/
-├── 0001_control_plane.up.sql
-└── 0002_control_plane_repository_functions.up.sql
+├── 0001~0016_*.up.sql       # 跨包函数、触发器、权限、约束和演进
+└── mysql/0001~0003_*.up.sql
+
+trpcservice/
+├── schema/postgres/schema.sql # PostgreSQL 公共角色/校验函数
+├── tenant/postgres/schema.sql
+├── model/postgres/schema.sql
+├── app/postgres/schema.sql
+├── backend/postgres/schema.sql
+├── channels/postgres/schema.sql
+└── runtime/*/postgres/schema.sql
+
 ```
 
 执行约定如下：
 
-1. 在干净 PostgreSQL 实例上使用一个事务执行完整文件；失败时整个 schema 和权限变更回滚。
+1. 在干净 PostgreSQL 实例上先按依赖顺序执行包级 schema，再逐个事务执行行为 migration；
+   行为 migration 失败时该文件的 schema/权限变更回滚。
 2. 迁移开始固定 `search_path` 为 `pg_catalog, public, pg_temp`，所有函数体对业务表使用 `public.`
    限定名；不依赖连接池或客户端会话的隐式 search path。
 3. 在干净实例中 migration 会创建缺失的 `NOLOGIN` 受控角色；生产部署也可以在执行前预置
@@ -82,7 +94,7 @@ migrations/
 5. SQL 文件不包含 token、API key、DSN、密码、运行时客户端或测试 Secret。`secret_ref` 是
    唯一允许进入控制面配置的凭据引用，且只按租户作用域解释。
 
-Migration 的对象顺序为：
+Schema module 的对象依赖顺序为：
 
 ```text
 tenant

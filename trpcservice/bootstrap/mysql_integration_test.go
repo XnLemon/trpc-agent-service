@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/XnLemon/trpc-agent-service/migrations"
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	appmysql "github.com/XnLemon/trpc-agent-service/trpcservice/app/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmysql "github.com/XnLemon/trpc-agent-service/trpcservice/backend/mysql"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/channels/mysql"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -95,11 +95,11 @@ func openMySQLControlPlaneTestDB(t *testing.T, ctx context.Context, dsn, migrati
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := migrations.ApplyMySQL(ctx, migrationDB); err != nil {
+	if err := bootstrap.ApplyMySQLMigrations(ctx, migrationDB); err != nil {
 		_ = migrationDB.Close()
 		t.Fatal(err)
 	}
-	if err := migrations.VerifyMySQL(ctx, migrationDB); err != nil {
+	if err := bootstrap.VerifyMySQLMigrations(ctx, migrationDB); err != nil {
 		_ = migrationDB.Close()
 		t.Fatal(err)
 	}

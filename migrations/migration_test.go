@@ -8,6 +8,15 @@ import (
 	"testing"
 	"time"
 
+	apppostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
+	auditpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/audit/postgres"
+	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
+	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
+	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
+	runtimequeuepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue/postgres"
+	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
+	commonpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/schema/postgres"
+	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -36,6 +45,15 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 	}
 	if alreadyMigrated {
 		t.Skip("migration smoke test requires an empty PostgreSQL database")
+	}
+	for _, schemaSQL := range []string{
+		commonpostgres.SchemaSQL, tenantpostgres.SchemaSQL, modelpostgres.SchemaSQL,
+		apppostgres.SchemaSQL, backendpostgres.SchemaSQL, channelpostgres.SchemaSQL,
+		runtimestoragepostgres.SchemaSQL, runtimequeuepostgres.SchemaSQL, auditpostgres.SchemaSQL,
+	} {
+		if _, err := conn.Exec(ctx, schemaSQL); err != nil {
+			t.Fatalf("initialize package-owned schema: %v", err)
+		}
 	}
 
 	_, sourceFile, _, ok := runtime.Caller(0)

@@ -167,7 +167,9 @@ trpcservice/runtime/model/  Secret/Model 运行时物化适配器与 Provider Re
 trpcservice/runtime/storage/factory/  Storage capability 物化与 Provider Registry
 trpcservice/runtime/runner/  通用 Runner Registry、lease、失效与关闭
 trpcservice/admin/      Admin API 与管理员认证
-migrations/             PostgreSQL/MySQL schema 与 migration
+migrations/             PostgreSQL/MySQL migration 编排与历史快照
+trpcservice/{domain}/{backend}/schema.sql
+                        各领域后端包拥有的基础表 schema
 deploy/                 Compose、Kubernetes、OTel/Prometheus 配置
 examples/               fault-injection、Telegram、WeCom E2E
 docs/                   架构、协议、运维和验收文档
@@ -194,6 +196,7 @@ CI 在 push/PR 时执行格式、静态检查、测试、覆盖率、race 和部
 - [首次运行初始化](docs/docs/issue-67-first-run-init.md)：`trpc-service init` 与幂等边界
 - [Gateway、Execution Plan 与 HTTP/SSE](docs/docs/gateway.md)：请求契约、鉴权、限流和流式响应
 - [PostgreSQL 控制面与启动装配](docs/docs/postgresql-control-plane.md)：migration、repository 和 bootstrap
+- [包级数据库 Schema](docs/docs/schema-modules.md)：按领域/后端归属的表 schema、初始化顺序与 breaking 边界
 - [原始任务书](docs/docs/project-brief.md)：项目最初的背景、要求、交付物和验收标准
 - [完整文档站](https://xnlemon.github.io/trpc-agent-service/)
 

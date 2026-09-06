@@ -17,11 +17,11 @@ func TestMySQLControlPlaneMigrationLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplyMySQL(context.Background(), db); err != nil {
+	if err := ApplyMySQL(context.Background(), db, allMySQLSchemaModules()...); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	if err := VerifyMySQL(context.Background(), db); err != nil {
+	if err := VerifyMySQL(context.Background(), db, allMySQLSchemaModules()...); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestMySQLControlPlaneMigrationLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = restarted.Close() }()
-	if err := VerifyMySQL(context.Background(), restarted); err != nil {
+	if err := VerifyMySQL(context.Background(), restarted, allMySQLSchemaModules()...); err != nil {
 		t.Fatal(err)
 	}
 }
