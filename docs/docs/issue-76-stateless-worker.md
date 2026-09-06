@@ -60,7 +60,7 @@ leased (lease expired) -> leased  (new fencing token)
 
 ## 迁移、双写与切换
 
-`trpcservice/runtime/migration` 将迁移拆成可重放阶段，每一步都按租户隔离并产生
+`trpcservice/internal/migration` 将迁移拆成可重放阶段，每一步都按租户隔离并产生
 `Report`。阶段状态通过 `StateStore` 持久化；默认的 `MemoryStateStore` 只用于测试和
 dry-run，生产部署必须注入共享实现：
 
@@ -95,7 +95,7 @@ ETag，元数据事务仍由 SQL 负责。迁移工具不会把 secret、原始�
 | --- | --- | --- | --- |
 | 无状态 Gateway/Worker 角色和共享后端边界 | 文档/组合入口 | 本页角色、Bootstrap 可选 Worker | ✅ |
 | Durable queue lease/fencing/retry/shutdown | 代码 | `runtime/queue` 契约与测试 | ✅ |
-| 可恢复的迁移阶段状态 | 代码 | `runtime/migration.StateStore` 与重建测试 | ✅ |
+| 可恢复的迁移阶段状态 | 代码 | `internal/migration.StateStore` 与重建测试 | ✅ |
 | copy、dual-write、catch-up、checksum 工具 | 代码 | 迁移报告和阶段测试 | ✅ |
 | Session/IM 容量与故障测试 | 代码 | 队列/迁移并发、取消测试 | ✅ |
 | migration DDL 与权限 | 代码 | `0013_execution_queue.up.sql` 和 migration 测试 | ✅ |

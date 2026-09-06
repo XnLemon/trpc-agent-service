@@ -43,7 +43,7 @@ bootstrap 负责把 app、agent、runtime、storage 和 Gateway 的具体实现�
 | `trpcservice/runtime/storage` | 租户范围内的 Session、Event、Memory、Artifact 等能力契约及其后端适配 | 选择执行租户、解析 Plan、驱动 Runner、回复发送策略 |
 | `trpcservice/runtime/storage/factory` | Backend ProviderRegistry、StorageFactory、CapabilitySet 及 capability 生命周期 | Backend Profile 领域校验和持久化 |
 | `trpcservice/runtime/outbox` | 回复物化、发送、重试和死信边界 | Agent 编排、控制面配置和执行调度 |
-| `trpcservice/runtime/migration` | 后端迁移、双写、校验和切换工具 | 在线执行、Runner 生命周期和请求路由 |
+| `trpcservice/internal/migration` | 后端迁移、双写、校验和切换工具 | 在线执行、Runner 生命周期和请求路由 |
 | `trpcservice/gateway` | 可信身份建立、协议中立的请求/事件转换、入口幂等和调用 runtime | Agent/Runner 的具体构造、控制面领域变更 |
 | `trpcservice/bootstrap` | 具体 Repository、Provider、Registry、Dispatcher 和 Worker 的组合装配 | 业务领域规则和新的跨层抽象 |
 
@@ -68,9 +68,9 @@ Agent 的实现。
 投递完成后的 inbound message 状态推进。为了兼容旧调用，省略后者时 Worker
 会从 `ReplyStore` 中探测同一个能力；新的组合根应显式注入两个能力。
 
-`trpcservice/channels/replies` 仅保留为旧导入路径服务的兼容 facade；新的事件
-渲染所有权在 `trpcservice/gateway/replies`。同样，Channel Provider Registry
-的组合实现位于 `trpcservice/channels/provider`，Binding 根包不再承载投递注册表。
+事件渲染所有权在 `trpcservice/gateway/replies`。同样，Channel Provider
+Registry 的组合实现位于 `trpcservice/channels/provider`，Binding 根包不再承载
+投递注册表。
 
 ## 允许的依赖
 
@@ -92,9 +92,10 @@ Agent 的实现。
    `llmagent`、模型 Provider 或 Session 实现。
 5. `runtime/model` 和 `runtime/storage/factory` 负责运行时物化；它们只消费
    `model`/`backend` 的无密钥契约，不把物化实现放回领域包。
-6. `runtime/storage`、`runtime/outbox` 和 `runtime/migration` 是 runtime
-   的子边界。它们可以提供能力给调用方，但不能把调度、认证或控制面
-   生命周期带回存储实现。
+6. `runtime/storage` 和 `runtime/outbox` 是 runtime 的子边界。它们可以提供
+   能力给调用方，但不能把调度、认证或控制面生命周期带回存储实现。
+   `trpcservice/internal/migration` 是服务内部的 operator tooling，不属于
+   runtime 执行核心，也不应被在线请求路径依赖。
 7. `bootstrap` 是具体实现的组合根。新的跨包依赖优先在组合根注入，
    不通过全局变量、隐式 Context 值或跨层反向调用建立。
 8. 新增接口应放在实际消费者所属的包；只有同一契约确实被多个独立
@@ -147,9 +148,10 @@ Outbox 负责回复投递资源。Context 始终由调用链显式传递，不�
 
 ## 后续重构规则
 
-- queue 和 migration 都是 runtime 的独立、显式组合边界：Bootstrap 可选地接管
-  `runtime/queue.Worker` 的生命周期；migration 的阶段状态通过 `StateStore` 注入，
-  不再由 Tool 自己保存进程内 map。它们不会被默认塞进同步 Gateway 请求路径。
+- queue 是 runtime 的独立、显式组合边界：Bootstrap 可选地接管
+  `runtime/queue.Worker` 的生命周期。`trpcservice/internal/migration` 的阶段状态
+  通过 `StateStore` 注入，不再由 Tool 自己保存进程内 map；它不会被默认塞进同步
+  Gateway 请求路径，也不属于 runtime 调度包。
 - 移动代码时优先移动所有权和测试，不为了包名创建重复类型或兼容层。
 - 任何跨租户存储能力都必须携带显式 `tenant_id`；字符串前缀不能替代
   授权和数据隔离。
