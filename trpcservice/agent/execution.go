@@ -35,11 +35,9 @@ type FactoryCacheKey struct {
 	ContentDigest string
 }
 
-// LLMAgentFactoryInput is the provider-neutral definition mapped into an
-// executable Agent by a later dependency resolver. The historical name is
-// kept for source compatibility while the input now also carries composite
-// Agent definitions. References remain IDs; secrets and live clients are
-// intentionally absent.
+// LLMAgentFactoryInput is the provider-neutral subset mapped into
+// tRPC-Agent-Go's LLMAgent and runtime options by a later dependency resolver.
+// References remain IDs; secrets and live clients are intentionally absent.
 type LLMAgentFactoryInput struct {
 	TenantID          string
 	TenantVersion     int64
@@ -59,7 +57,6 @@ type LLMAgentFactoryInput struct {
 	Generation        appmodel.GenerationConfig
 	Runtime           appmodel.RuntimePolicy
 	Tools             []appmodel.ToolAuthorization
-	Chain             *appmodel.ChainConfiguration
 }
 
 // Clone returns a defensive copy of Factory input pointer and slice fields.
@@ -67,7 +64,6 @@ func (input LLMAgentFactoryInput) Clone() LLMAgentFactoryInput {
 	clone := input
 	clone.Generation = cloneGenerationConfig(input.Generation)
 	clone.Tools = cloneTools(input.Tools)
-	clone.Chain = input.Chain.Clone()
 	return clone
 }
 
@@ -170,7 +166,7 @@ func (snapshot AgentExecutionSnapshot) FactoryInput() (LLMAgentFactoryInput, err
 		SchemaVersion: snapshot.revision.SchemaVersion, Instruction: snapshot.revision.Instruction,
 		GlobalInstruction: snapshot.revision.GlobalInstruction, ModelProfileID: snapshot.revision.ModelProfileID,
 		Generation: cloneGenerationConfig(snapshot.revision.Generation), Runtime: snapshot.revision.Runtime,
-		Tools: cloneTools(snapshot.revision.Tools), Chain: snapshot.revision.Chain.Clone(),
+		Tools: cloneTools(snapshot.revision.Tools),
 	}, nil
 }
 

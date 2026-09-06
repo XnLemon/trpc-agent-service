@@ -211,10 +211,9 @@ reconcile 规则。
 | redaction/fallback | redacted/fallback | 只保存策略类别，不保存被删内容或 provider error |
 | reply outbox | sent/retry/dead-letter/reconciled | event/reply/segment 派生确定性 ID；保持 fence 语义 |
 
-现有代码仍没有完整模型 fallback；模型 provider 返回的 token usage 已通过 Runner callback
-进入 Gateway 的执行级预算结算，模型价格由 Model Profile 的 provider option 提供，审计事件
-记录本次执行的 token/cost 增量。Tool policy、fallback、redaction、IM authorization/reconciliation
-仍使用 provider-neutral hooks。调用方必须只在事实已发生后调用 hook，不得伪造事件。
+现有代码没有完整模型 fallback 或按 provider 返回 token/cost 的生产路径；本 Issue 提供
+provider-neutral Tool policy、fallback、redaction、IM authorization/reconciliation 与 usage
+metric hooks。调用方必须只在事实已发生后调用 hook，不得伪造事件。
 
 ## 脱敏与访问控制
 
