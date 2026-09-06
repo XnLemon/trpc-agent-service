@@ -205,6 +205,80 @@ func TestWorkerRenewsLongRunningLease(t *testing.T) {
 	}
 }
 
+func TestWorkerHandlesRenewalFailureAsRetryable(t *testing.T) {
+	base := NewMemory()
+	defer base.Close()
+	if _, _, err := base.Enqueue(context.Background(), TaskInput{TenantID: "tenant-a", TaskID: "task-1", Kind: "run", Payload: []byte("payload")}); err != nil {
+		t.Fatal(err)
+	}
+	renewalFailure := errors.New("renewal failed")
+	store := &renewalStore{Store: base, renewErr: renewalFailure}
+	worker, err := New(Config{
+		Store: store, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second,
+		LeaseRenewInterval: time.Millisecond, BackoffBase: time.Millisecond, BackoffMax: time.Millisecond, MaxAttempts: 1,
+		Handler: func(ctx context.Context, _ Task) error {
+			<-ctx.Done()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := worker.RunOnce(context.Background()); !processed || err != nil {
+		t.Fatalf("renewal failure run = processed:%v err:%v", processed, err)
+	}
+	if store.renewCalls == 0 {
+		t.Fatal("worker did not attempt lease renewal")
+	}
+	task, err := base.Get(context.Background(), "tenant-a", "task-1")
+	if err != nil || task.Status != StatusRetryable {
+		t.Fatalf("renewal failure task = %+v err=%v", task, err)
+	}
+}
+
+func TestWorkerShutdownPreservesLeasedTask(t *testing.T) {
+	store := NewMemory()
+	defer store.Close()
+	if _, _, err := store.Enqueue(context.Background(), TaskInput{TenantID: "tenant-a", TaskID: "task-1", Kind: "run", Payload: []byte("payload")}); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	worker, err := New(Config{
+		Store: store, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second,
+		PollInterval: time.Millisecond, MaxAttempts: 1,
+		Handler: func(ctx context.Context, _ Task) error {
+			close(started)
+			<-ctx.Done()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := worker.Close(); err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.Get(context.Background(), "tenant-a", "task-1")
+	if err != nil || task.Status != StatusRetryable {
+		t.Fatalf("shutdown task = %+v err=%v", task, err)
+	}
+}
+
+func TestWorkerSupportsStoresWithoutLeaseRenewal(t *testing.T) {
+	store := &stubStore{claimTask: Task{TenantID: "tenant-a", TaskID: "task-1", Status: StatusLeased, Attempts: 1, FencingToken: 1}}
+	worker, err := New(Config{Store: store, Owner: "worker", LeaseDuration: time.Second, Handler: func(context.Context, Task) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := worker.RunOnce(context.Background()); !processed || err != nil {
+		t.Fatalf("non-renewer run = processed:%v err:%v", processed, err)
+	}
+}
+
 func TestSharedWorkersProcessSessionIMWorkload(t *testing.T) {
 	store := NewMemory()
 	defer store.Close()
@@ -310,6 +384,30 @@ func TestQueueErrorHelpersAndInvalidContext(t *testing.T) {
 	if !errors.Is(wrapped, context.DeadlineExceeded) {
 		t.Fatal("retry wrapper lost cause")
 	}
+	due := time.Now().UTC().Add(time.Minute)
+	forever := RetryForeverAt(ErrLeaseLost, due)
+	if !errors.Is(forever, ErrLeaseLost) || !retryForever(forever) {
+		t.Fatalf("retry forever helper = %v", forever)
+	}
+	if got, ok := retryAt(forever); !ok || !got.Equal(due) {
+		t.Fatalf("retry deadline = %v, want %v", got, due)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := WorkerCancellationCause(canceled); got != nil {
+		t.Fatalf("ordinary cancellation cause = %v", got)
+	}
+	owned, cancelOwned := context.WithCancelCause(context.Background())
+	cancelOwned(ErrLeaseLost)
+	if got := WorkerCancellationCause(owned); !errors.Is(got, ErrLeaseLost) {
+		t.Fatalf("lease cancellation cause = %v", got)
+	}
+	workerDeadline, cancelWorkerDeadline := context.WithTimeout(context.WithValue(context.Background(), workerContextKey{}, true), time.Nanosecond)
+	defer cancelWorkerDeadline()
+	<-workerDeadline.Done()
+	if got := WorkerCancellationCause(workerDeadline); got != nil {
+		t.Fatalf("worker child deadline cause = %v", got)
+	}
 	store := NewMemory()
 	defer store.Close()
 	if _, err := store.Get(nil, "tenant", "task"); !errors.Is(err, ErrInvalid) {
@@ -318,8 +416,58 @@ func TestQueueErrorHelpersAndInvalidContext(t *testing.T) {
 	if _, err := store.Claim(context.Background(), "", "", time.Second); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("invalid claim = %v", err)
 	}
+	if _, err := store.Renew(nil, "tenant", "task", "worker", 1, time.Second); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil context renew = %v", err)
+	}
+	if _, err := store.Renew(context.Background(), "", "task", "worker", 1, time.Second); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid renew = %v", err)
+	}
+	if _, err := store.Renew(context.Background(), "tenant", "missing", "worker", 1, time.Second); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing renew = %v", err)
+	}
 	if got := taskTenantHint(WithTenant(context.Background(), "tenant-a")); got != "tenant-a" {
 		t.Fatalf("tenant hint = %q", got)
+	}
+	if got := taskTenantHint(context.Background()); got != "" {
+		t.Fatalf("empty tenant hint = %q", got)
+	}
+}
+
+func TestWorkerRenewalConfigurationBoundaries(t *testing.T) {
+	store := NewMemory()
+	defer store.Close()
+	handler := func(context.Context, Task) error { return nil }
+	if _, err := New(Config{Store: store, Owner: "worker", LeaseDuration: time.Second, LeaseRenewInterval: -time.Nanosecond, Handler: handler}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("negative renewal interval = %v", err)
+	}
+	worker, err := New(Config{Store: store, Owner: "worker", LeaseDuration: 3 * time.Nanosecond, Handler: handler})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.leaseRenewInterval != time.Nanosecond {
+		t.Fatalf("tiny lease renewal interval = %v", worker.leaseRenewInterval)
+	}
+	for _, interval := range []time.Duration{3 * time.Nanosecond, 4 * time.Nanosecond} {
+		if _, err := New(Config{Store: store, Owner: "worker", LeaseDuration: 3 * time.Nanosecond, LeaseRenewInterval: interval, Handler: handler}); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("renewal interval %v = %v", interval, err)
+		}
+	}
+	var nilWorker *Worker
+	if _, err := nilWorker.RunOnce(nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil context on nil worker = %v", err)
+	}
+	if err := worker.Start(nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil context on worker start = %v", err)
+	}
+}
+
+func TestMemoryStoreRenewRejectsClosedBackend(t *testing.T) {
+	store := NewMemory()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Renew(context.Background(), "tenant", "task", "worker", 1, time.Second); !errors.Is(err, ErrClosed) {
+		t.Fatalf("renew closed backend = %v", err)
 	}
 }
 
@@ -345,6 +493,17 @@ type stubStore struct {
 	completeErr error
 	retryErr    error
 	failErr     error
+}
+
+type renewalStore struct {
+	Store
+	renewErr   error
+	renewCalls int
+}
+
+func (store *renewalStore) Renew(context.Context, string, string, string, int64, time.Duration) (Task, error) {
+	store.renewCalls++
+	return Task{}, store.renewErr
 }
 
 func (s *stubStore) Enqueue(context.Context, TaskInput) (Task, bool, error) {

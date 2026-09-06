@@ -442,20 +442,32 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 // owns the request acceptance decision; accepted is signaled only after the
 // execution handoff has been reserved.
 func (dispatcher *Dispatcher) startExecution(ctx context.Context, metadata dispatchMetadata, plan runtime.ExecutionPlan, identity tenant.RunnerIdentity, userMessage trpcmodel.Message, durable *durableExecution, span observability.Span, started time.Time, accepted chan<- struct{}) (<-chan DispatchEvent, error) {
+	if cause := runtimequeue.WorkerCancellationCause(ctx); cause != nil {
+		return nil, cause
+	}
 	planSnapshot := plan.AgentSnapshot()
 	planApp := planSnapshot.App()
 	if planApp.CanaryRevision != nil && planSnapshot.Revision().Revision == *planApp.CanaryRevision {
 		selectedRevision := planSnapshot.Revision().Revision
 		if err := dispatcher.writeExecutionAuditRevision(ctx, metadata, audit.EventCanarySelected, "", &selectedRevision); err != nil {
+			if cause := runtimequeue.WorkerCancellationCause(ctx); cause != nil {
+				return nil, cause
+			}
 			dispatcher.failDurable(durable, err)
 			return nil, auditWriteFailure()
 		}
 	}
 	if err := dispatcher.writeExecutionAudit(ctx, metadata, audit.EventExecutionStarted, ""); err != nil {
+		if cause := runtimequeue.WorkerCancellationCause(ctx); cause != nil {
+			return nil, cause
+		}
 		dispatcher.failDurable(durable, err)
 		return nil, auditWriteFailure()
 	}
 	if err := dispatcher.reserveHandoff(ctx, metadata); err != nil {
+		if cause := runtimequeue.WorkerCancellationCause(ctx); cause != nil {
+			return nil, cause
+		}
 		dispatcher.failDurable(durable, err)
 		return nil, auditWriteFailure()
 	}
@@ -478,6 +490,9 @@ func (dispatcher *Dispatcher) startExecution(ctx context.Context, metadata dispa
 		Plan: plan, Identity: identity, Message: userMessage, RequestID: metadata.requestID, TraceID: metadata.traceID,
 	})
 	if err != nil {
+		if cause := runtimequeue.WorkerCancellationCause(runnerCtx); cause != nil {
+			return nil, cause
+		}
 		executionErr := err
 		if errors.Is(executionErr, execution.ErrExecution) {
 			executionErr = ErrExecution

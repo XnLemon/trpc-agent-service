@@ -72,6 +72,54 @@ func TestPostgresQueueRenewsCurrentLease(t *testing.T) {
 	}
 }
 
+func TestPostgresQueueRenewErrorBranches(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Renew(nil, "tenant-a", "task-1", "worker", 1, time.Second); !errors.Is(err, queue.ErrInvalid) {
+		t.Fatalf("nil renewal context = %v", err)
+	}
+	if _, err := store.Renew(context.Background(), "", "task-1", "worker", 1, time.Second); !errors.Is(err, queue.ErrInvalid) {
+		t.Fatalf("invalid renewal input = %v", err)
+	}
+
+	columns := []string{"tenant_id", "task_id", "kind", "payload", "status", "attempts", "fencing_token", "lease_owner", "lease_expires_at", "next_attempt_at", "last_error_class", "created_at", "updated_at"}
+	renewQuery := regexp.QuoteMeta("UPDATE public.runtime_execution_queue SET lease_expires_at=now()+($5 * interval '1 millisecond')")
+	getQuery := regexp.QuoteMeta("SELECT " + columnsString(columns) + " FROM public.runtime_execution_queue")
+	mock.ExpectQuery(renewQuery).WithArgs("tenant-a", "task-1", "worker", int64(1), int64(1000)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(getQuery).WithArgs("tenant-a", "task-1").WillReturnError(sql.ErrNoRows)
+	if _, err := store.Renew(context.Background(), "tenant-a", "task-1", "worker", 1, time.Second); !errors.Is(err, queue.ErrNotFound) {
+		t.Fatalf("missing renewal target = %v", err)
+	}
+
+	mock.ExpectQuery(renewQuery).WithArgs("tenant-a", "task-1", "worker", int64(1), int64(1000)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(getQuery).WithArgs("tenant-a", "task-1").WillReturnError(errors.New("lookup failed"))
+	if _, err := store.Renew(context.Background(), "tenant-a", "task-1", "worker", 1, time.Second); err == nil || err.Error() != "lookup failed" {
+		t.Fatalf("renewal lookup failure = %v", err)
+	}
+
+	now := time.Now()
+	mock.ExpectQuery(renewQuery).WithArgs("tenant-a", "task-1", "worker", int64(1), int64(1000)).WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(getQuery).WithArgs("tenant-a", "task-1").WillReturnRows(sqlmock.NewRows(columns).AddRow("tenant-a", "task-1", "run", []byte("payload"), "leased", 1, 1, "other-worker", now.Add(time.Minute), now, "", now, now))
+	if _, err := store.Renew(context.Background(), "tenant-a", "task-1", "worker", 1, time.Second); !errors.Is(err, queue.ErrConflict) {
+		t.Fatalf("stale renewal = %v", err)
+	}
+
+	mock.ExpectQuery(renewQuery).WithArgs("tenant-a", "task-1", "worker", int64(1), int64(1000)).WillReturnError(errors.New("renew failed"))
+	if _, err := store.Renew(context.Background(), "tenant-a", "task-1", "worker", 1, time.Second); err == nil || err.Error() != "renew failed" {
+		t.Fatalf("renewal database failure = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPostgresQueueMapsNoRowsAndValidatesInputs(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -185,6 +233,22 @@ func TestPostgresClaimPreservesSubsecondLease(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPostgresLeaseMillisecondsRoundsUpAndHasMinimum(t *testing.T) {
+	for _, test := range []struct {
+		lease time.Duration
+		want  int64
+	}{
+		{lease: 0, want: 1},
+		{lease: 500 * time.Microsecond, want: 1},
+		{lease: time.Millisecond, want: 1},
+		{lease: 1500 * time.Microsecond, want: 2},
+	} {
+		if got := leaseMilliseconds(test.lease); got != test.want {
+			t.Fatalf("leaseMilliseconds(%v) = %d, want %d", test.lease, got, test.want)
+		}
 	}
 }
 

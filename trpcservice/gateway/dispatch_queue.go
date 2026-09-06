@@ -49,8 +49,8 @@ type executionTaskPayload struct {
 }
 
 // Enqueue persists one verified Channel request for an independent Agent
-// Worker. It resolves the current plan before admission, records the inbound
-// lifecycle in Received, and signals Accepted only after the queue write.
+// Worker. It writes the recoverable queue task before materializing the
+// inbound lifecycle and signals Accepted only after both durable writes.
 func (dispatcher *Dispatcher) Enqueue(ctx context.Context, request DispatchRequest) (EnqueueResult, error) {
 	if dispatcher == nil || dispatcher.resolver == nil || dispatcher.executionQueue == nil || dispatcher.runtimeStore == nil {
 		return EnqueueResult{}, ErrNotReady
@@ -69,64 +69,112 @@ func (dispatcher *Dispatcher) Enqueue(ctx context.Context, request DispatchReque
 	if _, err := dispatcher.resolver.Resolve(ctx, request.Principal); err != nil {
 		return EnqueueResult{}, err
 	}
-	event, err := dispatcher.prepareQueuedEvent(ctx, request.Principal, target, message)
+	admission, err := dispatcher.prepareQueuedAdmission(ctx, request.Principal, target, message)
 	if err != nil {
 		return EnqueueResult{}, err
 	}
 	payload, err := marshalExecutionTask(executionTaskPayload{
 		Version: executionTaskPayloadVersion, TenantID: request.Principal.TenantID(), AppID: request.Principal.AppID(),
 		BindingID: target.BindingID, BindingVersion: target.BindingVersion, ConfigDigest: target.ConfigDigest,
-		RequestID: requestID, TraceID: traceID, PrincipalKind: PrincipalChannel, EventID: event.EventID, Message: message,
+		RequestID: requestID, TraceID: traceID, PrincipalKind: PrincipalChannel, EventID: admission.input.EventID, Message: message,
 	})
 	if err != nil {
 		return EnqueueResult{}, ErrInvalidExecutionTask
 	}
+	event := runtimestorage.MessageEvent{TenantID: admission.input.TenantID, EventID: admission.input.EventID}
 	task, err := dispatcher.enqueueExecutionTask(ctx, event, payload)
 	if err != nil {
 		return EnqueueResult{}, err
+	}
+	event, duplicate, err := dispatcher.recordQueuedEvent(ctx, admission.input)
+	if err != nil {
+		// The queue row is the durable admission record. If event persistence
+		// loses a race or the process stops here, the Worker reconstructs the
+		// event from the task payload before execution.
+		return EnqueueResult{}, err
+	}
+	if duplicate || event.EventID != admission.input.EventID {
+		// A retry can race with a task whose event was materialized first. The
+		// extra queue row remains durable and the Worker will no-op it after
+		// observing the existing idempotent event.
+		return EnqueueResult{}, ErrDuplicateMessage
+	}
+	if err := dispatcher.bindQueuedAttachments(ctx, request.Principal.TenantID(), event.EventID, message); err != nil {
+		dispatcher.failUnclaimedEvent(event)
+		return EnqueueResult{}, ErrExecution
 	}
 	notifyAccepted(request.Accepted)
 	return EnqueueResult{TaskID: task.TaskID}, nil
 }
 
-func (dispatcher *Dispatcher) prepareQueuedEvent(ctx context.Context, principal Principal, target channels.RoutingTarget, message InboundMessage) (runtimestorage.MessageEvent, error) {
+type queuedAdmission struct {
+	input runtimestorage.MessageEventInput
+}
+
+func (dispatcher *Dispatcher) prepareQueuedAdmission(ctx context.Context, principal Principal, target channels.RoutingTarget, message InboundMessage) (queuedAdmission, error) {
 	identity, err := dispatchRunnerIdentity(principal, message)
 	if err != nil {
-		return runtimestorage.MessageEvent{}, err
+		return queuedAdmission{}, err
 	}
 	reply, err := replyTarget(target, message)
 	if err != nil {
-		return runtimestorage.MessageEvent{}, err
+		return queuedAdmission{}, err
 	}
 	if err := ensureInboundSession(ctx, dispatcher.runtimeStore, principal.TenantID(), identity.SessionID); err != nil {
-		return runtimestorage.MessageEvent{}, err
+		return queuedAdmission{}, err
 	}
-	event, duplicate, err := dispatcher.runtimeStore.RecordMessage(ctx, runtimestorage.MessageEventInput{
+	return queuedAdmission{input: runtimestorage.MessageEventInput{
 		TenantID: principal.TenantID(), EventID: uuid.NewString(), SessionID: identity.SessionID,
 		BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID,
 		IdempotencyKey: message.ExternalMessageID, ReplyTarget: reply,
-	})
+	}}, nil
+}
+
+func (dispatcher *Dispatcher) prepareQueuedEvent(ctx context.Context, principal Principal, target channels.RoutingTarget, message InboundMessage) (runtimestorage.MessageEvent, error) {
+	admission, err := dispatcher.prepareQueuedAdmission(ctx, principal, target, message)
 	if err != nil {
 		return runtimestorage.MessageEvent{}, err
 	}
+	event, duplicate, err := dispatcher.recordQueuedEvent(ctx, admission.input)
+	if err != nil {
+		return runtimestorage.MessageEvent{}, err
+	}
+	if duplicate {
+		return runtimestorage.MessageEvent{}, ErrDuplicateMessage
+	}
+	if err := dispatcher.bindQueuedAttachments(ctx, principal.TenantID(), event.EventID, message); err != nil {
+		return runtimestorage.MessageEvent{}, err
+	}
+	return event, nil
+}
+
+func (dispatcher *Dispatcher) recordQueuedEvent(ctx context.Context, input runtimestorage.MessageEventInput) (runtimestorage.MessageEvent, bool, error) {
+	event, duplicate, err := dispatcher.runtimeStore.RecordMessage(ctx, input)
+	if err != nil {
+		return runtimestorage.MessageEvent{}, false, err
+	}
 	event, err = prepareInboundEvent(ctx, dispatcher.runtimeStore, inboundEventPreparation{
-		tenantID: principal.TenantID(), event: event, duplicate: duplicate,
+		tenantID: input.TenantID, event: event, duplicate: duplicate,
 		owner: "enqueue-" + uuid.NewString(),
 	})
 	if err != nil {
-		return runtimestorage.MessageEvent{}, err
+		return runtimestorage.MessageEvent{}, false, err
 	}
+	return event, duplicate, nil
+}
+
+func (dispatcher *Dispatcher) bindQueuedAttachments(ctx context.Context, tenantID, eventID string, message InboundMessage) error {
 	if len(message.Attachments) == 0 {
-		return event, nil
+		return nil
 	}
 	binder, ok := dispatcher.attachments.(attachment.Binder)
 	if !ok {
-		return runtimestorage.MessageEvent{}, ErrExecution
+		return ErrExecution
 	}
-	if err := binder.BindAttachments(ctx, principal.TenantID(), event.EventID, message.Attachments); err != nil {
-		return runtimestorage.MessageEvent{}, ErrExecution
+	if err := binder.BindAttachments(ctx, tenantID, eventID, message.Attachments); err != nil {
+		return ErrExecution
 	}
-	return event, nil
+	return nil
 }
 
 func marshalExecutionTask(payload executionTaskPayload) ([]byte, error) {
@@ -209,6 +257,8 @@ func validExecutionTaskIdentity(task runtimequeue.Task, payload executionTaskPay
 // HandleExecutionTask is the Bootstrap-owned queue Handler. It rehydrates a
 // current trusted Channel target, claims the message lease, and runs the same
 // audit/outbox finalization path as synchronous Dispatch.
+//
+//nolint:gocyclo // The Worker boundary coordinates payload, route, event, lease, and recovery validation.
 func (dispatcher *Dispatcher) HandleExecutionTask(ctx context.Context, task runtimequeue.Task) error {
 	if dispatcher == nil || dispatcher.resolver == nil || dispatcher.runtimeStore == nil || dispatcher.channels == nil || dispatcher.tenants == nil || dispatcher.apps == nil {
 		return ErrNotReady
@@ -220,36 +270,75 @@ func (dispatcher *Dispatcher) HandleExecutionTask(ctx context.Context, task runt
 	if err != nil {
 		return err
 	}
-	event, err := dispatcher.runtimeStore.GetMessage(ctx, payload.TenantID, payload.EventID)
+	principal, err := dispatcher.rehydrateTaskPrincipal(ctx, payload)
 	if err != nil {
-		if errors.Is(err, runtimestorage.ErrNotFound) {
+		return dispatcher.rejectExecutionTask(ctx, payload, err)
+	}
+	identity, err := dispatchRunnerIdentity(principal, payload.Message)
+	if err != nil {
+		return dispatcher.rejectExecutionTask(ctx, payload, err)
+	}
+	event, duplicate, err := dispatcher.ensureQueuedEvent(ctx, payload, principal, identity)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
 		return runtimequeue.Retry(err)
 	}
-	if event.EventID != payload.EventID || event.BindingID != payload.BindingID || event.ExternalMessageID != payload.Message.ExternalMessageID {
+	if duplicate {
+		// Another durable task won the idempotency race while this task was
+		// between queue admission and event persistence. Completing this task
+		// avoids executing the same external message twice.
+		return nil
+	}
+	if event.EventID != payload.EventID {
+		return ErrInvalidExecutionTask
+	}
+	if event.TenantID != payload.TenantID || event.BindingID != payload.BindingID || event.ExternalMessageID != payload.Message.ExternalMessageID {
 		return ErrInvalidExecutionTask
 	}
 	if terminalMessageStatus(event.Status) {
 		return nil
 	}
-	principal, err := dispatcher.rehydrateTaskPrincipal(ctx, payload)
-	if err != nil {
+	if err := dispatcher.bindQueuedAttachments(ctx, principal.TenantID(), event.EventID, payload.Message); err != nil {
 		return dispatcher.rejectUnclaimedTask(ctx, event, err)
 	}
 	plan, err := dispatcher.resolver.Resolve(ctx, principal)
 	if err != nil {
 		return runtimequeue.Retry(err)
 	}
-	identity, err := dispatchRunnerIdentity(principal, payload.Message)
-	if err != nil {
-		return dispatcher.rejectUnclaimedTask(ctx, event, err)
-	}
 	durable, err := dispatcher.claimQueuedInbound(ctx, event, payload, durableInboundLeaseForRuntime(plan.AgentSnapshot().Revision().Runtime))
 	if err != nil {
 		return err
 	}
 	return dispatcher.executeQueuedTask(ctx, payload, principal, plan, identity, durable)
+}
+
+func (dispatcher *Dispatcher) ensureQueuedEvent(ctx context.Context, payload executionTaskPayload, principal Principal, identity tenant.RunnerIdentity) (runtimestorage.MessageEvent, bool, error) {
+	event, err := dispatcher.runtimeStore.GetMessage(ctx, payload.TenantID, payload.EventID)
+	if err == nil {
+		return event, false, nil
+	}
+	if !errors.Is(err, runtimestorage.ErrNotFound) {
+		return runtimestorage.MessageEvent{}, false, err
+	}
+	target, ok := principal.RoutingTarget()
+	if !ok {
+		return runtimestorage.MessageEvent{}, false, ErrInvalidExecutionTask
+	}
+	reply, err := replyTarget(target, payload.Message)
+	if err != nil {
+		return runtimestorage.MessageEvent{}, false, err
+	}
+	if err := ensureInboundSession(ctx, dispatcher.runtimeStore, payload.TenantID, identity.SessionID); err != nil {
+		return runtimestorage.MessageEvent{}, false, err
+	}
+	event, duplicate, err := dispatcher.runtimeStore.RecordMessage(ctx, runtimestorage.MessageEventInput{
+		TenantID: payload.TenantID, EventID: payload.EventID, SessionID: identity.SessionID,
+		BindingID: payload.BindingID, ExternalMessageID: payload.Message.ExternalMessageID,
+		IdempotencyKey: payload.Message.ExternalMessageID, ReplyTarget: reply,
+	})
+	return event, duplicate, err
 }
 
 func (dispatcher *Dispatcher) executeQueuedTask(ctx context.Context, payload executionTaskPayload, principal Principal, plan runtime.ExecutionPlan, identity tenant.RunnerIdentity, durable *durableExecution) error {
@@ -268,16 +357,27 @@ func (dispatcher *Dispatcher) executeQueuedTask(ctx context.Context, payload exe
 	defer cancel()
 	userMessage, err := buildUserMessage(executionCtx, dispatcher.attachments, principal.TenantID(), durable.eventID, payload.Message)
 	if err != nil {
+		if cause := runtimequeue.WorkerCancellationCause(executionCtx); cause != nil {
+			finishWorkerExecution(span, dispatcher, metadata, started, cause)
+			return dispatcher.preserveQueuedTask(durable, cause)
+		}
 		dispatcher.failDurable(durable, err)
 		finishWorkerExecution(span, dispatcher, metadata, started, err)
 		return dispatcher.finishQueuedTask(payload.TenantID, durable.eventID)
 	}
 	output, err := dispatcher.startExecution(executionCtx, metadata, plan, identity, userMessage, durable, span, started, nil)
 	if err != nil {
+		if cause := runtimequeue.WorkerCancellationCause(executionCtx); cause != nil {
+			finishWorkerExecution(span, dispatcher, metadata, started, cause)
+			return dispatcher.preserveQueuedTask(durable, cause)
+		}
 		finishWorkerExecution(span, dispatcher, metadata, started, err)
 		return dispatcher.finishQueuedTask(payload.TenantID, durable.eventID)
 	}
 	for range output {
+	}
+	if cause := runtimequeue.WorkerCancellationCause(executionCtx); cause != nil {
+		return dispatcher.preserveQueuedTask(durable, cause)
 	}
 	return dispatcher.finishQueuedTask(payload.TenantID, durable.eventID)
 }
@@ -288,6 +388,20 @@ func (dispatcher *Dispatcher) rejectUnclaimedTask(ctx context.Context, event run
 	}
 	dispatcher.failUnclaimedEvent(event)
 	return cause
+}
+
+func (dispatcher *Dispatcher) rejectExecutionTask(ctx context.Context, payload executionTaskPayload, cause error) error {
+	if IsContextCancellation(cause) {
+		return cause
+	}
+	event, err := dispatcher.runtimeStore.GetMessage(ctx, payload.TenantID, payload.EventID)
+	if err != nil {
+		if errors.Is(err, runtimestorage.ErrNotFound) {
+			return cause
+		}
+		return runtimequeue.Retry(err)
+	}
+	return dispatcher.rejectUnclaimedTask(ctx, event, cause)
 }
 
 func (dispatcher *Dispatcher) failUnclaimedEvent(event runtimestorage.MessageEvent) {
@@ -376,6 +490,29 @@ func (dispatcher *Dispatcher) finishQueuedTask(tenantID, eventID string) error {
 		return nil
 	}
 	return runtimequeue.Retry(ErrExecution)
+}
+
+func (dispatcher *Dispatcher) preserveQueuedTask(durable *durableExecution, cause error) error {
+	if durable == nil {
+		return runtimequeue.RetryForever(cause)
+	}
+	event, err := dispatcher.runtimeStore.GetMessage(context.Background(), durable.tenantID, durable.eventID)
+	if err != nil {
+		return runtimequeue.RetryForever(err)
+	}
+	if terminalMessageStatus(event.Status) {
+		return nil
+	}
+	if event.Status == runtimestorage.EventRunning && event.LeaseExpiresAt != nil {
+		if event.LeaseExpiresAt.After(time.Now().UTC()) {
+			return runtimequeue.RetryForeverAt(cause, event.LeaseExpiresAt.UTC())
+		}
+		_, _ = dispatcher.runtimeStore.TransitionMessage(context.Background(), runtimestorage.MessageTransition{
+			TenantID: event.TenantID, EventID: event.EventID, From: runtimestorage.EventRunning,
+			To: runtimestorage.EventExecutionReconciling, Owner: "worker-recovery-" + uuid.NewString(),
+		})
+	}
+	return runtimequeue.RetryForever(cause)
 }
 
 func terminalMessageStatus(status string) bool {

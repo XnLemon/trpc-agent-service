@@ -148,6 +148,36 @@ func TestPlanResolverEnsuresTenantRuntimeBeforeRepositoryResolution(t *testing.T
 	}
 }
 
+func TestPlanResolverRedactsTenantRuntimeFailureAndPreservesCancellation(t *testing.T) {
+	fixture := runtimeFixture(t)
+	config := testPlanResolverConfig(fixture)
+	config.TenantRuntime = tenantRuntimeFunc(func(context.Context, string) error {
+		return errors.New("secret provider detail")
+	})
+	resolver, err := NewPlanResolver(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = resolver.Resolve(context.Background(), PlanRequest{TenantID: fixture.root.TenantID, AppID: fixture.app.AppID})
+	if !errors.Is(err, ErrPlanUnavailable) || strings.Contains(err.Error(), "secret provider detail") {
+		t.Fatalf("tenant runtime failure = %v", err)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	config.TenantRuntime = tenantRuntimeFunc(func(context.Context, string) error {
+		cancel()
+		return context.DeadlineExceeded
+	})
+	resolver, err = NewPlanResolver(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = resolver.Resolve(canceled, PlanRequest{TenantID: fixture.root.TenantID, AppID: fixture.app.AppID})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("tenant runtime cancellation = %v", err)
+	}
+}
+
 type tenantRuntimeFunc func(context.Context, string) error
 
 func (function tenantRuntimeFunc) Ensure(ctx context.Context, tenantID string) error {

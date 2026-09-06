@@ -9,6 +9,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/execution"
+	runtimequeue "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 )
 
@@ -158,6 +159,9 @@ func (run *dispatchExecution) finishForwardOutput(ctx context.Context, terminalE
 }
 
 func (dispatcher *Dispatcher) finalizeForward(ctx context.Context, run *dispatchExecution, state *executionForwardState, mediaReplies []servicetool.ReplyIntent) error {
+	if cause := runtimequeue.WorkerCancellationCause(ctx); cause != nil && (!state.terminalSeen || IsContextCancellation(state.terminalErr)) {
+		return cause
+	}
 	terminalErr := state.terminalErr
 	eventType := state.terminalEventType
 	errorType := state.terminalErrorType

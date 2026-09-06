@@ -122,6 +122,73 @@ func TestDispatcherEnqueueRunsThroughIndependentWorkerAndMaterializesReply(t *te
 	}
 }
 
+func TestDispatcherWorkerShutdownLeavesExecutionRecoverable(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	principal, channelRepo := newQueueChannelPrincipal(t, fixture)
+	resolver, err := NewPlanResolver(resolverTestConfig(fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := runtimestorageinmemory.New()
+	t.Cleanup(func() { _ = store.Close() })
+	queue := runtimequeue.NewMemory()
+	t.Cleanup(func() { _ = queue.Close() })
+	runnerStarted := make(chan struct{})
+	runnerValue := &testRunner{runFn: func(ctx context.Context, _, _ string, _ trpcmodel.Message, _ ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+		close(runnerStarted)
+		events := make(chan *trpcevent.Event)
+		go func() {
+			<-ctx.Done()
+			close(events)
+		}()
+		return events, nil
+	}}
+	registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
+		return runnerValue, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = registry.Close() })
+	dispatcher, err := NewDispatcher(DispatchConfig{
+		Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store,
+		ExecutionQueue: queue, Channels: channelRepo, Tenants: fixture.tenants, Apps: fixture.apps,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := DispatchRequest{Principal: principal, RequestID: "shutdown-request", Message: InboundMessage{
+		Content: "hello", ExternalMessageID: "shutdown-external", ExternalUserID: "user-1",
+		ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer-1",
+	}}
+	result, err := dispatcher.Enqueue(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := runtimequeue.New(runtimequeue.Config{
+		Store: queue, Handler: dispatcher.HandleExecutionTask, TenantID: fixture.tenant.TenantID, Owner: "shutdown-worker",
+		LeaseDuration: time.Minute, PollInterval: time.Millisecond, MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-runnerStarted
+	if err := worker.Close(); err != nil {
+		t.Fatal(err)
+	}
+	task, err := queue.Get(context.Background(), fixture.tenant.TenantID, result.TaskID)
+	if err != nil || task.Status != runtimequeue.StatusRetryable {
+		t.Fatalf("shutdown queue task = %+v err=%v", task, err)
+	}
+	event, err := store.GetMessage(context.Background(), fixture.tenant.TenantID, result.TaskID)
+	if err != nil || event.Status != runtimestorage.EventRunning {
+		t.Fatalf("shutdown message event = %+v err=%v", event, err)
+	}
+}
+
 func TestAsyncDispatchReadinessPreservesSynchronousGraphs(t *testing.T) {
 	if AsyncDispatchReady(nil) {
 		t.Fatal("nil async service was reported ready")
