@@ -114,7 +114,7 @@ func runTelegramOutboxScenario(t *testing.T, ctx context.Context, provider outbo
 	assertTelegramOutboxDispatch(t, dispatchEvents, runner)
 	rows, err := store.ListReplyCandidates(ctx, fixture.target.TenantID)
 	assertTelegramOutboxRows(t, rows, err, runner.reply)
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: fixture.target.TenantID, Owner: "telegram-example-e2e", LeaseDuration: 30 * time.Second})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: fixture.target.TenantID, Owner: "telegram-example-e2e", LeaseDuration: 30 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

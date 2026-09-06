@@ -286,12 +286,19 @@ func newDispatchMaterializer(config DispatchConfig, batchStore runtimestorage.Re
 	if config.Materializer != nil {
 		return config.Materializer, nil
 	}
-	if batchStore == nil && config.RuntimeStore == nil {
+	if batchStore == nil {
 		return nil, nil
 	}
 	return outbox.NewMaterializer(outbox.MaterializerConfig{
-		Store: config.RuntimeStore, BatchStore: batchStore, Observability: config.Observability,
+		BatchStore: batchStore, Observability: config.Observability,
 	})
+}
+
+func validateDispatchCapabilities(config DispatchConfig, capabilities dispatchCapabilities) error {
+	if config.Materializer == nil && capabilities.sessions != nil && capabilities.messages != nil && capabilities.replyBatches == nil {
+		return fmt.Errorf("%w: durable dispatch requires reply materialization capability", ErrInvalid)
+	}
+	return nil
 }
 
 // NewDispatcher validates the protocol-neutral execution dependencies.
@@ -309,6 +316,9 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 		config.Observability = observability.NewNoopProvider()
 	}
 	capabilities := resolveDispatchCapabilities(config)
+	if err := validateDispatchCapabilities(config, capabilities); err != nil {
+		return nil, err
+	}
 	executor, err := execution.NewCoordinator(execution.Config{
 		Registry: config.Registry, DrainTimeout: config.DrainTimeout, Observability: config.Observability,
 	})

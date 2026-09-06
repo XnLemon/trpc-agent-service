@@ -86,7 +86,7 @@ func telegramE2ESeed(t *testing.T, ctx context.Context, store *inmemory.Store, t
 
 func telegramE2EWorker(t *testing.T, store *inmemory.Store, provider *Provider, tenantID string) *outbox.Worker {
 	t.Helper()
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: tenantID, Owner: "telegram-e2e-worker", LeaseDuration: 30 * time.Second})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: tenantID, Owner: "telegram-e2e-worker", LeaseDuration: 30 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

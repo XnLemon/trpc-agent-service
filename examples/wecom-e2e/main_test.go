@@ -77,7 +77,7 @@ func TestWeComCallbackOutboxE2E(t *testing.T) {
 	providerServer := newProviderServer(t)
 	defer providerServer.Close()
 	provider := &wecom.BindingProvider{Bindings: fixture.channels, Credentials: fixture.credentials, BaseURL: providerServer.URL, HTTPClient: providerServer.Client()}
-	worker, err := outbox.New(outbox.Config{Store: fixture.store, Provider: provider, TenantID: fixture.tenant.TenantID, Owner: "wecom-example-e2e", LeaseDuration: 30 * time.Second})
+	worker, err := outbox.New(outbox.Config{Store: fixture.store, MessageStore: fixture.store, Provider: provider, TenantID: fixture.tenant.TenantID, Owner: "wecom-example-e2e", LeaseDuration: 30 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

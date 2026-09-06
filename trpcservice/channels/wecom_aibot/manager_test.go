@@ -215,7 +215,7 @@ func TestProviderReconcilesDurableAcknowledgementAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: restartedProvider, TenantID: "tenant", Owner: "worker-after-restart", LeaseDuration: time.Second})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: restartedProvider, TenantID: "tenant", Owner: "worker-after-restart", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -84,7 +84,7 @@ func TestFaultInjectionOutboxRetryAndConcurrencyE2E(t *testing.T) {
 	seedCompletedReply(t, store, "tenant-fault", "event-fault", "reply-fault")
 
 	provider := &faultProvider{failures: []error{errors.New("provider token=" + injectedSecret)}}
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-fault", Owner: "worker-a", LeaseDuration: time.Second, MaxAttempts: 3, BackoffBase: time.Nanosecond, BackoffMax: time.Nanosecond})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: "tenant-fault", Owner: "worker-a", LeaseDuration: time.Second, MaxAttempts: 3, BackoffBase: time.Nanosecond, BackoffMax: time.Nanosecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestFaultInjectionOutboxRetryAndConcurrencyE2E(t *testing.T) {
 	provider.blockOnce = true
 	provider.started = started
 	provider.release = release
-	workerB, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-fault", Owner: "worker-b", LeaseDuration: time.Second})
+	workerB, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: "tenant-fault", Owner: "worker-b", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestFaultInjectionMaterializationFailureE2E(t *testing.T) {
 	base := runtimestorageinmemory.New()
 	t.Cleanup(func() { _ = base.Close() })
 	store := &failingBatchStore{RuntimeStore: base, err: errors.New("database password=" + injectedSecret)}
-	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: store, SegmentSize: 3})
+	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{BatchStore: store, SegmentSize: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestFaultInjectionMaterializationAtomicityE2E(t *testing.T) {
 	if _, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: "tenant-fault", EventID: "event-atomic", ReplyID: "reply-atomic", SegmentIndex: 1, SegmentCount: 2, Payload: "old"}); err != nil {
 		t.Fatal(err)
 	}
-	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: store, SegmentSize: 3})
+	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{BatchStore: store, SegmentSize: 3})
 	if err != nil {
 		t.Fatal(err)
 	}

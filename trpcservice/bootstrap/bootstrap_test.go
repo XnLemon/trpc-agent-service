@@ -186,7 +186,7 @@ func TestRuntimeStartsAndStopsConfiguredOutboxWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider := &bootstrapBlockingProvider{started: make(chan struct{}), canceled: make(chan struct{})}
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "bootstrap-worker", LeaseDuration: time.Second})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: "tenant-a", Owner: "bootstrap-worker", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,8 +215,9 @@ func TestRuntimeStartsAndStopsConfiguredOutboxWorker(t *testing.T) {
 }
 
 func TestNewRejectsAlreadyRunningOutboxWorker(t *testing.T) {
+	store := runtimestorageinmemory.New()
 	worker, err := outbox.New(outbox.Config{
-		Store: runtimestorageinmemory.New(), Provider: &bootstrapBlockingProvider{started: make(chan struct{}), canceled: make(chan struct{})},
+		Store: store, MessageStore: store, Provider: &bootstrapBlockingProvider{started: make(chan struct{}), canceled: make(chan struct{})},
 		TenantID: "tenant-a", Owner: "already-running", LeaseDuration: time.Second,
 	})
 	if err != nil {

@@ -17,8 +17,10 @@ func TestStartLogsUnexpectedWorkerFailure(t *testing.T) {
 	restore := servicelog.SetDefault(zap.New(core))
 	t.Cleanup(restore)
 
+	store := &branchStore{listErr: errors.New("database password=secret")}
 	worker, err := New(Config{
-		Store:         &branchStore{listErr: errors.New("database password=secret")},
+		Store:         store,
+		MessageStore:  store,
 		Provider:      branchProvider{},
 		TenantID:      "tenant-a",
 		Owner:         "worker-a",
