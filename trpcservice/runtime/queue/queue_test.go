@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -48,6 +49,33 @@ func TestMemoryQueueFencingRejectsStaleWorker(t *testing.T) {
 	}
 }
 
+func TestMemoryQueueRenewExtendsCurrentLease(t *testing.T) {
+	store := NewMemory()
+	defer store.Close()
+	_, _, err := store.Enqueue(context.Background(), TaskInput{TenantID: "tenant-a", TaskID: "task-1", Kind: "run", Payload: []byte("payload")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.Claim(context.Background(), "tenant-a", "worker-a", 20*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Renew(context.Background(), "tenant-a", "task-1", "worker-a", claimed.FencingToken, 100*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Renew(context.Background(), "tenant-a", "task-1", "worker-stale", claimed.FencingToken, time.Second); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale renewal = %v", err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if _, err := store.Claim(context.Background(), "tenant-a", "worker-b", time.Second); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("renewed lease was reclaimed = %v", err)
+	}
+	time.Sleep(80 * time.Millisecond)
+	if _, err := store.Claim(context.Background(), "tenant-a", "worker-b", time.Second); err != nil {
+		t.Fatalf("expired renewed lease was not reclaimed = %v", err)
+	}
+}
+
 func TestMemoryQueueConcurrentClaimHasOneWinner(t *testing.T) {
 	store := NewMemory()
 	defer store.Close()
@@ -59,7 +87,7 @@ func TestMemoryQueueConcurrentClaimHasOneWinner(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			if _, err := store.Claim(context.Background(), "tenant-a", FormatTaskKey("worker", string(rune('a'+i))), time.Second); err == nil {
+			if _, err := store.Claim(context.Background(), "tenant-a", FormatTaskKey("worker", strconv.Itoa(i)), time.Second); err == nil {
 				mu.Lock()
 				winners++
 				mu.Unlock()
@@ -134,6 +162,46 @@ func TestWorkerCancellationLeavesRecoverableLease(t *testing.T) {
 	time.Sleep(25 * time.Millisecond)
 	if _, err := store.Claim(context.Background(), "tenant-a", "worker-b", time.Second); err != nil {
 		t.Fatalf("reclaim after cancellation = %v", err)
+	}
+}
+
+func TestWorkerRenewsLongRunningLease(t *testing.T) {
+	store := NewMemory()
+	defer store.Close()
+	_, _, err := store.Enqueue(context.Background(), TaskInput{TenantID: "tenant-a", TaskID: "task-1", Kind: "run", Payload: []byte("payload")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	result := make(chan error, 1)
+	worker, err := New(Config{
+		Store: store, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: 20 * time.Millisecond,
+		LeaseRenewInterval: 5 * time.Millisecond, Handler: func(context.Context, Task) error {
+			close(started)
+			<-release
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		_, runErr := worker.RunOnce(context.Background())
+		result <- runErr
+	}()
+	<-started
+	time.Sleep(35 * time.Millisecond)
+	if _, err := store.Claim(context.Background(), "tenant-a", "worker-b", time.Second); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("long-running lease was reclaimed = %v", err)
+	}
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.Get(context.Background(), "tenant-a", "task-1")
+	if err != nil || task.Status != StatusCompleted {
+		t.Fatalf("long-running task = %+v err=%v", task, err)
 	}
 }
 

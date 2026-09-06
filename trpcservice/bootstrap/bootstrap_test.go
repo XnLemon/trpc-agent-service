@@ -430,7 +430,7 @@ func TestBootstrapRoutesAdminCacheInvalidationsToRuntimeRegistry(t *testing.T) {
 		{TenantID: tenantID, ProfileID: "backend-1", Kind: admin.CacheInvalidationBackend},
 		{TenantID: tenantID, BindingID: "binding-1", Kind: admin.CacheInvalidationBinding},
 	} {
-		invalidateRuntimeCache(graph.Registry, change)
+		invalidateRuntimeCache(graph.Registry, nil, change)
 	}
 }
 
@@ -870,6 +870,27 @@ func TestBootstrapOwnsOptionalExecutionQueueLifecycle(t *testing.T) {
 	}
 	if _, err := worker.RunOnce(context.Background()); !errors.Is(err, runtimequeue.ErrClosed) {
 		t.Fatalf("queue after Bootstrap close = %v", err)
+	}
+}
+
+func TestBootstrapCreatesExecutionWorkerFromQueueStore(t *testing.T) {
+	queue := runtimequeue.NewMemory()
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	config.ExecutionQueueStore = queue
+	graph, err := New(context.Background(), config)
+	if err != nil {
+		_ = queue.Close()
+		t.Fatal(err)
+	}
+	if graph.ExecutionQueue == nil {
+		t.Fatal("Bootstrap did not create an execution Worker")
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := queue.Claim(context.Background(), "tenant-a", "after-close", time.Second); !errors.Is(err, runtimequeue.ErrClosed) {
+		t.Fatalf("queue after owned close = %v", err)
 	}
 }
 

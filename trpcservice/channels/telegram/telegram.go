@@ -558,6 +558,9 @@ func (adapter *Adapter) handleReplay(ctx context.Context, message *models.Messag
 	if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressAccepted, inbound.ExternalMessageID, "", inbound.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
 		return ErrDispatch
 	}
+	if isAsyncAcceptedReplay(replay) {
+		return nil
+	}
 	if err := adapter.sendEvents(ctx, message, replay); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
@@ -569,6 +572,9 @@ func (adapter *Adapter) handleReplay(ctx context.Context, message *models.Messag
 }
 
 func (adapter *Adapter) handleClaimedUpdate(ctx context.Context, message *models.Message, inbound gateway.InboundMessage, claim *gateway.IdempotencyClaim) error {
+	if asynchronous, ok := adapter.dispatcher.(gateway.AsyncDispatchService); ok && gateway.AsyncDispatchReady(asynchronous) {
+		return adapter.handleAsyncClaimedUpdate(ctx, message, inbound, claim, asynchronous)
+	}
 	if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressAccepted, inbound.ExternalMessageID, "", inbound.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
 		_ = claim.Fail()
 		return ErrDispatch
@@ -602,6 +608,35 @@ func (adapter *Adapter) handleClaimedUpdate(ctx context.Context, message *models
 		return ErrDispatch
 	}
 	return nil
+}
+
+func (adapter *Adapter) handleAsyncClaimedUpdate(ctx context.Context, message *models.Message, inbound gateway.InboundMessage, claim *gateway.IdempotencyClaim, dispatcher gateway.AsyncDispatchService) error {
+	_, dispatchErr := dispatcher.Enqueue(ctx, gateway.DispatchRequest{Principal: adapter.principal, Message: inbound, RequestID: inbound.ExternalMessageID})
+	if dispatchErr != nil {
+		_ = claim.Fail()
+		if errors.Is(dispatchErr, context.Canceled) || errors.Is(dispatchErr, context.DeadlineExceeded) {
+			return dispatchErr
+		}
+		adapter.report(ErrorOperationDispatch, ErrDispatch)
+		if sendErr := adapter.sendText(ctx, message, failureReply); sendErr != nil && !errors.Is(sendErr, context.Canceled) && !errors.Is(sendErr, context.DeadlineExceeded) {
+			adapter.report(ErrorOperationSend, ErrSendMessage)
+		}
+		return ErrDispatch
+	}
+	accepted := []gateway.DispatchEvent{{Type: gateway.DispatchEventStatus, RequestID: inbound.ExternalMessageID, Status: "accepted"}}
+	if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressAccepted, inbound.ExternalMessageID, "", inbound.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
+		_ = claim.Complete(accepted)
+		adapter.report(ErrorOperationUpdate, ErrDispatch)
+		return ErrDispatch
+	}
+	if err := claim.Complete(accepted); err != nil {
+		return ErrDispatch
+	}
+	return nil
+}
+
+func isAsyncAcceptedReplay(events []gateway.DispatchEvent) bool {
+	return len(events) == 1 && events[0].Type == gateway.DispatchEventStatus && events[0].Status == "accepted" && !events[0].Done
 }
 
 func (adapter *Adapter) sdkHandler() bot.HandlerFunc {

@@ -50,6 +50,28 @@ func TestPostgresQueueLifecycle(t *testing.T) {
 	}
 }
 
+func TestPostgresQueueRenewsCurrentLease(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns := []string{"tenant_id", "task_id", "kind", "payload", "status", "attempts", "fencing_token", "lease_owner", "lease_expires_at", "next_attempt_at", "last_error_class", "created_at", "updated_at"}
+	now := time.Now()
+	mock.ExpectQuery(regexp.QuoteMeta("UPDATE public.runtime_execution_queue SET lease_expires_at=now()+($5 * interval '1 millisecond')")).WithArgs("tenant-a", "task-1", "worker", int64(7), int64(60000)).WillReturnRows(sqlmock.NewRows(columns).AddRow("tenant-a", "task-1", "run", []byte("payload"), "leased", 1, 3, "worker", now.Add(time.Minute), now, "", now, now))
+	task, err := store.Renew(context.Background(), "tenant-a", "task-1", "worker", 7, time.Minute)
+	if err != nil || task.Status != queue.StatusLeased || task.FencingToken != 3 {
+		t.Fatalf("renew = %+v err=%v", task, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPostgresQueueMapsNoRowsAndValidatesInputs(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

@@ -8,19 +8,23 @@ import (
 	"strings"
 	"time"
 
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/execution"
+	runtimequeue "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	"github.com/google/uuid"
+	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 var (
@@ -86,6 +90,30 @@ type DispatchService interface {
 	Dispatch(context.Context, DispatchRequest) (<-chan DispatchEvent, error)
 }
 
+// AsyncDispatchService is the durable channel-ingress contract. Enqueue
+// persists the sanitized request before returning; execution and reply
+// delivery happen in a separate Worker process or goroutine.
+type AsyncDispatchService interface {
+	Enqueue(context.Context, DispatchRequest) (EnqueueResult, error)
+}
+
+// AsyncDispatchReady reports whether a service has an enabled durable queue.
+// Implementations that do not expose readiness are treated as asynchronous
+// because the interface itself is an explicit opt-in capability.
+func AsyncDispatchReady(service AsyncDispatchService) bool {
+	if service == nil {
+		return false
+	}
+	ready, ok := service.(interface{ AsyncDispatchReady() bool })
+	return !ok || ready.AsyncDispatchReady()
+}
+
+// EnqueueResult identifies a durably accepted execution without exposing the
+// queue payload or any provider detail to a protocol adapter.
+type EnqueueResult struct {
+	TaskID string
+}
+
 // DispatchConfig configures the Resolver and Runtime Execution boundary.
 type DispatchConfig struct {
 	Resolver      *PlanResolver
@@ -110,6 +138,15 @@ type DispatchConfig struct {
 	// contains attachment references. Text-only dispatches remain independent of it.
 	Attachments     attachment.Reader
 	AttachmentStore runtimestorage.AttachmentStore
+	// ExecutionQueue enables the durable asynchronous Channel path. A nil
+	// value preserves the synchronous Dispatch contract for explicitly
+	// assembled local/test graphs.
+	ExecutionQueue runtimequeue.Store
+	// Channels, Tenants, and Apps are used by a Worker to re-verify the current
+	// route before executing a queued task.
+	Channels channels.CandidateConsumer
+	Tenants  tenant.Repository
+	Apps     appmodel.Repository
 }
 
 // Dispatcher resolves a fixed plan, prepares the Gateway execution context,
@@ -125,6 +162,10 @@ type Dispatcher struct {
 	handoffStore    audit.HandoffStore
 	attachments     attachment.Reader
 	attachmentStore runtimestorage.AttachmentStore
+	executionQueue  runtimequeue.Store
+	channels        channels.CandidateConsumer
+	tenants         tenant.Repository
+	apps            appmodel.Repository
 }
 
 type dispatchStore interface {
@@ -262,6 +303,9 @@ func validateDispatchCapabilities(config DispatchConfig, capabilities dispatchCa
 	if config.Materializer == nil && capabilities.sessions != nil && capabilities.messages != nil && capabilities.replyBatches == nil {
 		return fmt.Errorf("%w: durable dispatch requires reply materialization capability", ErrInvalid)
 	}
+	if config.ExecutionQueue != nil && (capabilities.sessions == nil || capabilities.messages == nil || config.Channels == nil || config.Tenants == nil || config.Apps == nil) {
+		return fmt.Errorf("%w: asynchronous dispatch requires durable stores and route repositories", ErrInvalid)
+	}
 	return nil
 }
 
@@ -295,12 +339,24 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Dispatcher{resolver: config.Resolver, executor: executor, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: newDispatchStore(capabilities), materializer: materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore, attachments: config.Attachments, attachmentStore: config.AttachmentStore}, nil
+	return &Dispatcher{
+		resolver: config.Resolver, executor: executor, telemetry: config.Observability, metrics: metrics.New(config.Observability),
+		runtimeStore: newDispatchStore(capabilities), materializer: materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore,
+		attachments: config.Attachments, attachmentStore: config.AttachmentStore, executionQueue: config.ExecutionQueue,
+		channels: config.Channels, tenants: config.Tenants, apps: config.Apps,
+	}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.
 func (dispatcher *Dispatcher) Ready() bool {
 	return dispatcher != nil && dispatcher.resolver != nil && dispatcher.resolver.Ready() && dispatcher.executor != nil && dispatcher.executor.Ready()
+}
+
+// AsyncDispatchReady reports whether this Dispatcher has a durable queue
+// configured. A Dispatcher remains synchronously usable when the queue is
+// deliberately omitted by a local or test composition.
+func (dispatcher *Dispatcher) AsyncDispatchReady() bool {
+	return dispatcher != nil && dispatcher.executionQueue != nil
 }
 
 // Dispatch starts one execution and returns a redacted event stream. The
@@ -342,7 +398,6 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	}
 	metadata.identity = identity
 	planSnapshot := plan.AgentSnapshot()
-	planApp := planSnapshot.App()
 	durable, err := dispatcher.claimInboundWithLease(ctx, metadata, durableInboundLeaseForRuntime(planSnapshot.Revision().Runtime))
 	if err != nil {
 		finishWithError(err)
@@ -374,26 +429,39 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		}
 		return nil, ErrExecution
 	}
+	output, err := dispatcher.startExecution(ctx, metadata, plan, identity, userMessage, durable, span, started, request.Accepted)
+	if err != nil {
+		finishWithError(err)
+		return nil, err
+	}
+	return output, nil
+}
+
+// startExecution contains the shared audit, Runner, and forwarding setup used
+// by synchronous API dispatch and the durable execution Worker. The caller
+// owns the request acceptance decision; accepted is signaled only after the
+// execution handoff has been reserved.
+func (dispatcher *Dispatcher) startExecution(ctx context.Context, metadata dispatchMetadata, plan runtime.ExecutionPlan, identity tenant.RunnerIdentity, userMessage trpcmodel.Message, durable *durableExecution, span observability.Span, started time.Time, accepted chan<- struct{}) (<-chan DispatchEvent, error) {
+	planSnapshot := plan.AgentSnapshot()
+	planApp := planSnapshot.App()
 	if planApp.CanaryRevision != nil && planSnapshot.Revision().Revision == *planApp.CanaryRevision {
 		selectedRevision := planSnapshot.Revision().Revision
 		if err := dispatcher.writeExecutionAuditRevision(ctx, metadata, audit.EventCanarySelected, "", &selectedRevision); err != nil {
 			dispatcher.failDurable(durable, err)
-			finishWithError(err)
 			return nil, auditWriteFailure()
 		}
 	}
 	if err := dispatcher.writeExecutionAudit(ctx, metadata, audit.EventExecutionStarted, ""); err != nil {
 		dispatcher.failDurable(durable, err)
-		finishWithError(err)
 		return nil, auditWriteFailure()
 	}
 	if err := dispatcher.reserveHandoff(ctx, metadata); err != nil {
-		finishWithError(err)
+		dispatcher.failDurable(durable, err)
 		return nil, auditWriteFailure()
 	}
-	if request.Accepted != nil {
+	if accepted != nil {
 		select {
-		case request.Accepted <- struct{}{}:
+		case accepted <- struct{}{}:
 		default:
 		}
 	}
@@ -401,13 +469,13 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	mediaReplies := servicetool.NewReplyCollector()
 	if durable != nil {
 		runnerCtx = servicetool.WithExecutionContext(runnerCtx, servicetool.ExecutionContext{
-			TenantID: request.Principal.TenantID(), EventID: durable.eventID, RequestID: requestID, TraceID: traceID,
+			TenantID: metadata.principal.TenantID(), EventID: durable.eventID, RequestID: metadata.requestID, TraceID: metadata.traceID,
 			Attachments: dispatcher.attachmentStore, Replies: mediaReplies,
-			Audit: audit.Recorder{Writer: dispatcher.auditWriter, TenantID: request.Principal.TenantID()},
+			Audit: audit.Recorder{Writer: dispatcher.auditWriter, TenantID: metadata.principal.TenantID()},
 		})
 	}
 	runnerEvents, err := dispatcher.executor.Execute(runnerCtx, execution.Request{
-		Plan: plan, Identity: identity, Message: userMessage, RequestID: requestID, TraceID: traceID,
+		Plan: plan, Identity: identity, Message: userMessage, RequestID: metadata.requestID, TraceID: metadata.traceID,
 	})
 	if err != nil {
 		executionErr := err
@@ -421,14 +489,11 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		}
 		if auditErr := dispatcher.writeExecutionAudit(context.Background(), metadata, eventType, errorType); auditErr != nil {
 			dispatcher.failDurable(durable, auditErr)
-			finishWithError(auditErr)
 			return nil, auditWriteFailure()
 		}
 		if IsContextCancellation(err) {
-			finishWithError(err)
 			return nil, err
 		}
-		finishWithError(executionErr)
 		return nil, executionErr
 	}
 

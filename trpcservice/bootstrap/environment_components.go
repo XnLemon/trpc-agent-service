@@ -22,6 +22,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	modelruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/model"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
@@ -214,48 +215,79 @@ func environmentRegistriesForStores(config environmentConfig, delegateSessions s
 	secretRegistry := modelruntime.NewSecretRegistry()
 	modelRegistry := modelruntime.NewModelProviderRegistry()
 	backendRegistry := storagefactory.NewProviderRegistry()
-	runtimeProviders, err := environmentRuntimeProviders(config, runtimeStores)
+	materializer, err := newEnvironmentTenantMaterializer(config, delegateSessions, runtimeStores, secretRegistry, modelRegistry, backendRegistry)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	for _, identity := range config.apiIdentities {
-		if config.demoMode {
-			if err := modelRegistry.Register(identity.TenantID, demoModelProvider, environmentModelFactory{}); err != nil {
-				return nil, nil, nil, err
-			}
-			if err := registerEnvironmentRuntimeProviders(backendRegistry, identity.TenantID, delegateSessions, config, runtimeProviders); err != nil {
-				return nil, nil, nil, err
-			}
-			continue
-		}
-		modelAPIKey := config.modelAPIKey
-		if len(config.modelAPIKeys) != 0 {
-			modelAPIKey = config.modelAPIKeys[identity.TenantID]
-		}
-		if modelAPIKey == "" {
-			return nil, nil, nil, ErrInvalidConfig
-		}
-		if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.secretRef}, modelAPIKey); err != nil {
-			return nil, nil, nil, err
-		}
-		if err := modelRegistry.Register(identity.TenantID, config.modelProvider, environmentModelFactory{}); err != nil {
-			return nil, nil, nil, err
-		}
-		if config.runtimeStorage == "redis" && config.redis.Password != "" {
-			if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.redisSecretRef}, config.redis.Password); err != nil {
-				return nil, nil, nil, err
-			}
-		}
-		if config.s3AccessKeyID != "" {
-			if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.s3SecretRef}, config.s3AccessKeyID+":"+config.s3SecretKey); err != nil {
-				return nil, nil, nil, err
-			}
-		}
-		if err := registerEnvironmentRuntimeProviders(backendRegistry, identity.TenantID, delegateSessions, config, runtimeProviders); err != nil {
+		if err := materializer(context.Background(), identity.TenantID); err != nil {
 			return nil, nil, nil, err
 		}
 	}
 	return secretRegistry, modelRegistry, backendRegistry, nil
+}
+
+func newEnvironmentTenantMaterializer(
+	config environmentConfig,
+	delegateSessions session.Service,
+	runtimeStores environmentRuntimeStores,
+	secretRegistry *modelruntime.SecretRegistry,
+	modelRegistry *modelruntime.ModelProviderRegistry,
+	backendRegistry *storagefactory.ProviderRegistry,
+) (runtime.TenantRuntimeMaterializer, error) {
+	runtimeProviders, err := environmentRuntimeProviders(config, runtimeStores)
+	if err != nil {
+		return nil, err
+	}
+	if secretRegistry == nil || modelRegistry == nil || backendRegistry == nil {
+		return nil, ErrInvalidConfig
+	}
+	return func(ctx context.Context, tenantID string) error {
+		if ctx == nil || tenantID == "" {
+			return ErrInvalidConfig
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if config.demoMode {
+			if err := modelRegistry.Register(tenantID, demoModelProvider, environmentModelFactory{}); err != nil {
+				return err
+			}
+			return registerEnvironmentRuntimeProviders(backendRegistry, tenantID, delegateSessions, config, runtimeProviders)
+		}
+		modelAPIKey := config.modelAPIKey
+		if mapped, ok := config.modelAPIKeys[tenantID]; ok {
+			modelAPIKey = mapped
+		}
+		if modelAPIKey == "" {
+			return ErrInvalidConfig
+		}
+		if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: tenantID, SecretRef: config.secretRef}, modelAPIKey); err != nil {
+			return err
+		}
+		if err := modelRegistry.Register(tenantID, config.modelProvider, environmentModelFactory{}); err != nil {
+			return err
+		}
+		if config.runtimeStorage == "redis" && config.redis.Password != "" {
+			if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: tenantID, SecretRef: config.redisSecretRef}, config.redis.Password); err != nil {
+				return err
+			}
+		}
+		if config.s3AccessKeyID != "" {
+			if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: tenantID, SecretRef: config.s3SecretRef}, config.s3AccessKeyID+":"+config.s3SecretKey); err != nil {
+				return err
+			}
+		}
+		return registerEnvironmentRuntimeProviders(backendRegistry, tenantID, delegateSessions, config, runtimeProviders)
+	}, nil
+}
+
+func environmentTenantRuntimeForStores(config environmentConfig, delegateSessions session.Service, runtimeStores environmentRuntimeStores, secretRegistry *modelruntime.SecretRegistry, modelRegistry *modelruntime.ModelProviderRegistry, backendRegistry *storagefactory.ProviderRegistry) (*runtime.TenantRuntimeRegistry, error) {
+	materializer, err := newEnvironmentTenantMaterializer(config, delegateSessions, runtimeStores, secretRegistry, modelRegistry, backendRegistry)
+	if err != nil {
+		return nil, err
+	}
+	return runtime.NewTenantRuntimeRegistry(materializer)
 }
 
 func environmentRuntimeProviders(config environmentConfig, stores environmentRuntimeStores) ([]environmentRuntimeProviderSpec, error) {

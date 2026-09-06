@@ -355,9 +355,16 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 			result <- buildErr
 			return
 		}
-		stream, dispatchErr := h.dispatcher.Dispatch(executionCtx, gateway.DispatchRequest{Accepted: accepted, Principal: state.principal, RequestID: requestID, TraceID: traceID, Message: inbound})
-		if dispatchErr == nil && stream != nil {
-			for range stream {
+		request := gateway.DispatchRequest{Accepted: accepted, Principal: state.principal, RequestID: requestID, TraceID: traceID, Message: inbound}
+		var dispatchErr error
+		if asynchronous, ok := h.dispatcher.(gateway.AsyncDispatchService); ok && gateway.AsyncDispatchReady(asynchronous) {
+			_, dispatchErr = asynchronous.Enqueue(executionCtx, request)
+		} else {
+			stream, synchronousErr := h.dispatcher.Dispatch(executionCtx, request)
+			dispatchErr = synchronousErr
+			if dispatchErr == nil && stream != nil {
+				for range stream {
+				}
 			}
 		}
 		result <- dispatchErr

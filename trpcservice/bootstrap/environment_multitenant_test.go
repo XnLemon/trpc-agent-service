@@ -12,6 +12,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	modelruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/model"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
@@ -177,6 +178,40 @@ func TestEnvironmentRegistriesRejectMissingTenantModelKey(t *testing.T) {
 	}, delegate, store)
 	if !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("missing tenant model key = %v", err)
+	}
+}
+
+func TestEnvironmentTenantRuntimeMaterializesNewDemoTenantOnDemand(t *testing.T) {
+	const tenantID = "t_00000000000000000000000002"
+	delegate := inmemory.NewSessionService()
+	store := runtimestorageinmemory.New()
+	t.Cleanup(func() {
+		_ = delegate.Close()
+		_ = store.Close()
+	})
+	config := environmentConfig{demoMode: true, modelProvider: demoModelProvider, modelNames: []string{demoModelName}, runtimeStorage: "inmemory"}
+	secretRegistry := modelruntime.NewSecretRegistry()
+	modelRegistry := modelruntime.NewModelProviderRegistry()
+	backendRegistry := storagefactory.NewProviderRegistry()
+	tenantRuntime, err := environmentTenantRuntimeForStores(config, delegate, environmentRuntimeStores{
+		primary: store, providers: map[string]environmentStorage{"inmemory": store},
+	}, secretRegistry, modelRegistry, backendRegistry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tenantRuntime.Close() })
+	if err := tenantRuntime.Ensure(context.Background(), tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := modelRegistry.New(context.Background(), modelprofile.ModelFactoryInput{TenantID: tenantID, Provider: demoModelProvider, Model: demoModelName}, modelprofile.SecretValue{}); err != nil {
+		t.Fatalf("new tenant model provider = %v", err)
+	}
+	if _, err := backendRegistry.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: tenantID}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "inmemory"}); err != nil {
+		t.Fatalf("new tenant session provider = %v", err)
+	}
+	tenantRuntime.InvalidateTenant(tenantID)
+	if err := tenantRuntime.Ensure(context.Background(), tenantID); err != nil {
+		t.Fatalf("re-materialize new tenant after invalidation = %v", err)
 	}
 }
 

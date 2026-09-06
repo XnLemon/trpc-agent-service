@@ -51,6 +51,7 @@ import (
 	tenantmysql "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/mysql"
 	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
+	"github.com/google/uuid"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
@@ -132,9 +133,19 @@ type Config struct {
 	OutboxWorkerFactory func([]channels.PollingAdapter) (*outbox.Worker, error)
 	OutboxPollInterval  time.Duration
 	// ExecutionQueue is an optional generic durable execution worker. The
-	// caller constructs its task handler; Bootstrap only owns its lifecycle and
-	// closes it before the Runner Registry.
+	// caller may inject a fully configured worker. When ExecutionQueueStore is
+	// supplied without a worker, Bootstrap constructs the Agent execution
+	// handler and owns the worker lifecycle.
 	ExecutionQueue *runtimequeue.Worker
+	// ExecutionQueueStore is the durable task capability used by Gateway
+	// enqueue and by the Bootstrap-created worker. Bootstrap closes this store
+	// after the worker stops.
+	ExecutionQueueStore         runtimequeue.Store
+	ExecutionQueuePollInterval  time.Duration
+	ExecutionQueueLeaseDuration time.Duration
+	// TenantRuntime materializes tenant-scoped providers on first use. It is
+	// optional for explicitly assembled synchronous/test graphs.
+	TenantRuntime runtime.TenantRuntime
 	// AuditWriter receives execution and configured channel delivery facts.
 	AuditWriter        audit.Writer
 	Authenticator      gateway.APIAuthenticator
@@ -162,17 +173,18 @@ type Config struct {
 // before the HTTP server is drained; Close then closes the Runner Registry and
 // only after that resources explicitly owned by this graph.
 type Runtime struct {
-	Handler        *gateway.HTTPHandler
-	Resolver       *gateway.PlanResolver
-	Registry       *runtimerunner.RunnerRegistry
-	Dispatcher     *gateway.Dispatcher
-	OutboxWorker   *outbox.Worker
-	ExecutionQueue *runtimequeue.Worker
-	wecomLifecycle callbackLifecycle
-	wecomHandler   http.Handler
-	wecomAIBots    []channels.PollingAdapter
-	aiBotDone      []chan struct{}
-	aiBotCancel    context.CancelFunc
+	Handler             *gateway.HTTPHandler
+	Resolver            *gateway.PlanResolver
+	Registry            *runtimerunner.RunnerRegistry
+	Dispatcher          *gateway.Dispatcher
+	OutboxWorker        *outbox.Worker
+	ExecutionQueue      *runtimequeue.Worker
+	executionQueueStore runtimequeue.Store
+	wecomLifecycle      callbackLifecycle
+	wecomHandler        http.Handler
+	wecomAIBots         []channels.PollingAdapter
+	aiBotDone           []chan struct{}
+	aiBotCancel         context.CancelFunc
 
 	db               *sql.DB
 	ownDB            bool
@@ -405,11 +417,18 @@ func prepareRuntimeConfig(config *Config) error {
 }
 
 func newRuntimeGraph(config Config) (*Runtime, error) {
+	closeExecutionQueueStore := func() {
+		if config.ExecutionQueueStore != nil {
+			_ = config.ExecutionQueueStore.Close()
+		}
+	}
 	resolver, err := gateway.NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: config.Tenants, Apps: config.Apps, Models: config.Models, Backends: config.Backends,
 		ModelCatalog: config.ModelCatalog, BackendCatalog: config.BackendCatalog,
+		TenantRuntime: config.TenantRuntime,
 	})
 	if err != nil {
+		closeExecutionQueueStore()
 		return nil, ErrInvalidConfig
 	}
 	registry, err := agentrunnerfactory.NewRuntimeRunnerRegistry(agentrunnerfactory.Config{
@@ -418,10 +437,13 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 		Observability: config.Observability, ToolRegistry: config.ToolRegistry,
 	})
 	if err != nil {
+		closeExecutionQueueStore()
 		return nil, ErrInvalidConfig
 	}
 	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{
 		Resolver: resolver, Registry: registry,
+		ExecutionQueue: config.ExecutionQueueStore,
+		Channels:       config.Channels, Tenants: config.Tenants, Apps: config.Apps,
 		SessionStore: config.SessionStore,
 		MessageStore: config.MessageStore, ReplyBatchStore: config.ReplyBatchStore,
 		Attachments: config.Attachments, AttachmentStore: config.AttachmentStore,
@@ -429,11 +451,31 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	})
 	if err != nil {
 		_ = registry.Close()
+		closeExecutionQueueStore()
 		return nil, ErrInvalidConfig
+	}
+	executionQueue := config.ExecutionQueue
+	if executionQueue == nil && config.ExecutionQueueStore != nil {
+		leaseDuration := config.ExecutionQueueLeaseDuration
+		if leaseDuration <= 0 {
+			leaseDuration = 2 * time.Hour
+		}
+		worker, workerErr := runtimequeue.New(runtimequeue.Config{
+			Store: config.ExecutionQueueStore, Handler: dispatcher.HandleExecutionTask,
+			Owner: "execution-worker-" + uuid.NewString(), LeaseDuration: leaseDuration,
+			PollInterval: config.ExecutionQueuePollInterval,
+		})
+		if workerErr != nil {
+			_ = registry.Close()
+			closeExecutionQueueStore()
+			return nil, ErrInvalidConfig
+		}
+		executionQueue = worker
 	}
 	aiBots, err := configureRuntimeChannels(&config, dispatcher)
 	if err != nil {
 		_ = registry.Close()
+		closeExecutionQueueStore()
 		return nil, ErrInvalidConfig
 	}
 	readyGate := config.ReadyGate
@@ -447,9 +489,9 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	runtimeGraph := &Runtime{
 		Resolver: resolver, Registry: registry, Dispatcher: dispatcher,
 		OutboxWorker:   config.OutboxWorker,
-		ExecutionQueue: config.ExecutionQueue,
-		wecomHandler:   config.WeComHandler,
-		db:             config.DB, ownDB: config.OwnDB, readyGate: readyGate,
+		ExecutionQueue: executionQueue, executionQueueStore: config.ExecutionQueueStore,
+		wecomHandler: config.WeComHandler,
+		db:           config.DB, ownDB: config.OwnDB, readyGate: readyGate,
 		ping: ping, verifyMigrations: config.VerifyMigrations, closeDeps: config.CloseDependencies,
 		telemetry:   config.Observability,
 		wecomAIBots: aiBots,
@@ -568,7 +610,7 @@ func configureAdmin(config *Config, registry *runtimerunner.RunnerRegistry) erro
 		Authenticator: config.AdminAuthenticator,
 		ModelCatalog:  config.ModelCatalog, BackendCatalog: config.BackendCatalog,
 		CacheInvalidator: admin.CacheInvalidatorFunc(func(change admin.CacheInvalidation) {
-			invalidateRuntimeCache(registry, change)
+			invalidateRuntimeCache(registry, config.TenantRuntime, change)
 		}),
 	})
 	if err != nil {
@@ -581,7 +623,7 @@ func configureAdmin(config *Config, registry *runtimerunner.RunnerRegistry) erro
 	return nil
 }
 
-func invalidateRuntimeCache(registry *runtimerunner.RunnerRegistry, change admin.CacheInvalidation) {
+func invalidateRuntimeCache(registry *runtimerunner.RunnerRegistry, tenantRuntime runtime.TenantRuntime, change admin.CacheInvalidation) {
 	// A closed registry cannot admit a future execution. Other errors are
 	// impossible for Admin-derived non-empty IDs, so a committed control-
 	// plane mutation remains successful during shutdown.
@@ -597,6 +639,9 @@ func invalidateRuntimeCache(registry *runtimerunner.RunnerRegistry, change admin
 	case admin.CacheInvalidationBinding:
 		// Bindings are resolved and verified on every channel request. They
 		// do not key a Runner or provider cache in this process.
+	}
+	if invalidator, ok := tenantRuntime.(runtime.TenantRuntimeInvalidator); ok {
+		invalidator.InvalidateTenant(change.TenantID)
 	}
 }
 
@@ -714,6 +759,9 @@ func (graph *Runtime) Close() error {
 		}
 		if graph.ExecutionQueue != nil {
 			closeErr = errors.Join(closeErr, graph.ExecutionQueue.Close())
+		}
+		if graph.executionQueueStore != nil {
+			closeErr = errors.Join(closeErr, graph.executionQueueStore.Close())
 		}
 		if graph.Registry != nil {
 			closeErr = errors.Join(closeErr, graph.Registry.Close())
