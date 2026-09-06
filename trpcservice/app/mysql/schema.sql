@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS agent_app_revision (
     CONSTRAINT agent_revision_app_fk FOREIGN KEY (tenant_id, app_id) REFERENCES agent_app (tenant_id, app_id),
     CONSTRAINT agent_revision_model_fk FOREIGN KEY (tenant_id, model_profile_id) REFERENCES model_profile (tenant_id, profile_id),
     CONSTRAINT agent_revision_state_ck CHECK (state IN ('draft', 'published')),
-    CONSTRAINT agent_revision_kind_ck CHECK (agent_kind = 'llm'),
+    CONSTRAINT agent_revision_kind_ck CHECK (agent_kind IN ('llm', 'chain')),
     CONSTRAINT agent_revision_schema_ck CHECK (schema_version = 1),
     CONSTRAINT agent_revision_version_ck CHECK (draft_version >= 1),
     CONSTRAINT agent_revision_digest_ck CHECK ((state = 'draft' AND content_digest IS NULL AND published_at IS NULL) OR (state = 'published' AND content_digest IS NOT NULL AND published_at IS NOT NULL))
@@ -81,4 +81,3 @@ CREATE TABLE IF NOT EXISTS agent_app_change_outbox (
     CONSTRAINT agent_app_event_fk FOREIGN KEY (tenant_id, app_id) REFERENCES agent_app (tenant_id, app_id),
     CONSTRAINT agent_app_event_version_ck CHECK (next_version = previous_version + 1)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
-

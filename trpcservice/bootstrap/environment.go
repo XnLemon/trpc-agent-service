@@ -24,6 +24,7 @@ import (
 	modelprofilemysql "github.com/XnLemon/trpc-agent-service/trpcservice/model/mysql"
 	modelprofilepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	runtimebudgetpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimequeuepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue/postgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -161,6 +162,7 @@ func postgresEnvironmentSchemaModules() []sharedschema.Module {
 		runtimestoragepostgres.SchemaModule(),
 		runtimequeuepostgres.SchemaModule(),
 		auditpostgres.SchemaModule(),
+		runtimebudgetpostgres.SchemaModule(),
 	}
 }
 

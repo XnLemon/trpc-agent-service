@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS public.agent_app_revision (
     state              TEXT NOT NULL DEFAULT 'draft'
                        CHECK (state IN ('draft', 'published')),
     draft_version      BIGINT NOT NULL DEFAULT 1 CHECK (draft_version >= 1),
-    agent_kind         TEXT NOT NULL CHECK (agent_kind = 'llm'),
+    agent_kind         TEXT NOT NULL CHECK (agent_kind IN ('llm', 'chain')),
     schema_version     INT NOT NULL DEFAULT 1 CHECK (schema_version = 1),
     description        TEXT NOT NULL DEFAULT ''
                        CHECK (description = public.trim_control_plane_text(description)

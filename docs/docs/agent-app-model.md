@@ -4,6 +4,10 @@
 > 发布与回滚语义，以及供 Agent Factory 消费的一次执行快照。实现跟踪见
 > [Issue #17](https://github.com/XnLemon/trpc-agent-service/issues/17)。
 
+> 当前实现状态：schema v1 已支持 `llm` 和顺序 `chain` 两种 Agent kind；
+> `trpcservice/agent/factory.go` 通过 `kind + schema_version` 注册并构造对应 Agent。
+> Graph、Parallel、Cycle、租户级 Skill/MCP/Plugin/Guardrail 注册仍未实现。
+
 ## 目标与边界
 
 Agent App 是租户创建、发布和路由 Agent 的控制面对象。它必须同时解决两类问题：
@@ -35,11 +39,13 @@ App 根实体使用乐观锁 `version`；Revision 使用 App 内单调递增的 
 发布后的 Revision 永久不可修改。更新配置必须维护草稿，再发布为新的 Revision。回滚不覆盖
 内容，只把 `current_revision` 切换到一个历史已发布 Revision。
 
-### 第一阶段只执行 LLMAgent
+### 第一阶段支持 LLMAgent 与顺序 Chain
 
-模型保留 `agent_kind` 和 `schema_version`，但第一阶段只接受 `agent_kind = 'llm'`。
-Graph、Chain、Parallel 和 Cycle 的结构与拓扑校验应在各自设计完成后显式扩展，不能先接受
-任意 kind 或把未验证配置直接交给框架。
+模型保留 `agent_kind` 和 `schema_version`。schema v1 接受 `agent_kind = 'llm'` 和
+`agent_kind = 'chain'`：Chain 由 2–32 个有序、命名且经过校验的 LLMAgent step 组成，
+每个 step 继承父 Revision 的模型、工具 allowlist、generation 和 runtime policy。
+Graph、Parallel 和 Cycle 的结构与拓扑校验应在各自设计完成后显式扩展，不能先接受任意
+kind 或把未验证配置直接交给框架。
 
 ### 引用能力，不持有运行时对象
 
@@ -102,7 +108,7 @@ CREATE TABLE agent_app_revision (
     state           TEXT NOT NULL DEFAULT 'draft'
                     CHECK (state IN ('draft', 'published')),
     draft_version   BIGINT NOT NULL DEFAULT 1 CHECK (draft_version >= 1),
-    agent_kind      TEXT NOT NULL CHECK (agent_kind = 'llm'),
+    agent_kind      TEXT NOT NULL CHECK (agent_kind IN ('llm', 'chain')),
     schema_version  INT NOT NULL DEFAULT 1 CHECK (schema_version = 1),
 
     description        TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 2000),
@@ -304,7 +310,7 @@ Tenant 与 App 是连续的两道门禁：只有两者都 active 才能创建新
 任一步失败都必须回滚，旧 `current_revision` 继续提供服务。
 
 摘要使用 SHA-256 小写十六进制，输入为确定性序列化后的 agent kind、schema version、
-Prompt、模型引用、排序后的工具授权、generation config 和 runtime policy。摘要不包含时间、
+Prompt、模型引用、排序后的工具授权、generation config、runtime policy 和 Chain steps。摘要不包含时间、
 actor 或 draft version。Map key、集合顺序和空值语义必须规范化。摘要用于缓存和审计，不是
 签名或授权凭据。
 
@@ -346,6 +352,7 @@ trpcservice/agent/
 ├── revision.go       # 草稿、发布版本及摘要
 ├── repository.go     # 控制面 Repository 契约
 ├── execution.go      # 执行快照和 Factory 输入边界
+├── factory.go        # 按 kind + schema version 构造 Agent
 └── inmemory/
     └── inmemory.go   # 单进程开发/测试实现
 ```
@@ -381,7 +388,7 @@ type Repository interface {
 ## 执行快照与 Agent Factory
 
 `AgentExecutionSnapshot` 是一次 Worker 执行的不可变输入，至少包含 Tenant ID/version、
-App ID/key/version、固定 Revision/content digest、LLMAgent 无密钥配置及依赖引用。
+App ID/key/version、固定 Revision/content digest、无密钥 Agent 定义及依赖引用。
 
 快照构造器连续验证：
 
@@ -397,16 +404,18 @@ App ID/key/version、固定 Revision/content digest、LLMAgent 无密钥配置�
 
 | Revision 配置 | tRPC-Agent-Go 边界 |
 | --- | --- |
-| App key / 展示元数据 | LLMAgent name 与 description；稳定运行身份仍使用 App ID |
-| instruction / global instruction | LLMAgent Instruction / GlobalInstruction |
+| App key / 展示元数据 | LLMAgent 或 Chain name 与 description；稳定运行身份仍使用 App ID |
+| instruction / global instruction | LLMAgent 的 Instruction / GlobalInstruction；Chain 为父级运行说明 |
+| chain steps | `chainagent.New` 的有序 LLMAgent 子 Agent |
 | model profile ref | 同租户 Model Registry 解析为 `model.Model` |
 | tool allowlist | 同租户 Tool Registry 解析为 `tool.Tool` / `tool.ToolSet` |
 | generation config | `model.GenerationConfig` 的受支持字段 |
 | runtime policy | Tool 并行、并发、循环和有界执行选项 |
 | tenant/app/revision/digest | Factory 缓存键及 OTel attributes |
 
-Factory 复用 tRPC-Agent-Go 的 LLMAgent、Agent、Runner、Tool、Session 和 Memory。平台层只负责
-租户授权、配置解析、依赖注入、缓存和审计，不复制框架执行循环。
+Factory 复用 tRPC-Agent-Go 的 LLMAgent、Chain、Agent、Runner、Tool、Session 和 Memory。
+平台层只负责租户授权、配置解析、依赖注入、缓存和审计，不复制框架执行循环；未知的
+`kind + schema_version` 不会回退到 LLMAgent。
 
 Factory 缓存键至少包含：
 

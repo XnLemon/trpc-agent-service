@@ -13,6 +13,7 @@ import (
 	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
 	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
+	runtimebudgetpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget/postgres"
 	runtimequeuepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue/postgres"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	commonpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/schema/postgres"
@@ -49,7 +50,7 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 	for _, schemaSQL := range []string{
 		commonpostgres.SchemaSQL, tenantpostgres.SchemaSQL, modelpostgres.SchemaSQL,
 		apppostgres.SchemaSQL, backendpostgres.SchemaSQL, channelpostgres.SchemaSQL,
-		runtimestoragepostgres.SchemaSQL, runtimequeuepostgres.SchemaSQL, auditpostgres.SchemaSQL,
+		runtimestoragepostgres.SchemaSQL, runtimequeuepostgres.SchemaSQL, auditpostgres.SchemaSQL, runtimebudgetpostgres.SchemaSQL,
 	} {
 		if _, err := conn.Exec(ctx, schemaSQL); err != nil {
 			t.Fatalf("initialize package-owned schema: %v", err)
@@ -78,6 +79,7 @@ func TestPostgreSQLControlPlaneMigration(t *testing.T) {
 		"0014_wecom_aibot_channel.up.sql",
 		"0015_runtime_attachments.up.sql",
 		"0016_runtime_reply_media.up.sql",
+		"0017_agent_chain.up.sql",
 	} {
 		path := filepath.Join(migrationDir, name)
 		contents, err := os.ReadFile(path) // #nosec G304 -- names are fixed migration files under the repository root.

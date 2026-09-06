@@ -10,6 +10,7 @@ import (
 	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
 	modelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/model/mysql"
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
+	runtimebudgetpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget/postgres"
 	runtimequeuepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue/postgres"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	sharedschema "github.com/XnLemon/trpc-agent-service/trpcservice/schema"
@@ -22,7 +23,7 @@ func allPostgresSchemaModules() []sharedschema.Module {
 	return []sharedschema.Module{
 		commonpostgres.SchemaModule(), tenantpostgres.SchemaModule(), modelpostgres.SchemaModule(),
 		apppostgres.SchemaModule(), backendpostgres.SchemaModule(), channelpostgres.SchemaModule(),
-		runtimestoragepostgres.SchemaModule(), runtimequeuepostgres.SchemaModule(), auditpostgres.SchemaModule(),
+		runtimestoragepostgres.SchemaModule(), runtimequeuepostgres.SchemaModule(), auditpostgres.SchemaModule(), runtimebudgetpostgres.SchemaModule(),
 	}
 }
 

@@ -3,6 +3,9 @@
 > 本页记录 Issue #48 的通用 RuntimeStore 契约，以及 Issue #108 的 Redis 实现边界。
 > 代码、测试和部署示例只把已经验证的能力标为已实现；未覆盖的外部后端仍属于后续工作。
 
+> 状态补充：预算账本现由 `trpcservice/runtime/budget` 独立持有，PostgreSQL 实现支持执行前
+> 原子预占、执行后结算、失败释放和幂等重试；它不属于 Session/Reply RuntimeStore 的事务接口。
+
 ## 目标与非目标
 
 PostgreSQL 仍是控制面和默认运行时事实源；Redis 是可选的共享运行时后端。每个操作都必须显式带 `tenant_id`；
@@ -12,7 +15,8 @@ Session/Runner 使用的命名空间只用于防碰撞，不能替代数据库�
 - `message_event` 入站幂等事实、事件序号和执行状态；
 - `reply_outbox` 分段回复、租约/fencing、重试和供应商回执。
 
-Issue #48 不实现 Memory/Knowledge/Artifact 的其他生产适配、AuditEvent/usage/cost、
+Issue #48 不实现 Memory/Knowledge/Artifact 的其他生产适配、AuditEvent/usage/cost 的通用存储（预算账本另由
+`runtime/budget` 提供）、
 完整 IM webhook/media、分布式调度、KMS/Vault 或告警平台。API principal 继续由
 Gateway HTTP 层的进程内幂等存储保护；跨进程 durable inbound claim 只在已验证
 Channel principal 上启用，因为 `message_event.binding_id` 必须引用真实的控制面 Binding。
