@@ -360,6 +360,12 @@ func TestServiceHistoryAndDurableAppendErrorBranches(t *testing.T) {
 		t.Fatalf("invalid history = %v", err)
 	}
 	store.history = nil
+	if err := service.AppendEvent(context.Background(), created, &trpcevent.Event{
+		ID:         "invalid-json",
+		Extensions: map[string]json.RawMessage{"invalid": []byte("{")},
+	}); !errors.Is(err, runtimestorage.ErrInvalid) {
+		t.Fatalf("invalid event JSON = %v", err)
+	}
 	if err := service.AppendEvent(context.Background(), created, &trpcevent.Event{}); !errors.Is(err, runtimestorage.ErrInvalid) {
 		t.Fatalf("empty event ID = %v", err)
 	}

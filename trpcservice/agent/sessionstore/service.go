@@ -12,7 +12,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
-	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 )
@@ -20,8 +20,8 @@ import (
 // Persistence is the storage capability required by the session adapter. It
 // intentionally excludes inbound message and reply delivery concerns.
 type Persistence interface {
-	runtimestorage.SessionStateStore
-	runtimestorage.EventHistoryStore
+	sessionstorage.SessionStateStore
+	sessionstorage.EventHistoryStore
 }
 
 type sessionPersistence = Persistence
@@ -50,8 +50,8 @@ func New(tenantID string, delegate session.Service, store Persistence) (*Service
 // actual persistence operation latency under the supplied provider. The
 // optional backend name is normalized to the bounded metric provider bucket.
 func NewWithObservability(tenantID string, delegate session.Service, store Persistence, telemetry observability.Provider, backendName ...string) (*Service, error) {
-	if runtimestorage.ValidateTenant(tenantID) != nil || delegate == nil || store == nil {
-		return nil, runtimestorage.ErrInvalid
+	if sessionstorage.ValidateTenant(tenantID) != nil || delegate == nil || store == nil {
+		return nil, sessionstorage.ErrInvalid
 	}
 	if telemetry == nil {
 		telemetry = observability.NewNoopProvider()
@@ -72,9 +72,9 @@ func (s *Service) CreateSession(ctx context.Context, key session.Key, state sess
 	if err != nil {
 		return nil, err
 	}
-	if _, err := observeStore(s, ctx, func(operationCtx context.Context) (runtimestorage.Session, error) {
+	if _, err := observeStore(s, ctx, func(operationCtx context.Context) (sessionstorage.Session, error) {
 		return s.store.CreateSession(operationCtx, s.tenantID, key.SessionID, stateToAny(created.State))
-	}); err != nil && !errors.Is(err, runtimestorage.ErrDuplicate) {
+	}); err != nil && !errors.Is(err, sessionstorage.ErrDuplicate) {
 		_ = s.delegate.DeleteSession(ctx, key)
 		return nil, err
 	}
@@ -87,11 +87,11 @@ func (s *Service) GetSession(ctx context.Context, key session.Key, options ...se
 	if err := validateKey(key); err != nil {
 		return nil, err
 	}
-	persisted, storeErr := observeStore(s, ctx, func(operationCtx context.Context) (runtimestorage.Session, error) {
+	persisted, storeErr := observeStore(s, ctx, func(operationCtx context.Context) (sessionstorage.Session, error) {
 		return s.store.GetSession(operationCtx, s.tenantID, key.SessionID)
 	})
 	if storeErr != nil {
-		if errors.Is(storeErr, runtimestorage.ErrNotFound) {
+		if errors.Is(storeErr, sessionstorage.ErrNotFound) {
 			return s.delegate.GetSession(ctx, key, options...)
 		}
 		return nil, storeErr
@@ -126,7 +126,7 @@ func (s *Service) GetSession(ctx context.Context, key session.Key, options ...se
 }
 
 func (s *Service) restoreHistory(ctx context.Context, value *session.Session, sessionID string, options ...session.Option) error {
-	history, err := observeStore(s, ctx, func(operationCtx context.Context) ([]runtimestorage.EventPayload, error) {
+	history, err := observeStore(s, ctx, func(operationCtx context.Context) ([]sessionstorage.EventPayload, error) {
 		return s.store.ListEventPayloads(operationCtx, s.tenantID, sessionID)
 	})
 	if err != nil {
@@ -142,7 +142,7 @@ func (s *Service) restoreHistory(ctx context.Context, value *session.Session, se
 		}
 		var historical trpcevent.Event
 		if err := json.Unmarshal(item.Payload, &historical); err != nil {
-			return runtimestorage.ErrStorage
+			return sessionstorage.ErrStorage
 		}
 		if err := s.delegate.AppendEvent(ctx, value, &historical, options...); err != nil {
 			return err
@@ -156,13 +156,13 @@ func (s *Service) UpdateSessionState(ctx context.Context, key session.Key, state
 	if err := validateKey(key); err != nil {
 		return err
 	}
-	persisted, err := observeStore(s, ctx, func(operationCtx context.Context) (runtimestorage.Session, error) {
+	persisted, err := observeStore(s, ctx, func(operationCtx context.Context) (sessionstorage.Session, error) {
 		return s.store.GetSession(operationCtx, s.tenantID, key.SessionID)
 	})
 	if err != nil {
 		return err
 	}
-	updated, err := observeStore(s, ctx, func(operationCtx context.Context) (runtimestorage.Session, error) {
+	updated, err := observeStore(s, ctx, func(operationCtx context.Context) (sessionstorage.Session, error) {
 		return s.store.UpdateSessionState(operationCtx, s.tenantID, key.SessionID, persisted.Version, stateToAny(state))
 	})
 	if err != nil {
@@ -178,17 +178,17 @@ func (s *Service) AppendEvent(ctx context.Context, sess *session.Session, value 
 		return session.ErrNilSession
 	}
 	if value.ID == "" {
-		return runtimestorage.ErrInvalid
+		return sessionstorage.ErrInvalid
 	}
 	payload, err := json.Marshal(value)
 	if err != nil {
-		return runtimestorage.ErrInvalid
+		return sessionstorage.ErrInvalid
 	}
 	// Inbound message_event rows are created by the trusted Channel/Gateway
 	// boundary, where binding_id and external_message_id are available. Runner
 	// event history is a separate session-scoped immutable log.
-	if _, err := observeStore(s, ctx, func(operationCtx context.Context) (runtimestorage.EventPayload, error) {
-		return s.store.AppendEventPayload(operationCtx, runtimestorage.EventPayload{
+	if _, err := observeStore(s, ctx, func(operationCtx context.Context) (sessionstorage.EventPayload, error) {
+		return s.store.AppendEventPayload(operationCtx, sessionstorage.EventPayload{
 			TenantID: s.tenantID, SessionID: sess.ID, EventID: value.ID, Payload: payload,
 		})
 	}); err != nil {
@@ -215,7 +215,7 @@ func (s *Service) DeleteSession(ctx context.Context, key session.Key, options ..
 	}
 	if err := observeStoreError(s, ctx, func(operationCtx context.Context) error {
 		return s.store.DeleteSession(operationCtx, s.tenantID, key.SessionID)
-	}); err != nil && !errors.Is(err, runtimestorage.ErrNotFound) {
+	}); err != nil && !errors.Is(err, sessionstorage.ErrNotFound) {
 		return err
 	}
 	if err := s.delegate.DeleteSession(ctx, key, options...); err != nil {
@@ -301,7 +301,7 @@ func validateKey(key session.Key) error {
 func observeStore[T any](service *Service, ctx context.Context, operation func(context.Context) (T, error)) (T, error) {
 	var zero T
 	if service == nil || operation == nil {
-		return zero, runtimestorage.ErrInvalid
+		return zero, sessionstorage.ErrInvalid
 	}
 	started := time.Now()
 	operationCtx, _, finish := observability.StartOperation(ctx, service.telemetry, observability.OperationStorageOperation, "storage")

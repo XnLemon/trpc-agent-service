@@ -145,6 +145,201 @@ func TestMigrationValidationBoundaries(t *testing.T) {
 	}
 }
 
+func TestMigrationPhaseStateSurvivesToolRecreation(t *testing.T) {
+	ctx := context.Background()
+	source, destination, router := NewMemorySource(), NewMemoryDestination(), NewMemoryRouter()
+	if err := source.Put("tenant-a", Record{Kind: "session", Key: "s1", Payload: []byte("state")}); err != nil {
+		t.Fatal(err)
+	}
+	state := NewMemoryStateStore()
+	first, err := NewToolWithStateStore(source, destination, router, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Begin(ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Copy(ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.CatchUp(ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := NewToolWithStateStore(source, destination, router, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Cutover(ctx, "tenant-a"); err != nil {
+		t.Fatalf("cutover after tool recreation = %v", err)
+	}
+	if _, err := second.Rollback(ctx, "tenant-a"); err != nil {
+		t.Fatalf("rollback after tool recreation = %v", err)
+	}
+}
+
+func TestMigrationStateFailureRestoresRoute(t *testing.T) {
+	ctx := context.Background()
+	source, destination, router := NewMemorySource(), NewMemoryDestination(), NewMemoryRouter()
+	if err := source.Put("tenant-a", Record{Kind: "session", Key: "s1", Payload: []byte("state")}); err != nil {
+		t.Fatal(err)
+	}
+	state := &failingStateStore{delegate: NewMemoryStateStore(), err: errors.New("state unavailable")}
+	tool, err := NewToolWithStateStore(source, destination, router, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Begin(ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Copy(ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.CatchUp(ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	state.fail = true
+	if _, err := tool.Cutover(ctx, "tenant-a"); err == nil {
+		t.Fatal("cutover succeeded despite state persistence failure")
+	}
+	if current, err := router.Current(ctx, "tenant-a"); err != nil || current != BackendSource {
+		t.Fatalf("route after failed cutover = %q, err=%v", current, err)
+	}
+
+	if _, err := tool.Cutover(ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	state.fail = true
+	if _, err := tool.Rollback(ctx, "tenant-a"); err == nil {
+		t.Fatal("rollback succeeded despite state persistence failure")
+	}
+	if current, err := router.Current(ctx, "tenant-a"); err != nil || current != BackendDestination {
+		t.Fatalf("route after failed rollback = %q, err=%v", current, err)
+	}
+}
+
+func TestMigrationStatePersistenceAndLoadErrors(t *testing.T) {
+	ctx := context.Background()
+	source, destination, router := NewMemorySource(), NewMemoryDestination(), NewMemoryRouter()
+	if err := source.Put("tenant-a", Record{Kind: "session", Key: "s1", Payload: []byte("state")}); err != nil {
+		t.Fatal(err)
+	}
+	state := &failingStateStore{delegate: NewMemoryStateStore(), err: errors.New("state unavailable")}
+	tool, err := NewToolWithStateStore(source, destination, router, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state.fail = true
+	if _, err := tool.Begin(ctx, "tenant-a"); !errors.Is(err, state.err) {
+		t.Fatalf("begin state error = %v", err)
+	}
+	if _, err := tool.Begin(ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	state.fail = true
+	if _, err := tool.Copy(ctx, "tenant-a"); !errors.Is(err, state.err) {
+		t.Fatalf("copy state error = %v", err)
+	}
+	if _, err := tool.Copy(ctx, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	state.fail = true
+	if _, err := tool.CatchUp(ctx, "tenant-a"); !errors.Is(err, state.err) {
+		t.Fatalf("catch-up state error = %v", err)
+	}
+
+	getErr := errors.New("state read unavailable")
+	readErrorState := &failingStateStore{delegate: NewMemoryStateStore(), getErr: getErr}
+	readErrorTool, err := NewToolWithStateStore(source, destination, router, readErrorState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		run  func(*Tool) error
+	}{
+		{name: "copy", run: func(value *Tool) error { _, err := value.Copy(ctx, "tenant-a"); return err }},
+		{name: "catch-up", run: func(value *Tool) error { _, err := value.CatchUp(ctx, "tenant-a"); return err }},
+		{name: "cutover", run: func(value *Tool) error { _, err := value.Cutover(ctx, "tenant-a"); return err }},
+		{name: "rollback", run: func(value *Tool) error { _, err := value.Rollback(ctx, "tenant-a"); return err }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.run(readErrorTool); !errors.Is(err, getErr) {
+				t.Fatalf("state read error = %v", err)
+			}
+		})
+	}
+}
+
+func TestMigrationLoadStateBoundaries(t *testing.T) {
+	ctx := context.Background()
+	var nilTool *Tool
+	if _, _, err := nilTool.loadState(ctx, "tenant-a"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil tool load state error = %v", err)
+	}
+	if _, _, err := (&Tool{}).loadState(ctx, "tenant-a"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nil state store error = %v", err)
+	}
+
+	tool, err := NewToolWithStateStore(NewMemorySource(), NewMemoryDestination(), NewMemoryRouter(), mismatchedStateStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := tool.loadState(ctx, "tenant-a"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("mismatched state error = %v", err)
+	}
+}
+
+func TestMemoryStateStoreValidation(t *testing.T) {
+	store := NewMemoryStateStore()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.Get(canceled, "tenant-a"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled state get = %v", err)
+	}
+	if err := store.Put(canceled, State{TenantID: "tenant-a"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled state put = %v", err)
+	}
+	if err := store.Put(context.Background(), State{TenantID: "tenant-a", Barrier: -1}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("negative barrier error = %v", err)
+	}
+	if err := store.Put(context.Background(), State{TenantID: "tenant-a", PreviousBackend: Backend("unknown")}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid previous backend error = %v", err)
+	}
+}
+
+type failingStateStore struct {
+	delegate *MemoryStateStore
+	err      error
+	fail     bool
+	getErr   error
+}
+
+type mismatchedStateStore struct{}
+
+func (mismatchedStateStore) Get(context.Context, string) (State, error) {
+	return State{TenantID: "tenant-b"}, nil
+}
+
+func (mismatchedStateStore) Put(context.Context, State) error { return nil }
+
+func (store *failingStateStore) Get(ctx context.Context, tenantID string) (State, error) {
+	if store.getErr != nil {
+		return State{}, store.getErr
+	}
+	return store.delegate.Get(ctx, tenantID)
+}
+
+func (store *failingStateStore) Put(ctx context.Context, state State) error {
+	if store.fail {
+		store.fail = false
+		return store.err
+	}
+	return store.delegate.Put(ctx, state)
+}
+
 type stubSource struct {
 	watermark   int64
 	records     []Record
@@ -200,7 +395,7 @@ func TestMigrationAdapterErrorsAndPhaseBoundaries(t *testing.T) {
 	ctx := context.Background()
 	destination := &stubDestination{}
 	router := &stubRouter{}
-	if _, err := (&Tool{source: &stubSource{beginErr: errors.New("begin failed")}, destination: destination, router: router, barriers: map[string]int64{}, copied: map[string]bool{}, caughtUp: map[string]bool{}, cutovers: map[string]Backend{}}).Begin(ctx, "tenant-a"); err == nil {
+	if _, err := (&Tool{source: &stubSource{beginErr: errors.New("begin failed")}, destination: destination, router: router, state: NewMemoryStateStore()}).Begin(ctx, "tenant-a"); err == nil {
 		t.Fatal("begin error was swallowed")
 	}
 	source := &stubSource{watermark: 5, records: []Record{{Kind: "session", Key: "s1", Payload: []byte("one")}}}

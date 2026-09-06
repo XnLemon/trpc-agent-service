@@ -29,6 +29,7 @@ import (
 	runtimeservice "github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	modelruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	runtimequeue "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
@@ -233,6 +234,39 @@ func TestNewRejectsAlreadyRunningOutboxWorker(t *testing.T) {
 	}
 }
 
+func TestStartExecutionQueueRejectsRunningWorker(t *testing.T) {
+	store := runtimequeue.NewMemory()
+	worker, err := runtimequeue.New(runtimequeue.Config{
+		Store: store, Handler: func(context.Context, runtimequeue.Task) error { return nil },
+		Owner: "bootstrap-queue-error", LeaseDuration: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = worker.Close()
+		_ = store.Close()
+	})
+	if err := startExecutionQueue(&Runtime{ExecutionQueue: worker}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("running queue error = %v", err)
+	}
+}
+
+func TestConfigureRuntimeChannelsClosesWorkerReturnedWithError(t *testing.T) {
+	worker := &outbox.Worker{}
+	config := Config{
+		OutboxWorkerFactory: func([]channels.PollingAdapter) (*outbox.Worker, error) {
+			return worker, errors.New("worker factory failed")
+		},
+	}
+	if _, err := configureRuntimeChannels(&config, nil); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("worker factory error = %v", err)
+	}
+}
+
 func TestNewRejectsMissingExplicitDependency(t *testing.T) {
 	if _, err := New(context.Background(), Config{}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("missing dependency error = %v", err)
@@ -338,6 +372,40 @@ func TestBootstrapCoversConstructionFailureBoundaries(t *testing.T) {
 		t.Fatalf("non-repository admin channel dependency = %v", err)
 	}
 	closeDependencies()
+}
+
+func TestBootstrapClosesPartiallyConstructedAIBots(t *testing.T) {
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	first := newBootstrapAIBot()
+	config.WeComAIBotFactories = []func(gateway.DispatchService) (channels.PollingAdapter, error){
+		func(gateway.DispatchService) (channels.PollingAdapter, error) { return first, nil },
+		func(gateway.DispatchService) (channels.PollingAdapter, error) {
+			return nil, errors.New("second bot failed")
+		},
+	}
+	if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("partial AI Bot construction error = %v", err)
+	}
+	if first.closed.Load() != 1 {
+		t.Fatalf("partially constructed AI Bot close count = %d, want 1", first.closed.Load())
+	}
+}
+
+func TestBootstrapFailureClosesConstructedGraph(t *testing.T) {
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	bot := newBootstrapAIBot()
+	config.WeComAIBotFactories = []func(gateway.DispatchService) (channels.PollingAdapter, error){
+		func(gateway.DispatchService) (channels.PollingAdapter, error) { return bot, nil },
+	}
+	config.HTTP.MaxBodyBytes = -1
+	if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("handler construction error = %v", err)
+	}
+	if bot.closed.Load() != 1 {
+		t.Fatalf("failed bootstrap AI Bot close count = %d, want 1", bot.closed.Load())
+	}
 }
 
 func TestBootstrapRoutesAdminCacheInvalidationsToRuntimeRegistry(t *testing.T) {
@@ -774,6 +842,45 @@ func TestBootstrapBuildsRuntimeRegistryFromStorageFactory(t *testing.T) {
 	}
 }
 
+func TestBootstrapOwnsOptionalExecutionQueueLifecycle(t *testing.T) {
+	store := runtimequeue.NewMemory()
+	defer func() { _ = store.Close() }()
+	worker, err := runtimequeue.New(runtimequeue.Config{
+		Store: store, Handler: func(context.Context, runtimequeue.Task) error { return nil },
+		Owner: "bootstrap-queue", LeaseDuration: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	config.ExecutionQueue = worker
+	graph, err := New(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.RunOnce(context.Background()); !errors.Is(err, runtimequeue.ErrClosed) {
+		t.Fatalf("queue after Bootstrap close = %v", err)
+	}
+}
+
+func TestBootstrapPassesExplicitAttachmentCapabilities(t *testing.T) {
+	store := runtimestorageinmemory.New()
+	t.Cleanup(func() { _ = store.Close() })
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	config.RuntimeStore = store
+	if err := prepareRuntimeConfig(&config); err != nil {
+		t.Fatal(err)
+	}
+	if config.Attachments != store || config.AttachmentStore != store {
+		t.Fatalf("derived attachment capabilities = reader:%T store:%T", config.Attachments, config.AttachmentStore)
+	}
+}
+
 func nilContextForTest() context.Context { return nil }
 
 func setRequiredEnvironment(t *testing.T) {
@@ -993,6 +1100,51 @@ func TestEnvironmentSelectsMySQLControlPlaneAndRejectsPostgresRuntimeStore(t *te
 	t.Setenv(envControlPlaneDriver, "sqlite")
 	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("unknown control-plane driver error = %v", err)
+	}
+}
+
+func TestEnvironmentRuntimeCapabilities(t *testing.T) {
+	t.Run("requires atomic reply batches", func(t *testing.T) {
+		_, _, _, err := environmentPrimaryRuntimeCapabilities(&environmentRuntimeStoreSpy{})
+		if !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("runtime capabilities error = %v", err)
+		}
+	})
+
+	t.Run("derives optional capabilities", func(t *testing.T) {
+		store := runtimestorageinmemory.New()
+		t.Cleanup(func() { _ = store.Close() })
+		replyBatchStore, attachments, attachmentStore, err := environmentPrimaryRuntimeCapabilities(store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if replyBatchStore == nil {
+			t.Fatal("reply batch capability is nil")
+		}
+		if attachments == nil || attachmentStore == nil {
+			t.Fatal("attachment capabilities are nil")
+		}
+	})
+}
+
+func TestEnvironmentAdminAuthenticator(t *testing.T) {
+	static, err := environmentAdminAuthenticator(environmentConfig{adminToken: "admin", adminTenants: []string{"*"}})
+	if err != nil || static == nil {
+		t.Fatalf("static admin authenticator = %v, %v", static, err)
+	}
+
+	session, err := environmentAdminAuthenticator(environmentConfig{adminToken: "admin", adminTenants: []string{"*"}, adminUsername: "operator", adminPassword: "secret"})
+	if err != nil || session == nil {
+		t.Fatalf("session admin authenticator = %v, %v", session, err)
+	}
+
+	for _, config := range []environmentConfig{
+		{adminToken: "admin\ninvalid", adminTenants: []string{"*"}},
+		{adminToken: "admin", adminTenants: []string{"*"}, adminUsername: "operator", adminPassword: "secret\n"},
+	} {
+		if _, err := environmentAdminAuthenticator(config); !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("invalid admin authenticator error = %v", err)
+		}
 	}
 }
 

@@ -358,7 +358,11 @@ func (r *InMemoryRepository) LookupCandidates(ctx context.Context, channel chann
 		if err != nil {
 			return nil, channels.ErrCandidateUnavailable
 		}
-		candidate, err := channels.NewCandidateBindingContext(channel, routeDigest, binding.Version, binding.ConfigDigest, channels.PurposeWebhookVerification, token, now, now.Add(r.candidateTTL))
+		candidate, err := channels.NewCandidateBindingContextFromInput(channels.CandidateBindingInput{
+			Channel: channel, PublicRouteKeyDigest: routeDigest, BindingVersion: binding.Version,
+			ConfigDigest: binding.ConfigDigest, Purpose: channels.PurposeWebhookVerification,
+			CandidateToken: token, IssuedAt: now, ExpiresAt: now.Add(r.candidateTTL),
+		})
 		if err != nil {
 			return nil, channels.ErrCandidateUnavailable
 		}

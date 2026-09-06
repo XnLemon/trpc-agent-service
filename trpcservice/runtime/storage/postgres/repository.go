@@ -26,7 +26,7 @@ func New(db *sql.DB) *Store { return &Store{db: db} }
 
 // GetReplyCorrelation loads the durable execution-to-reply correlation.
 func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID string) (runtimestorage.ReplyCorrelation, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.ReplyCorrelation{}, err
 	}
 	if tenantID == "" || eventID == "" {
@@ -43,7 +43,7 @@ func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID strin
 
 // GetSession loads a tenant-scoped session.
 func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (runtimestorage.Session, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.Session{}, err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
@@ -63,7 +63,7 @@ func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (run
 
 // CreateSession persists a new tenant-scoped session.
 func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (runtimestorage.Session, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.Session{}, err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
@@ -90,7 +90,7 @@ func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, s
 
 // UpdateSessionState applies an expected-version session state update.
 func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (runtimestorage.Session, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.Session{}, err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
@@ -123,7 +123,7 @@ func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID stri
 
 // DeleteSession removes a tenant-scoped session.
 func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) error {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
@@ -145,7 +145,7 @@ func (s *Store) DeleteSession(ctx context.Context, tenantID, sessionID string) e
 
 // RecordMessage inserts or returns an idempotent inbound message event.
 func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageEventInput) (runtimestorage.MessageEvent, bool, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.MessageEvent{}, false, err
 	}
 	if runtimestorage.ValidateSession(input.TenantID, input.SessionID) != nil || input.BindingID == "" || input.ExternalMessageID == "" || input.EventID == "" || runtimestorage.ValidateReplyTarget(input.ReplyTarget) != nil || (input.ReplyTarget != (runtimestorage.ReplyTarget{}) && input.ReplyTarget.BindingID != input.BindingID) {
@@ -196,7 +196,7 @@ func (s *Store) lookupMessageByExternal(ctx context.Context, tenantID, bindingID
 
 // GetMessage loads a tenant-scoped inbound message event.
 func (s *Store) GetMessage(ctx context.Context, tenantID, eventID string) (runtimestorage.MessageEvent, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.MessageEvent{}, err
 	}
 	if runtimestorage.ValidateTenant(tenantID) != nil || eventID == "" {
@@ -220,7 +220,7 @@ func lookupMessage(ctx context.Context, query messageQuerier, tenantID, eventID 
 
 // TransitionMessage applies a fenced message lifecycle transition.
 func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage.MessageTransition) (runtimestorage.MessageEvent, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.MessageEvent{}, err
 	}
 	if runtimestorage.ValidateTenant(transition.TenantID) != nil || transition.EventID == "" || transition.Owner == "" {
@@ -273,7 +273,7 @@ func (s *Store) transitionMessageWithReply(ctx context.Context, transition runti
 
 // AppendEventPayload stores an immutable session event payload.
 func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.EventPayload) (runtimestorage.EventPayload, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.EventPayload{}, err
 	}
 	if err := validatePayload(payload); err != nil {
@@ -292,7 +292,7 @@ func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.E
 
 // ListEventPayloads returns ordered event history for a session.
 func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]runtimestorage.EventPayload, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return nil, err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
@@ -325,7 +325,7 @@ func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID strin
 
 // EnqueueReply stores one durable reply segment idempotently.
 func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutbox) (runtimestorage.ReplyOutbox, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
 	var normalizeErr error
@@ -369,7 +369,7 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 //
 //nolint:gocyclo // The transaction validates and atomically persists the complete reply batch.
 func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return nil, err
 	}
 	var err error
@@ -408,7 +408,7 @@ func (s *Store) EnqueueReplies(ctx context.Context, values []runtimestorage.Repl
 // EnqueueRepliesWithCorrelation atomically persists execution correlation and
 // the complete reply segment batch.
 func (s *Store) EnqueueRepliesWithCorrelation(ctx context.Context, correlation runtimestorage.ReplyCorrelation, values []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return nil, err
 	}
 	if correlation.TenantID == "" || correlation.EventID == "" || correlation.RequestID == "" {
@@ -524,7 +524,7 @@ func (s *Store) insertReplySegments(ctx context.Context, tx *sql.Tx, values []ru
 
 // GetReply loads one durable reply segment.
 func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment int) (runtimestorage.ReplyOutbox, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
 	if runtimestorage.ValidateTenant(tenantID) != nil || replyID == "" || segment < 0 {
@@ -540,7 +540,7 @@ func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment 
 
 // ListReplyCandidates returns reply segments eligible for delivery.
 func (s *Store) ListReplyCandidates(ctx context.Context, tenantID string) ([]runtimestorage.ReplyOutbox, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return nil, err
 	}
 	if err := runtimestorage.ValidateTenant(tenantID); err != nil {
@@ -567,7 +567,7 @@ func (s *Store) ListReplyCandidates(ctx context.Context, tenantID string) ([]run
 
 // ClaimReply leases one reply segment to a delivery worker.
 func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segment int, owner string, leaseDuration time.Duration) (runtimestorage.ReplyOutbox, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
 	if runtimestorage.ValidateTenant(tenantID) != nil || replyID == "" || owner == "" || leaseDuration <= 0 {
@@ -594,7 +594,7 @@ func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segmen
 // RecordReplyReceipt persists a provider acknowledgement without releasing
 // the current sending lease. The worker later owns the sent transition.
 func (s *Store) RecordReplyReceipt(ctx context.Context, receipt runtimestorage.ReplyReceipt) (runtimestorage.ReplyOutbox, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
 	if runtimestorage.ValidateTenant(receipt.TenantID) != nil || receipt.ReplyID == "" || receipt.SegmentIndex < 0 || receipt.Owner == "" || receipt.FencingToken <= 0 || strings.TrimSpace(receipt.ProviderID) == "" {
@@ -616,7 +616,7 @@ func (s *Store) RecordReplyReceipt(ctx context.Context, receipt runtimestorage.R
 
 // TransitionReply applies a fenced reply delivery transition.
 func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.ReplyTransition) (runtimestorage.ReplyOutbox, error) {
-	if err := check(ctx); err != nil {
+	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
 	if runtimestorage.ValidateTenant(transition.TenantID) != nil || transition.ReplyID == "" || transition.Owner == "" {
@@ -648,6 +648,17 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 
 // Close releases store resources; the borrowed database remains caller-owned.
 func (s *Store) Close() error { return nil }
+
+func checkStore(ctx context.Context, store *Store) error {
+	if err := check(ctx); err != nil {
+		return err
+	}
+	if store == nil || store.db == nil {
+		return runtimestorage.ErrStorage
+	}
+	return nil
+}
+
 func check(ctx context.Context) error {
 	if ctx == nil {
 		return runtimestorage.ErrInvalid

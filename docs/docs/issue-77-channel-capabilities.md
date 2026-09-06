@@ -36,7 +36,7 @@ Webhook 和 worker group 都由创建者关闭；关闭先阻断新 admission，
 | WeCom multi-account registry、worker group | `wecom.Registry`/`WorkerGroup` 与测试 | ✅ |
 | WeCom group delivery、receipt reconciliation | `Provider.Deliver/Reconcile` 与测试 | ✅ |
 | Public WeChat/customer-service provider boundaries | `channels/wechat` 显式类型与测试 | ✅ |
-| Runner event text/stream/card fallback | `channels/replies` renderer 与 adapter 测试 | ✅ |
+| Runner event text/stream/card fallback | `gateway/replies` renderer 与 adapter 测试 | ✅ |
 | Deterministic external integration E2E | fake Telegram/WeCom/WeChat tests | ✅ |
 
 生产凭据、真实公网 webhook、供应商 SLA 和 live E2E 仍由部署环境负责；仓库测试不记录真实

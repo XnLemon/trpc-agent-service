@@ -19,6 +19,7 @@ import (
 	appmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	appmysql "github.com/XnLemon/trpc-agent-service/trpcservice/app/mysql"
 	apppostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
@@ -36,6 +37,7 @@ import (
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	runtimequeue "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
@@ -100,11 +102,32 @@ type Config struct {
 	// ToolRegistry resolves published revision authorizations to installed,
 	// context-bound platform tools. A nil value uses the built-in registry.
 	ToolRegistry *servicetool.Registry
-	// RuntimeStore is the tenant-scoped Session/Event/Outbox capability. It is
-	// separate from upstream session.Service while the runtime adapter evolves.
+	// RuntimeStore is the legacy tenant-scoped Session/Event/Outbox aggregate.
+	// New composition code should inject the narrow capabilities below instead
+	// of making the dispatcher depend on a complete storage implementation.
+	//
+	// Deprecated: use SessionStore, EventHistoryStore, MessageStore, and
+	// ReplyBatchStore.
 	RuntimeStore runtimestorage.RuntimeStore
+	// SessionStore is the session-state capability used by durable dispatch.
+	SessionStore runtimestorage.SessionStateStore
+	// EventHistoryStore is the immutable upstream event history capability used
+	// when Bootstrap wraps an upstream Session service for durable recovery.
+	EventHistoryStore runtimestorage.EventHistoryStore
+	// MessageStore is the inbound message lifecycle capability used by durable
+	// dispatch.
+	MessageStore runtimestorage.MessageStore
+	// ReplyBatchStore is the atomic reply materialization capability used by the
+	// outbox materializer.
+	ReplyBatchStore runtimestorage.ReplyBatchEnqueuer
+	// Attachments loads verified tenant-owned media during Gateway dispatch.
+	// It is kept separate from the session/message/reply capabilities.
+	Attachments attachment.Reader
+	// AttachmentStore binds and stores verified tenant-owned media.
+	AttachmentStore runtimestorage.AttachmentStore
 	// RuntimeTenantID fixes the tenant scope when Bootstrap wraps Sessions with
-	// the RuntimeStore-backed capability. It must come from trusted config.
+	// the explicitly supplied session persistence capabilities. It must come
+	// from trusted config.
 	RuntimeTenantID string
 	// OutboxWorker is constructed from trusted provider routing configuration.
 	// Bootstrap owns its lifecycle but never derives a recipient from HTTP.
@@ -113,6 +136,10 @@ type Config struct {
 	// produced their managers. It is mutually exclusive with OutboxWorker.
 	OutboxWorkerFactory func([]channels.PollingAdapter) (*outbox.Worker, error)
 	OutboxPollInterval  time.Duration
+	// ExecutionQueue is an optional generic durable execution worker. The
+	// caller constructs its task handler; Bootstrap only owns its lifecycle and
+	// closes it before the Runner Registry.
+	ExecutionQueue *runtimequeue.Worker
 	// AuditWriter receives execution and configured channel delivery facts.
 	AuditWriter        audit.Writer
 	Authenticator      gateway.APIAuthenticator
@@ -145,6 +172,7 @@ type Runtime struct {
 	Registry       *runtimerunner.RunnerRegistry
 	Dispatcher     *gateway.Dispatcher
 	OutboxWorker   *outbox.Worker
+	ExecutionQueue *runtimequeue.Worker
 	wecomLifecycle callbackLifecycle
 	wecomHandler   http.Handler
 	wecomAIBots    []channels.PollingAdapter
@@ -166,6 +194,11 @@ type Runtime struct {
 type callbackLifecycle interface {
 	BeginShutdown()
 	Close() error
+}
+
+type bootstrapSessionPersistence struct {
+	runtimestorage.SessionStateStore
+	runtimestorage.EventHistoryStore
 }
 
 type pollingHealth interface{ Ready() bool }
@@ -210,6 +243,12 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = runtimeGraph.Close()
+		}
+	}()
 	if err := configureAdmin(&config, runtimeGraph.Registry); err != nil {
 		return nil, err
 	}
@@ -219,10 +258,13 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	if err := startOutboxWorker(runtimeGraph, config.OutboxPollInterval); err != nil {
 		return nil, err
 	}
-	if err := startAIBots(runtimeGraph); err != nil {
-		_ = runtimeGraph.Close()
-		return nil, ErrInvalidConfig
+	if err := startExecutionQueue(runtimeGraph); err != nil {
+		return nil, err
 	}
+	if err := startAIBots(runtimeGraph); err != nil {
+		return nil, err
+	}
+	committed = true
 	return runtimeGraph, nil
 }
 
@@ -332,13 +374,37 @@ func validateConfig(config Config) error {
 }
 
 func prepareRuntimeConfig(config *Config) error {
-	if config.RuntimeStore == nil {
+	if config.RuntimeStore == nil && config.SessionStore == nil && config.MessageStore == nil && config.ReplyBatchStore == nil {
 		config.RuntimeStore = runtimestorageinmemory.New()
+	}
+	if config.RuntimeStore != nil {
+		if config.SessionStore == nil {
+			config.SessionStore, _ = config.RuntimeStore.(runtimestorage.SessionStateStore)
+		}
+		if config.EventHistoryStore == nil {
+			config.EventHistoryStore, _ = config.RuntimeStore.(runtimestorage.EventHistoryStore)
+		}
+		if config.MessageStore == nil {
+			config.MessageStore, _ = config.RuntimeStore.(runtimestorage.MessageStore)
+		}
+		if config.ReplyBatchStore == nil {
+			config.ReplyBatchStore, _ = config.RuntimeStore.(runtimestorage.ReplyBatchEnqueuer)
+		}
+		if config.Attachments == nil {
+			config.Attachments, _ = config.RuntimeStore.(attachment.Reader)
+		}
+		if config.AttachmentStore == nil {
+			config.AttachmentStore, _ = config.RuntimeStore.(runtimestorage.AttachmentStore)
+		}
 	}
 	if config.RuntimeTenantID == "" {
 		return nil
 	}
-	wrapped, err := agentsessionstore.NewWithObservability(config.RuntimeTenantID, config.Sessions, config.RuntimeStore, config.Observability)
+	if config.Sessions == nil || config.SessionStore == nil || config.EventHistoryStore == nil {
+		return ErrInvalidConfig
+	}
+	persistence := bootstrapSessionPersistence{SessionStateStore: config.SessionStore, EventHistoryStore: config.EventHistoryStore}
+	wrapped, err := agentsessionstore.NewWithObservability(config.RuntimeTenantID, config.Sessions, persistence, config.Observability)
 	if err != nil {
 		return ErrInvalidConfig
 	}
@@ -362,14 +428,15 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, ErrInvalidConfig
 	}
-	var replyBatchStore runtimestorage.ReplyBatchEnqueuer
-	if config.RuntimeStore != nil {
-		replyBatchStore, _ = config.RuntimeStore.(runtimestorage.ReplyBatchEnqueuer)
+	legacyRuntimeStore := config.RuntimeStore
+	if config.SessionStore != nil && config.MessageStore != nil && config.ReplyBatchStore != nil {
+		legacyRuntimeStore = nil
 	}
 	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{
 		Resolver: resolver, Registry: registry,
-		RuntimeStore: config.RuntimeStore, SessionStore: config.RuntimeStore,
-		MessageStore: config.RuntimeStore, ReplyBatchStore: replyBatchStore,
+		RuntimeStore: legacyRuntimeStore, SessionStore: config.SessionStore,
+		MessageStore: config.MessageStore, ReplyBatchStore: config.ReplyBatchStore,
+		Attachments: config.Attachments, AttachmentStore: config.AttachmentStore,
 		DrainTimeout: config.DrainTimeout, AuditWriter: config.AuditWriter, Observability: config.Observability,
 	})
 	if err != nil {
@@ -391,9 +458,10 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	}
 	runtimeGraph := &Runtime{
 		Resolver: resolver, Registry: registry, Dispatcher: dispatcher,
-		OutboxWorker: config.OutboxWorker,
-		wecomHandler: config.WeComHandler,
-		db:           config.DB, ownDB: config.OwnDB, readyGate: readyGate,
+		OutboxWorker:   config.OutboxWorker,
+		ExecutionQueue: config.ExecutionQueue,
+		wecomHandler:   config.WeComHandler,
+		db:             config.DB, ownDB: config.OwnDB, readyGate: readyGate,
 		ping: ping, verifyMigrations: config.VerifyMigrations, closeDeps: config.CloseDependencies,
 		telemetry:   config.Observability,
 		wecomAIBots: aiBots,
@@ -417,9 +485,12 @@ func configureRuntimeChannels(config *Config, dispatcher gateway.DispatchService
 	}
 	aiBots, err := newWeComAIBots(config.WeComAIBotFactories, dispatcher)
 	if err != nil {
+		closeCallbackHandler(config.WeComHandler)
 		return nil, err
 	}
 	if config.OutboxWorker != nil && config.OutboxWorkerFactory != nil {
+		closePollingAdapters(aiBots)
+		closeCallbackHandler(config.WeComHandler)
 		return nil, ErrInvalidConfig
 	}
 	if config.OutboxWorkerFactory == nil {
@@ -427,6 +498,11 @@ func configureRuntimeChannels(config *Config, dispatcher gateway.DispatchService
 	}
 	worker, err := config.OutboxWorkerFactory(aiBots)
 	if err != nil || worker == nil {
+		if worker != nil {
+			_ = worker.Close()
+		}
+		closePollingAdapters(aiBots)
+		closeCallbackHandler(config.WeComHandler)
 		return nil, ErrInvalidConfig
 	}
 	config.OutboxWorker = worker
@@ -435,20 +511,38 @@ func configureRuntimeChannels(config *Config, dispatcher gateway.DispatchService
 
 func newWeComAIBots(factories []func(gateway.DispatchService) (channels.PollingAdapter, error), dispatcher gateway.DispatchService) ([]channels.PollingAdapter, error) {
 	aiBots := make([]channels.PollingAdapter, 0, len(factories))
+	invalid := func(err error) ([]channels.PollingAdapter, error) {
+		closePollingAdapters(aiBots)
+		return nil, err
+	}
 	for _, factory := range factories {
 		if factory == nil {
-			return nil, ErrInvalidConfig
+			return invalid(ErrInvalidConfig)
 		}
 		aiBot, err := factory(dispatcher)
 		if err != nil || aiBot == nil || aiBot.Channel() != channels.ChannelWeComAIBot {
-			return nil, ErrInvalidConfig
+			return invalid(ErrInvalidConfig)
 		}
 		if _, ok := aiBot.(pollingHealth); !ok {
-			return nil, ErrInvalidConfig
+			return invalid(ErrInvalidConfig)
 		}
 		aiBots = append(aiBots, aiBot)
 	}
 	return aiBots, nil
+}
+
+func closePollingAdapters(adapters []channels.PollingAdapter) {
+	for _, adapter := range adapters {
+		if adapter != nil {
+			_ = adapter.Close()
+		}
+	}
+}
+
+func closeCallbackHandler(handler http.Handler) {
+	if lifecycle, ok := handler.(callbackLifecycle); ok {
+		_ = lifecycle.Close()
+	}
 }
 
 func startAIBots(runtimeGraph *Runtime) error {
@@ -478,7 +572,6 @@ func configureAdmin(config *Config, registry *runtimerunner.RunnerRegistry) erro
 	}
 	bindingRepository, ok := config.Channels.(channels.Repository)
 	if !ok {
-		_ = registry.Close()
 		return ErrInvalidConfig
 	}
 	adminHandler, err := admin.NewHandler(admin.Config{
@@ -491,7 +584,6 @@ func configureAdmin(config *Config, registry *runtimerunner.RunnerRegistry) erro
 		}),
 	})
 	if err != nil {
-		_ = registry.Close()
 		return ErrInvalidConfig
 	}
 	config.AdminHandler = adminHandler
@@ -531,7 +623,6 @@ func configureHandler(runtimeGraph *Runtime, config Config) error {
 		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout, Observability: config.Observability,
 	})
 	if err != nil {
-		_ = runtimeGraph.Registry.Close()
 		return ErrInvalidConfig
 	}
 	runtimeGraph.Handler = handler
@@ -543,8 +634,16 @@ func startOutboxWorker(runtimeGraph *Runtime, pollInterval time.Duration) error 
 		return nil
 	}
 	if err := runtimeGraph.OutboxWorker.Start(context.Background(), pollInterval); err != nil {
-		_ = runtimeGraph.Handler.Close()
-		_ = runtimeGraph.Registry.Close()
+		return ErrInvalidConfig
+	}
+	return nil
+}
+
+func startExecutionQueue(runtimeGraph *Runtime) error {
+	if runtimeGraph == nil || runtimeGraph.ExecutionQueue == nil {
+		return nil
+	}
+	if err := runtimeGraph.ExecutionQueue.Start(context.Background()); err != nil {
 		return ErrInvalidConfig
 	}
 	return nil
@@ -624,6 +723,9 @@ func (graph *Runtime) Close() error {
 		}
 		for _, done := range graph.aiBotDone {
 			<-done
+		}
+		if graph.ExecutionQueue != nil {
+			closeErr = errors.Join(closeErr, graph.ExecutionQueue.Close())
 		}
 		if graph.Registry != nil {
 			closeErr = errors.Join(closeErr, graph.Registry.Close())

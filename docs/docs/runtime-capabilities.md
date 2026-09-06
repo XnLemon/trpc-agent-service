@@ -16,6 +16,11 @@ reject an older event sequence, and memory writes enqueue their durable record
 for asynchronous vector indexing (the explicit EnqueueMemoryIndex operation is
 also available for retries).
 
+Session state and immutable event history are also published through the neutral
+`trpcservice/storage/session` contract. The `agent/sessionstore` adapter depends
+on that contract; `runtime/storage` re-exports compatible aliases so the
+runtime-specific message/reply capabilities can evolve independently.
+
 Backend profiles select session, memory, summary, knowledge, artifact, and
 audit bindings. runtime/storage/factory.CapabilitySet exposes typed accessors
 for those capabilities; providers are resolved only under the requested tenant

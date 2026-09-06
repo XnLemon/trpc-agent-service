@@ -95,6 +95,9 @@ type DispatchConfig struct {
 	// API principals remain protected by the HTTP IdempotencyStore. It is kept as
 	// a compatibility aggregate; new callers should provide the narrow fields
 	// below.
+	//
+	// Deprecated: provide SessionStore, MessageStore, and ReplyBatchStore
+	// explicitly.
 	RuntimeStore runtimestorage.RuntimeStore
 	// SessionStore is the session-state capability used by durable dispatch.
 	SessionStore runtimestorage.SessionStateStore

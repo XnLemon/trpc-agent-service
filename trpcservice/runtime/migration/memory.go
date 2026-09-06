@@ -16,6 +16,46 @@ type MemorySource struct {
 	dual    map[string]bool
 }
 
+// MemoryStateStore is a deterministic process-local StateStore for tests and
+// dry-runs. Production callers should provide a shared durable implementation.
+type MemoryStateStore struct {
+	mu     sync.Mutex
+	states map[string]State
+}
+
+// NewMemoryStateStore creates an empty migration state store.
+func NewMemoryStateStore() *MemoryStateStore {
+	return &MemoryStateStore{states: map[string]State{}}
+}
+
+// Get returns one tenant's migration phase state.
+func (s *MemoryStateStore) Get(ctx context.Context, tenantID string) (State, error) {
+	if err := validate(ctx, tenantID); err != nil {
+		return State{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, ok := s.states[tenantID]
+	if !ok {
+		return State{}, ErrNotFound
+	}
+	return state, nil
+}
+
+// Put stores one tenant's migration phase state.
+func (s *MemoryStateStore) Put(ctx context.Context, state State) error {
+	if err := validate(ctx, state.TenantID); err != nil {
+		return err
+	}
+	if state.Barrier < 0 || (state.PreviousBackend != "" && state.PreviousBackend != BackendSource && state.PreviousBackend != BackendDestination) {
+		return ErrInvalid
+	}
+	s.mu.Lock()
+	s.states[state.TenantID] = state
+	s.mu.Unlock()
+	return nil
+}
+
 // NewMemorySource creates an empty source adapter.
 func NewMemorySource() *MemorySource {
 	return &MemorySource{records: map[string]map[string]Record{}, changes: map[string][]Change{}, seq: map[string]int64{}, dual: map[string]bool{}}
@@ -167,3 +207,4 @@ func cloneRecord(value Record) Record {
 var _ Source = (*MemorySource)(nil)
 var _ Destination = (*MemoryDestination)(nil)
 var _ Router = (*MemoryRouter)(nil)
+var _ StateStore = (*MemoryStateStore)(nil)
