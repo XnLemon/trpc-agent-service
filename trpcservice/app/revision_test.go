@@ -65,6 +65,69 @@ func TestNewRevisionNormalizesAndMaterializesDefaults(t *testing.T) {
 	}
 }
 
+func TestChainRevisionNormalizesAndFreezesItsDefinition(t *testing.T) {
+	input := validRevisionInput()
+	input.Kind = KindChain
+	input.Configuration.Chain = &ChainConfiguration{Steps: []ChainStep{
+		{Name: " first ", Instruction: " Classify the request. ", GlobalInstruction: " Follow policy. "},
+		{Name: "answer", Instruction: "Draft the response."},
+	}}
+	revision, err := NewRevision(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revision.Kind != KindChain || revision.Chain == nil || revision.Chain.Steps[0].Name != "first" || revision.Chain.Steps[0].Instruction != "Classify the request." || revision.Chain.Steps[0].GlobalInstruction != "Follow policy." {
+		t.Fatalf("chain definition was not normalized: %+v", revision.Chain)
+	}
+	clone := revision.Clone()
+	clone.Chain.Steps[0].Instruction = "mutated"
+	if revision.Chain.Steps[0].Instruction == "mutated" {
+		t.Fatal("chain definition leaked through Revision.Clone")
+	}
+	digest, err := revision.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clone.Chain.Steps[0].Instruction = revision.Chain.Steps[0].Instruction
+	changedDigest, err := clone.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != changedDigest {
+		t.Fatal("equivalent chain definitions produced different content digests")
+	}
+	clone.Chain.Steps[1].Instruction = "Use a different response policy."
+	changedDigest, err = clone.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest == changedDigest {
+		t.Fatal("chain behavior change did not alter content digest")
+	}
+}
+
+func TestChainRevisionRejectsInvalidDefinitions(t *testing.T) {
+	tests := []struct {
+		name  string
+		chain *ChainConfiguration
+	}{
+		{name: "missing chain", chain: nil},
+		{name: "one step", chain: &ChainConfiguration{Steps: []ChainStep{{Name: "only", Instruction: "run"}}}},
+		{name: "duplicate step", chain: &ChainConfiguration{Steps: []ChainStep{{Name: "same", Instruction: "one"}, {Name: "same", Instruction: "two"}}}},
+		{name: "control character", chain: &ChainConfiguration{Steps: []ChainStep{{Name: "one", Instruction: "run\nnow"}, {Name: "two", Instruction: "finish"}}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := validRevisionInput()
+			input.Kind = KindChain
+			input.Configuration.Chain = test.chain
+			if _, err := NewRevision(input); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("expected ErrInvalid, got %v", err)
+			}
+		})
+	}
+}
+
 func TestNewRevisionRejectsInvalidDefinitions(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -590,8 +590,9 @@ Adapter 必须使用经过验证的 Lua/Stream/事务边界；无法原子提交
 | Memory/Knowledge | `memory.Service`、Knowledge/VectorStore 接口 | Tenant 分区、异步索引、权限过滤和迁移 |
 | Artifact | `artifact.Service` | Tenant bucket/prefix、digest、生命周期和审计引用 |
 | Audit | OpenTelemetry 可复用为 trace | 独立 append-only audit adapter；sampling 不能代替审计 |
-| Agent 执行 | Runner、LLMAgent、Tool/MCP、Plugin/Guardrail | Gateway、Binding、幂等、策略和回复 Outbox |
+| Agent 执行 | Runner、LLMAgent/Chain、Tool/MCP、Plugin/Guardrail | Gateway、Binding、幂等、策略、预算和回复 Outbox |
 
 Issue #37 已将 Tenant、Agent App/Revision、Model Profile、Backend Profile 和 Channel Binding
-的控制面表与跨租户复合约束落入 migration；当前 Go 代码仍没有实现 Session/Memory/Audit
-生产表或客户端。本文剩余逻辑模型用于约束后续 issue，不能替代后续平台表的数据库交付物。
+的控制面表与跨租户复合约束落入 migration；Session/Memory/Audit 运行时客户端以及 PostgreSQL
+预算预占/结算/释放账本已落地，Redis/向量库等其他后端仍按各自契约标注。本文剩余逻辑模型
+用于约束后续 issue，不能替代后续平台表的数据库交付物。
