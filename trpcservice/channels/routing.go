@@ -99,19 +99,6 @@ func NewCandidateBindingContextFromInput(input CandidateBindingInput) (Candidate
 	return candidate, nil
 }
 
-// NewCandidateBindingContext constructs a validated opaque candidate result.
-// The Repository normally creates it after a route-index hit.
-//
-// Deprecated: use NewCandidateBindingContextFromInput. This positional
-// constructor remains as a compatibility adapter for existing integrations.
-func NewCandidateBindingContext(channel Channel, routeDigest string, bindingVersion int64, configDigest string, purpose VerificationPurpose, candidateToken string, issuedAt, expiresAt time.Time) (CandidateBindingContext, error) {
-	return NewCandidateBindingContextFromInput(CandidateBindingInput{
-		Channel: channel, PublicRouteKeyDigest: routeDigest, BindingVersion: bindingVersion,
-		ConfigDigest: configDigest, Purpose: purpose, CandidateToken: candidateToken,
-		IssuedAt: issuedAt, ExpiresAt: expiresAt,
-	})
-}
-
 // Clone returns a value copy of the candidate context. The Repository compares
 // all fields when consuming it, so changing this copy cannot change its state.
 func (c CandidateBindingContext) Clone() CandidateBindingContext { return c }

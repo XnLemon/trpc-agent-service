@@ -804,4 +804,3 @@ func nullTime(value time.Time) any {
 var _ runtimestorage.AuditStore = (*Store)(nil)
 var _ runtimestorage.VectorStore = (*Store)(nil)
 var _ runtimestorage.ObjectStore = (*Store)(nil)
-var _ runtimestorage.RuntimeCapabilities = (*Store)(nil)

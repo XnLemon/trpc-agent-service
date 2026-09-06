@@ -355,7 +355,10 @@ func TestProtocolJSONAndCandidateValidationErrors(t *testing.T) {
 	}
 	valid := time.Now().UTC()
 	digest := strings.Repeat("a", 64)
-	candidate, err := NewCandidateBindingContext(ChannelWeCom, digest, 1, digest, PurposeWebhookVerification, "token", valid, valid.Add(time.Second))
+	candidate, err := NewCandidateBindingContextFromInput(CandidateBindingInput{
+		Channel: ChannelWeCom, PublicRouteKeyDigest: digest, BindingVersion: 1, ConfigDigest: digest,
+		Purpose: PurposeWebhookVerification, CandidateToken: "token", IssuedAt: valid, ExpiresAt: valid.Add(time.Second),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +413,10 @@ func TestCandidateLifetimePurposeAndOpaqueHandleBoundaries(t *testing.T) {
 	routeDigest, _ := DigestPublicRouteKey(ChannelWeCom, "route")
 	configDigest := strings.Repeat("a", 64)
 	now := time.Now().UTC()
-	candidate, err := NewCandidateBindingContext(ChannelWeCom, routeDigest, 1, configDigest, PurposeWebhookVerification, "opaque-token", now, now.Add(time.Second))
+	candidate, err := NewCandidateBindingContextFromInput(CandidateBindingInput{
+		Channel: ChannelWeCom, PublicRouteKeyDigest: routeDigest, BindingVersion: 1, ConfigDigest: configDigest,
+		Purpose: PurposeWebhookVerification, CandidateToken: "opaque-token", IssuedAt: now, ExpiresAt: now.Add(time.Second),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,10 +426,16 @@ func TestCandidateLifetimePurposeAndOpaqueHandleBoundaries(t *testing.T) {
 	if err := candidate.Validate(now.Add(time.Second)); !errors.Is(err, ErrCandidateUnavailable) {
 		t.Fatalf("expired candidate was accepted: %v", err)
 	}
-	if _, err := NewCandidateBindingContext(ChannelWeCom, routeDigest, 1, configDigest, VerificationPurpose(""), "opaque-token", now, now.Add(time.Second)); !errors.Is(err, ErrInvalid) {
+	if _, err := NewCandidateBindingContextFromInput(CandidateBindingInput{
+		Channel: ChannelWeCom, PublicRouteKeyDigest: routeDigest, BindingVersion: 1, ConfigDigest: configDigest,
+		Purpose: VerificationPurpose(""), CandidateToken: "opaque-token", IssuedAt: now, ExpiresAt: now.Add(time.Second),
+	}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("empty candidate purpose was accepted: %v", err)
 	}
-	if _, err := NewCandidateBindingContext(ChannelWeCom, routeDigest, 1, configDigest, PurposeWebhookVerification, "opaque-token", now, now.Add(MaxCandidateLifetime+time.Nanosecond)); !errors.Is(err, ErrInvalid) {
+	if _, err := NewCandidateBindingContextFromInput(CandidateBindingInput{
+		Channel: ChannelWeCom, PublicRouteKeyDigest: routeDigest, BindingVersion: 1, ConfigDigest: configDigest,
+		Purpose: PurposeWebhookVerification, CandidateToken: "opaque-token", IssuedAt: now, ExpiresAt: now.Add(MaxCandidateLifetime + time.Nanosecond),
+	}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unbounded candidate lifetime was accepted: %v", err)
 	}
 

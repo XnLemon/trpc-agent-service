@@ -6,13 +6,17 @@ import (
 	"testing"
 )
 
+func newTestTool(source Source, destination Destination, router Router) (*Tool, error) {
+	return NewToolWithStateStore(source, destination, router, NewMemoryStateStore())
+}
+
 func TestMigrationCopyCatchUpValidateCutoverRollback(t *testing.T) {
 	ctx := context.Background()
 	source, destination, router := NewMemorySource(), NewMemoryDestination(), NewMemoryRouter()
 	if err := source.Put("tenant-a", Record{Kind: "session", Key: "s1", Payload: []byte(`{"state":1}`)}); err != nil {
 		t.Fatal(err)
 	}
-	tool, err := NewTool(source, destination, router)
+	tool, err := newTestTool(source, destination, router)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +56,7 @@ func TestMigrationChecksumBlocksCutover(t *testing.T) {
 	ctx := context.Background()
 	source, destination, router := NewMemorySource(), NewMemoryDestination(), NewMemoryRouter()
 	_ = source.Put("tenant-a", Record{Kind: "session", Key: "s1", Payload: []byte("one")})
-	tool, _ := NewTool(source, destination, router)
+	tool, _ := newTestTool(source, destination, router)
 	if _, err := tool.Cutover(context.Background(), "tenant-a"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("cutover before dual-write = %v", err)
 	}
@@ -73,7 +77,7 @@ func TestMigrationChecksumBlocksCutover(t *testing.T) {
 func TestMigrationCutoverRequiresCopyAndCatchUp(t *testing.T) {
 	ctx := context.Background()
 	source, destination, router := NewMemorySource(), NewMemoryDestination(), NewMemoryRouter()
-	tool, err := NewTool(source, destination, router)
+	tool, err := newTestTool(source, destination, router)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,11 +118,11 @@ func TestDigestIsOrderIndependentAndCopiesPayload(t *testing.T) {
 }
 
 func TestMigrationValidationBoundaries(t *testing.T) {
-	if _, err := NewTool(nil, nil, nil); !errors.Is(err, ErrInvalid) {
+	if _, err := newTestTool(nil, nil, nil); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("invalid tool = %v", err)
 	}
 	source, destination, router := NewMemorySource(), NewMemoryDestination(), NewMemoryRouter()
-	tool, _ := NewTool(source, destination, router)
+	tool, _ := newTestTool(source, destination, router)
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := tool.Begin(canceled, "tenant-a"); !errors.Is(err, context.Canceled) {
@@ -399,7 +403,7 @@ func TestMigrationAdapterErrorsAndPhaseBoundaries(t *testing.T) {
 		t.Fatal("begin error was swallowed")
 	}
 	source := &stubSource{watermark: 5, records: []Record{{Kind: "session", Key: "s1", Payload: []byte("one")}}}
-	tool, err := NewTool(source, destination, router)
+	tool, err := newTestTool(source, destination, router)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +475,7 @@ func TestMigrationAdapterErrorsAndPhaseBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A destination route without a recorded cutover cannot be replayed safely.
-	destinationTool, _ := NewTool(source, destination, &stubRouter{backend: BackendDestination})
+	destinationTool, _ := newTestTool(source, destination, &stubRouter{backend: BackendDestination})
 	_, _ = destinationTool.Begin(ctx, "tenant-b")
 	_, _ = destinationTool.Copy(ctx, "tenant-b")
 	_, _ = destinationTool.CatchUp(ctx, "tenant-b")

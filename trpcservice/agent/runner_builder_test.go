@@ -132,7 +132,10 @@ func TestNewRunnerWithConfigCoversModelToolTelemetryAndStorageBoundaries(t *test
 	storageFactory := storagefactory.StorageFactoryFunc(func(_ context.Context, value backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
 		return storagefactory.NewCapabilitySet(value.TenantID, map[backend.Capability]any{backend.CapabilitySession: storageSessions})
 	})
-	runner, err = NewRunnerWithToolRegistry(context.Background(), input, nil, runnerBuilderModelFactory{}, nil, observability.NewNoopProvider(), nil, storageFactory)
+	runner, err = NewRunnerWithConfig(context.Background(), RunnerConfig{
+		Input: input, ModelFactory: runnerBuilderModelFactory{}, Observability: observability.NewNoopProvider(),
+		StorageFactory: storageFactory,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

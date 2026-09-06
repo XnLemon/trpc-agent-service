@@ -142,16 +142,10 @@ type ModelProviderRegistry struct {
 	closed    bool
 }
 
-// ProviderRegistry is retained as a concise name for model provider callers.
-type ProviderRegistry = ModelProviderRegistry
-
 // NewModelProviderRegistry creates an empty tenant-scoped model registry.
 func NewModelProviderRegistry() *ModelProviderRegistry {
 	return &ModelProviderRegistry{factories: make(map[modelProviderKey]ModelFactory)}
 }
-
-// NewProviderRegistry creates a model provider registry.
-func NewProviderRegistry() *ModelProviderRegistry { return NewModelProviderRegistry() }
 
 // Register installs or replaces one tenant/provider factory.
 func (registry *ModelProviderRegistry) Register(tenantID, provider string, factory ModelFactory) error {

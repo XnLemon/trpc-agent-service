@@ -15,7 +15,7 @@ func TestAgentPostgresMutationPreflightErrorBranches(t *testing.T) {
 		app := newStoredAgentApp(t)
 		db, mock := newPostgresCoverageDB(t)
 		mock.ExpectQuery("SELECT tenant_id, app_id, app_key").WithArgs(app.TenantID, app.AppID).WillReturnError(sql.ErrNoRows)
-		_, err := NewRepository(db).Get(context.Background(), app.TenantID, app.AppID)
+		_, err := NewAppRepository(db).Get(context.Background(), app.TenantID, app.AppID)
 		if !errors.Is(err, appmodel.ErrNotFound) {
 			t.Fatalf("Get missing app error = %v", err)
 		}
@@ -28,7 +28,7 @@ func TestAgentPostgresMutationPreflightErrorBranches(t *testing.T) {
 		mock.ExpectBegin()
 		expectAgentApp(mock, app)
 		mock.ExpectRollback()
-		_, err := NewRepository(db).UpdateMetadata(context.Background(), appmodel.UpdateMetadataInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version + 1, DisplayName: "Updated", Description: app.Description})
+		_, err := NewAppRepository(db).UpdateMetadata(context.Background(), appmodel.UpdateMetadataInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version + 1, DisplayName: "Updated", Description: app.Description})
 		if !errors.Is(err, appmodel.ErrConflict) {
 			t.Fatalf("stale metadata error = %v", err)
 		}
@@ -42,7 +42,7 @@ func TestAgentPostgresMutationPreflightErrorBranches(t *testing.T) {
 		expectAgentApp(mock, app)
 		mock.ExpectQuery("COALESCE\\(MAX\\(revision\\)").WillReturnError(errors.New("revision number"))
 		mock.ExpectRollback()
-		_, err := NewRepository(db).CreateDraft(context.Background(), postgresCreateDraftInput(app))
+		_, err := NewAppRepository(db).CreateDraft(context.Background(), postgresCreateDraftInput(app))
 		if !errors.Is(err, ErrStorage) {
 			t.Fatalf("CreateDraft revision number error = %v", err)
 		}
@@ -56,7 +56,7 @@ func TestAgentPostgresMutationPreflightErrorBranches(t *testing.T) {
 		expectAgentApp(mock, app)
 		mock.ExpectQuery("SELECT tenant_id, app_id, revision").WillReturnError(errors.New("revision read"))
 		mock.ExpectRollback()
-		_, err := NewRepository(db).UpdateDraft(context.Background(), postgresUpdateDraftInput(app, 1))
+		_, err := NewAppRepository(db).UpdateDraft(context.Background(), postgresUpdateDraftInput(app, 1))
 		if !errors.Is(err, ErrStorage) {
 			t.Fatalf("UpdateDraft revision read error = %v", err)
 		}
@@ -66,7 +66,7 @@ func TestAgentPostgresMutationPreflightErrorBranches(t *testing.T) {
 	t.Run("transition checks already cancelled context", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if _, _, err := NewRepository(nil).TransitionStatus(ctx, appmodel.TransitionStatusInput{}); !errors.Is(err, context.Canceled) {
+		if _, _, err := NewAppRepository(nil).TransitionStatus(ctx, appmodel.TransitionStatusInput{}); !errors.Is(err, context.Canceled) {
 			t.Fatalf("TransitionStatus canceled error = %v", err)
 		}
 	})
@@ -163,7 +163,7 @@ func TestAgentPostgresPublishErrorBranches(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db, mock := newPostgresCoverageDB(t)
 			tc.setup(mock)
-			_, _, _, err := NewRepository(db).Publish(context.Background(), input)
+			_, _, _, err := NewAppRepository(db).Publish(context.Background(), input)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("Publish error = %v, want %v", err, tc.want)
 			}
@@ -238,7 +238,7 @@ func TestAgentPostgresRollbackErrorBranches(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db, mock := newPostgresCoverageDB(t)
 			tc.setup(mock)
-			_, _, err := NewRepository(db).Rollback(context.Background(), input)
+			_, _, err := NewAppRepository(db).Rollback(context.Background(), input)
 			want := tc.want
 			if want == nil {
 				want = ErrStorage
@@ -256,7 +256,7 @@ func TestAgentPostgresSetCanaryAndTransitionErrorBranches(t *testing.T) {
 
 	t.Run("canary rejects inactive tenant", func(t *testing.T) {
 		db, mock := newPostgresCoverageDB(t)
-		_, _, err := NewRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: "tenant", AppID: "app", TenantActive: false, Metadata: metadata})
+		_, _, err := NewAppRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: "tenant", AppID: "app", TenantActive: false, Metadata: metadata})
 		if !errors.Is(err, appmodel.ErrInvalid) {
 			t.Fatalf("inactive tenant error = %v", err)
 		}
@@ -266,7 +266,7 @@ func TestAgentPostgresSetCanaryAndTransitionErrorBranches(t *testing.T) {
 	t.Run("canary begin error", func(t *testing.T) {
 		db, mock := newPostgresCoverageDB(t)
 		mock.ExpectBegin().WillReturnError(errors.New("begin"))
-		_, _, err := NewRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: "tenant", AppID: "app", TenantActive: true, Metadata: metadata})
+		_, _, err := NewAppRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: "tenant", AppID: "app", TenantActive: true, Metadata: metadata})
 		if !errors.Is(err, ErrStorage) {
 			t.Fatalf("canary begin error = %v", err)
 		}
@@ -276,7 +276,7 @@ func TestAgentPostgresSetCanaryAndTransitionErrorBranches(t *testing.T) {
 	t.Run("transition begin error", func(t *testing.T) {
 		db, mock := newPostgresCoverageDB(t)
 		mock.ExpectBegin().WillReturnError(errors.New("begin"))
-		_, _, err := NewRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: "tenant", AppID: "app", ExpectedVersion: 1, NextStatus: appmodel.StatusDisabled, Metadata: metadata})
+		_, _, err := NewAppRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: "tenant", AppID: "app", ExpectedVersion: 1, NextStatus: appmodel.StatusDisabled, Metadata: metadata})
 		if !errors.Is(err, ErrStorage) {
 			t.Fatalf("transition begin error = %v", err)
 		}
@@ -292,7 +292,7 @@ func TestAgentPostgresSetCanaryAndTransitionErrorBranches(t *testing.T) {
 		expectAgentApp(mock, app)
 		mock.ExpectQuery("SELECT tenant_id, app_id, revision").WillReturnError(errors.New("revision read"))
 		mock.ExpectRollback()
-		_, _, err := NewRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: appmodel.StatusSuspended, Metadata: metadata})
+		_, _, err := NewAppRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: appmodel.StatusSuspended, Metadata: metadata})
 		if !errors.Is(err, ErrStorage) {
 			t.Fatalf("transition revision read error = %v", err)
 		}
@@ -315,7 +315,7 @@ func TestAgentPostgresSetCanaryAndTransitionErrorBranches(t *testing.T) {
 		expectAgentApp(mock, &stored)
 		mock.ExpectQuery("SELECT event_type").WillReturnRows(sqlmock.NewRows([]string{"event_type"}).AddRow("short"))
 		mock.ExpectRollback()
-		_, _, err := NewRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: appmodel.StatusSuspended, Metadata: metadata})
+		_, _, err := NewAppRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: appmodel.StatusSuspended, Metadata: metadata})
 		if !errors.Is(err, ErrStorage) {
 			t.Fatalf("transition event error = %v", err)
 		}
@@ -338,7 +338,7 @@ func TestAgentPostgresSetCanaryAndTransitionErrorBranches(t *testing.T) {
 		expectAgentApp(mock, &stored)
 		expectAgentEvent(mock, &stored, appmodel.ChangeSuspended, appmodel.StatusActive, appmodel.StatusSuspended, app.CurrentRevision, stored.CurrentRevision, revision.ContentDigest, app.Version, stored.Version, stored.UpdatedAt)
 		mock.ExpectCommit().WillReturnError(errors.New("commit"))
-		_, _, err := NewRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: appmodel.StatusSuspended, Metadata: metadata})
+		_, _, err := NewAppRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: appmodel.StatusSuspended, Metadata: metadata})
 		if !errors.Is(err, ErrStorage) {
 			t.Fatalf("transition commit error = %v", err)
 		}
@@ -359,7 +359,7 @@ func TestAgentPostgresLoadRevisionDecodesTools(t *testing.T) {
 		"tenant_id", "app_id", "revision", "state", "draft_version", "agent_kind", "schema_version", "description", "instruction", "global_instruction", "model_profile_id", "generation_config", "runtime_policy", "content_digest", "published_at", "created_at", "updated_at",
 	}).AddRow(revision.TenantID, revision.AppID, revision.Revision, string(revision.State), revision.DraftVersion, string(revision.Kind), revision.SchemaVersion, revision.Description, revision.Instruction, revision.GlobalInstruction, revision.ModelProfileID, generation, runtime, nil, nil, revision.CreatedAt, revision.UpdatedAt))
 	mock.ExpectQuery("SELECT tool_id, required").WithArgs(app.TenantID, app.AppID, revision.Revision).WillReturnRows(sqlmock.NewRows([]string{"tool_id", "required"}).AddRow("tool-a", true))
-	loaded, err := NewRepository(db).GetRevision(context.Background(), app.TenantID, app.AppID, revision.Revision)
+	loaded, err := NewAppRepository(db).GetRevision(context.Background(), app.TenantID, app.AppID, revision.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}

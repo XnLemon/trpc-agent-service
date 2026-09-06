@@ -17,7 +17,7 @@ var agentAppListColumns = []string{
 }
 
 func TestAgentRepositoryListRejectsNilReceiver(t *testing.T) {
-	var repository *AgentRepository
+	var repository *AppRepository
 	ctx := context.Background()
 	if _, _, err := repository.List(ctx, "tenant", "", "", "", 1); !errors.Is(err, ErrStorage) {
 		t.Fatalf("List nil-receiver error = %v", err)
@@ -30,7 +30,7 @@ func TestAgentRepositoryListRejectsNilReceiver(t *testing.T) {
 func TestAgentRepositoryListPrefersCanceledContextOverStorage(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	repository := NewRepository(nil)
+	repository := NewAppRepository(nil)
 	if _, _, err := repository.List(ctx, "tenant", "", "", "", 1); !errors.Is(err, context.Canceled) {
 		t.Fatalf("List canceled-context error = %v", err)
 	}
@@ -59,7 +59,7 @@ func TestAgentRepositoryListAppliesPageBounds(t *testing.T) {
 				WillReturnRows(agentAppRows(apps...)).
 				RowsWillBeClosed()
 
-			items, cursor, err := NewRepository(db).List(context.Background(), app.TenantID, "", "", "", tc.limit)
+			items, cursor, err := NewAppRepository(db).List(context.Background(), app.TenantID, "", "", "", tc.limit)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -96,7 +96,7 @@ func TestAgentRepositoryListFiltersAndPaginates(t *testing.T) {
 		WillReturnRows(agentAppRows(first, &second, &nonMatching, &disabled)).
 		RowsWillBeClosed()
 
-	items, cursor, err := NewRepository(db).List(context.Background(), first.TenantID, " PAYMENTS ", string(appmodel.StatusDraft), "1", 1)
+	items, cursor, err := NewAppRepository(db).List(context.Background(), first.TenantID, " PAYMENTS ", string(appmodel.StatusDraft), "1", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestAgentRepositoryListReturnsEmptyPagePastEnd(t *testing.T) {
 		WillReturnRows(agentAppRows(app)).
 		RowsWillBeClosed()
 
-	items, cursor, err := NewRepository(db).List(context.Background(), app.TenantID, "", "", "1", 1)
+	items, cursor, err := NewAppRepository(db).List(context.Background(), app.TenantID, "", "", "1", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,19 +136,19 @@ func TestAgentRepositoryListFailureCases(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		setup func(sqlmock.Sqlmock, *appmodel.App)
-		call  func(*AgentRepository, *appmodel.App) error
+		call  func(*AppRepository, *appmodel.App) error
 		want  error
 	}{
 		{
 			name: "invalid cursor",
-			call: func(repository *AgentRepository, app *appmodel.App) error {
+			call: func(repository *AppRepository, app *appmodel.App) error {
 				_, _, err := repository.List(ctx, app.TenantID, "", "", "not-a-cursor", 1)
 				return err
 			},
 		},
 		{
 			name: "negative cursor",
-			call: func(repository *AgentRepository, app *appmodel.App) error {
+			call: func(repository *AppRepository, app *appmodel.App) error {
 				_, _, err := repository.List(ctx, app.TenantID, "", "", "-1", 1)
 				return err
 			},
@@ -158,7 +158,7 @@ func TestAgentRepositoryListFailureCases(t *testing.T) {
 			setup: func(mock sqlmock.Sqlmock, app *appmodel.App) {
 				mock.ExpectQuery(`FROM public\.agent_app WHERE tenant_id = \$1`).WithArgs(app.TenantID).WillReturnError(sql.ErrNoRows)
 			},
-			call: func(repository *AgentRepository, app *appmodel.App) error {
+			call: func(repository *AppRepository, app *appmodel.App) error {
 				_, _, err := repository.List(ctx, app.TenantID, "", "", "", 1)
 				return err
 			},
@@ -169,7 +169,7 @@ func TestAgentRepositoryListFailureCases(t *testing.T) {
 			setup: func(mock sqlmock.Sqlmock, app *appmodel.App) {
 				mock.ExpectQuery(`FROM public\.agent_app WHERE tenant_id = \$1`).WithArgs(app.TenantID).WillReturnError(errors.New("query failed"))
 			},
-			call: func(repository *AgentRepository, app *appmodel.App) error {
+			call: func(repository *AppRepository, app *appmodel.App) error {
 				_, _, err := repository.List(ctx, app.TenantID, "", "", "", 1)
 				return err
 			},
@@ -183,7 +183,7 @@ func TestAgentRepositoryListFailureCases(t *testing.T) {
 					WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(app.TenantID)).
 					RowsWillBeClosed()
 			},
-			call: func(repository *AgentRepository, app *appmodel.App) error {
+			call: func(repository *AppRepository, app *appmodel.App) error {
 				_, _, err := repository.List(ctx, app.TenantID, "", "", "", 1)
 				return err
 			},
@@ -195,7 +195,7 @@ func TestAgentRepositoryListFailureCases(t *testing.T) {
 				rows := agentAppRows(app).RowError(0, errors.New("iteration failed"))
 				mock.ExpectQuery(`FROM public\.agent_app WHERE tenant_id = \$1`).WithArgs(app.TenantID).WillReturnRows(rows).RowsWillBeClosed()
 			},
-			call: func(repository *AgentRepository, app *appmodel.App) error {
+			call: func(repository *AppRepository, app *appmodel.App) error {
 				_, _, err := repository.List(ctx, app.TenantID, "", "", "", 1)
 				return err
 			},
@@ -208,7 +208,7 @@ func TestAgentRepositoryListFailureCases(t *testing.T) {
 				invalid.Status = appmodel.Status("unknown")
 				mock.ExpectQuery(`FROM public\.agent_app WHERE tenant_id = \$1`).WithArgs(app.TenantID).WillReturnRows(agentAppRows(&invalid)).RowsWillBeClosed()
 			},
-			call: func(repository *AgentRepository, app *appmodel.App) error {
+			call: func(repository *AppRepository, app *appmodel.App) error {
 				_, _, err := repository.List(ctx, app.TenantID, "", "", "", 1)
 				return err
 			},
@@ -222,7 +222,7 @@ func TestAgentRepositoryListFailureCases(t *testing.T) {
 				tc.setup(mock, app)
 			}
 
-			err := tc.call(NewRepository(db), app)
+			err := tc.call(NewAppRepository(db), app)
 			if tc.want == nil {
 				if err == nil {
 					t.Fatal("invalid cursor was accepted")
@@ -254,7 +254,7 @@ func TestAgentRepositoryListRevisionsAppliesPageBounds(t *testing.T) {
 			revisions := agentListRevisions(t, app, tc.count)
 			expectAgentRevisionList(t, mock, app, revisions)
 
-			items, cursor, err := NewRepository(db).ListRevisions(context.Background(), app.TenantID, app.AppID, "", "", "", tc.limit)
+			items, cursor, err := NewAppRepository(db).ListRevisions(context.Background(), app.TenantID, app.AppID, "", "", "", tc.limit)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -279,7 +279,7 @@ func TestAgentRepositoryListRevisionsFiltersAndPaginates(t *testing.T) {
 	db, mock := newAgentListMock(t)
 	expectAgentRevisionList(t, mock, app, revisions)
 
-	items, cursor, err := NewRepository(db).ListRevisions(context.Background(), app.TenantID, app.AppID, " PAYMENTS ", string(appmodel.RevisionStateDraft), "1", 1)
+	items, cursor, err := NewAppRepository(db).ListRevisions(context.Background(), app.TenantID, app.AppID, " PAYMENTS ", string(appmodel.RevisionStateDraft), "1", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ func TestAgentRepositoryListRevisionsReturnsEmptyPagePastEnd(t *testing.T) {
 	db, mock := newAgentListMock(t)
 	expectAgentRevisionList(t, mock, app, []*appmodel.Revision{revision})
 
-	items, cursor, err := NewRepository(db).ListRevisions(context.Background(), app.TenantID, app.AppID, "", "", "1", 1)
+	items, cursor, err := NewAppRepository(db).ListRevisions(context.Background(), app.TenantID, app.AppID, "", "", "1", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,19 +314,19 @@ func TestAgentRepositoryListRevisionsFailureCases(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		setup func(*testing.T, sqlmock.Sqlmock, *appmodel.App)
-		call  func(*AgentRepository, *appmodel.App) error
+		call  func(*AppRepository, *appmodel.App) error
 		want  error
 	}{
 		{
 			name: "invalid cursor",
-			call: func(repository *AgentRepository, app *appmodel.App) error {
+			call: func(repository *AppRepository, app *appmodel.App) error {
 				_, _, err := repository.ListRevisions(ctx, app.TenantID, app.AppID, "", "", "not-a-cursor", 1)
 				return err
 			},
 		},
 		{
 			name: "negative cursor",
-			call: func(repository *AgentRepository, app *appmodel.App) error {
+			call: func(repository *AppRepository, app *appmodel.App) error {
 				_, _, err := repository.ListRevisions(ctx, app.TenantID, app.AppID, "", "", "-1", 1)
 				return err
 			},
@@ -336,7 +336,7 @@ func TestAgentRepositoryListRevisionsFailureCases(t *testing.T) {
 			setup: func(_ *testing.T, mock sqlmock.Sqlmock, app *appmodel.App) {
 				mock.ExpectQuery(`FROM public\.agent_app_revision WHERE tenant_id=\$1 AND app_id=\$2`).WithArgs(app.TenantID, app.AppID).WillReturnError(sql.ErrNoRows)
 			},
-			call: func(repository *AgentRepository, app *appmodel.App) error {
+			call: func(repository *AppRepository, app *appmodel.App) error {
 				_, _, err := repository.ListRevisions(ctx, app.TenantID, app.AppID, "", "", "", 1)
 				return err
 			},
@@ -347,7 +347,7 @@ func TestAgentRepositoryListRevisionsFailureCases(t *testing.T) {
 			setup: func(_ *testing.T, mock sqlmock.Sqlmock, app *appmodel.App) {
 				mock.ExpectQuery(`FROM public\.agent_app_revision WHERE tenant_id=\$1 AND app_id=\$2`).WithArgs(app.TenantID, app.AppID).WillReturnError(errors.New("query failed"))
 			},
-			call: func(repository *AgentRepository, app *appmodel.App) error {
+			call: func(repository *AppRepository, app *appmodel.App) error {
 				_, _, err := repository.ListRevisions(ctx, app.TenantID, app.AppID, "", "", "", 1)
 				return err
 			},
@@ -361,7 +361,7 @@ func TestAgentRepositoryListRevisionsFailureCases(t *testing.T) {
 					WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow("not-a-number")).
 					RowsWillBeClosed()
 			},
-			call: func(repository *AgentRepository, app *appmodel.App) error {
+			call: func(repository *AppRepository, app *appmodel.App) error {
 				_, _, err := repository.ListRevisions(ctx, app.TenantID, app.AppID, "", "", "", 1)
 				return err
 			},
@@ -373,7 +373,7 @@ func TestAgentRepositoryListRevisionsFailureCases(t *testing.T) {
 				rows := sqlmock.NewRows([]string{"revision"}).AddRow(int64(1)).RowError(0, errors.New("iteration failed"))
 				mock.ExpectQuery(`FROM public\.agent_app_revision WHERE tenant_id=\$1 AND app_id=\$2`).WithArgs(app.TenantID, app.AppID).WillReturnRows(rows).RowsWillBeClosed()
 			},
-			call: func(repository *AgentRepository, app *appmodel.App) error {
+			call: func(repository *AppRepository, app *appmodel.App) error {
 				_, _, err := repository.ListRevisions(ctx, app.TenantID, app.AppID, "", "", "", 1)
 				return err
 			},
@@ -388,7 +388,7 @@ func TestAgentRepositoryListRevisionsFailureCases(t *testing.T) {
 					RowsWillBeClosed()
 				mock.ExpectQuery(`FROM public\.agent_app_revision`).WithArgs(app.TenantID, app.AppID, int64(1)).WillReturnError(errors.New("revision load failed"))
 			},
-			call: func(repository *AgentRepository, app *appmodel.App) error {
+			call: func(repository *AppRepository, app *appmodel.App) error {
 				_, _, err := repository.ListRevisions(ctx, app.TenantID, app.AppID, "", "", "", 1)
 				return err
 			},
@@ -402,7 +402,7 @@ func TestAgentRepositoryListRevisionsFailureCases(t *testing.T) {
 				tc.setup(t, mock, app)
 			}
 
-			err := tc.call(NewRepository(db), app)
+			err := tc.call(NewAppRepository(db), app)
 			if tc.want == nil {
 				if err == nil {
 					t.Fatal("invalid cursor was accepted")
