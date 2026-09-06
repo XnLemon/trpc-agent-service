@@ -274,6 +274,13 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	replyStore, messageStore, deliveryStore, err := environmentPrimaryDeliveryCapabilities(runtimeStore)
+	if err != nil {
+		_ = delegateSessions.Close()
+		_ = runtimeStores.Close()
+		_ = db.Close()
+		return nil, err
+	}
 	tenantRepo, appRepo, channelRepo, auditWriter, err := environmentRepositories(config, db)
 	if err != nil {
 		_ = delegateSessions.Close()
@@ -284,7 +291,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	auditWriter = metrics.WrapAuditWriter(auditWriter, config.telemetry)
 	wecomFactory, wecomProvider, err := environmentWeComComponents(environmentWeComDependencies{
 		config: config, channels: channelRepo, tenants: tenantRepo, apps: appRepo,
-		runtime: runtimeStore, auditWriter: auditWriter,
+		attachments: attachmentStore, auditWriter: auditWriter,
 	})
 	if err != nil {
 		_ = delegateSessions.Close()
@@ -309,7 +316,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, fmt.Errorf("%w: wecom ai bot components: %v", ErrInvalidConfig, err)
 	}
 	workerFactory := environmentOutboxWorkerFactory(environmentOutboxWorkerDependencies{
-		config: config, runtime: runtimeStore, auditWriter: auditWriter,
+		config: config, replyStore: replyStore, messageStore: messageStore, deliveryStore: deliveryStore, auditWriter: auditWriter,
 		legacy: wecomProvider, aiBotBindings: aiBotBindingIDs,
 	})
 	storageFactory, err := storagefactory.NewRegistryStorageFactory(backendRegistry, secretRegistry)
@@ -347,7 +354,8 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		OutboxPollInterval:  time.Second,
 		AuditWriter:         auditWriter,
 		Ping: func(pingContext context.Context) error {
-			return environmentPing(pingContext, config.driver, db, runtimeStore)
+			pinger, _ := runtimeStore.(interface{ Ping(context.Context) error })
+			return environmentPing(pingContext, config.driver, db, pinger)
 		},
 		Migrate:          applyMigrations,
 		VerifyMigrations: verifyMigrations,

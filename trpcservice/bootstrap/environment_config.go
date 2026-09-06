@@ -476,7 +476,7 @@ func environmentRedisRuntimeStore(ctx context.Context, config environmentConfig)
 	return store, nil
 }
 
-func environmentPing(ctx context.Context, driver ControlPlaneDriver, db *sql.DB, runtimeStore runtimestorage.RuntimeStore) error {
+func environmentPing(ctx context.Context, driver ControlPlaneDriver, db *sql.DB, runtimePinger interface{ Ping(context.Context) error }) error {
 	if ctx == nil {
 		return ErrInvalidConfig
 	}
@@ -490,8 +490,8 @@ func environmentPing(ctx context.Context, driver ControlPlaneDriver, db *sql.DB,
 	} else if err := postgres.Ping(ctx, db); err != nil {
 		return err
 	}
-	if pinger, ok := runtimeStore.(interface{ Ping(context.Context) error }); ok {
-		return pinger.Ping(ctx)
+	if runtimePinger != nil {
+		return runtimePinger.Ping(ctx)
 	}
 	return nil
 }

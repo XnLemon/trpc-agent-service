@@ -60,8 +60,9 @@ Agent 的实现。
 
 `runtime/storage` 的基础持久化契约已经按能力拆成
 `SessionStateStore`、`EventHistoryStore`、`MessageStore` 和 `ReplyStore`。
-`RuntimeStore` 暂时保留为存储实现的组合接口；Bootstrap 可以把它拆成显式能力，
-但 Gateway 只接受自己需要的最窄接口，不再从聚合存储隐式探测能力。
+`RuntimeStore` 暂时保留为存储实现的组合接口；Bootstrap 的环境 composition
+只在创建后端 provider 时短暂使用它，再输出显式能力。Bootstrap 公共 Config 和
+Gateway 都只接受自己需要的最窄接口，不再从聚合存储隐式探测能力。
 
 `trpcservice/outbox` 的 Worker 现在分别接收 `ReplyStore` 和
 `MessageStore`：前者拥有回复分片的 claim/transition，后者只负责所有分片
