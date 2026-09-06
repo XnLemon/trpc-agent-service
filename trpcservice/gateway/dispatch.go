@@ -17,6 +17,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/execution"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	"github.com/google/uuid"
@@ -92,7 +93,7 @@ type DispatchConfig struct {
 	DrainTimeout  time.Duration
 	Observability observability.Provider
 	// SessionStore is the session-state capability used by durable dispatch.
-	SessionStore runtimestorage.SessionStateStore
+	SessionStore sessionstorage.SessionStateStore
 	// MessageStore is the inbound message lifecycle capability used by durable
 	// dispatch.
 	MessageStore runtimestorage.MessageStore
@@ -127,32 +128,32 @@ type Dispatcher struct {
 }
 
 type dispatchStore interface {
-	runtimestorage.SessionStateStore
+	sessionstorage.SessionStateStore
 	runtimestorage.MessageStore
 }
 
 type dispatchStoreView struct {
-	sessions runtimestorage.SessionStateStore
+	sessions sessionstorage.SessionStateStore
 	messages runtimestorage.MessageStore
 }
 
-func (store dispatchStoreView) GetSession(ctx context.Context, tenantID, sessionID string) (runtimestorage.Session, error) {
+func (store dispatchStoreView) GetSession(ctx context.Context, tenantID, sessionID string) (sessionstorage.Session, error) {
 	if store.sessions == nil {
-		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+		return sessionstorage.Session{}, runtimestorage.ErrInvalid
 	}
 	return store.sessions.GetSession(ctx, tenantID, sessionID)
 }
 
-func (store dispatchStoreView) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (runtimestorage.Session, error) {
+func (store dispatchStoreView) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (sessionstorage.Session, error) {
 	if store.sessions == nil {
-		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+		return sessionstorage.Session{}, runtimestorage.ErrInvalid
 	}
 	return store.sessions.CreateSession(ctx, tenantID, sessionID, state)
 }
 
-func (store dispatchStoreView) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (runtimestorage.Session, error) {
+func (store dispatchStoreView) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (sessionstorage.Session, error) {
 	if store.sessions == nil {
-		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+		return sessionstorage.Session{}, runtimestorage.ErrInvalid
 	}
 	return store.sessions.UpdateSessionState(ctx, tenantID, sessionID, expectedVersion, state)
 }
@@ -219,7 +220,7 @@ type dispatchExecution struct {
 }
 
 type dispatchCapabilities struct {
-	sessions     runtimestorage.SessionStateStore
+	sessions     sessionstorage.SessionStateStore
 	messages     runtimestorage.MessageStore
 	replyBatches runtimestorage.ReplyBatchEnqueuer
 }

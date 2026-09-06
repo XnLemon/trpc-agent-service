@@ -43,7 +43,7 @@ func (runner *testRunner) Close() error {
 func testExecutionPlan(t *testing.T) runtime.ExecutionPlan {
 	t.Helper()
 	fixture := newGatewayFixture(t)
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})
@@ -222,7 +222,7 @@ func TestRunnerRegistrySelectiveInvalidationPreservesUnrelatedTenant(t *testing.
 
 func TestRunnerRegistrySeparatesBackendProfileVersions(t *testing.T) {
 	fixture := newGatewayFixture(t)
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})

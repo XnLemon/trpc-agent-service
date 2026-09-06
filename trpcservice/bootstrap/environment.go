@@ -22,6 +22,7 @@ import (
 	runtimestorageredis "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
@@ -182,8 +183,8 @@ type environmentRuntimeStores struct {
 // builds runtime providers. It is deliberately not exported from runtime
 // storage: callers receive the narrow capability interfaces they need.
 type environmentStorage interface {
-	runtimestorage.SessionStateStore
-	runtimestorage.EventHistoryStore
+	sessionstorage.SessionStateStore
+	sessionstorage.EventHistoryStore
 	runtimestorage.MessageStore
 	runtimestorage.ReplyStore
 	Close() error

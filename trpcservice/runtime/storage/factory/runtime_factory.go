@@ -99,17 +99,11 @@ func (set *CapabilitySet) Memory() (runtimestorage.MemoryStore, error) {
 	return service, nil
 }
 
-// Summary returns the tenant-scoped summary capability. The direct summary
-// binding is preferred; the Session/Memory fallback keeps older providers
-// compatible while they migrate to the explicit capability.
+// Summary returns the tenant-scoped summary capability. Summary must be
+// materialized through the explicit summary binding; another capability that
+// happens to implement SummaryStore does not imply summary ownership.
 func (set *CapabilitySet) Summary() (runtimestorage.SummaryStore, error) {
 	value, ok := set.Capability(CapabilitySummary)
-	if !ok {
-		value, ok = set.Capability(CapabilitySession)
-	}
-	if !ok {
-		value, ok = set.Capability(CapabilityMemory)
-	}
 	if !ok {
 		return nil, ErrCapabilityUnavailable
 	}

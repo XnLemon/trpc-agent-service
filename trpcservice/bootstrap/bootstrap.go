@@ -37,6 +37,7 @@ import (
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	runtimequeue "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -44,6 +45,7 @@ import (
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
 	tenantmysql "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/mysql"
@@ -103,10 +105,10 @@ type Config struct {
 	// context-bound platform tools. A nil value uses the built-in registry.
 	ToolRegistry *servicetool.Registry
 	// SessionStore is the session-state capability used by durable dispatch.
-	SessionStore runtimestorage.SessionStateStore
+	SessionStore sessionstorage.SessionStateStore
 	// EventHistoryStore is the immutable upstream event history capability used
 	// when Bootstrap wraps an upstream Session service for durable recovery.
-	EventHistoryStore runtimestorage.EventHistoryStore
+	EventHistoryStore sessionstorage.EventHistoryStore
 	// MessageStore is the inbound message lifecycle capability used by durable
 	// dispatch.
 	MessageStore runtimestorage.MessageStore
@@ -190,8 +192,8 @@ type callbackLifecycle interface {
 }
 
 type bootstrapSessionPersistence struct {
-	runtimestorage.SessionStateStore
-	runtimestorage.EventHistoryStore
+	sessionstorage.SessionStateStore
+	sessionstorage.EventHistoryStore
 }
 
 type pollingHealth interface{ Ready() bool }
@@ -403,7 +405,7 @@ func prepareRuntimeConfig(config *Config) error {
 }
 
 func newRuntimeGraph(config Config) (*Runtime, error) {
-	resolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{
+	resolver, err := gateway.NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: config.Tenants, Apps: config.Apps, Models: config.Models, Backends: config.Backends,
 		ModelCatalog: config.ModelCatalog, BackendCatalog: config.BackendCatalog,
 	})

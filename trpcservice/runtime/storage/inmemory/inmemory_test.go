@@ -12,6 +12,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 )
 
 func seedEvent(t *testing.T, store *inmemory.Store, tenantID, sessionID, eventID string) {
@@ -578,19 +579,19 @@ func TestStoreEventHistoryAndMessageLifecycle(t *testing.T) {
 	store := inmemory.New()
 	seedEvent(t, store, "tenant-a", "session-history", "inbound-1")
 	payload := []byte("{\"ID\":\"runner-1\"}")
-	first, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: payload})
+	first, err := store.AppendEventPayload(context.Background(), sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: payload})
 	if err != nil || first.HistorySeq != 1 {
 		t.Fatalf("append = %+v err=%v", first, err)
 	}
 	first.Payload[0] = 'x'
-	replay, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: payload})
+	replay, err := store.AppendEventPayload(context.Background(), sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: payload})
 	if err != nil || string(replay.Payload) != string(payload) {
 		t.Fatalf("idempotent append = %+v err=%v", replay, err)
 	}
-	if _, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: []byte("{ \"ID\": \"runner-1\" }")}); err != nil {
+	if _, err := store.AppendEventPayload(context.Background(), sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: []byte("{ \"ID\": \"runner-1\" }")}); err != nil {
 		t.Fatalf("semantic JSON duplicate = %v", err)
 	}
-	if _, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: []byte("{\"ID\":\"changed\"}")}); !errors.Is(err, runtimestorage.ErrConflict) {
+	if _, err := store.AppendEventPayload(context.Background(), sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session-history", EventID: "runner-1", Payload: []byte("{\"ID\":\"changed\"}")}); !errors.Is(err, runtimestorage.ErrConflict) {
 		t.Fatalf("payload conflict = %v", err)
 	}
 	items, err := store.ListEventPayloads(context.Background(), "tenant-a", "session-history")

@@ -289,7 +289,7 @@ func newDurableTelegramFixture(t *testing.T, providerAccountID string) durableTe
 	if err != nil {
 		t.Fatal(err)
 	}
-	planResolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{Tenants: tenants, Apps: apps, Models: modelsRepo, Backends: backends, ModelCatalog: modelCatalog, BackendCatalog: backendCatalog})
+	planResolver, err := gateway.NewPlanResolver(runtime.PlanResolverConfig{Tenants: tenants, Apps: apps, Models: modelsRepo, Backends: backends, ModelCatalog: modelCatalog, BackendCatalog: backendCatalog})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -24,6 +24,7 @@ import (
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
@@ -278,7 +279,7 @@ func newFixture(t *testing.T) fixture {
 	}
 	tenantA, appA := controlPlane.createTenant(t, "a")
 	tenantB, appB := controlPlane.createTenant(t, "b")
-	resolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{Tenants: tenants, Apps: apps, Models: models, Backends: backends, ModelCatalog: modelCatalog, BackendCatalog: backendCatalog})
+	resolver, err := gateway.NewPlanResolver(runtime.PlanResolverConfig{Tenants: tenants, Apps: apps, Models: models, Backends: backends, ModelCatalog: modelCatalog, BackendCatalog: backendCatalog})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +545,7 @@ func (s *failingBatchStore) EnqueueRepliesWithCorrelation(_ context.Context, _ r
 }
 
 type seedReplyStore interface {
-	runtimestorage.SessionStateStore
+	sessionstorage.SessionStateStore
 	runtimestorage.MessageStore
 	runtimestorage.ReplyStore
 }

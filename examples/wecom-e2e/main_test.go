@@ -248,7 +248,7 @@ func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	planResolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{Tenants: tenantRepo, Apps: appRepo, Models: modelRepo, Backends: backendRepo, ModelCatalog: modelCatalog, BackendCatalog: backendCatalog})
+	planResolver, err := gateway.NewPlanResolver(runtime.PlanResolverConfig{Tenants: tenantRepo, Apps: appRepo, Models: modelRepo, Backends: backendRepo, ModelCatalog: modelCatalog, BackendCatalog: backendCatalog})
 	if err != nil {
 		t.Fatal(err)
 	}
