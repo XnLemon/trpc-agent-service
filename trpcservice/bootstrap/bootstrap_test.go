@@ -192,7 +192,12 @@ func TestRuntimeStartsAndStopsConfiguredOutboxWorker(t *testing.T) {
 	}
 	config, closeDependencies := testConfig(t)
 	defer closeDependencies()
-	config.RuntimeStore = store
+	config.SessionStore = store
+	config.EventHistoryStore = store
+	config.MessageStore = store
+	config.ReplyBatchStore = store
+	config.Attachments = store
+	config.AttachmentStore = store
 	config.OutboxWorker = worker
 	config.OutboxPollInterval = time.Hour
 	graph, err := New(context.Background(), config)
@@ -873,12 +878,37 @@ func TestBootstrapPassesExplicitAttachmentCapabilities(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	config, closeDependencies := testConfig(t)
 	defer closeDependencies()
-	config.RuntimeStore = store
+	config.SessionStore = store
+	config.EventHistoryStore = store
+	config.MessageStore = store
+	config.ReplyBatchStore = store
+	config.Attachments = store
+	config.AttachmentStore = store
 	if err := prepareRuntimeConfig(&config); err != nil {
 		t.Fatal(err)
 	}
 	if config.Attachments != store || config.AttachmentStore != store {
-		t.Fatalf("derived attachment capabilities = reader:%T store:%T", config.Attachments, config.AttachmentStore)
+		t.Fatalf("configured attachment capabilities = reader:%T store:%T", config.Attachments, config.AttachmentStore)
+	}
+}
+
+func TestPrepareRuntimeConfigOwnsDefaultCapabilities(t *testing.T) {
+	var previousClosed atomic.Bool
+	config := Config{CloseDependencies: func() error {
+		previousClosed.Store(true)
+		return nil
+	}}
+	if err := prepareRuntimeConfig(&config); err != nil {
+		t.Fatal(err)
+	}
+	if config.SessionStore == nil || config.EventHistoryStore == nil || config.MessageStore == nil || config.ReplyBatchStore == nil || config.Attachments == nil || config.AttachmentStore == nil {
+		t.Fatalf("default runtime capabilities = session:%T history:%T message:%T reply:%T attachments:%T attachmentStore:%T", config.SessionStore, config.EventHistoryStore, config.MessageStore, config.ReplyBatchStore, config.Attachments, config.AttachmentStore)
+	}
+	if err := config.CloseDependencies(); err != nil {
+		t.Fatal(err)
+	}
+	if !previousClosed.Load() {
+		t.Fatal("bootstrap did not preserve the existing dependency closer")
 	}
 }
 

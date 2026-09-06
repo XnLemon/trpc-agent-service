@@ -338,7 +338,6 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		ReplyBatchStore:     replyBatchStore,
 		Attachments:         attachments,
 		AttachmentStore:     attachmentStore,
-		RuntimeStore:        runtimeStore,
 		RuntimeTenantID:     "",
 		Authenticator:       authenticator,
 		AdminAuthenticator:  adminAuthenticator,
