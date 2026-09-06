@@ -389,6 +389,9 @@ func TestQueueErrorHelpersAndInvalidContext(t *testing.T) {
 	if !errors.Is(forever, ErrLeaseLost) || !retryForever(forever) {
 		t.Fatalf("retry forever helper = %v", forever)
 	}
+	if RetryForever(nil) != nil || RetryForeverAt(nil, due) != nil {
+		t.Fatal("nil retry forever helper did not return nil")
+	}
 	if got, ok := retryAt(forever); !ok || !got.Equal(due) {
 		t.Fatalf("retry deadline = %v, want %v", got, due)
 	}
@@ -433,6 +436,29 @@ func TestQueueErrorHelpersAndInvalidContext(t *testing.T) {
 	}
 }
 
+func TestWorkerHonorsRetryForeverDeadlineBeyondAttemptLimit(t *testing.T) {
+	store := NewMemory()
+	defer store.Close()
+	if _, _, err := store.Enqueue(context.Background(), TaskInput{TenantID: "tenant-a", TaskID: "task-deadline", Kind: "run", Payload: []byte("payload")}); err != nil {
+		t.Fatal(err)
+	}
+	due := time.Now().UTC().Add(time.Minute)
+	worker, err := New(Config{
+		Store: store, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second,
+		MaxAttempts: 1, Handler: func(context.Context, Task) error { return RetryForeverAt(ErrLeaseLost, due) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := worker.RunOnce(context.Background()); !processed || err != nil {
+		t.Fatalf("retry forever deadline run = processed:%v err:%v", processed, err)
+	}
+	task, err := store.Get(context.Background(), "tenant-a", "task-deadline")
+	if err != nil || task.Status != StatusRetryable || !task.NextAttemptAt.Equal(due) {
+		t.Fatalf("retry forever deadline task = %+v err=%v", task, err)
+	}
+}
+
 func TestWorkerRenewalConfigurationBoundaries(t *testing.T) {
 	store := NewMemory()
 	defer store.Close()
@@ -451,6 +477,9 @@ func TestWorkerRenewalConfigurationBoundaries(t *testing.T) {
 		if _, err := New(Config{Store: store, Owner: "worker", LeaseDuration: 3 * time.Nanosecond, LeaseRenewInterval: interval, Handler: handler}); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("renewal interval %v = %v", interval, err)
 		}
+	}
+	if _, err := New(Config{Store: store, Owner: "worker", LeaseDuration: 2 * time.Nanosecond, Handler: handler}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("tiny lease default renewal interval = %v", err)
 	}
 	var nilWorker *Worker
 	if _, err := nilWorker.RunOnce(nil); !errors.Is(err, ErrInvalid) {

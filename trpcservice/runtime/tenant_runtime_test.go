@@ -63,12 +63,18 @@ func TestTenantRuntimeRegistryRetriesFailureAndInvalidatesPublishedState(t *test
 	if got := calls.Load(); got != 3 {
 		t.Fatalf("materializer calls = %d, want 3", got)
 	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestTenantRuntimeRegistryRejectsInvalidAndClosedUse(t *testing.T) {
 	var nilRegistry *TenantRuntimeRegistry
 	if err := nilRegistry.Ensure(context.Background(), "tenant-a"); !errors.Is(err, ErrInvalidTenantRuntime) {
 		t.Fatalf("nil registry error = %v", err)
+	}
+	if err := nilRegistry.Close(); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := NewTenantRuntimeRegistry(nil); !errors.Is(err, ErrInvalidTenantRuntime) {
 		t.Fatalf("nil materializer error = %v", err)
@@ -136,6 +142,67 @@ func TestTenantRuntimeRegistryWaiterHonorsCancellationAndSharesFailure(t *testin
 	}
 }
 
+func TestTenantRuntimeRegistryWaitersObserveMaterializationCompletion(t *testing.T) {
+	t.Run("cancellation", func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		registry, err := NewTenantRuntimeRegistry(func(context.Context, string) error {
+			close(started)
+			<-release
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ownerResult := make(chan error, 1)
+		go func() { ownerResult <- registry.Ensure(context.Background(), "tenant-a") }()
+		<-started
+		waiterObserved := make(chan struct{}, 1)
+		waiterContext, cancel := context.WithCancel(context.Background())
+		waiter := observedDoneContext{Context: waiterContext, observed: waiterObserved}
+		waiterResult := make(chan error, 1)
+		go func() { waiterResult <- registry.Ensure(waiter, "tenant-a") }()
+		<-waiterObserved
+		cancel()
+		if err := <-waiterResult; !errors.Is(err, context.Canceled) {
+			t.Fatalf("waiter cancellation error = %v", err)
+		}
+		close(release)
+		if err := <-ownerResult; err != nil {
+			t.Fatalf("owner completion error = %v", err)
+		}
+	})
+
+	t.Run("completed failure", func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		failure := errors.New("materialization failed")
+		registry, err := NewTenantRuntimeRegistry(func(context.Context, string) error {
+			close(started)
+			<-release
+			return failure
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ownerResult := make(chan error, 1)
+		go func() { ownerResult <- registry.Ensure(context.Background(), "tenant-a") }()
+		<-started
+		waiterObserved := make(chan struct{}, 1)
+		waiter := observedDoneContext{Context: context.Background(), observed: waiterObserved}
+		waiterResult := make(chan error, 1)
+		go func() { waiterResult <- registry.Ensure(waiter, "tenant-a") }()
+		<-waiterObserved
+		close(release)
+		if err := <-ownerResult; !errors.Is(err, failure) {
+			t.Fatalf("owner failure = %v", err)
+		}
+		if err := <-waiterResult; !errors.Is(err, failure) {
+			t.Fatalf("waiter failure = %v", err)
+		}
+	})
+}
+
 func TestTenantRuntimeRegistryInvalidationRacesWithMaterialization(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -184,4 +251,17 @@ func TestTenantRuntimeRegistryCloseReleasesInFlightCall(t *testing.T) {
 	if err := <-result; !errors.Is(err, ErrTenantRuntimeClosed) {
 		t.Fatalf("in-flight close error = %v", err)
 	}
+}
+
+type observedDoneContext struct {
+	context.Context
+	observed chan<- struct{}
+}
+
+func (ctx observedDoneContext) Done() <-chan struct{} {
+	select {
+	case ctx.observed <- struct{}{}:
+	default:
+	}
+	return ctx.Context.Done()
 }

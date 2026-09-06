@@ -164,6 +164,90 @@ func TestDispatcherEnqueueLeavesDurableTaskWhenEventPersistenceFails(t *testing.
 	}
 }
 
+func TestDispatcherQueueAdmissionDuplicateAndRecoveryBoundaries(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	principal, _ := newQueueChannelPrincipal(t, fixture)
+	resolver, err := NewPlanResolver(resolverTestConfig(fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := InboundMessage{Content: "hello", ContentType: ContentTypeText, ExternalMessageID: "duplicate-external", ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"}
+	store := &queueMessageStoreStub{recordDuplicate: true}
+	queue := runtimequeue.NewMemory()
+	t.Cleanup(func() { _ = queue.Close() })
+	dispatcher := &Dispatcher{resolver: resolver, runtimeStore: store, executionQueue: queue}
+	if _, err := dispatcher.Enqueue(context.Background(), DispatchRequest{Principal: principal, Message: message}); !errors.Is(err, ErrDuplicateMessage) {
+		t.Fatalf("duplicate queue admission error = %v", err)
+	}
+	if store.recordCalls != 1 {
+		t.Fatalf("duplicate queue admission record calls = %d, want 1", store.recordCalls)
+	}
+
+	target := principalMustTarget(t, principal)
+	store = &queueMessageStoreStub{
+		event:           runtimestorage.MessageEvent{TenantID: fixture.tenant.TenantID, EventID: "existing-event", SessionID: "session", BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID, Status: runtimestorage.EventReceived},
+		recordDuplicate: true,
+	}
+	dispatcher.runtimeStore = store
+	if _, err := dispatcher.prepareQueuedEvent(context.Background(), principal, target, message); !errors.Is(err, ErrDuplicateMessage) {
+		t.Fatalf("duplicate event preparation error = %v", err)
+	}
+
+	dispatcher, fixture, principal, store = newTaskHandlerBoundary(t)
+	task, payload := taskForPrincipal(t, principal, "recovery-duplicate")
+	identity, err := dispatchRunnerIdentity(principal, payload.Message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.event = runtimestorage.MessageEvent{TenantID: payload.TenantID, EventID: payload.EventID, BindingID: payload.BindingID, ExternalMessageID: payload.Message.ExternalMessageID, Status: runtimestorage.EventReceived}
+	store.forceMissingEvent = true
+	store.recordDuplicate = true
+	if err := dispatcher.HandleExecutionTask(context.Background(), task); err != nil {
+		t.Fatalf("duplicate event recovery = %v", err)
+	}
+
+	store.forceMissingEvent = false
+	store.recordDuplicate = false
+	store.event.EventID = "different-event"
+	if err := dispatcher.HandleExecutionTask(context.Background(), task); !errors.Is(err, ErrInvalidExecutionTask) {
+		t.Fatalf("recovered event identity mismatch = %v", err)
+	}
+
+	store.event = runtimestorage.MessageEvent{}
+	badPayload := payload
+	badPayload.Message.ExternalUserID = ""
+	badTask := taskForPayload(t, task, badPayload)
+	if err := dispatcher.HandleExecutionTask(context.Background(), badTask); err == nil {
+		t.Fatal("invalid runner identity unexpectedly succeeded")
+	}
+
+	missingRoute := &queueMessageStoreStub{forceMissingEvent: true}
+	dispatcher.runtimeStore = missingRoute
+	if _, _, err := dispatcher.ensureQueuedEvent(context.Background(), payload, Principal{kind: PrincipalAPI}, identity); !errors.Is(err, ErrInvalidExecutionTask) {
+		t.Fatalf("missing routing target error = %v", err)
+	}
+	badReply := payload
+	badReply.Message.ConversationKind = "unsupported"
+	if _, _, err := dispatcher.ensureQueuedEvent(context.Background(), badReply, principal, identity); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid reply target error = %v", err)
+	}
+	store = missingRoute
+	dispatcher.runtimeStore = store
+	store.getSessionErr = errors.New("session unavailable")
+	if _, _, err := dispatcher.ensureQueuedEvent(context.Background(), payload, principal, identity); !strings.Contains(err.Error(), "session unavailable") {
+		t.Fatalf("missing event session error = %v", err)
+	}
+
+	store = &queueMessageStoreStub{event: runtimestorage.MessageEvent{TenantID: payload.TenantID, EventID: payload.EventID, BindingID: payload.BindingID, ExternalMessageID: payload.Message.ExternalMessageID, Status: runtimestorage.EventReceived}}
+	dispatcher.runtimeStore = store
+	attachments := testAttachmentReference(t, attachment.KindImage, "image/png", []byte("image"))
+	payload.Message.Attachments = []attachment.Reference{attachments}
+	task = taskForPayload(t, task, payload)
+	if err := dispatcher.HandleExecutionTask(context.Background(), task); !errors.Is(err, ErrExecution) {
+		t.Fatalf("missing attachment binder error = %v", err)
+	}
+}
+
 func TestEnsureQueuedEventRebuildsMissingEvent(t *testing.T) {
 	dispatcher, _, principal, _ := newTaskHandlerBoundary(t)
 	task, payload := taskForPrincipal(t, principal, "rebuild-event")
@@ -453,6 +537,13 @@ func TestPreserveQueuedTaskKeepsWorkerOwnedMessageRecoverable(t *testing.T) {
 	if err := dispatcher.preserveQueuedTask(durable, cause); err != nil {
 		t.Fatalf("terminal worker task preservation = %v", err)
 	}
+	if err := dispatcher.preserveQueuedTask(nil, cause); !isRetryableQueueError(err) || !errors.Is(err, cause) {
+		t.Fatalf("nil durable preservation = %v", err)
+	}
+	store.getMessageErr = errors.New("message store unavailable")
+	if err := dispatcher.preserveQueuedTask(durable, cause); !isRetryableQueueError(err) {
+		t.Fatalf("message lookup preservation = %v", err)
+	}
 }
 
 func TestExecuteQueuedTaskHandlesAttachmentAndRunnerFailures(t *testing.T) {
@@ -601,16 +692,18 @@ func (store *executionQueueStoreStub) Get(context.Context, string, string) (runt
 }
 
 type queueMessageStoreStub struct {
-	event           runtimestorage.MessageEvent
-	getSessionErr   error
-	createErr       error
-	recordErr       error
-	getMessageErr   error
-	transitionErr   error
-	transitions     []runtimestorage.MessageTransition
-	transitionFn    func(context.Context, runtimestorage.MessageTransition) (runtimestorage.MessageEvent, error)
-	recordCalls     int
-	lastRecordInput runtimestorage.MessageEventInput
+	event             runtimestorage.MessageEvent
+	getSessionErr     error
+	createErr         error
+	recordErr         error
+	getMessageErr     error
+	transitionErr     error
+	transitions       []runtimestorage.MessageTransition
+	transitionFn      func(context.Context, runtimestorage.MessageTransition) (runtimestorage.MessageEvent, error)
+	recordCalls       int
+	lastRecordInput   runtimestorage.MessageEventInput
+	recordDuplicate   bool
+	forceMissingEvent bool
 }
 
 func (store *queueMessageStoreStub) GetSession(context.Context, string, string) (sessionstorage.Session, error) {
@@ -642,12 +735,15 @@ func (store *queueMessageStoreStub) RecordMessage(_ context.Context, input runti
 	if store.event.EventID == "" {
 		store.event = runtimestorage.MessageEvent{TenantID: input.TenantID, EventID: input.EventID, SessionID: input.SessionID, BindingID: input.BindingID, ExternalMessageID: input.ExternalMessageID, Status: runtimestorage.EventReceived, ReplyTarget: input.ReplyTarget}
 	}
-	return store.event, false, nil
+	return store.event, store.recordDuplicate, nil
 }
 
 func (store *queueMessageStoreStub) GetMessage(context.Context, string, string) (runtimestorage.MessageEvent, error) {
 	if store.getMessageErr != nil {
 		return runtimestorage.MessageEvent{}, store.getMessageErr
+	}
+	if store.forceMissingEvent {
+		return runtimestorage.MessageEvent{}, runtimestorage.ErrNotFound
 	}
 	if store.event.EventID == "" {
 		return runtimestorage.MessageEvent{}, runtimestorage.ErrNotFound

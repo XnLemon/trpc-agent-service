@@ -446,6 +446,31 @@ func TestHandleUpdateUsesDurableEnqueueAndReplaysAccepted(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateDurableEnqueueFailureBranches(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "async-error-branches", "12345")
+	canceledDispatcher := &asyncDispatchStub{ready: true, enqueueErr: context.Canceled}
+	canceledAdapter := newTestAdapter(t, target, canceledDispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
+	canceledAdapter.audit.Writer = &telegramAuditWriter{}
+	if err := canceledAdapter.HandleUpdate(context.Background(), textUpdate(73, models.ChatTypePrivate, 100, 42, "canceled", 0)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled enqueue error = %v", err)
+	}
+
+	failingDispatcher := &asyncDispatchStub{ready: true, enqueueErr: errors.New("queue unavailable")}
+	failingClient := &fakeBot{me: &models.User{ID: 12345, IsBot: true}, sendErr: errors.New("send unavailable")}
+	failingAdapter := newTestAdapter(t, newTrustedTarget(t, channels.ChannelTelegram, "async-send-error", "12345"), failingDispatcher, failingClient)
+	failingAdapter.audit.Writer = &telegramAuditWriter{}
+	if err := failingAdapter.HandleUpdate(context.Background(), textUpdate(74, models.ChatTypePrivate, 100, 42, "rejected", 0)); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("enqueue/send failure error = %v", err)
+	}
+
+	auditDispatcher := &asyncDispatchStub{ready: true}
+	auditAdapter := newTestAdapter(t, newTrustedTarget(t, channels.ChannelTelegram, "async-audit-error", "12345"), auditDispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
+	auditAdapter.audit.Writer = &telegramAuditWriter{alwaysFail: true}
+	if err := auditAdapter.HandleUpdate(context.Background(), textUpdate(75, models.ChatTypePrivate, 100, 42, "audit failure", 0)); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("accepted audit failure error = %v", err)
+	}
+}
+
 func assertPrivateInboundRequest(t *testing.T, target channels.RoutingTarget, request gateway.DispatchRequest, contextValue any, key contextKey) {
 	t.Helper()
 	if request.Principal.Kind() != gateway.PrincipalChannel || request.Principal.TenantID() != target.TenantID || request.Principal.AppID() != target.AppID {

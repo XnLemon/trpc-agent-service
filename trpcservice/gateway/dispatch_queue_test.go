@@ -203,6 +203,14 @@ func TestAsyncDispatchReadinessPreservesSynchronousGraphs(t *testing.T) {
 	}
 }
 
+func TestAsyncDispatchRequiresDurableRouteRepositories(t *testing.T) {
+	queue := runtimequeue.NewMemory()
+	defer func() { _ = queue.Close() }()
+	if err := validateDispatchCapabilities(DispatchConfig{ExecutionQueue: queue}, dispatchCapabilities{}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("missing asynchronous route repositories error = %v", err)
+	}
+}
+
 func TestDecodeExecutionTaskRejectsMissingIdentity(t *testing.T) {
 	base := executionTaskPayload{
 		Version: executionTaskPayloadVersion, TenantID: "tenant", AppID: "app", BindingID: "binding",
