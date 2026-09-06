@@ -88,8 +88,7 @@ type Config struct {
 	// transitioning deliveries.
 	Store runtimestorage.ReplyStore
 	// MessageStore is the inbound message lifecycle capability used to advance
-	// an event after all of its reply segments are delivered. When omitted, New
-	// derives it from Store for compatibility with a RuntimeStore aggregate.
+	// an event after all of its reply segments are delivered.
 	MessageStore runtimestorage.MessageStore
 	Provider     Provider
 	// Channel and ProviderName identify the real delivery route for telemetry.
@@ -110,14 +109,7 @@ type Config struct {
 
 // New creates a reply worker after validating delivery and lease settings.
 func New(config Config) (*Worker, error) {
-	if config.Store == nil || config.Provider == nil || runtimestorage.ValidateTenant(config.TenantID) != nil || config.Owner == "" || config.LeaseDuration <= 0 {
-		return nil, ErrInvalid
-	}
-	messageStore := config.MessageStore
-	if messageStore == nil {
-		messageStore, _ = config.Store.(runtimestorage.MessageStore)
-	}
-	if messageStore == nil {
+	if config.Store == nil || config.MessageStore == nil || config.Provider == nil || runtimestorage.ValidateTenant(config.TenantID) != nil || config.Owner == "" || config.LeaseDuration <= 0 {
 		return nil, ErrInvalid
 	}
 	if config.MaxAttempts <= 0 {
@@ -144,7 +136,7 @@ func New(config Config) (*Worker, error) {
 	if config.ProviderName == "" {
 		config.ProviderName = "other"
 	}
-	return &Worker{store: config.Store, messageStore: messageStore, provider: config.Provider, channel: config.Channel, providerName: config.ProviderName, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, jitter: config.Jitter, telemetry: config.Observability, metrics: metrics.New(config.Observability), audit: audit.Recorder{Writer: config.AuditWriter, TenantID: config.TenantID}}, nil
+	return &Worker{store: config.Store, messageStore: config.MessageStore, provider: config.Provider, channel: config.Channel, providerName: config.ProviderName, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, jitter: config.Jitter, telemetry: config.Observability, metrics: metrics.New(config.Observability), audit: audit.Recorder{Writer: config.AuditWriter, TenantID: config.TenantID}}, nil
 }
 
 // Run polls until ctx is canceled. It owns no goroutine after returning.
@@ -462,7 +454,7 @@ func eligible(value runtimestorage.ReplyOutbox) bool {
 }
 
 func (w *Worker) advanceEvent(ctx context.Context, eventID string) {
-	if eventID == "" {
+	if w == nil || w.messageStore == nil || eventID == "" {
 		return
 	}
 	candidates, err := observeStorage(w, ctx, func(operationCtx context.Context) ([]runtimestorage.ReplyOutbox, error) {
@@ -484,19 +476,15 @@ func (w *Worker) advanceEvent(ctx context.Context, eventID string) {
 	if !hasEvent {
 		return
 	}
-	messageStore := w.messageCapability()
-	if messageStore == nil {
-		return
-	}
 	event, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.MessageEvent, error) {
-		return messageStore.GetMessage(operationCtx, w.tenantID, eventID)
+		return w.messageStore.GetMessage(operationCtx, w.tenantID, eventID)
 	})
 	if err != nil {
 		return
 	}
 	if event.Status == runtimestorage.EventCompleted {
 		if _, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.MessageEvent, error) {
-			return messageStore.TransitionMessage(operationCtx, runtimestorage.MessageTransition{TenantID: w.tenantID, EventID: eventID, From: runtimestorage.EventCompleted, To: runtimestorage.EventReplyPending, Owner: w.owner})
+			return w.messageStore.TransitionMessage(operationCtx, runtimestorage.MessageTransition{TenantID: w.tenantID, EventID: eventID, From: runtimestorage.EventCompleted, To: runtimestorage.EventReplyPending, Owner: w.owner})
 		}); err != nil {
 			return
 		}
@@ -504,20 +492,9 @@ func (w *Worker) advanceEvent(ctx context.Context, eventID string) {
 	}
 	if event.Status == runtimestorage.EventReplyPending {
 		_, _ = observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.MessageEvent, error) {
-			return messageStore.TransitionMessage(operationCtx, runtimestorage.MessageTransition{TenantID: w.tenantID, EventID: eventID, From: runtimestorage.EventReplyPending, To: runtimestorage.EventReplied, Owner: w.owner})
+			return w.messageStore.TransitionMessage(operationCtx, runtimestorage.MessageTransition{TenantID: w.tenantID, EventID: eventID, From: runtimestorage.EventReplyPending, To: runtimestorage.EventReplied, Owner: w.owner})
 		})
 	}
-}
-
-func (w *Worker) messageCapability() runtimestorage.MessageStore {
-	if w == nil {
-		return nil
-	}
-	if w.messageStore != nil {
-		return w.messageStore
-	}
-	messageStore, _ := w.store.(runtimestorage.MessageStore)
-	return messageStore
 }
 
 func (w *Worker) reconcile(ctx context.Context, claimed runtimestorage.ReplyOutbox) bool {

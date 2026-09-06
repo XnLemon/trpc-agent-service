@@ -14,7 +14,7 @@
 
 每个 operation 只能有一个终态：开始时可记录 `status=started`，但必须在成功、业务错误、取消或超时时记录恰好一个终态并结束 span。HTTP/SSE 请求的终态由整个协议生命周期决定：客户端断开、写入失败、request context 取消、空 stream 或没有 `done` 的不完整 stream 不能被记为成功；已经写出 HTTP 200 后只能在 telemetry/audit 中记录失败或取消，不能再写第二个 HTTP status。Model callback 以一次模型调用为边界：流式 partial response 不能提前结束 span 或重复累计 token；`GenerateContent` 在创建响应流前返回的错误也必须结束同一 span。企业微信 receive 创建的 context 必须作为 Gateway/Runner dispatch 的 parent，不能从独立的 handler 根 context 重新开始链路。
 
-Storage telemetry 覆盖实际 RuntimeStore/Session service 的读写方法（Get/Create/Update/Delete Session、Append/List event、message/reply lifecycle），而不只覆盖 capability factory construction 或 inbound claim；新增 adapter 必须复用同一 hook。
+Storage telemetry 覆盖实际运行时存储能力/Session service 的读写方法（Get/Create/Update/Delete Session、Append/List event、message/reply lifecycle），而不只覆盖 capability factory construction 或 inbound claim；新增 adapter 必须复用同一 hook。
 
 不得写入 token、API key、DSN 密码、Authorization、完整 URL、session/user/message/request 原文或不受界限的外部 ID。tenant/app 关联只使用配置的短 hash；hash 不作为 Prometheus label，避免租户数量直接变成指标基数。
 

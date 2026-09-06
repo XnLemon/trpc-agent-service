@@ -17,8 +17,10 @@ func TestStartLogsUnexpectedWorkerFailure(t *testing.T) {
 	restore := servicelog.SetDefault(zap.New(core))
 	t.Cleanup(restore)
 
+	store := &branchStore{listErr: errors.New("database password=secret")}
 	worker, err := New(Config{
-		Store:         &branchStore{listErr: errors.New("database password=secret")},
+		Store:         store,
+		MessageStore:  store,
 		Provider:      branchProvider{},
 		TenantID:      "tenant-a",
 		Owner:         "worker-a",
@@ -30,8 +32,8 @@ func TestStartLogsUnexpectedWorkerFailure(t *testing.T) {
 	if err := worker.Start(context.Background(), time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	waitForObservedMessage(t, logs, "[runtime/outbox] worker stopped")
-	entry := logs.FilterMessage("[runtime/outbox] worker stopped").All()[0]
+	waitForObservedMessage(t, logs, "[outbox] worker stopped")
+	entry := logs.FilterMessage("[outbox] worker stopped").All()[0]
 	if got := entry.ContextMap()["error_type"]; got != "worker_stopped" {
 		t.Fatalf("error_type = %v, want worker_stopped", got)
 	}

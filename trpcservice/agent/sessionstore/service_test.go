@@ -17,7 +17,8 @@ import (
 )
 
 type failingCreateStore struct {
-	runtimestorage.RuntimeStore
+	runtimestorage.SessionStateStore
+	runtimestorage.EventHistoryStore
 }
 
 type serviceStore struct {

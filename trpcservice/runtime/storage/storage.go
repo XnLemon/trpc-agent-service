@@ -250,24 +250,10 @@ type ReplyStore interface {
 	TransitionReply(context.Context, ReplyTransition) (ReplyOutbox, error)
 }
 
-// RuntimeStore is the tenant-scoped compatibility aggregate used by the
-// runtime persistence implementations. Consumers should depend on the
-// narrowest capability interface they need.
-//
-// Deprecated: use the narrow capability interfaces such as SessionStateStore,
-// EventHistoryStore, MessageStore, ReplyStore, and ReplyBatchEnqueuer.
-type RuntimeStore interface {
-	SessionStateStore
-	EventHistoryStore
-	MessageStore
-	ReplyStore
-	Close() error
-}
-
 // ReplyBatchEnqueuer is the atomic reply-materialization capability. A batch
 // either makes every segment durable or makes none of its new segments visible
-// to a delivery worker. It remains separate from RuntimeStore so existing
-// readers can keep a narrow dependency surface.
+// to a delivery worker. It remains separate from the segment lifecycle
+// capabilities so consumers can keep a narrow dependency surface.
 type ReplyBatchEnqueuer interface {
 	EnqueueReplies(context.Context, []ReplyOutbox) ([]ReplyOutbox, error)
 }

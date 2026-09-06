@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/google/uuid"
@@ -168,7 +168,7 @@ func TestRuntimeStorePostgreSQLOutboxWorkerRestartRecovery(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	store = New(db)
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: integrationProvider{id: "provider-restart"}, TenantID: tenantID, Owner: "restart-worker", LeaseDuration: time.Second})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: integrationProvider{id: "provider-restart"}, TenantID: tenantID, Owner: "restart-worker", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -26,9 +26,9 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	runtimeservice "github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	modelruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/model"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimequeue "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -186,13 +186,18 @@ func TestRuntimeStartsAndStopsConfiguredOutboxWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider := &bootstrapBlockingProvider{started: make(chan struct{}), canceled: make(chan struct{})}
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "bootstrap-worker", LeaseDuration: time.Second})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: "tenant-a", Owner: "bootstrap-worker", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	config, closeDependencies := testConfig(t)
 	defer closeDependencies()
-	config.RuntimeStore = store
+	config.SessionStore = store
+	config.EventHistoryStore = store
+	config.MessageStore = store
+	config.ReplyBatchStore = store
+	config.Attachments = store
+	config.AttachmentStore = store
 	config.OutboxWorker = worker
 	config.OutboxPollInterval = time.Hour
 	graph, err := New(context.Background(), config)
@@ -215,8 +220,9 @@ func TestRuntimeStartsAndStopsConfiguredOutboxWorker(t *testing.T) {
 }
 
 func TestNewRejectsAlreadyRunningOutboxWorker(t *testing.T) {
+	store := runtimestorageinmemory.New()
 	worker, err := outbox.New(outbox.Config{
-		Store: runtimestorageinmemory.New(), Provider: &bootstrapBlockingProvider{started: make(chan struct{}), canceled: make(chan struct{})},
+		Store: store, MessageStore: store, Provider: &bootstrapBlockingProvider{started: make(chan struct{}), canceled: make(chan struct{})},
 		TenantID: "tenant-a", Owner: "already-running", LeaseDuration: time.Second,
 	})
 	if err != nil {
@@ -703,7 +709,7 @@ func TestEnvironmentWeComAIBotComponentsUseTrustedBindings(t *testing.T) {
 		return outbox.New(config)
 	}
 	workerFactory := environmentOutboxWorkerFactory(environmentOutboxWorkerDependencies{
-		config: environment, runtime: runtimeStore, aiBotBindings: bindingIDs,
+		config: environment, replyStore: runtimeStore, messageStore: runtimeStore, deliveryStore: runtimeStore, aiBotBindings: bindingIDs,
 	})
 	if _, err := workerFactory([]channels.PollingAdapter{manager}); err != nil {
 		t.Fatalf("AI Bot outbox worker = %v", err)
@@ -756,7 +762,7 @@ func TestEnvironmentOutboxWorkerFactoryRoutesAIBotBindings(t *testing.T) {
 
 	const tenantID = "t_00000000000000000000000000"
 	factory := environmentOutboxWorkerFactory(environmentOutboxWorkerDependencies{
-		config: environmentConfig{tenantID: tenantID}, runtime: store,
+		config: environmentConfig{tenantID: tenantID}, replyStore: store, messageStore: store, deliveryStore: store,
 		aiBotBindings: map[string]struct{}{"aibot-binding": {}},
 	})
 	manager := &wecom_aibot.Manager{}
@@ -872,12 +878,37 @@ func TestBootstrapPassesExplicitAttachmentCapabilities(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	config, closeDependencies := testConfig(t)
 	defer closeDependencies()
-	config.RuntimeStore = store
+	config.SessionStore = store
+	config.EventHistoryStore = store
+	config.MessageStore = store
+	config.ReplyBatchStore = store
+	config.Attachments = store
+	config.AttachmentStore = store
 	if err := prepareRuntimeConfig(&config); err != nil {
 		t.Fatal(err)
 	}
 	if config.Attachments != store || config.AttachmentStore != store {
-		t.Fatalf("derived attachment capabilities = reader:%T store:%T", config.Attachments, config.AttachmentStore)
+		t.Fatalf("configured attachment capabilities = reader:%T store:%T", config.Attachments, config.AttachmentStore)
+	}
+}
+
+func TestPrepareRuntimeConfigOwnsDefaultCapabilities(t *testing.T) {
+	var previousClosed atomic.Bool
+	config := Config{CloseDependencies: func() error {
+		previousClosed.Store(true)
+		return nil
+	}}
+	if err := prepareRuntimeConfig(&config); err != nil {
+		t.Fatal(err)
+	}
+	if config.SessionStore == nil || config.EventHistoryStore == nil || config.MessageStore == nil || config.ReplyBatchStore == nil || config.Attachments == nil || config.AttachmentStore == nil {
+		t.Fatalf("default runtime capabilities = session:%T history:%T message:%T reply:%T attachments:%T attachmentStore:%T", config.SessionStore, config.EventHistoryStore, config.MessageStore, config.ReplyBatchStore, config.Attachments, config.AttachmentStore)
+	}
+	if err := config.CloseDependencies(); err != nil {
+		t.Fatal(err)
+	}
+	if !previousClosed.Load() {
+		t.Fatal("bootstrap did not preserve the existing dependency closer")
 	}
 }
 
@@ -1123,6 +1154,10 @@ func TestEnvironmentRuntimeCapabilities(t *testing.T) {
 		}
 		if attachments == nil || attachmentStore == nil {
 			t.Fatal("attachment capabilities are nil")
+		}
+		replyStore, messageStore, deliveryStore := environmentPrimaryDeliveryCapabilities(store)
+		if replyStore != store || messageStore != store || deliveryStore != store {
+			t.Fatalf("delivery capabilities = reply:%T message:%T delivery:%T", replyStore, messageStore, deliveryStore)
 		}
 	})
 }
@@ -1682,7 +1717,7 @@ func (bootstrapPingConn) Begin() (driver.Tx, error)           { return nil, driv
 func (bootstrapPingConn) Ping(context.Context) error          { return nil }
 
 type trackingRuntimeStore struct {
-	runtimestorage.RuntimeStore
+	environmentStorage
 	closed atomic.Bool
 }
 

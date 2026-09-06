@@ -19,8 +19,8 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
@@ -84,7 +84,7 @@ func TestFaultInjectionOutboxRetryAndConcurrencyE2E(t *testing.T) {
 	seedCompletedReply(t, store, "tenant-fault", "event-fault", "reply-fault")
 
 	provider := &faultProvider{failures: []error{errors.New("provider token=" + injectedSecret)}}
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-fault", Owner: "worker-a", LeaseDuration: time.Second, MaxAttempts: 3, BackoffBase: time.Nanosecond, BackoffMax: time.Nanosecond})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: "tenant-fault", Owner: "worker-a", LeaseDuration: time.Second, MaxAttempts: 3, BackoffBase: time.Nanosecond, BackoffMax: time.Nanosecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestFaultInjectionOutboxRetryAndConcurrencyE2E(t *testing.T) {
 	provider.blockOnce = true
 	provider.started = started
 	provider.release = release
-	workerB, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-fault", Owner: "worker-b", LeaseDuration: time.Second})
+	workerB, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: "tenant-fault", Owner: "worker-b", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,8 +126,8 @@ func TestFaultInjectionOutboxRetryAndConcurrencyE2E(t *testing.T) {
 func TestFaultInjectionMaterializationFailureE2E(t *testing.T) {
 	base := runtimestorageinmemory.New()
 	t.Cleanup(func() { _ = base.Close() })
-	store := &failingBatchStore{RuntimeStore: base, err: errors.New("database password=" + injectedSecret)}
-	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: store, SegmentSize: 3})
+	store := &failingBatchStore{ReplyStore: base, err: errors.New("database password=" + injectedSecret)}
+	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{BatchStore: store, SegmentSize: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestFaultInjectionMaterializationAtomicityE2E(t *testing.T) {
 	if _, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: "tenant-fault", EventID: "event-atomic", ReplyID: "reply-atomic", SegmentIndex: 1, SegmentCount: 2, Payload: "old"}); err != nil {
 		t.Fatal(err)
 	}
-	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: store, SegmentSize: 3})
+	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{BatchStore: store, SegmentSize: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +290,7 @@ func newFixture(t *testing.T) fixture {
 	t.Cleanup(func() { _ = registry.Close() })
 	store := runtimestorageinmemory.New()
 	t.Cleanup(func() { _ = store.Close() })
-	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store})
+	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store, Attachments: store, AttachmentStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,7 +528,7 @@ func (p *faultProvider) CallsFor(replyID string) int {
 }
 
 type failingBatchStore struct {
-	runtimestorage.RuntimeStore
+	runtimestorage.ReplyStore
 	err       error
 	attempted int
 }
@@ -543,7 +543,13 @@ func (s *failingBatchStore) EnqueueRepliesWithCorrelation(_ context.Context, _ r
 	return nil, s.err
 }
 
-func seedCompletedReply(t *testing.T, store runtimestorage.RuntimeStore, tenantID, eventID, replyID string) {
+type seedReplyStore interface {
+	runtimestorage.SessionStateStore
+	runtimestorage.MessageStore
+	runtimestorage.ReplyStore
+}
+
+func seedCompletedReply(t *testing.T, store seedReplyStore, tenantID, eventID, replyID string) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := store.CreateSession(ctx, tenantID, "session-"+eventID, nil); err != nil {

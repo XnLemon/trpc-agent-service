@@ -851,5 +851,8 @@ func cloneReply(value runtimestorage.ReplyOutbox) runtimestorage.ReplyOutbox {
 	return value
 }
 
-var _ runtimestorage.RuntimeStore = (*Store)(nil)
+var _ runtimestorage.SessionStateStore = (*Store)(nil)
+var _ runtimestorage.EventHistoryStore = (*Store)(nil)
+var _ runtimestorage.MessageStore = (*Store)(nil)
+var _ runtimestorage.ReplyStore = (*Store)(nil)
 var _ runtimestorage.ReplyReceiptRecorder = (*Store)(nil)

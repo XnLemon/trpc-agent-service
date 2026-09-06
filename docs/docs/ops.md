@@ -2,7 +2,7 @@
 
 > 本页把 [生产架构设计](architecture.md) 转成可执行的发布、监控、恢复和风险检查表。
 > 本页按代码和自动化测试证据标注能力状态，不等同于一份已经完成生产部署的运行手册。
-> 控制面、Runner spine、SQL/InMemory RuntimeStore，以及可选的 Redis Session/Memory
+> 控制面、Runner spine、SQL/InMemory 运行时存储能力，以及可选的 Redis Session/Memory
 > provider 已落地；真实 IM 验签、Dashboard、生产告警平台和其他外部存储适配仍需单独验收。
 
 ## 运行边界与值班目标
@@ -215,9 +215,9 @@ backpressure。高峰保护使用租户级 token bucket、全局队列上限、�
 | 能力 | 状态 | 证据或边界 |
 | --- | --- | --- |
 | Tenant、Agent App/Revision、Model Profile、Backend Profile、Execution Plan 和 Runner policy | 已实现 | 控制面模型、快照和策略测试 |
-| InMemory RuntimeStore | 已实现 | Tenant-scoped Session/Event/Memory 契约测试 |
-| PostgreSQL RuntimeStore | 部分实现 | 迁移、CAS、幂等、Outbox 和可选 live conformance；需要外部 DSN 才能验证重启恢复 |
-| Redis RuntimeStore | 已实现（Issue #108） | `TRPC_SESSION_BACKEND=redis`，Redis Session/Memory、WATCH/MULTI CAS、租户隔离和 readiness PING；可选 live reconnect 测试 |
+| InMemory 运行时存储能力 | 已实现 | Tenant-scoped Session/Event/Memory 契约测试 |
+| PostgreSQL 运行时存储能力 | 部分实现 | 迁移、CAS、幂等、Outbox 和可选 live conformance；需要外部 DSN 才能验证重启恢复 |
+| Redis Session/Memory 能力 | 已实现（Issue #108） | `TRPC_SESSION_BACKEND=redis`，Redis Session/Memory、WATCH/MULTI CAS、租户隔离和 readiness PING；可选 live reconnect 测试 |
 | Redis capability 范围 | 明确限制 | 仅 `session`、`memory`；`summary`、`knowledge`、`artifact`、`audit` 和独立向量库 provider 会被拒绝 |
 | Redis/PostgreSQL 迁移、双写、shadow read、自动 cutover | 未实现 | 迁移方案仍需后续工具和演练，不能把切换当作 Redis provider 自带能力 |
 | S3/OSS-compatible Artifact/Object provider | 已实现（Issue #113） | `runtime/storage/s3`、tenant-scoped `artifact` binding、bounded transfer、metadata 校验、Probe/Close；默认不启用，需显式 S3 Profile 和凭据；MinIO live conformance 为可选 |

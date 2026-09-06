@@ -36,7 +36,7 @@ import (
 	modelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/model/mysql"
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	runtimequeue "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -102,13 +102,6 @@ type Config struct {
 	// ToolRegistry resolves published revision authorizations to installed,
 	// context-bound platform tools. A nil value uses the built-in registry.
 	ToolRegistry *servicetool.Registry
-	// RuntimeStore is the legacy tenant-scoped Session/Event/Outbox aggregate.
-	// New composition code should inject the narrow capabilities below instead
-	// of making the dispatcher depend on a complete storage implementation.
-	//
-	// Deprecated: use SessionStore, EventHistoryStore, MessageStore, and
-	// ReplyBatchStore.
-	RuntimeStore runtimestorage.RuntimeStore
 	// SessionStore is the session-state capability used by durable dispatch.
 	SessionStore runtimestorage.SessionStateStore
 	// EventHistoryStore is the immutable upstream event history capability used
@@ -374,27 +367,24 @@ func validateConfig(config Config) error {
 }
 
 func prepareRuntimeConfig(config *Config) error {
-	if config.RuntimeStore == nil && config.SessionStore == nil && config.MessageStore == nil && config.ReplyBatchStore == nil {
-		config.RuntimeStore = runtimestorageinmemory.New()
-	}
-	if config.RuntimeStore != nil {
-		if config.SessionStore == nil {
-			config.SessionStore, _ = config.RuntimeStore.(runtimestorage.SessionStateStore)
-		}
-		if config.EventHistoryStore == nil {
-			config.EventHistoryStore, _ = config.RuntimeStore.(runtimestorage.EventHistoryStore)
-		}
-		if config.MessageStore == nil {
-			config.MessageStore, _ = config.RuntimeStore.(runtimestorage.MessageStore)
-		}
-		if config.ReplyBatchStore == nil {
-			config.ReplyBatchStore, _ = config.RuntimeStore.(runtimestorage.ReplyBatchEnqueuer)
-		}
+	if config.SessionStore == nil && config.EventHistoryStore == nil && config.MessageStore == nil && config.ReplyBatchStore == nil {
+		store := runtimestorageinmemory.New()
+		config.SessionStore = store
+		config.EventHistoryStore = store
+		config.MessageStore = store
+		config.ReplyBatchStore = store
 		if config.Attachments == nil {
-			config.Attachments, _ = config.RuntimeStore.(attachment.Reader)
+			config.Attachments = store
 		}
 		if config.AttachmentStore == nil {
-			config.AttachmentStore, _ = config.RuntimeStore.(runtimestorage.AttachmentStore)
+			config.AttachmentStore = store
+		}
+		previousClose := config.CloseDependencies
+		config.CloseDependencies = func() error {
+			if previousClose == nil {
+				return store.Close()
+			}
+			return errors.Join(previousClose(), store.Close())
 		}
 	}
 	if config.RuntimeTenantID == "" {
@@ -428,13 +418,9 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, ErrInvalidConfig
 	}
-	legacyRuntimeStore := config.RuntimeStore
-	if config.SessionStore != nil && config.MessageStore != nil && config.ReplyBatchStore != nil {
-		legacyRuntimeStore = nil
-	}
 	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{
 		Resolver: resolver, Registry: registry,
-		RuntimeStore: legacyRuntimeStore, SessionStore: config.SessionStore,
+		SessionStore: config.SessionStore,
 		MessageStore: config.MessageStore, ReplyBatchStore: config.ReplyBatchStore,
 		Attachments: config.Attachments, AttachmentStore: config.AttachmentStore,
 		DrainTimeout: config.DrainTimeout, AuditWriter: config.AuditWriter, Observability: config.Observability,

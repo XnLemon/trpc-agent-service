@@ -6,7 +6,7 @@ import (
 	"go.uber.org/zap"
 )
 
-var packageLog = servicelog.NewPrefixedLogger("[runtime/outbox]")
+var packageLog = servicelog.NewPrefixedLogger("[outbox]")
 
 func logWorkerStopped(worker *Worker, err error) {
 	if worker == nil || err == nil {
