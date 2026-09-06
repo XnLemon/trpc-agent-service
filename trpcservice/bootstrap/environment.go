@@ -188,6 +188,31 @@ func (stores environmentRuntimeStores) Close() error {
 	return errors.Join(errs...)
 }
 
+func environmentPrimaryRuntimeCapabilities(runtimeStore runtimestorage.RuntimeStore) (runtimestorage.ReplyBatchEnqueuer, attachment.Reader, runtimestorage.AttachmentStore, error) {
+	replyBatchStore, ok := runtimeStore.(runtimestorage.ReplyBatchEnqueuer)
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("%w: runtime storage does not support atomic reply batches", ErrInvalidConfig)
+	}
+	attachments, _ := runtimeStore.(attachment.Reader)
+	attachmentStore, _ := runtimeStore.(runtimestorage.AttachmentStore)
+	return replyBatchStore, attachments, attachmentStore, nil
+}
+
+func environmentAdminAuthenticator(config environmentConfig) (admin.Authenticator, error) {
+	staticAdmin, err := admin.NewStaticAuthenticator(config.adminToken, config.adminTenants)
+	if err != nil {
+		return nil, fmt.Errorf("%w: Admin authenticator configuration is invalid", ErrInvalidConfig)
+	}
+	if config.adminUsername == "" {
+		return staticAdmin, nil
+	}
+	sessionAuthenticator, err := admin.NewSessionAuthenticator(config.adminUsername, config.adminPassword, staticAdmin)
+	if err != nil {
+		return nil, fmt.Errorf("%w: Admin session configuration is invalid", ErrInvalidConfig)
+	}
+	return sessionAuthenticator, nil
+}
+
 // NewFromEnvironment assembles the production bootstrap graph from explicit
 // process configuration. It fails before binding an HTTP server when the
 // durable control plane or required credentials are not configured.
@@ -220,17 +245,9 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: API authenticator configuration is invalid", ErrInvalidConfig)
 	}
-	staticAdmin, err := admin.NewStaticAuthenticator(config.adminToken, config.adminTenants)
+	adminAuthenticator, err := environmentAdminAuthenticator(config)
 	if err != nil {
-		return nil, fmt.Errorf("%w: Admin authenticator configuration is invalid", ErrInvalidConfig)
-	}
-	var adminAuthenticator admin.Authenticator = staticAdmin
-	if config.adminUsername != "" {
-		sessionAuthenticator, sessionErr := admin.NewSessionAuthenticator(config.adminUsername, config.adminPassword, staticAdmin)
-		if sessionErr != nil {
-			return nil, fmt.Errorf("%w: Admin session configuration is invalid", ErrInvalidConfig)
-		}
-		adminAuthenticator = sessionAuthenticator
+		return nil, err
 	}
 	db, applyMigrations, verifyMigrations, err := openEnvironmentDatabaseForConfig(ctx, config)
 	if err != nil {
@@ -250,15 +267,13 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, err
 	}
 	runtimeStore := runtimeStores.primary
-	replyBatchStore, ok := runtimeStore.(runtimestorage.ReplyBatchEnqueuer)
-	if !ok {
+	replyBatchStore, attachments, attachmentStore, err := environmentPrimaryRuntimeCapabilities(runtimeStore)
+	if err != nil {
 		_ = delegateSessions.Close()
 		_ = runtimeStores.Close()
 		_ = db.Close()
-		return nil, fmt.Errorf("%w: runtime storage does not support atomic reply batches", ErrInvalidConfig)
+		return nil, err
 	}
-	attachments, _ := runtimeStore.(attachment.Reader)
-	attachmentStore, _ := runtimeStore.(runtimestorage.AttachmentStore)
 	tenantRepo, appRepo, channelRepo, auditWriter, err := environmentRepositories(config, db)
 	if err != nil {
 		_ = delegateSessions.Close()

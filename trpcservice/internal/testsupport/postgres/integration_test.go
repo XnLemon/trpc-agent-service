@@ -460,7 +460,7 @@ func runRepositoryMigrations(ctx context.Context, dsn string) error {
 	if !ok {
 		return errors.New("locate repository migration test source")
 	}
-	migrationDir := filepath.Join(filepath.Dir(sourceFile), "..", "..", "..", "migrations")
+	migrationDir := filepath.Join(filepath.Dir(sourceFile), "..", "..", "..", "..", "migrations")
 	for _, name := range []string{
 		"0001_control_plane.up.sql",
 		"0002_control_plane_repository_functions.up.sql",

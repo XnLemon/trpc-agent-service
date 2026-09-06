@@ -1070,6 +1070,51 @@ func TestEnvironmentSelectsMySQLControlPlaneAndRejectsPostgresRuntimeStore(t *te
 	}
 }
 
+func TestEnvironmentRuntimeCapabilities(t *testing.T) {
+	t.Run("requires atomic reply batches", func(t *testing.T) {
+		_, _, _, err := environmentPrimaryRuntimeCapabilities(&environmentRuntimeStoreSpy{})
+		if !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("runtime capabilities error = %v", err)
+		}
+	})
+
+	t.Run("derives optional capabilities", func(t *testing.T) {
+		store := runtimestorageinmemory.New()
+		t.Cleanup(func() { _ = store.Close() })
+		replyBatchStore, attachments, attachmentStore, err := environmentPrimaryRuntimeCapabilities(store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if replyBatchStore == nil {
+			t.Fatal("reply batch capability is nil")
+		}
+		if attachments == nil || attachmentStore == nil {
+			t.Fatal("attachment capabilities are nil")
+		}
+	})
+}
+
+func TestEnvironmentAdminAuthenticator(t *testing.T) {
+	static, err := environmentAdminAuthenticator(environmentConfig{adminToken: "admin", adminTenants: []string{"*"}})
+	if err != nil || static == nil {
+		t.Fatalf("static admin authenticator = %v, %v", static, err)
+	}
+
+	session, err := environmentAdminAuthenticator(environmentConfig{adminToken: "admin", adminTenants: []string{"*"}, adminUsername: "operator", adminPassword: "secret"})
+	if err != nil || session == nil {
+		t.Fatalf("session admin authenticator = %v, %v", session, err)
+	}
+
+	for _, config := range []environmentConfig{
+		{adminToken: "admin\ninvalid", adminTenants: []string{"*"}},
+		{adminToken: "admin", adminTenants: []string{"*"}, adminUsername: "operator", adminPassword: "secret\n"},
+	} {
+		if _, err := environmentAdminAuthenticator(config); !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("invalid admin authenticator error = %v", err)
+		}
+	}
+}
+
 func TestNewFromEnvironmentBootstrapsMySQLWithSeparateMigrationAccount(t *testing.T) {
 	setRequiredEnvironment(t)
 	t.Setenv(envControlPlaneDriver, "mysql")
