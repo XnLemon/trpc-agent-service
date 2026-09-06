@@ -65,8 +65,8 @@ Agent 的实现。
 
 `runtime/outbox` 的 Worker 现在分别接收 `ReplyStore` 和
 `MessageStore`：前者拥有回复分片的 claim/transition，后者只负责所有分片
-投递完成后的 inbound message 状态推进。为了兼容旧调用，省略后者时 Worker
-会从 `ReplyStore` 中探测同一个能力；新的组合根应显式注入两个能力。
+投递完成后的 inbound message 状态推进。Worker 不再从一个聚合存储中探测
+隐式能力；组合根必须显式注入两个能力。
 
 `trpcservice/channels/replies` 仅保留为旧导入路径服务的兼容 facade；新的事件
 渲染所有权在 `trpcservice/gateway/replies`。同样，Channel Provider Registry

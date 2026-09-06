@@ -930,7 +930,7 @@ func TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle(t 
 	}
 	t.Cleanup(func() { _ = registry.Close() })
 	store := inmemory.New()
-	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: store, SegmentSize: 3})
+	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{BatchStore: store, SegmentSize: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1243,7 +1243,7 @@ func assertDurableReplyWorkerCompletes(t *testing.T, store runtimestorage.Runtim
 func assertDurableReplyWorkerCompletesCount(t *testing.T, store runtimestorage.RuntimeStore, tenantID, eventID string, want int) {
 	t.Helper()
 	provider := &durableOutboxProvider{}
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: tenantID, Owner: "worker", LeaseDuration: time.Second})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: tenantID, Owner: "worker", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

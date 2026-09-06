@@ -286,11 +286,11 @@ func newDispatchMaterializer(config DispatchConfig, batchStore runtimestorage.Re
 	if config.Materializer != nil {
 		return config.Materializer, nil
 	}
-	if batchStore == nil && config.RuntimeStore == nil {
+	if batchStore == nil {
 		return nil, nil
 	}
 	return outbox.NewMaterializer(outbox.MaterializerConfig{
-		Store: config.RuntimeStore, BatchStore: batchStore, Observability: config.Observability,
+		BatchStore: batchStore, Observability: config.Observability,
 	})
 }
 

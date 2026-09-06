@@ -95,7 +95,7 @@ func TestWorkerDeliversAndFencesProviderReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider := &providerStub{deliverID: "provider-1"}
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestWorkerDeliversReplySegmentsInOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider := &providerStub{deliverID: "provider-segments"}
-	worker, err := outbox.New(outbox.Config{Store: reverseCandidateStore{Store: base}, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second})
+	worker, err := outbox.New(outbox.Config{Store: reverseCandidateStore{Store: base}, MessageStore: base, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestWorkerWaitsForRetryablePrecedingSegment(t *testing.T) {
 		}
 	}
 	provider := &providerStub{deliverID: "provider-retry", deliverFn: failFirstSegmentOnce()}
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, BackoffBase: time.Nanosecond, BackoffMax: time.Nanosecond})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, BackoffBase: time.Nanosecond, BackoffMax: time.Nanosecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestWorkerDeadLettersSegmentsAfterADeadLetteredPredecessor(t *testing.T) {
 		t.Fatal("worker delivered a segment after its predecessor dead-lettered")
 		return nil
 	}}
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestWorkerRetriesThenDeadLettersStableProviderErrors(t *testing.T) {
 	store := inmemory.New()
 	seedReply(t, store, "tenant-a", "event-2", "reply-2")
 	provider := &providerStub{deliverErr: &outbox.DeliveryError{Class: "rate_limited", Retryable: true}}
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, MaxAttempts: 1})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, MaxAttempts: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestWorkerReconcilesExpiredSendingBeforeRedelivery(t *testing.T) {
 	}
 	time.Sleep(2 * time.Millisecond)
 	provider := &providerStub{reconcileStatus: outbox.DeliveryAccepted, reconcileID: "provider-recovered"}
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "new-worker", LeaseDuration: time.Second})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: "tenant-a", Owner: "new-worker", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,7 @@ func TestWorkerValidationAndCancellation(t *testing.T) {
 		t.Fatalf("invalid worker = %v", err)
 	}
 	store := inmemory.New()
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: &providerStub{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: &providerStub{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestWorkerValidationAndCancellation(t *testing.T) {
 func TestMaterializerSegmentsIdempotently(t *testing.T) {
 	store := inmemory.New()
 	seedReply(t, store, "tenant-a", "event-materialize", "unused")
-	m, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: store, SegmentSize: 3})
+	m, err := outbox.NewMaterializer(outbox.MaterializerConfig{BatchStore: store, SegmentSize: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestMaterializerWritesIdempotentStructuredMediaReply(t *testing.T) {
 	data := []byte("png")
 	digest := sha256.Sum256(data)
 	reference := attachment.Reference{ID: "tool-image", Kind: attachment.KindImage, MIMEType: "image/png", Name: "test.png", Size: int64(len(data)), SHA256: hex.EncodeToString(digest[:]), Provider: "tool", ProviderID: "send_test_image"}
-	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: store, SegmentSize: 3})
+	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{BatchStore: store, SegmentSize: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +357,7 @@ func TestMaterializerDoesNotExposePrefixWhenAnySegmentConflicts(t *testing.T) {
 	if _, err := store.EnqueueReply(context.Background(), runtimestorage.ReplyOutbox{TenantID: "tenant-a", EventID: "event", ReplyID: "reply", SegmentIndex: 1, SegmentCount: 2, Payload: "other"}); err != nil {
 		t.Fatal(err)
 	}
-	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: store, SegmentSize: 3})
+	materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{BatchStore: store, SegmentSize: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +372,7 @@ func TestMaterializerDoesNotExposePrefixWhenAnySegmentConflicts(t *testing.T) {
 func TestWorkerRunStopsOnCancellationAndRejectsConcurrentRun(t *testing.T) {
 	store := inmemory.New()
 	provider := &providerStub{}
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, BackoffBase: time.Millisecond})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, BackoffBase: time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +393,7 @@ func TestWorkerRunStopsOnCancellationAndRejectsConcurrentRun(t *testing.T) {
 }
 
 func TestWorkerStartReservesLifecycleBeforeReturning(t *testing.T) {
-	worker, err := outbox.New(outbox.Config{Store: inmemory.New(), Provider: &providerStub{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second})
+	worker, err := outbox.New(outbox.Config{Store: inmemory.New(), MessageStore: inmemory.New(), Provider: &providerStub{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
