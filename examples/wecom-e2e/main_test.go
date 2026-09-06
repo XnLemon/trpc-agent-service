@@ -259,7 +259,7 @@ func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture
 	}
 	t.Cleanup(func() { _ = registry.Close() })
 	store := runtimestoragepostgres.New(db)
-	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: planResolver, Registry: registry, RuntimeStore: store})
+	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: planResolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store, Attachments: store, AttachmentStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}

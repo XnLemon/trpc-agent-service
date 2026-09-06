@@ -83,7 +83,7 @@ func TestDispatchStoreViewFailsClosedAndDelegatesNarrowCapabilities(t *testing.T
 func TestResolveDispatchAttachmentsUsesReaderOwnedStore(t *testing.T) {
 	store := inmemory.New()
 	t.Cleanup(func() { _ = store.Close() })
-	reader, attachmentStore := resolveDispatchAttachments(DispatchConfig{Attachments: store})
+	reader, attachmentStore := resolveDispatchAttachments(DispatchConfig{Attachments: store, AttachmentStore: store})
 	if reader != store || attachmentStore != store {
 		t.Fatalf("resolved attachments = reader:%T store:%T", reader, attachmentStore)
 	}

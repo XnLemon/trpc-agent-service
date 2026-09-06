@@ -817,7 +817,7 @@ func TestDispatcherDurableChannelClaimSuppressesDuplicateRunner(t *testing.T) {
 	}
 	defer func() { _ = registry.Close() }()
 	store := inmemory.New()
-	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, DrainTimeout: 10 * time.Millisecond})
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store, DrainTimeout: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -886,7 +886,7 @@ func TestDispatcherBindsStoredAttachmentBeforePassingVerifiedContentToRunner(t *
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = registry.Close() })
-	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store})
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store, Attachments: store, AttachmentStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -934,7 +934,7 @@ func TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, Materializer: materializer, DrainTimeout: time.Second})
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store, Materializer: materializer, DrainTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -980,7 +980,7 @@ func newToolMediaDispatcher(t *testing.T, fixture gatewayFixture) (*Dispatcher, 
 	}
 	t.Cleanup(func() { _ = registry.Close() })
 	store := inmemory.New()
-	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, DrainTimeout: time.Second})
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store, Attachments: store, AttachmentStore: store, DrainTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1083,7 +1083,7 @@ func TestDispatcherToolFailureMaterializesFallback(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = registry.Close() })
 	store := inmemory.New()
-	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, AttachmentStore: failingToolAttachmentStore{AttachmentStore: store}, DrainTimeout: time.Second})
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store, AttachmentStore: failingToolAttachmentStore{AttachmentStore: store}, DrainTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1126,7 +1126,7 @@ func TestDispatcherDurableInboundLeaseCoversAgentRuntimeTimeout(t *testing.T) {
 	baseStore := inmemory.New()
 	t.Cleanup(func() { _ = baseStore.Close() })
 	store := &transitionCaptureStore{RuntimeStore: baseStore}
-	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, ReplyBatchStore: baseStore, DrainTimeout: time.Millisecond})
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: baseStore, DrainTimeout: time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1171,7 +1171,7 @@ func TestDispatcherDurableChannelModelErrorMaterializesFallbackReply(t *testing.
 	}
 	t.Cleanup(func() { _ = registry.Close() })
 	store := inmemory.New()
-	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: store, DrainTimeout: time.Millisecond})
+	dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store, DrainTimeout: time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1456,7 +1456,9 @@ func TestDispatcherDurableDispatchFailurePaths(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, RuntimeStore: inmemory.New(), DrainTimeout: time.Millisecond})
+		store := inmemory.New()
+		t.Cleanup(func() { _ = store.Close() })
+		dispatcher, err := NewDispatcher(DispatchConfig{Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store, DrainTimeout: time.Millisecond})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1509,7 +1511,7 @@ func TestDispatcherDurableAttachmentFailurePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	reference := testAttachmentReference(t, attachment.KindImage, "image/png", []byte("image"))
-	newDispatcher := func(t *testing.T, store runtimestorage.RuntimeStore, attachments attachment.Reader) (*Dispatcher, *runtimerunner.RunnerRegistry, *atomic.Int32) {
+	newDispatcher := func(t *testing.T, store *inmemory.Store, attachments attachment.Reader) (*Dispatcher, *runtimerunner.RunnerRegistry, *atomic.Int32) {
 		t.Helper()
 		var runnerCalls atomic.Int32
 		registry, err := runtimerunner.NewRunnerRegistry(runtimerunner.RunnerRegistryConfig{Factory: func(context.Context, runtime.ExecutionPlan) (runtimerunner.Runner, error) {
@@ -1522,7 +1524,8 @@ func TestDispatcherDurableAttachmentFailurePaths(t *testing.T) {
 			t.Fatal(err)
 		}
 		dispatcher, err := NewDispatcher(DispatchConfig{
-			Resolver: resolver, Registry: registry, RuntimeStore: store, Attachments: attachments, DrainTimeout: time.Millisecond,
+			Resolver: resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store,
+			Attachments: attachments, DrainTimeout: time.Millisecond,
 		})
 		if err != nil {
 			t.Fatal(err)

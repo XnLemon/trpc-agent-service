@@ -428,13 +428,9 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, ErrInvalidConfig
 	}
-	legacyRuntimeStore := config.RuntimeStore
-	if config.SessionStore != nil && config.MessageStore != nil && config.ReplyBatchStore != nil {
-		legacyRuntimeStore = nil
-	}
 	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{
 		Resolver: resolver, Registry: registry,
-		RuntimeStore: legacyRuntimeStore, SessionStore: config.SessionStore,
+		SessionStore: config.SessionStore,
 		MessageStore: config.MessageStore, ReplyBatchStore: config.ReplyBatchStore,
 		Attachments: config.Attachments, AttachmentStore: config.AttachmentStore,
 		DrainTimeout: config.DrainTimeout, AuditWriter: config.AuditWriter, Observability: config.Observability,
