@@ -192,11 +192,11 @@ func TestEnvironmentComponentSelectionErrorBranches(t *testing.T) {
 	if _, err := missingStoreFactory(nil); err == nil {
 		t.Fatal("AI Bot worker accepted a runtime store without delivery acknowledgements")
 	}
-	invalidAdapterFactory := environmentOutboxWorkerFactory(environmentOutboxWorkerDependencies{config: environmentConfig{tenantID: "t_00000000000000000000000000"}, runtime: store, aiBotBindings: map[string]struct{}{"binding": {}}})
+	invalidAdapterFactory := environmentOutboxWorkerFactory(environmentOutboxWorkerDependencies{config: environmentConfig{tenantID: "t_00000000000000000000000000"}, replyStore: store, messageStore: store, deliveryStore: store, aiBotBindings: map[string]struct{}{"binding": {}}})
 	if _, err := invalidAdapterFactory([]channels.PollingAdapter{failingPollingAdapter{}}); err == nil {
 		t.Fatal("AI Bot worker accepted an adapter with the wrong concrete type")
 	}
-	countFactory := environmentOutboxWorkerFactory(environmentOutboxWorkerDependencies{config: environmentConfig{tenantID: "t_00000000000000000000000000"}, runtime: store, aiBotBindings: map[string]struct{}{"binding": {}}})
+	countFactory := environmentOutboxWorkerFactory(environmentOutboxWorkerDependencies{config: environmentConfig{tenantID: "t_00000000000000000000000000"}, replyStore: store, messageStore: store, deliveryStore: store, aiBotBindings: map[string]struct{}{"binding": {}}})
 	if _, err := countFactory(nil); err == nil {
 		t.Fatal("AI Bot worker accepted a mismatched manager count")
 	}

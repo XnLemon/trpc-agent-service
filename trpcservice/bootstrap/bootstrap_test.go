@@ -709,7 +709,7 @@ func TestEnvironmentWeComAIBotComponentsUseTrustedBindings(t *testing.T) {
 		return outbox.New(config)
 	}
 	workerFactory := environmentOutboxWorkerFactory(environmentOutboxWorkerDependencies{
-		config: environment, runtime: runtimeStore, aiBotBindings: bindingIDs,
+		config: environment, replyStore: runtimeStore, messageStore: runtimeStore, deliveryStore: runtimeStore, aiBotBindings: bindingIDs,
 	})
 	if _, err := workerFactory([]channels.PollingAdapter{manager}); err != nil {
 		t.Fatalf("AI Bot outbox worker = %v", err)
@@ -762,7 +762,7 @@ func TestEnvironmentOutboxWorkerFactoryRoutesAIBotBindings(t *testing.T) {
 
 	const tenantID = "t_00000000000000000000000000"
 	factory := environmentOutboxWorkerFactory(environmentOutboxWorkerDependencies{
-		config: environmentConfig{tenantID: tenantID}, runtime: store,
+		config: environmentConfig{tenantID: tenantID}, replyStore: store, messageStore: store, deliveryStore: store,
 		aiBotBindings: map[string]struct{}{"aibot-binding": {}},
 	})
 	manager := &wecom_aibot.Manager{}
@@ -1154,6 +1154,10 @@ func TestEnvironmentRuntimeCapabilities(t *testing.T) {
 		}
 		if attachments == nil || attachmentStore == nil {
 			t.Fatal("attachment capabilities are nil")
+		}
+		replyStore, messageStore, deliveryStore := environmentPrimaryDeliveryCapabilities(store)
+		if replyStore != store || messageStore != store || deliveryStore != store {
+			t.Fatalf("delivery capabilities = reply:%T message:%T delivery:%T", replyStore, messageStore, deliveryStore)
 		}
 	})
 }

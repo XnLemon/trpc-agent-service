@@ -53,7 +53,7 @@ type environmentWeComDependencies struct {
 	channels    channels.CandidateConsumer
 	tenants     tenant.Repository
 	apps        appmodel.Repository
-	runtime     runtimestorage.RuntimeStore
+	attachments runtimestorage.AttachmentStore
 	auditWriter audit.Writer
 }
 
@@ -63,16 +63,12 @@ func environmentWeComComponents(dependencies environmentWeComDependencies) (func
 		return nil, nil, nil
 	}
 	credentials := environmentWeComCredentialResolver{tenantID: config.tenantID, config: *config.wecom}
-	var attachments runtimestorage.AttachmentStore
-	if store, ok := dependencies.runtime.(runtimestorage.AttachmentStore); ok {
-		attachments = store
-	}
 	var mediaDownloader wecom.MediaDownloader
-	if attachments != nil {
+	if dependencies.attachments != nil {
 		mediaDownloader = &wecom.HTTPMediaDownloader{}
 	}
 	factory := func(dispatcher gateway.DispatchService) (http.Handler, error) {
-		return wecom.New(wecom.Config{Candidates: dependencies.channels, Tenants: dependencies.tenants, Apps: dependencies.apps, Credentials: credentials, Dispatcher: dispatcher, Attachments: attachments, MediaDownloader: mediaDownloader, AuditWriter: dependencies.auditWriter, Observability: config.telemetry})
+		return wecom.New(wecom.Config{Candidates: dependencies.channels, Tenants: dependencies.tenants, Apps: dependencies.apps, Credentials: credentials, Dispatcher: dispatcher, Attachments: dependencies.attachments, MediaDownloader: mediaDownloader, AuditWriter: dependencies.auditWriter, Observability: config.telemetry})
 	}
 	return factory, &wecom.BindingProvider{Bindings: dependencies.channels, Credentials: credentials}, nil
 }
@@ -118,7 +114,9 @@ func environmentWeComAIBotComponents(dependencies environmentWeComAIBotDependenc
 
 type environmentOutboxWorkerDependencies struct {
 	config        environmentConfig
-	runtime       runtimestorage.RuntimeStore
+	replyStore    runtimestorage.ReplyStore
+	messageStore  runtimestorage.MessageStore
+	deliveryStore wecom_aibot.DeliveryStore
 	auditWriter   audit.Writer
 	legacy        outbox.Provider
 	aiBotBindings map[string]struct{}
@@ -126,7 +124,9 @@ type environmentOutboxWorkerDependencies struct {
 
 func environmentOutboxWorkerFactory(dependencies environmentOutboxWorkerDependencies) func([]channels.PollingAdapter) (*outbox.Worker, error) {
 	config := dependencies.config
-	runtimeStore := dependencies.runtime
+	replyStore := dependencies.replyStore
+	messageStore := dependencies.messageStore
+	deliveryStore := dependencies.deliveryStore
 	auditWriter := dependencies.auditWriter
 	legacy := dependencies.legacy
 	aiBotBindingIDs := dependencies.aiBotBindings
@@ -139,8 +139,7 @@ func environmentOutboxWorkerFactory(dependencies environmentOutboxWorkerDependen
 		leaseDuration := 30 * time.Second
 		if len(aiBotBindingIDs) > 0 {
 			leaseDuration = wecom_aibot.OutboxLeaseDuration
-			deliveryStore, ok := runtimeStore.(wecom_aibot.DeliveryStore)
-			if !ok {
+			if deliveryStore == nil {
 				return nil, errors.New("runtime store does not support durable reply acknowledgements")
 			}
 			managers := make([]*wecom_aibot.Manager, 0, len(aiBotBindingIDs))
@@ -168,8 +167,13 @@ func environmentOutboxWorkerFactory(dependencies environmentOutboxWorkerDependen
 		if err != nil {
 			return nil, err
 		}
-		return newEnvironmentWeComWorker(outbox.Config{Store: runtimeStore, MessageStore: runtimeStore, Provider: provider, Channel: channel, ProviderName: providerName, TenantID: config.tenantID, Owner: owner, LeaseDuration: leaseDuration, AuditWriter: auditWriter, Observability: config.telemetry})
+		return newEnvironmentWeComWorker(outbox.Config{Store: replyStore, MessageStore: messageStore, Provider: provider, Channel: channel, ProviderName: providerName, TenantID: config.tenantID, Owner: owner, LeaseDuration: leaseDuration, AuditWriter: auditWriter, Observability: config.telemetry})
 	}
+}
+
+func environmentPrimaryDeliveryCapabilities(runtimeStore runtimestorage.RuntimeStore) (runtimestorage.ReplyStore, runtimestorage.MessageStore, wecom_aibot.DeliveryStore) {
+	deliveryStore, _ := runtimeStore.(wecom_aibot.DeliveryStore)
+	return runtimeStore, runtimeStore, deliveryStore
 }
 
 type environmentReplyProvider struct {
