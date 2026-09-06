@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
@@ -42,7 +42,7 @@ func NewRunner(
 	resolver modelprofile.SecretResolver,
 	factory modelprofile.ModelFactory,
 	sessions session.Service,
-	storageFactories ...backend.StorageFactory,
+	storageFactories ...storagefactory.StorageFactory,
 ) (trpcrunner.Runner, error) {
 	return NewRunnerWithObservability(ctx, input, resolver, factory, sessions, nil, storageFactories...)
 }
@@ -55,7 +55,7 @@ func NewRunnerWithObservability(
 	factory modelprofile.ModelFactory,
 	sessions session.Service,
 	telemetry observability.Provider,
-	storageFactories ...backend.StorageFactory,
+	storageFactories ...storagefactory.StorageFactory,
 ) (trpcrunner.Runner, error) {
 	return NewRunnerWithToolRegistry(ctx, input, resolver, factory, sessions, telemetry, servicetool.DefaultRegistry(), storageFactories...)
 }
@@ -73,7 +73,7 @@ func NewRunnerWithToolRegistry(
 	sessions session.Service,
 	telemetry observability.Provider,
 	toolRegistry *servicetool.Registry,
-	storageFactories ...backend.StorageFactory,
+	storageFactories ...storagefactory.StorageFactory,
 ) (trpcrunner.Runner, error) {
 	if ctx == nil {
 		return nil, errors.New("invalid runner: context is required")
@@ -81,90 +81,25 @@ func NewRunnerWithToolRegistry(
 	if sessions == nil && len(storageFactories) == 0 {
 		return nil, errors.New("invalid runner: session service is required")
 	}
-	agentInput := input.Agent.Clone()
-	modelInput := input.Model
-	var err error
-	var capabilities *backend.CapabilitySet
 	if len(storageFactories) > 1 {
 		return nil, errors.New("invalid runner: multiple storage factories")
 	}
 	if len(storageFactories) == 1 && storageFactories[0] == nil {
 		return nil, errors.New("invalid runner: storage factory is required")
 	}
+	var storageFactory storagefactory.StorageFactory
 	if len(storageFactories) == 1 {
-		storageCtx := ctx
-		started := time.Now()
-		var finishStorage func(error)
-		storageMetrics := metrics.New(telemetry)
-		if telemetry != nil {
-			storageCtx, _, finishStorage = observability.StartOperation(ctx, telemetry, observability.OperationStorageOperation, "storage")
-			_ = storageMetrics.Request(storageCtx, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": "other", "status": "started"})
-		}
-		capabilities, err = storageFactories[0].New(storageCtx, input.Storage)
-		if finishStorage != nil {
-			finishStorage(err)
-			_ = storageMetrics.Operation(storageCtx, started, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": "other"}, err)
-			status := "success"
-			if err != nil {
-				status = observability.ErrorClass(err)
-				if status == "" {
-					status = "error"
-				}
-			}
-			_ = storageMetrics.BackendDuration(storageCtx, observability.DurationMilliseconds(started), map[string]string{"component": "storage", "provider": "other", "status": status, "error_class": observability.ErrorClass(err)})
-		}
-		if err != nil {
-			return nil, fmt.Errorf("build runner: storage capability: %w", err)
-		}
-		sessions, err = capabilities.Session()
-		if err != nil {
-			_ = capabilities.Close()
-			return nil, fmt.Errorf("build runner: session capability: %w", err)
-		}
+		storageFactory = storageFactories[0]
 	}
-	ownedCapabilities := capabilities != nil
-	defer func() {
-		if ownedCapabilities {
-			_ = capabilities.Close()
-		}
-	}()
-	scopedSessions, err := NewTenantSessionService(input.Tenant, sessions)
-	if err != nil {
-		return nil, fmt.Errorf("build runner: session scope: %w", err)
-	}
-	model, err := modelprofile.ResolveAndBuild(ctx, modelInput, resolver, factory)
-	if err != nil {
-		return nil, fmt.Errorf("build runner: model: %w", err)
-	}
-	if telemetry != nil {
-		model = wrapTelemetryModel(model)
-	}
-	if toolRegistry == nil {
-		toolRegistry = servicetool.DefaultRegistry()
-	}
-	tools, err := toolRegistry.Resolve(agentInput.Tools)
-	if err != nil {
-		return nil, fmt.Errorf("build runner: tools: %w", err)
-	}
-	llmOptions := llmAgentOptions(agentInput, model, tools)
-	if telemetry != nil {
-		llmOptions = append(llmOptions, telemetryOptions(telemetry, modelInput.Provider, modelInput.Model)...)
-	}
-	llmAgent := llmagent.New(agentInput.Name, llmOptions...)
-	delegate := trpcrunner.NewRunner(
-		agentInput.AppID,
-		llmAgent,
-		trpcrunner.WithSessionService(scopedSessions),
-	)
-	runner := &policyRunner{
-		delegate:     delegate,
-		capabilities: capabilities,
-		runOptions: []trpcagent.RunOption{
-			trpcagent.WithMaxRunDuration(time.Duration(agentInput.Runtime.ExecutionTimeoutSeconds) * time.Second),
-		},
-	}
-	ownedCapabilities = false
-	return runner, nil
+	return NewRunnerWithConfig(ctx, RunnerConfig{
+		Input:          input,
+		SecretResolver: resolver,
+		ModelFactory:   factory,
+		Sessions:       sessions,
+		Observability:  telemetry,
+		ToolRegistry:   toolRegistry,
+		StorageFactory: storageFactory,
+	})
 }
 
 func llmAgentOptions(input LLMAgentFactoryInput, model trpcmodel.Model, toolSets ...[]trpctool.Tool) []llmagent.Option {
@@ -443,7 +378,7 @@ func telemetryOptions(provider observability.Provider, providerName, modelFamily
 // appended last so an execution cannot silently extend its control-plane limits.
 type policyRunner struct {
 	delegate     trpcrunner.Runner
-	capabilities *backend.CapabilitySet
+	capabilities *storagefactory.CapabilitySet
 	runOptions   []trpcagent.RunOption
 }
 

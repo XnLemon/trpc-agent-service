@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	serviceagent "github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -383,22 +384,22 @@ func TestCoordinatorForwardCancellationCheckpoints(t *testing.T) {
 	request := Request{RequestID: "request-forward-cancel", TraceID: "trace-forward-cancel"}
 	tests := []struct {
 		name     string
-		runner   func() chan *trpcevent.Event
+		runner   func() chan serviceagent.RunnerEvent
 		errAfter int32
 	}{
 		{
 			name: "after receiving event",
-			runner: func() chan *trpcevent.Event {
-				events := make(chan *trpcevent.Event, 1)
-				events <- &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "hello"}}}}}
+			runner: func() chan serviceagent.RunnerEvent {
+				events := make(chan serviceagent.RunnerEvent, 1)
+				events <- serviceagent.RunnerEvent{Type: serviceagent.RunnerEventMessage, Text: "hello"}
 				return events
 			},
 			errAfter: 1,
 		},
 		{
 			name: "after closed channel",
-			runner: func() chan *trpcevent.Event {
-				events := make(chan *trpcevent.Event)
+			runner: func() chan serviceagent.RunnerEvent {
+				events := make(chan serviceagent.RunnerEvent)
 				close(events)
 				return events
 			},
@@ -406,27 +407,27 @@ func TestCoordinatorForwardCancellationCheckpoints(t *testing.T) {
 		},
 		{
 			name: "before mapped event",
-			runner: func() chan *trpcevent.Event {
-				events := make(chan *trpcevent.Event, 1)
-				events <- &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "hello"}}}}}
+			runner: func() chan serviceagent.RunnerEvent {
+				events := make(chan serviceagent.RunnerEvent, 1)
+				events <- serviceagent.RunnerEvent{Type: serviceagent.RunnerEventMessage, Text: "hello"}
 				return events
 			},
 			errAfter: 2,
 		},
 		{
 			name: "while sending event",
-			runner: func() chan *trpcevent.Event {
-				events := make(chan *trpcevent.Event, 1)
-				events <- &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "hello"}}}}}
+			runner: func() chan serviceagent.RunnerEvent {
+				events := make(chan serviceagent.RunnerEvent, 1)
+				events <- serviceagent.RunnerEvent{Type: serviceagent.RunnerEventMessage, Text: "hello"}
 				return events
 			},
 			errAfter: 3,
 		},
 		{
 			name: "after terminal drain",
-			runner: func() chan *trpcevent.Event {
-				events := make(chan *trpcevent.Event, 1)
-				events <- &trpcevent.Event{Response: &trpcmodel.Response{Done: true}}
+			runner: func() chan serviceagent.RunnerEvent {
+				events := make(chan serviceagent.RunnerEvent, 1)
+				events <- serviceagent.RunnerEvent{Type: serviceagent.RunnerEventDone, Status: "complete", Done: true}
 				return events
 			},
 			errAfter: 3,
@@ -458,7 +459,7 @@ func TestCoordinatorForwardSelectCancellation(t *testing.T) {
 	finished := make(chan struct{})
 	go func() {
 		coordinator.forward(ctx, executionStream{
-			request: Request{RequestID: "request-select-cancel"}, runnerEvents: make(chan *trpcevent.Event),
+			request: Request{RequestID: "request-select-cancel"}, runnerEvents: make(chan serviceagent.RunnerEvent),
 			lease: &runtimerunner.RunnerLease{}, output: output, finishRunner: func(error) {}, started: time.Now(),
 		})
 		close(finished)
@@ -516,14 +517,14 @@ func TestCoordinatorInputAndConfigurationErrors(t *testing.T) {
 func TestMapRunnerEvent(t *testing.T) {
 	tests := []struct {
 		name  string
-		event *trpcevent.Event
+		event serviceagent.RunnerEvent
 		want  EventType
 		done  bool
 	}{
-		{name: "nil event", event: nil, want: EventStatus},
-		{name: "partial response", event: &trpcevent.Event{Response: &trpcmodel.Response{IsPartial: true}}, want: EventStatus},
-		{name: "message fallback", event: &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Message: trpcmodel.Message{Content: "fallback"}}}}}, want: EventMessage},
-		{name: "done", event: &trpcevent.Event{Response: &trpcmodel.Response{Choices: []trpcmodel.Choice{{Delta: trpcmodel.Message{Content: "final"}}}, Done: true}}, want: EventMessage, done: true},
+		{name: "zero event", event: serviceagent.RunnerEvent{}, want: EventStatus},
+		{name: "partial response", event: serviceagent.RunnerEvent{Type: serviceagent.RunnerEventStatus, Status: "partial"}, want: EventStatus},
+		{name: "message", event: serviceagent.RunnerEvent{Type: serviceagent.RunnerEventMessage, Text: "fallback"}, want: EventMessage},
+		{name: "done", event: serviceagent.RunnerEvent{Type: serviceagent.RunnerEventDone, Status: "complete", Done: true}, want: EventDone, done: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -533,8 +534,8 @@ func TestMapRunnerEvent(t *testing.T) {
 			}
 		})
 	}
-	errorEvents, done := mapRunnerEvent(&trpcevent.Event{Response: &trpcmodel.Response{Error: &trpcmodel.ResponseError{Message: "secret"}}}, "request", "trace")
-	if !done || len(errorEvents) != 2 || !errors.Is(errorEvents[0].Err, ErrExecution) {
+	errorEvents, done := mapRunnerEvent(serviceagent.RunnerEvent{Type: serviceagent.RunnerEventError, Err: serviceagent.ErrRunnerExecution}, "request", "trace")
+	if done || len(errorEvents) != 1 || !errors.Is(errorEvents[0].Err, ErrExecution) {
 		t.Fatalf("error events=%+v done=%v", errorEvents, done)
 	}
 }
@@ -542,9 +543,6 @@ func TestMapRunnerEvent(t *testing.T) {
 func TestExecutionHelpersRespectCancellationAndBounds(t *testing.T) {
 	if !errors.Is(cancellationError(nil), context.Canceled) {
 		t.Fatal("nil context did not produce cancellation")
-	}
-	if responseText(nil) != "" {
-		t.Fatal("nil response produced text")
 	}
 	var nilContext context.Context
 	if sendEvent(nilContext, make(chan Event, 1), Event{}) {
@@ -575,11 +573,6 @@ func TestExecutionHelpersRespectCancellationAndBounds(t *testing.T) {
 	if event := <-fullOutput; event.Status != "existing" {
 		t.Fatalf("trySend overwrote full output with %+v", event)
 	}
-	drainRunnerEvents(nil, time.Second)
-	drainRunnerEvents(make(chan *trpcevent.Event), 0)
-	closedEvents := make(chan *trpcevent.Event)
-	close(closedEvents)
-	drainRunnerEvents(closedEvents, time.Second)
 }
 
 func collectExecutionEvents(stream <-chan Event) []Event {

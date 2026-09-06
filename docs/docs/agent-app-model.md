@@ -345,7 +345,7 @@ trpcservice/agent/
 ├── app.go            # App 根实体、生命周期和校验
 ├── revision.go       # 草稿、发布版本及摘要
 ├── repository.go     # 控制面 Repository 契约
-├── runtime.go        # 执行快照和 Factory 输入边界
+├── execution.go      # 执行快照和 Factory 输入边界
 └── inmemory/
     └── inmemory.go   # 单进程开发/测试实现
 ```

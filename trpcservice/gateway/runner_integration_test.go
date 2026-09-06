@@ -8,10 +8,12 @@ import (
 	"testing"
 	"time"
 
+	agentrunnerfactory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/runnerfactory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
+	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -509,13 +511,13 @@ func (stage2ModelFactory) New(context.Context, model.ModelFactoryInput, model.Se
 }
 
 func TestRuntimeRunnerRegistryWiresBorrowedDependencies(t *testing.T) {
-	if _, err := runtimerunner.NewRuntimeRunnerRegistry(runtimerunner.RuntimeRunnerRegistryConfig{}); !errors.Is(err, runtimerunner.ErrInvalid) {
+	if _, err := agentrunnerfactory.NewRuntimeRunnerRegistry(agentrunnerfactory.Config{}); !errors.Is(err, runtimerunner.ErrInvalid) {
 		t.Fatalf("missing runtime dependency error = %v", err)
 	}
 	plan := testExecutionPlan(t)
 	sessions := sessioninmemory.NewSessionService()
 	t.Cleanup(func() { _ = sessions.Close() })
-	registry, err := runtimerunner.NewRuntimeRunnerRegistry(runtimerunner.RuntimeRunnerRegistryConfig{
+	registry, err := agentrunnerfactory.NewRuntimeRunnerRegistry(agentrunnerfactory.Config{
 		ModelFactory: stage2ModelFactory{},
 		Sessions:     sessions,
 	})
@@ -531,10 +533,10 @@ func TestRuntimeRunnerRegistryWiresBorrowedDependencies(t *testing.T) {
 	if err := registry.Close(); err != nil {
 		t.Fatal(err)
 	}
-	storageRegistry, err := runtimerunner.NewRuntimeRunnerRegistry(runtimerunner.RuntimeRunnerRegistryConfig{
+	storageRegistry, err := agentrunnerfactory.NewRuntimeRunnerRegistry(agentrunnerfactory.Config{
 		ModelFactory: stage2ModelFactory{},
-		StorageFactory: backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
-			return nil, backend.ErrStorageFactory
+		StorageFactory: storagefactory.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
+			return nil, storagefactory.ErrStorageFactory
 		}),
 	})
 	if err != nil {

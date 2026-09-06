@@ -4,12 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
-	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 func TestModelExecutionSnapshotFreezesInputAndKeepsSecretOutOfState(t *testing.T) {
@@ -78,84 +76,6 @@ func assertModelSnapshotContextBoundary(t *testing.T, snapshot ModelExecutionSna
 	}
 }
 
-func TestResolveAndBuildUsesExplicitConditionalTenantSecretScope(t *testing.T) {
-	root, tenantSnapshot, optionalProfile, catalog := modelExecutionFixture(t, "")
-	optionalSnapshot, err := NewModelExecutionSnapshot(tenantSnapshot, optionalProfile, catalog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	optionalInput, err := optionalSnapshot.FactoryInput()
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolver := &recordingResolver{}
-	factory := &recordingFactory{}
-	if _, err := ResolveAndBuild(context.Background(), optionalInput, nil, factory); err != nil {
-		t.Fatalf("optional no-secret build error = %v", err)
-	}
-	if factory.calls != 1 || factory.secret.Value() != "" {
-		t.Fatalf("optional no-secret factory calls=%d secret=%q", factory.calls, factory.secret.Value())
-	}
-	if resolver.calls != 0 {
-		t.Fatalf("optional no-secret resolver calls = %d, want zero", resolver.calls)
-	}
-
-	secretProfile, err := NewProfile(CreateInput{
-		TenantID: root.TenantID, ProfileKey: "optional-secret", DisplayName: "Optional Secret",
-		Configuration: Configuration{Provider: "public", Model: "chat", SecretRef: "secret://tenant/model"},
-	}, catalog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secretSnapshot, err := NewModelExecutionSnapshot(tenantSnapshot, secretProfile, catalog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secretInput, err := secretSnapshot.FactoryInput()
-	if err != nil {
-		t.Fatal(err)
-	}
-	secret, err := NewSecretValue("super-secret")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolver.value = secret
-	factory = &recordingFactory{}
-	if _, err := ResolveAndBuild(context.Background(), secretInput, resolver, factory); err != nil {
-		t.Fatal(err)
-	}
-	if resolver.calls != 1 || resolver.scope != (SecretScope{TenantID: root.TenantID, SecretRef: "secret://tenant/model"}) {
-		t.Fatalf("unexpected resolver scope/calls: %+v calls=%d", resolver.scope, resolver.calls)
-	}
-	if factory.secret.Value() != "super-secret" || factory.input.SecretRef != "secret://tenant/model" {
-		t.Fatalf("secret was not passed only to factory: value=%q input=%+v", factory.secret.Value(), factory.input)
-	}
-	if fmt.Sprint(factory.secret) != "<redacted-secret>" {
-		t.Fatalf("secret String() leaked value: %q", fmt.Sprint(factory.secret))
-	}
-}
-
-func TestResolveAndBuildRedactsResolverAndFactoryErrors(t *testing.T) {
-	_, tenantSnapshot, profile, catalog := modelExecutionFixture(t, "secret://tenant/model")
-	snapshot, err := NewModelExecutionSnapshot(tenantSnapshot, profile, catalog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	input, err := snapshot.FactoryInput()
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolver := &recordingResolver{err: errors.New("KMS returned super-secret")}
-	if _, err := ResolveAndBuild(context.Background(), input, resolver, &recordingFactory{}); !errors.Is(err, ErrSecretResolution) || strings.Contains(err.Error(), "super-secret") {
-		t.Fatalf("resolver error was not redacted/classified: %v", err)
-	}
-	resolver.err = nil
-	factory := &recordingFactory{err: errors.New("provider rejected super-secret")}
-	if _, err := ResolveAndBuild(context.Background(), input, resolver, factory); !errors.Is(err, ErrModelFactory) || strings.Contains(err.Error(), "super-secret") {
-		t.Fatalf("factory error was not redacted/classified: %v", err)
-	}
-}
-
 func TestSecretScopeRejectsMissingOrInvalidTenant(t *testing.T) {
 	if err := (SecretScope{SecretRef: "secret://model"}).Validate(); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing tenant error = %v", err)
@@ -170,13 +90,11 @@ func TestSecretScopeRejectsMissingOrInvalidTenant(t *testing.T) {
 
 func TestModelExecutionSnapshotRejectsInvalidStatesAndInputs(t *testing.T) {
 	root, tenantSnapshot, profile, catalog := modelExecutionFixture(t, "")
-	snapshot, err := NewModelExecutionSnapshot(tenantSnapshot, profile, catalog)
-	if err != nil {
+	if _, err := NewModelExecutionSnapshot(tenantSnapshot, profile, catalog); err != nil {
 		t.Fatal(err)
 	}
 	assertInvalidModelSnapshotAccessors(t)
 	assertInvalidModelExecutionStates(t, root, profile, catalog)
-	assertResolveAndBuildBoundaries(t, snapshot, root, tenantSnapshot, catalog)
 	assertInvalidModelFactoryInputs(t, root)
 }
 
@@ -244,63 +162,6 @@ func assertInvalidModelExecutionStates(t *testing.T, root *tenant.Tenant, profil
 	}
 }
 
-func assertResolveAndBuildBoundaries(t *testing.T, snapshot ModelExecutionSnapshot, root *tenant.Tenant, tenantSnapshot tenant.ConfigurationSnapshot, catalog *ProviderCatalog) {
-	t.Helper()
-	if _, err := NewSecretValue(""); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("empty secret error = %v", err)
-	}
-	if got := (SecretValue{}).String(); got != "<empty-secret>" {
-		t.Fatalf("empty secret String() = %q", got)
-	}
-	input, err := snapshot.FactoryInput()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var nilContext context.Context
-	if _, err := ResolveAndBuild(nilContext, input, nil, &recordingFactory{}); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("nil context error = %v", err)
-	}
-	if _, err := ResolveAndBuild(context.Background(), input, nil, nil); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("nil factory error = %v", err)
-	}
-	if _, err := ResolveAndBuild(context.Background(), ModelFactoryInput{}, nil, &recordingFactory{}); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("incomplete factory input error = %v", err)
-	}
-	secretProfile, err := NewProfile(CreateInput{
-		TenantID: root.TenantID, ProfileKey: "secret-input", DisplayName: "Secret Input",
-		Configuration: Configuration{Provider: "public", Model: "chat", SecretRef: "secret://tenant/model"},
-	}, catalog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secretSnapshot, err := NewModelExecutionSnapshot(tenantSnapshot, secretProfile, catalog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secretInput, err := secretSnapshot.FactoryInput()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ResolveAndBuild(context.Background(), secretInput, nil, &recordingFactory{}); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("missing resolver error = %v", err)
-	}
-	resolver := &recordingResolver{err: errors.New("resolver secret")}
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := ResolveAndBuild(cancelled, secretInput, resolver, &recordingFactory{}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled resolver error = %v", err)
-	}
-	factory := &recordingFactory{returnNil: true}
-	if _, err := ResolveAndBuild(context.Background(), input, nil, factory); !errors.Is(err, ErrModelFactory) {
-		t.Fatalf("nil model error = %v", err)
-	}
-	cancelled, cancel = context.WithCancel(context.Background())
-	cancel()
-	if _, err := ResolveAndBuild(cancelled, input, nil, &recordingFactory{err: errors.New("factory failure")}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled factory error = %v", err)
-	}
-}
-
 func assertInvalidModelFactoryInputs(t *testing.T, root *tenant.Tenant) {
 	t.Helper()
 	incompleteInputs := []ModelFactoryInput{
@@ -309,61 +170,10 @@ func assertInvalidModelFactoryInputs(t *testing.T, root *tenant.Tenant) {
 		{TenantID: root.TenantID, ProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", TenantVersion: 1, ProfileVersion: 1, SchemaVersion: SchemaVersionV1, ContentDigest: "digest", Provider: "fake", Model: "deterministic", SecretRef: "bad ref"},
 	}
 	for _, incomplete := range incompleteInputs {
-		if err := validateFactoryInput(incomplete); !errors.Is(err, ErrInvalid) {
+		if err := incomplete.Validate(); !errors.Is(err, ErrInvalid) {
 			t.Errorf("factory input %+v error = %v", incomplete, err)
 		}
 	}
-}
-
-type recordingResolver struct {
-	calls int
-	scope SecretScope
-	value SecretValue
-	err   error
-}
-
-func (resolver *recordingResolver) Resolve(_ context.Context, scope SecretScope) (SecretValue, error) {
-	resolver.calls++
-	resolver.scope = scope
-	if resolver.err != nil {
-		return SecretValue{}, resolver.err
-	}
-	return resolver.value, nil
-}
-
-type recordingFactory struct {
-	calls     int
-	input     ModelFactoryInput
-	secret    SecretValue
-	err       error
-	returnNil bool
-}
-
-func (factory *recordingFactory) New(_ context.Context, input ModelFactoryInput, secret SecretValue) (trpcmodel.Model, error) {
-	factory.calls++
-	factory.input = input
-	factory.secret = secret
-	if factory.err != nil {
-		return nil, factory.err
-	}
-	if factory.returnNil {
-		return nil, nil
-	}
-	return fakeModel{}, nil
-}
-
-type fakeModel struct{}
-
-func (fakeModel) Info() trpcmodel.Info { return trpcmodel.Info{Name: "chat"} }
-
-func (fakeModel) GenerateContent(ctx context.Context, _ *trpcmodel.Request) (<-chan *trpcmodel.Response, error) {
-	responses := make(chan *trpcmodel.Response, 1)
-	select {
-	case responses <- &trpcmodel.Response{Choices: []trpcmodel.Choice{{Message: trpcmodel.NewAssistantMessage("ok")}}, Done: true}:
-	case <-ctx.Done():
-	}
-	close(responses)
-	return responses, nil
 }
 
 func modelExecutionFixture(t *testing.T, secretRef string) (*tenant.Tenant, tenant.ConfigurationSnapshot, *Profile, *ProviderCatalog) {

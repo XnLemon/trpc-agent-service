@@ -13,6 +13,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestorageredis "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
@@ -158,7 +159,7 @@ func TestEnvironmentRegistriesKeepModelSecretsTenantScoped(t *testing.T) {
 	if _, err := models.New(context.Background(), modelprofile.ModelFactoryInput{TenantID: tenantA, Provider: defaultModelProvider, Model: "gpt-4o-mini"}, modelSecret); err != nil {
 		t.Fatalf("tenant model registry = %v", err)
 	}
-	if _, err := backend.NewRegistryStorageFactory(backends, secrets); err != nil {
+	if _, err := storagefactory.NewRegistryStorageFactory(backends, secrets); err != nil {
 		t.Fatalf("tenant backend registry = %v", err)
 	}
 }
@@ -325,7 +326,7 @@ func TestEnvironmentRuntimeCapabilityProviderNew(t *testing.T) {
 		t.Fatalf("nil session context = %v", err)
 	}
 	for _, capability := range []backend.Capability{backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit, backend.Capability("unknown")} {
-		if _, err := (environmentRuntimeCapabilityProvider{capability: capability}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, backend.ErrStorageFactory) {
+		if _, err := (environmentRuntimeCapabilityProvider{capability: capability}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, storagefactory.ErrStorageFactory) {
 			t.Fatalf("missing %s store error = %v", capability, err)
 		}
 	}
@@ -334,14 +335,14 @@ func TestEnvironmentRuntimeCapabilityProviderNew(t *testing.T) {
 	}
 
 	knowledgeOnly := &environmentKnowledgeOnlyStore{RuntimeStore: store, knowledge: store}
-	if _, err := (environmentRuntimeCapabilityProvider{capability: backend.CapabilityKnowledge, store: knowledgeOnly}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, backend.ErrStorageFactory) {
+	if _, err := (environmentRuntimeCapabilityProvider{capability: backend.CapabilityKnowledge, store: knowledgeOnly}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, storagefactory.ErrStorageFactory) {
 		t.Fatalf("missing vector store error = %v", err)
 	}
 	artifactOnly := &environmentArtifactOnlyStore{RuntimeStore: store, artifact: store}
-	if _, err := (environmentRuntimeCapabilityProvider{capability: backend.CapabilityArtifact, store: artifactOnly}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, backend.ErrStorageFactory) {
+	if _, err := (environmentRuntimeCapabilityProvider{capability: backend.CapabilityArtifact, store: artifactOnly}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, storagefactory.ErrStorageFactory) {
 		t.Fatalf("missing object store error = %v", err)
 	}
-	if _, err := (environmentRuntimeCapabilityProvider{capability: backend.Capability("unknown"), store: store}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, backend.ErrStorageFactory) {
+	if _, err := (environmentRuntimeCapabilityProvider{capability: backend.Capability("unknown"), store: store}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, storagefactory.ErrStorageFactory) {
 		t.Fatalf("unsupported capability error = %v", err)
 	}
 
@@ -407,7 +408,7 @@ func TestEnvironmentBackendCatalogIncludesTenantScopedS3ArtifactOnly(t *testing.
 		}
 	}
 	for _, options := range []map[string]string{{"bucket": "BAD"}, {"bucket": "a..b"}, {"bucket": bucket, "unknown": "value"}, {"bucket": bucket, "path_style": "maybe"}, {"bucket": bucket, "allow_insecure": "maybe"}, {"bucket": bucket, "max_bytes": "0"}, {"bucket": bucket, "connect_timeout_ms": "0"}} {
-		if _, err := parseEnvironmentS3Options(options); !errors.Is(err, backend.ErrStorageFactory) {
+		if _, err := parseEnvironmentS3Options(options); !errors.Is(err, storagefactory.ErrStorageFactory) {
 			t.Fatalf("invalid S3 bucket %#v = %v", options, err)
 		}
 	}
@@ -458,24 +459,24 @@ func TestEnvironmentS3CapabilityProviderValidatesScopeAndProbe(t *testing.T) {
 	if err != nil || value != store || store.probes != 1 {
 		t.Fatalf("S3 provider = %T, %v, probes=%d", value, err, store.probes)
 	}
-	if _, err := provider.New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000001"}, binding, secret); !errors.Is(err, backend.ErrStorageFactory) {
+	if _, err := provider.New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000001"}, binding, secret); !errors.Is(err, storagefactory.ErrStorageFactory) {
 		t.Fatalf("foreign S3 tenant = %v", err)
 	}
 	store.probeErr = errors.New("unavailable")
-	if _, err := provider.New(context.Background(), input, binding, secret); !errors.Is(err, backend.ErrStorageFactory) || store.closes != 1 {
+	if _, err := provider.New(context.Background(), input, binding, secret); !errors.Is(err, storagefactory.ErrStorageFactory) || store.closes != 1 {
 		t.Fatalf("S3 probe failure = %v, closes=%d", err, store.closes)
 	}
 	store.probeErr = nil
 	newEnvironmentS3Store = func(context.Context, string, backend.CapabilityBinding, modelprofile.SecretValue) (environmentS3Store, error) {
 		return nil, errors.New("factory unavailable")
 	}
-	if _, err := provider.New(context.Background(), input, binding, secret); !errors.Is(err, backend.ErrStorageFactory) {
+	if _, err := provider.New(context.Background(), input, binding, secret); !errors.Is(err, storagefactory.ErrStorageFactory) {
 		t.Fatalf("S3 factory failure = %v", err)
 	}
 	newEnvironmentS3Store = func(context.Context, string, backend.CapabilityBinding, modelprofile.SecretValue) (environmentS3Store, error) {
 		return nil, nil
 	}
-	if _, err := provider.New(context.Background(), input, binding, secret); !errors.Is(err, backend.ErrStorageFactory) {
+	if _, err := provider.New(context.Background(), input, binding, secret); !errors.Is(err, storagefactory.ErrStorageFactory) {
 		t.Fatalf("nil S3 store = %v", err)
 	}
 }
@@ -511,7 +512,7 @@ func TestEnvironmentS3ConfigurationBoundaries(t *testing.T) {
 			if ctx == nil && test.name != "nil context" {
 				ctx = context.Background()
 			}
-			if _, err := newEnvironmentS3StoreFromConfig(ctx, test.tenant, test.bind, test.secret); !errors.Is(err, backend.ErrStorageFactory) {
+			if _, err := newEnvironmentS3StoreFromConfig(ctx, test.tenant, test.bind, test.secret); !errors.Is(err, storagefactory.ErrStorageFactory) {
 				t.Fatalf("newEnvironmentS3StoreFromConfig() = %v", err)
 			}
 		})
@@ -810,21 +811,21 @@ func TestEnvironmentRedisCatalogAndRegistryBoundaries(t *testing.T) {
 	if err != nil || provider == nil {
 		t.Fatalf("tenant redis provider = %v", err)
 	}
-	if _, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySummary, Provider: "redis"}); !errors.Is(err, backend.ErrProviderUnavailable) {
+	if _, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySummary, Provider: "redis"}); !errors.Is(err, storagefactory.ErrProviderUnavailable) {
 		t.Fatalf("unsupported redis provider capability = %v", err)
 	}
-	if _, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000002"}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis"}); !errors.Is(err, backend.ErrProviderUnavailable) {
+	if _, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000002"}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis"}); !errors.Is(err, storagefactory.ErrProviderUnavailable) {
 		t.Fatalf("unregistered tenant redis provider = %v", err)
 	}
 	value, err := provider.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: "redis://other:6379"}, secret)
-	if !errors.Is(err, backend.ErrStorageFactory) || value != nil {
+	if !errors.Is(err, storagefactory.ErrStorageFactory) || value != nil {
 		t.Fatalf("mismatched redis endpoint = %T, %v", value, err)
 	}
 	if strings.Contains(err.Error(), "redis://other:6379") {
 		t.Fatal("redis endpoint leaked in provider error")
 	}
 	value, err = provider.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: config.redisEndpoint, SecretRef: "env/other"}, secret)
-	if !errors.Is(err, backend.ErrStorageFactory) || value != nil {
+	if !errors.Is(err, storagefactory.ErrStorageFactory) || value != nil {
 		t.Fatalf("mismatched redis secret reference = %T, %v", value, err)
 	}
 }
@@ -873,7 +874,7 @@ func TestEnvironmentRedisProfilesUseSeparateInMemoryProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	factory, err := backend.NewRegistryStorageFactory(providers, secrets)
+	factory, err := storagefactory.NewRegistryStorageFactory(providers, secrets)
 	if err != nil {
 		t.Fatal(err)
 	}

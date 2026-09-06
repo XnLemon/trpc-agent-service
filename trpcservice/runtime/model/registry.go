@@ -1,4 +1,4 @@
-package model
+package modelruntime
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 
@@ -44,7 +45,7 @@ func (registry *SecretRegistry) Register(scope SecretScope, value SecretValue) e
 	if registry == nil {
 		return ErrSecretUnavailable
 	}
-	if err := scope.Validate(); err != nil || value.value == "" {
+	if err := scope.Validate(); err != nil || value.Value() == "" {
 		return fmt.Errorf("%w: invalid secret registration", ErrInvalid)
 	}
 	registry.mu.Lock()
@@ -235,7 +236,7 @@ func (registry *ModelProviderRegistry) Close() error {
 }
 
 func validRegistryTenant(value string) bool {
-	return validateTenantID(value) == nil
+	return modelprofile.ValidateTenantID(value) == nil
 }
 
 var _ ModelFactory = (*ModelProviderRegistry)(nil)

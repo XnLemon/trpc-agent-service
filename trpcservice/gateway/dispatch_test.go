@@ -1734,6 +1734,18 @@ func TestDispatcherConfigurationAndEventMappingEdges(t *testing.T) {
 	if !readyDispatcher.Ready() {
 		t.Fatal("configured dispatcher is not ready")
 	}
+	narrowStore := inmemory.New()
+	t.Cleanup(func() { _ = narrowStore.Close() })
+	narrowDispatcher, err := NewDispatcher(DispatchConfig{
+		Resolver: dispatcher.resolver, Registry: registry,
+		SessionStore: narrowStore, MessageStore: narrowStore, ReplyBatchStore: narrowStore,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if narrowDispatcher.runtimeStore == nil || narrowDispatcher.materializer == nil {
+		t.Fatalf("narrow dispatcher capabilities = store:%v materializer:%v", narrowDispatcher.runtimeStore, narrowDispatcher.materializer)
+	}
 	var nilDispatcher *Dispatcher
 	if nilDispatcher.Ready() {
 		t.Fatal("nil dispatcher is ready")

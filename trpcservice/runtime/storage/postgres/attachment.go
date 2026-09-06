@@ -13,7 +13,6 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
-	pgstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
 
 const attachmentColumns = "tenant_id,attachment_id,kind,mime_type,name,size,sha256,provider,provider_id,event_id,expires_at"
@@ -86,12 +85,12 @@ func (s *Store) persistAttachment(ctx context.Context, tenantID string, referenc
 
 func ensureAttachmentObject(ctx context.Context, tx *sql.Tx, tenantID string, reference attachment.Reference, data []byte) error {
 	if _, err := tx.ExecContext(ctx, "INSERT INTO public.runtime_object (tenant_id,object_key,content_type,content,size,etag) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id,object_key) DO NOTHING", tenantID, reference.ID, reference.MIMEType, data, reference.Size, reference.SHA256); err != nil {
-		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	var objectType, objectETag string
 	var objectSize int64
 	if err := tx.QueryRowContext(ctx, "SELECT content_type,size,etag FROM public.runtime_object WHERE tenant_id=$1 AND object_key=$2", tenantID, reference.ID).Scan(&objectType, &objectSize, &objectETag); err != nil {
-		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if objectType != reference.MIMEType || objectSize != reference.Size || objectETag != reference.SHA256 {
 		return runtimestorage.ErrConflict
@@ -102,7 +101,7 @@ func ensureAttachmentObject(ctx context.Context, tx *sql.Tx, tenantID string, re
 func insertAttachmentMetadata(ctx context.Context, tx *sql.Tx, tenantID string, reference attachment.Reference, expiresAt time.Time) error {
 	result, err := tx.ExecContext(ctx, "INSERT INTO public.runtime_attachment (tenant_id,attachment_id,kind,mime_type,name,size,sha256,provider,provider_id,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (tenant_id,attachment_id) DO NOTHING", tenantID, reference.ID, reference.Kind, reference.MIMEType, reference.Name, reference.Size, reference.SHA256, reference.Provider, reference.ProviderID, expiresAt)
 	if err != nil {
-		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	created, err := result.RowsAffected()
 	if err != nil {
@@ -146,7 +145,7 @@ func (s *Store) BindAttachments(ctx context.Context, tenantID, eventID string, r
 		if err == nil {
 			return runtimestorage.ErrNotFound
 		}
-		return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	for _, reference := range references {
 		normalized, err := reference.Normalize()
@@ -166,7 +165,7 @@ func (s *Store) BindAttachments(ctx context.Context, tenantID, eventID string, r
 	}
 	for _, reference := range references {
 		if _, err := tx.ExecContext(ctx, "UPDATE public.runtime_attachment SET event_id=$3 WHERE tenant_id=$1 AND attachment_id=$2 AND (event_id IS NULL OR event_id=$3)", tenantID, reference.ID, eventID); err != nil {
-			return pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+			return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -196,7 +195,7 @@ func (s *Store) Load(ctx context.Context, tenantID, eventID string, reference at
 	}
 	var data []byte
 	if err := s.db.QueryRowContext(ctx, "SELECT content FROM public.runtime_object WHERE tenant_id=$1 AND object_key=$2", tenantID, normalized.ID).Scan(&data); err != nil {
-		return attachment.Content{}, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return attachment.Content{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	content := attachment.Content{Data: bytes.Clone(data)}
 	if err := content.Validate(normalized); err != nil {
@@ -221,7 +220,7 @@ func (s *Store) CleanupAttachments(ctx context.Context, tenantID string, before 
 	defer func() { _ = tx.Rollback() }()
 	rows, err := tx.QueryContext(ctx, "DELETE FROM public.runtime_attachment AS a WHERE a.tenant_id=$1 AND a.expires_at <= $2 AND (a.event_id IS NULL OR EXISTS (SELECT 1 FROM public.message_event AS e WHERE e.tenant_id=a.tenant_id AND e.event_id=a.event_id AND e.status IN ('completed','failed'))) RETURNING a.attachment_id", tenantID, before.UTC())
 	if err != nil {
-		return 0, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return 0, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer func() { _ = rows.Close() }()
 	ids := make([]string, 0)
@@ -237,7 +236,7 @@ func (s *Store) CleanupAttachments(ctx context.Context, tenantID string, before 
 	}
 	for _, id := range ids {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM public.runtime_object WHERE tenant_id=$1 AND object_key=$2", tenantID, id); err != nil {
-			return 0, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+			return 0, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -263,7 +262,7 @@ func loadAttachment(ctx context.Context, query attachmentQuerier, tenantID, id s
 		return storedAttachment{}, false, nil
 	}
 	if err != nil {
-		return storedAttachment{}, false, pgstorage.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return storedAttachment{}, false, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if storedTenantID != tenantID {
 		return storedAttachment{}, false, runtimestorage.ErrStorage

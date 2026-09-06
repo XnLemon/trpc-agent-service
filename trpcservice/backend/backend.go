@@ -1073,6 +1073,11 @@ func validateTenantID(id string) error {
 	return validateCrockfordID(id, "t_", "tenant")
 }
 
+// ValidateTenantID validates the tenant scope used by runtime storage
+// adapters. Tenant identity remains a backend-domain concern even when a
+// runtime package uses it to key an in-process registry.
+func ValidateTenantID(id string) error { return validateTenantID(id) }
+
 func validateProfileID(id string) error {
 	return validateCrockfordID(id, "bp_", "backend profile")
 }

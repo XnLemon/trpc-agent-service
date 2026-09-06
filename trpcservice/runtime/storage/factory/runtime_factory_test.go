@@ -1,4 +1,4 @@
-package backend
+package factory
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	modelruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/model"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimeinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/session"
@@ -20,7 +21,7 @@ func TestRegistryStorageFactoryMaterializesTenantSession(t *testing.T) {
 	if err := providers.Register(tenantID, CapabilitySession, "memory", factory); err != nil {
 		t.Fatal(err)
 	}
-	secrets := modelprofile.NewSecretRegistry()
+	secrets := modelruntime.NewSecretRegistry()
 	storageFactory, err := NewRegistryStorageFactory(providers, secrets)
 	if err != nil {
 		t.Fatal(err)
@@ -179,7 +180,7 @@ func TestMatchesCapabilityContracts(t *testing.T) {
 
 func TestRegistryStorageFactoryCancellationAndMissingSession(t *testing.T) {
 	providers := NewProviderRegistry()
-	secrets := modelprofile.NewSecretRegistry()
+	secrets := modelruntime.NewSecretRegistry()
 	factory, err := NewRegistryStorageFactory(providers, secrets)
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +203,7 @@ func TestRegistryStorageFactoryCancellationAfterProviderSuccess(t *testing.T) {
 	if err := providers.Register(tenantID, CapabilitySession, "memory", provider); err != nil {
 		t.Fatal(err)
 	}
-	factory, err := NewRegistryStorageFactory(providers, modelprofile.NewSecretRegistry())
+	factory, err := NewRegistryStorageFactory(providers, modelruntime.NewSecretRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +231,7 @@ func TestRegistryStorageFactoryBuildsTenantCapabilitiesConcurrently(t *testing.T
 			t.Fatal(err)
 		}
 	}
-	factory, err := NewRegistryStorageFactory(providers, modelprofile.NewSecretRegistry())
+	factory, err := NewRegistryStorageFactory(providers, modelruntime.NewSecretRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +345,7 @@ func TestCapabilitySetClosesSharedValueOnce(t *testing.T) {
 func TestRegistryStorageFactoryClosesEarlierCapabilityAndScopesSecrets(t *testing.T) {
 	const tenantID = "t_00000000000000000000000000"
 	providers := NewProviderRegistry()
-	secrets := modelprofile.NewSecretRegistry()
+	secrets := modelruntime.NewSecretRegistry()
 	if err := secrets.RegisterValue(modelprofile.SecretScope{TenantID: tenantID, SecretRef: "secret/session"}, "session-secret"); err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +401,7 @@ func TestRegistryStorageFactoryRejectsDuplicateCapabilities(t *testing.T) {
 	if err := providers.Register(tenantID, CapabilitySession, "two", second); err != nil {
 		t.Fatal(err)
 	}
-	factory, err := NewRegistryStorageFactory(providers, modelprofile.NewSecretRegistry())
+	factory, err := NewRegistryStorageFactory(providers, modelruntime.NewSecretRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,11 +423,11 @@ func TestRegistryStorageFactoryRejectsDuplicateCapabilities(t *testing.T) {
 }
 
 func TestRegistryStorageFactoryValidationAndResolverFailures(t *testing.T) {
-	if _, err := NewRegistryStorageFactory(nil, modelprofile.NewSecretRegistry()); !errors.Is(err, ErrStorageFactory) {
+	if _, err := NewRegistryStorageFactory(nil, modelruntime.NewSecretRegistry()); !errors.Is(err, ErrStorageFactory) {
 		t.Fatalf("nil providers factory = %v", err)
 	}
 	providers := NewProviderRegistry()
-	factory, err := NewRegistryStorageFactory(providers, modelprofile.NewSecretRegistry())
+	factory, err := NewRegistryStorageFactory(providers, modelruntime.NewSecretRegistry())
 	if err != nil {
 		t.Fatal(err)
 	}

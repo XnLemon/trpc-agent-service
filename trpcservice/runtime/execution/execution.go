@@ -6,18 +6,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync/atomic"
 	"time"
 
+	serviceagent "github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
-	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
-	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
-	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 var (
@@ -68,7 +65,7 @@ type Event struct {
 type Request struct {
 	Plan      runtime.ExecutionPlan
 	Identity  tenant.RunnerIdentity
-	Message   trpcmodel.Message
+	Message   serviceagent.Message
 	RequestID string
 	TraceID   string
 }
@@ -101,7 +98,7 @@ type Coordinator struct {
 // ownership visible at the forwarding boundary.
 type executionStream struct {
 	request      Request
-	runnerEvents <-chan *trpcevent.Event
+	runnerEvents <-chan serviceagent.RunnerEvent
 	lease        *runtimerunner.RunnerLease
 	output       chan<- Event
 	finishRunner func(error)
@@ -170,7 +167,10 @@ func (coordinator *Coordinator) Execute(ctx context.Context, request Request) (<
 	runnerCtx, _, finishRunner := observability.StartOperation(observability.WithCorrelation(ctx, request.RequestID, request.TraceID), coordinator.telemetry, observability.OperationRunnerExecution, "runner")
 	started := time.Now()
 	_ = coordinator.metrics.Request(runnerCtx, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution, "status": "started"})
-	runnerEvents, err := runnerValue.Run(runnerCtx, request.Identity.UserID, request.Identity.SessionID, request.Message, trpcagent.WithRequestID(request.RequestID))
+	runnerEvents, err := serviceagent.Invoke(runnerCtx, runnerValue, serviceagent.Invocation{
+		UserID: request.Identity.UserID, SessionID: request.Identity.SessionID,
+		Message: request.Message, RequestID: request.RequestID,
+	}, coordinator.drainTimeout)
 	if err != nil {
 		err = normalizeRunError(err)
 		finishRunner(err)
@@ -223,6 +223,11 @@ func (coordinator *Coordinator) forward(ctx context.Context, stream executionStr
 				coordinator.emitDone(stream.output, stream.request, "complete")
 			}
 		}
+		// The Agent adapter owns the upstream Event channel, but the runtime
+		// still owns this normalized stream until it is closed. Drain it before
+		// releasing the lease so invalidation or registry shutdown cannot close
+		// an external Runner while its adapter is finishing source cleanup.
+		coordinator.drain(stream.runnerEvents)
 		stream.finishRunner(terminalErr)
 		_ = coordinator.metrics.Operation(ctx, stream.started, map[string]string{"component": "runner", "operation": observability.OperationRunnerExecution}, terminalErr)
 		_ = stream.lease.Release()
@@ -233,7 +238,6 @@ func (coordinator *Coordinator) forward(ctx context.Context, stream executionStr
 	for {
 		if coordinator.canceled(ctx, &terminalState) {
 			terminalErr = cancellationError(ctx)
-			coordinator.drain(stream.runnerEvents)
 			coordinator.emitCancellation(stream.output, stream.request, terminalErr)
 			terminalCommitted = true
 			return
@@ -242,7 +246,6 @@ func (coordinator *Coordinator) forward(ctx context.Context, stream executionStr
 		case event, ok := <-stream.runnerEvents:
 			if coordinator.canceled(ctx, &terminalState) {
 				terminalErr = cancellationError(ctx)
-				coordinator.drain(stream.runnerEvents)
 				coordinator.emitCancellation(stream.output, stream.request, terminalErr)
 				terminalCommitted = true
 				return
@@ -263,7 +266,6 @@ func (coordinator *Coordinator) forward(ctx context.Context, stream executionStr
 			for _, item := range mapped {
 				if coordinator.canceled(ctx, &terminalState) {
 					terminalErr = cancellationError(ctx)
-					coordinator.drain(stream.runnerEvents)
 					coordinator.emitCancellation(stream.output, stream.request, terminalErr)
 					terminalCommitted = true
 					return
@@ -278,14 +280,12 @@ func (coordinator *Coordinator) forward(ctx context.Context, stream executionStr
 				}
 				if !sendEvent(ctx, stream.output, item) {
 					terminalErr = cancellationError(ctx)
-					coordinator.drain(stream.runnerEvents)
 					coordinator.emitCancellation(stream.output, stream.request, terminalErr)
 					terminalCommitted = true
 					return
 				}
 			}
 			if done {
-				coordinator.drain(stream.runnerEvents)
 				if coordinator.canceled(ctx, &terminalState) {
 					terminalErr = cancellationError(ctx)
 					coordinator.emitCancellation(stream.output, stream.request, terminalErr)
@@ -300,7 +300,6 @@ func (coordinator *Coordinator) forward(ctx context.Context, stream executionStr
 			}
 		case <-ctx.Done():
 			terminalErr = cancellationError(ctx)
-			coordinator.drain(stream.runnerEvents)
 			coordinator.emitCancellation(stream.output, stream.request, terminalErr)
 			terminalCommitted = true
 			return
@@ -308,12 +307,26 @@ func (coordinator *Coordinator) forward(ctx context.Context, stream executionStr
 	}
 }
 
-func (coordinator *Coordinator) canceled(ctx context.Context, state *atomic.Uint32) bool {
-	return state.Load() == terminalCanceled || ctx.Err() != nil
+func (coordinator *Coordinator) drain(events <-chan serviceagent.RunnerEvent) {
+	if coordinator == nil || events == nil || coordinator.drainTimeout <= 0 {
+		return
+	}
+	timer := time.NewTimer(coordinator.drainTimeout)
+	defer timer.Stop()
+	for {
+		select {
+		case _, ok := <-events:
+			if !ok {
+				return
+			}
+		case <-timer.C:
+			return
+		}
+	}
 }
 
-func (coordinator *Coordinator) drain(events <-chan *trpcevent.Event) {
-	drainRunnerEvents(events, coordinator.drainTimeout)
+func (coordinator *Coordinator) canceled(ctx context.Context, state *atomic.Uint32) bool {
+	return state.Load() == terminalCanceled || ctx.Err() != nil
 }
 
 func (coordinator *Coordinator) emitCancellation(output chan<- Event, request Request, err error) {
@@ -346,51 +359,27 @@ func cancellationStatus(err error) string {
 	return "canceled"
 }
 
-func mapRunnerEvent(event *trpcevent.Event, requestID, traceID string) ([]Event, bool) {
-	if event == nil || event.Response == nil {
+func mapRunnerEvent(event serviceagent.RunnerEvent, requestID, traceID string) ([]Event, bool) {
+	if event.Type == "" {
 		return []Event{{Type: EventStatus, RequestID: requestID, TraceID: traceID, Status: "progress"}}, false
 	}
-	response := event.Response
-	if response.Error != nil {
-		return []Event{
-			{Type: EventError, RequestID: requestID, TraceID: traceID, Err: ErrExecution},
-			{Type: EventDone, RequestID: requestID, TraceID: traceID, Status: "error", Done: true},
-		}, true
+	result := Event{Type: EventType(event.Type), RequestID: requestID, TraceID: traceID, Text: event.Text, Status: event.Status, Err: event.Err, Done: event.Done}
+	switch event.Type {
+	case serviceagent.RunnerEventMessage:
+		result.Type = EventMessage
+	case serviceagent.RunnerEventStatus:
+		result.Type = EventStatus
+	case serviceagent.RunnerEventError:
+		result.Type = EventError
+		result.Err = ErrExecution
+	case serviceagent.RunnerEventDone:
+		result.Type = EventDone
+		result.Done = true
 	}
-	text := responseText(response)
-	result := make([]Event, 0, 2)
-	if text != "" {
-		result = append(result, Event{Type: EventMessage, RequestID: requestID, TraceID: traceID, Text: text})
+	if result.Type == EventError && !errors.Is(result.Err, context.Canceled) && !errors.Is(result.Err, context.DeadlineExceeded) {
+		result.Err = ErrExecution
 	}
-	if response.Done {
-		result = append(result, Event{Type: EventDone, RequestID: requestID, TraceID: traceID, Status: "complete", Done: true})
-		return result, true
-	}
-	if len(result) == 0 {
-		status := "progress"
-		if response.IsPartial {
-			status = "partial"
-		}
-		result = append(result, Event{Type: EventStatus, RequestID: requestID, TraceID: traceID, Status: status})
-	}
-	return result, false
-}
-
-func responseText(response *trpcmodel.Response) string {
-	if response == nil {
-		return ""
-	}
-	var builder strings.Builder
-	for _, choice := range response.Choices {
-		text := choice.Delta.Content
-		if text == "" {
-			text = choice.Message.Content
-		}
-		if text != "" {
-			builder.WriteString(text)
-		}
-	}
-	return builder.String()
+	return []Event{result}, result.Type == EventDone || result.Done
 }
 
 func sendEvent(ctx context.Context, output chan<- Event, event Event) bool {
@@ -414,26 +403,5 @@ func trySend(output chan<- Event, event Event) {
 	select {
 	case output <- event:
 	default:
-	}
-}
-
-func drainRunnerEvents(events <-chan *trpcevent.Event, timeout time.Duration) {
-	if events == nil {
-		return
-	}
-	if timeout <= 0 {
-		return
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	for {
-		select {
-		case _, ok := <-events:
-			if !ok {
-				return
-			}
-		case <-timer.C:
-			return
-		}
 	}
 }

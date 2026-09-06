@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -93,9 +92,19 @@ type DispatchConfig struct {
 	DrainTimeout  time.Duration
 	Observability observability.Provider
 	// RuntimeStore enables durable inbound claims for verified Channel principals.
-	// API principals remain protected by the HTTP IdempotencyStore.
+	// API principals remain protected by the HTTP IdempotencyStore. It is kept as
+	// a compatibility aggregate; new callers should provide the narrow fields
+	// below.
 	RuntimeStore runtimestorage.RuntimeStore
-	Materializer *outbox.Materializer
+	// SessionStore is the session-state capability used by durable dispatch.
+	SessionStore runtimestorage.SessionStateStore
+	// MessageStore is the inbound message lifecycle capability used by durable
+	// dispatch.
+	MessageStore runtimestorage.MessageStore
+	// ReplyBatchStore is the atomic reply materialization capability used when a
+	// materializer is constructed by the dispatcher.
+	ReplyBatchStore runtimestorage.ReplyBatchEnqueuer
+	Materializer    *outbox.Materializer
 	// AuditWriter receives mandatory execution lifecycle facts. It is optional
 	// for compatibility with deployments that have not enabled audit storage.
 	AuditWriter audit.Writer
@@ -125,6 +134,60 @@ type Dispatcher struct {
 type dispatchStore interface {
 	runtimestorage.SessionStateStore
 	runtimestorage.MessageStore
+}
+
+type dispatchStoreView struct {
+	sessions runtimestorage.SessionStateStore
+	messages runtimestorage.MessageStore
+}
+
+func (store dispatchStoreView) GetSession(ctx context.Context, tenantID, sessionID string) (runtimestorage.Session, error) {
+	if store.sessions == nil {
+		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+	}
+	return store.sessions.GetSession(ctx, tenantID, sessionID)
+}
+
+func (store dispatchStoreView) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (runtimestorage.Session, error) {
+	if store.sessions == nil {
+		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+	}
+	return store.sessions.CreateSession(ctx, tenantID, sessionID, state)
+}
+
+func (store dispatchStoreView) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (runtimestorage.Session, error) {
+	if store.sessions == nil {
+		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+	}
+	return store.sessions.UpdateSessionState(ctx, tenantID, sessionID, expectedVersion, state)
+}
+
+func (store dispatchStoreView) DeleteSession(ctx context.Context, tenantID, sessionID string) error {
+	if store.sessions == nil {
+		return runtimestorage.ErrInvalid
+	}
+	return store.sessions.DeleteSession(ctx, tenantID, sessionID)
+}
+
+func (store dispatchStoreView) RecordMessage(ctx context.Context, input runtimestorage.MessageEventInput) (runtimestorage.MessageEvent, bool, error) {
+	if store.messages == nil {
+		return runtimestorage.MessageEvent{}, false, runtimestorage.ErrInvalid
+	}
+	return store.messages.RecordMessage(ctx, input)
+}
+
+func (store dispatchStoreView) GetMessage(ctx context.Context, tenantID, eventID string) (runtimestorage.MessageEvent, error) {
+	if store.messages == nil {
+		return runtimestorage.MessageEvent{}, runtimestorage.ErrInvalid
+	}
+	return store.messages.GetMessage(ctx, tenantID, eventID)
+}
+
+func (store dispatchStoreView) TransitionMessage(ctx context.Context, transition runtimestorage.MessageTransition) (runtimestorage.MessageEvent, error) {
+	if store.messages == nil {
+		return runtimestorage.MessageEvent{}, runtimestorage.ErrInvalid
+	}
+	return store.messages.TransitionMessage(ctx, transition)
 }
 
 type durableExecution struct {
@@ -160,6 +223,74 @@ type dispatchExecution struct {
 	auditFinalized  bool
 }
 
+type dispatchCapabilities struct {
+	sessions     runtimestorage.SessionStateStore
+	messages     runtimestorage.MessageStore
+	replyBatches runtimestorage.ReplyBatchEnqueuer
+}
+
+func resolveDispatchCapabilities(config DispatchConfig) dispatchCapabilities {
+	capabilities := dispatchCapabilities{
+		sessions:     config.SessionStore,
+		messages:     config.MessageStore,
+		replyBatches: config.ReplyBatchStore,
+	}
+	if config.RuntimeStore == nil {
+		return capabilities
+	}
+	if capabilities.sessions == nil {
+		capabilities.sessions, _ = config.RuntimeStore.(runtimestorage.SessionStateStore)
+	}
+	if capabilities.messages == nil {
+		capabilities.messages, _ = config.RuntimeStore.(runtimestorage.MessageStore)
+	}
+	if capabilities.replyBatches == nil {
+		capabilities.replyBatches, _ = config.RuntimeStore.(runtimestorage.ReplyBatchEnqueuer)
+	}
+	return capabilities
+}
+
+func resolveDispatchAttachments(config DispatchConfig) (attachment.Reader, runtimestorage.AttachmentStore) {
+	reader := config.Attachments
+	if reader == nil {
+		reader, _ = config.RuntimeStore.(attachment.Reader)
+	}
+	store := config.AttachmentStore
+	if store != nil {
+		return reader, store
+	}
+	if value, ok := config.RuntimeStore.(runtimestorage.AttachmentStore); ok {
+		return reader, value
+	}
+	if value, ok := reader.(runtimestorage.AttachmentStore); ok {
+		return reader, value
+	}
+	return reader, nil
+}
+
+func newDispatchStore(config DispatchConfig, capabilities dispatchCapabilities) dispatchStore {
+	if capabilities.sessions != nil && capabilities.messages != nil {
+		return dispatchStoreView{sessions: capabilities.sessions, messages: capabilities.messages}
+	}
+	if config.RuntimeStore == nil {
+		return nil
+	}
+	store, _ := config.RuntimeStore.(dispatchStore)
+	return store
+}
+
+func newDispatchMaterializer(config DispatchConfig, batchStore runtimestorage.ReplyBatchEnqueuer) (*outbox.Materializer, error) {
+	if config.Materializer != nil {
+		return config.Materializer, nil
+	}
+	if batchStore == nil && config.RuntimeStore == nil {
+		return nil, nil
+	}
+	return outbox.NewMaterializer(outbox.MaterializerConfig{
+		Store: config.RuntimeStore, BatchStore: batchStore, Observability: config.Observability,
+	})
+}
+
 // NewDispatcher validates the protocol-neutral execution dependencies.
 func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if config.Resolver == nil || config.Registry == nil {
@@ -174,33 +305,20 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
 	}
+	capabilities := resolveDispatchCapabilities(config)
 	executor, err := execution.NewCoordinator(execution.Config{
 		Registry: config.Registry, DrainTimeout: config.DrainTimeout, Observability: config.Observability,
 	})
 	if err != nil {
 		return nil, err
 	}
-	if config.Attachments == nil {
-		if reader, ok := config.RuntimeStore.(attachment.Reader); ok {
-			config.Attachments = reader
-		}
-	}
-	if config.AttachmentStore == nil {
-		if store, ok := config.RuntimeStore.(runtimestorage.AttachmentStore); ok {
-			config.AttachmentStore = store
-		} else if store, ok := config.Attachments.(runtimestorage.AttachmentStore); ok {
-			config.AttachmentStore = store
-		}
-	}
+	config.Attachments, config.AttachmentStore = resolveDispatchAttachments(config)
 	config.AuditWriter = metrics.WrapAuditWriter(config.AuditWriter, config.Observability)
-	if config.Materializer == nil && config.RuntimeStore != nil {
-		materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{Store: config.RuntimeStore, Observability: config.Observability})
-		if err != nil {
-			return nil, err
-		}
-		config.Materializer = materializer
+	materializer, err := newDispatchMaterializer(config, capabilities.replyBatches)
+	if err != nil {
+		return nil, err
 	}
-	return &Dispatcher{resolver: config.Resolver, executor: executor, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: config.RuntimeStore, materializer: config.Materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore, attachments: config.Attachments, attachmentStore: config.AttachmentStore}, nil
+	return &Dispatcher{resolver: config.Resolver, executor: executor, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: newDispatchStore(config, capabilities), materializer: materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore, attachments: config.Attachments, attachmentStore: config.AttachmentStore}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.
@@ -344,527 +462,6 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	}
 	go dispatcher.forwardExecution(runnerCtx, run)
 	return output, nil
-}
-
-func (dispatcher *Dispatcher) reserveHandoff(ctx context.Context, metadata dispatchMetadata) error {
-	if dispatcher.handoffStore == nil {
-		return nil
-	}
-	_, err := dispatcher.handoffStore.Reserve(ctx, audit.ExecutionHandoff{
-		TenantID: metadata.principal.TenantID(), HandoffID: audit.NewEventID(metadata.requestID, "handoff"),
-		RequestID: metadata.requestID, TraceID: metadata.traceID, EventID: audit.NewEventID(metadata.requestID, string(audit.EventExecutionStarted)), State: audit.HandoffPending,
-	})
-	return err
-}
-
-func normalizeDispatchRequest(ctx context.Context, request DispatchRequest) (InboundMessage, string, string, error) {
-	if ctx == nil {
-		return InboundMessage{}, "", "", fmt.Errorf("%w: context is required", ErrInvalid)
-	}
-	if err := ctx.Err(); err != nil {
-		return InboundMessage{}, "", "", err
-	}
-	if err := request.Principal.Validate(); err != nil {
-		return InboundMessage{}, "", "", ErrUnauthenticated
-	}
-	message, err := request.Message.Normalize()
-	if err != nil {
-		return InboundMessage{}, "", "", err
-	}
-	requestID, err := normalizeCorrelationID(request.RequestID, true)
-	if err != nil {
-		return InboundMessage{}, "", "", err
-	}
-	traceID, err := normalizeCorrelationID(request.TraceID, false)
-	if err != nil {
-		return InboundMessage{}, "", "", err
-	}
-	return message, requestID, traceID, nil
-}
-
-func detachedCorrelationContext(parent context.Context, requestID, traceID string) context.Context {
-	if parent == nil {
-		parent = context.Background()
-	}
-	return observability.WithCorrelation(context.WithoutCancel(parent), requestID, traceID)
-}
-
-func (dispatcher *Dispatcher) claimInbound(ctx context.Context, metadata dispatchMetadata) (result *durableExecution, err error) {
-	return dispatcher.claimInboundWithLease(ctx, metadata, durableInboundLeaseForRuntime(appmodel.DefaultRuntimePolicy()))
-}
-
-func (dispatcher *Dispatcher) claimInboundWithLease(ctx context.Context, metadata dispatchMetadata, leaseDuration time.Duration) (result *durableExecution, err error) {
-	if dispatcher.runtimeStore == nil || metadata.principal.Kind() != PrincipalChannel {
-		return nil, nil
-	}
-	if leaseDuration <= 0 {
-		leaseDuration = durableInboundLeaseForRuntime(appmodel.DefaultRuntimePolicy())
-	}
-	started := time.Now()
-	operationCtx, _, finish := observability.StartOperation(ctx, dispatcher.telemetry, observability.OperationStorageOperation, "storage")
-	_ = dispatcher.metrics.Request(operationCtx, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "status": "started"})
-	defer func() {
-		finish(err)
-		_ = dispatcher.metrics.Operation(operationCtx, started, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation}, err)
-		status := "success"
-		if err != nil {
-			status = observability.ErrorClass(err)
-			if status == "" {
-				status = "error"
-			}
-		}
-		_ = dispatcher.metrics.BackendDuration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "status": status, "error_class": observability.ErrorClass(err)})
-	}()
-	ctx = operationCtx
-	target, ok := metadata.principal.RoutingTarget()
-	if !ok || metadata.message.ExternalMessageID == "" || len([]rune(metadata.message.ExternalMessageID)) > maxDurableExternalMessageIDRunes {
-		return nil, fmt.Errorf("%w: durable Channel messages require an external message ID", ErrInvalid)
-	}
-	store := dispatcher.runtimeStore
-	replyTarget, err := replyTarget(target, metadata.message)
-	if err != nil {
-		return nil, err
-	}
-	if err := ensureInboundSession(ctx, store, metadata.principal.TenantID(), metadata.identity.SessionID); err != nil {
-		return nil, err
-	}
-	event, duplicate, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{
-		TenantID: metadata.principal.TenantID(), EventID: uuid.NewString(), SessionID: metadata.identity.SessionID,
-		BindingID: target.BindingID, ExternalMessageID: metadata.message.ExternalMessageID,
-		IdempotencyKey: metadata.message.ExternalMessageID,
-		ReplyTarget:    replyTarget,
-	})
-	if err != nil {
-		return nil, err
-	}
-	owner := "gateway-" + uuid.NewString()
-	event, err = prepareInboundEvent(ctx, store, inboundEventPreparation{tenantID: metadata.principal.TenantID(), event: event, duplicate: duplicate, owner: owner})
-	if err != nil {
-		return nil, err
-	}
-	from := event.Status
-	running, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{
-		TenantID: metadata.principal.TenantID(), EventID: event.EventID, From: from,
-		To: runtimestorage.EventRunning, Owner: owner, LeaseDuration: leaseDuration,
-	})
-	if err != nil {
-		if duplicate && errors.Is(err, runtimestorage.ErrConflict) {
-			return nil, ErrDuplicateMessage
-		}
-		return nil, err
-	}
-	return &durableExecution{store: store, tenantID: metadata.principal.TenantID(), eventID: event.EventID, owner: owner, fencingToken: running.FencingToken, replyTarget: event.ReplyTarget}, nil
-}
-
-func durableInboundLeaseForRuntime(policy appmodel.RuntimePolicy) time.Duration {
-	seconds := policy.ExecutionTimeoutSeconds
-	if seconds <= 0 {
-		seconds = appmodel.DefaultRuntimePolicy().ExecutionTimeoutSeconds
-	}
-	return time.Duration(seconds)*time.Second + durableInboundLeaseGrace
-}
-
-func replyTarget(target channels.RoutingTarget, message InboundMessage) (runtimestorage.ReplyTarget, error) {
-	reply := runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: string(message.ConversationKind), ThreadID: message.ExternalThreadID}
-	switch message.ConversationKind {
-	case channels.ConversationDirect:
-		reply.ReceiverID = message.ExternalPeerID
-	case channels.ConversationGroup:
-		reply.ReceiverID = message.ExternalChatID
-	default:
-		return runtimestorage.ReplyTarget{}, fmt.Errorf("%w: reply conversation kind is invalid", ErrInvalid)
-	}
-	if err := runtimestorage.ValidateReplyTarget(reply); err != nil {
-		return runtimestorage.ReplyTarget{}, fmt.Errorf("%w: reply target is invalid", ErrInvalid)
-	}
-	return reply, nil
-}
-
-func ensureInboundSession(ctx context.Context, store runtimestorage.SessionStateStore, tenantID, sessionID string) error {
-	if _, err := store.GetSession(ctx, tenantID, sessionID); err == nil {
-		return nil
-	} else if !errors.Is(err, runtimestorage.ErrNotFound) {
-		return err
-	}
-	_, err := store.CreateSession(ctx, tenantID, sessionID, nil)
-	if errors.Is(err, runtimestorage.ErrDuplicate) {
-		return nil
-	}
-	return err
-}
-
-type inboundEventPreparation struct {
-	tenantID  string
-	event     runtimestorage.MessageEvent
-	duplicate bool
-	owner     string
-}
-
-func prepareInboundEvent(ctx context.Context, store runtimestorage.MessageStore, preparation inboundEventPreparation) (runtimestorage.MessageEvent, error) {
-	if !preparation.duplicate {
-		return preparation.event, nil
-	}
-	event := preparation.event
-	if event.Status == runtimestorage.EventRunning && (event.LeaseExpiresAt == nil || event.LeaseExpiresAt.After(time.Now().UTC())) {
-		return runtimestorage.MessageEvent{}, ErrDuplicateMessage
-	}
-	if event.Status == runtimestorage.EventRunning {
-		if _, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: preparation.tenantID, EventID: event.EventID, From: runtimestorage.EventRunning, To: runtimestorage.EventExecutionReconciling, Owner: preparation.owner}); err != nil {
-			return runtimestorage.MessageEvent{}, ErrDuplicateMessage
-		}
-		event.Status = runtimestorage.EventExecutionReconciling
-	}
-	if event.Status != runtimestorage.EventReceived && event.Status != runtimestorage.EventExecutionReconciling {
-		return runtimestorage.MessageEvent{}, ErrDuplicateMessage
-	}
-	return event, nil
-}
-
-func (dispatcher *Dispatcher) failDurable(durable *durableExecution, cause error) {
-	if durable == nil {
-		return
-	}
-	to := runtimestorage.EventFailed
-	_ = dispatcher.observeStorage(context.Background(), func(operationCtx context.Context) error {
-		_, err := durable.store.TransitionMessage(operationCtx, runtimestorage.MessageTransition{
-			TenantID: durable.tenantID, EventID: durable.eventID, From: runtimestorage.EventRunning,
-			To: to, Owner: durable.owner, FencingToken: durable.fencingToken,
-		})
-		return err
-	})
-}
-
-func (dispatcher *Dispatcher) finishDurable(ctx context.Context, metadata dispatchMetadata, durable *durableExecution, terminalErr error, reply string, mediaReplies []servicetool.ReplyIntent) {
-	if durable == nil {
-		return
-	}
-	durableCtx := detachedCorrelationContext(ctx, metadata.requestID, metadata.traceID)
-	if terminalErr != nil && !IsContextCancellation(terminalErr) {
-		reply = durableFailureFallbackReply
-		mediaReplies = nil
-	}
-	segments := 0
-	replyID := ""
-	if dispatcher.materializer != nil {
-		input := outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: metadata.requestID, TraceID: metadata.traceID, TraceParent: observability.TraceParentFromContext(durableCtx), ReplyTarget: durable.replyTarget}
-		if terminalErr == nil && len(mediaReplies) > 0 {
-			input.Segments = mediaReplySegments(mediaReplies)
-		} else {
-			input.Payload = reply
-		}
-		if strings.TrimSpace(input.Payload) != "" || len(input.Segments) > 0 {
-			var err error
-			segments, err = dispatcher.materializer.Materialize(durableCtx, input)
-			if err != nil {
-				terminalErr = err
-				if len(mediaReplies) > 0 {
-					fallback := outbox.MaterializeInput{TenantID: durable.tenantID, EventID: durable.eventID, ReplyID: durable.eventID, RequestID: metadata.requestID, TraceID: metadata.traceID, TraceParent: observability.TraceParentFromContext(durableCtx), Payload: durableFailureFallbackReply, ReplyTarget: durable.replyTarget}
-					segments, err = dispatcher.materializer.Materialize(durableCtx, fallback)
-					if err == nil {
-						replyID = durable.eventID
-					}
-				}
-			} else {
-				replyID = durable.eventID
-			}
-		}
-	}
-	to := runtimestorage.EventCompleted
-	if terminalErr != nil && replyID == "" {
-		to = runtimestorage.EventFailed
-	}
-	_ = dispatcher.observeStorage(durableCtx, func(operationCtx context.Context) error {
-		_, err := durable.store.TransitionMessage(operationCtx, runtimestorage.MessageTransition{
-			TenantID: durable.tenantID, EventID: durable.eventID, From: runtimestorage.EventRunning,
-			To: to, Owner: durable.owner, FencingToken: durable.fencingToken, ReplyID: replyID, SegmentCount: segments,
-		})
-		return err
-	})
-}
-
-func mediaReplySegments(intents []servicetool.ReplyIntent) []outbox.ReplySegment {
-	segments := make([]outbox.ReplySegment, 0, len(intents))
-	for _, intent := range intents {
-		segments = append(segments, outbox.ReplySegment{Kind: intent.Kind, Payload: intent.Payload, Attachment: intent.Attachment, Fallback: intent.Fallback})
-	}
-	return segments
-}
-
-func (dispatcher *Dispatcher) observeStorage(ctx context.Context, operation func(context.Context) error) error {
-	if dispatcher == nil || operation == nil {
-		return ErrInvalid
-	}
-	started := time.Now()
-	operationCtx, _, finish := observability.StartOperation(ctx, dispatcher.telemetry, observability.OperationStorageOperation, "storage")
-	_ = dispatcher.metrics.Request(operationCtx, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": "other", "status": "started"})
-	err := operation(operationCtx)
-	finish(err)
-	labels := map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": "other"}
-	_ = dispatcher.metrics.Operation(operationCtx, started, labels, err)
-	status := "success"
-	if err != nil {
-		status = observability.ErrorClass(err)
-		if status == "" {
-			status = "error"
-		}
-	}
-	_ = dispatcher.metrics.BackendDuration(operationCtx, observability.DurationMilliseconds(started), map[string]string{"component": "storage", "provider": "other", "status": status, "error_class": observability.ErrorClass(err)})
-	return err
-}
-
-type executionForwardState struct {
-	terminalErr          error
-	terminalEventType    audit.EventType
-	terminalErrorType    string
-	terminalErrorEmitted bool
-	terminalSeen         bool
-	reply                strings.Builder
-}
-
-func (state *executionForwardState) observe(event execution.Event) {
-	switch event.Type {
-	case execution.EventMessage:
-		state.reply.WriteString(event.Text)
-	case execution.EventError:
-		state.terminalErr = event.Err
-		if IsContextCancellation(state.terminalErr) {
-			state.terminalEventType, state.terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
-			return
-		}
-		if state.terminalErr == nil {
-			state.terminalErr = ErrExecution
-		}
-		state.terminalEventType, state.terminalErrorType = audit.EventExecutionFailed, string(audit.ErrorUnavailable)
-	}
-	if event.Done {
-		state.terminalSeen = true
-	}
-	if !event.Done || state.terminalErr != nil {
-		return
-	}
-	switch event.Status {
-	case "error":
-		state.terminalErr = ErrExecution
-		state.terminalEventType, state.terminalErrorType = audit.EventExecutionFailed, string(audit.ErrorUnavailable)
-	case "canceled":
-		state.terminalErr = context.Canceled
-		state.terminalEventType, state.terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
-	case "deadline_exceeded":
-		state.terminalErr = context.DeadlineExceeded
-		state.terminalEventType, state.terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
-	default:
-		state.terminalEventType, state.terminalErrorType = audit.EventExecutionCompleted, ""
-	}
-}
-
-func (state *executionForwardState) skip(event execution.Event) bool {
-	return event.Type == execution.EventDone || (event.Type == execution.EventError && IsContextCancellation(event.Err))
-}
-
-func (state *executionForwardState) markSendFailure(ctx context.Context) {
-	state.terminalErr = ctx.Err()
-	if state.terminalErr == nil {
-		state.terminalErr = context.Canceled
-	}
-	state.terminalEventType, state.terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
-	state.terminalErrorEmitted = false
-}
-
-func (state *executionForwardState) ensureTerminal(ctx context.Context) {
-	if state.terminalSeen || state.terminalErr != nil {
-		return
-	}
-	if ctx.Err() != nil {
-		state.terminalErr = ctx.Err()
-		state.terminalEventType, state.terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
-		return
-	}
-	state.terminalEventType, state.terminalErrorType = audit.EventExecutionCompleted, ""
-}
-
-func (dispatcher *Dispatcher) forwardExecution(ctx context.Context, run *dispatchExecution) {
-	defer close(run.output)
-
-	state := executionForwardState{}
-	for event := range run.executionEvents {
-		state.observe(event)
-		if state.skip(event) {
-			continue
-		}
-		mapped := mapExecutionEvent(event)
-		if mapped.Type != DispatchEventMessage && mapped.Type != DispatchEventStatus && mapped.Type != DispatchEventError {
-			continue
-		}
-		if mapped.Type == DispatchEventError {
-			state.terminalErrorEmitted = true
-		}
-		if !sendDispatchEvent(ctx, run.output, mapped) {
-			state.markSendFailure(ctx)
-			break
-		}
-	}
-	state.ensureTerminal(ctx)
-	mediaIntents := []servicetool.ReplyIntent(nil)
-	if run.mediaReplies != nil {
-		mediaIntents = run.mediaReplies.Intents()
-	}
-	terminalErr := dispatcher.finalizeForward(ctx, run, &state, mediaIntents)
-	run.finishForwardOutput(ctx, terminalErr, state.terminalErrorEmitted)
-	if terminalErr != nil {
-		class := observability.ErrorClass(terminalErr)
-		run.span.SetAttributes(observability.Attribute{Key: "error_class", Value: class})
-		run.span.SetStatus(observability.StatusError, class)
-		run.span.RecordError(terminalErr)
-	} else {
-		run.span.SetStatus(observability.StatusOK, "")
-	}
-	_ = dispatcher.metrics.Operation(ctx, run.started, map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch}, terminalErr)
-	logDispatchFailure(run.metadata.principal, run.metadata.requestID, run.metadata.traceID, terminalErr)
-	run.span.End()
-}
-
-func mapExecutionEvent(event execution.Event) DispatchEvent {
-	result := DispatchEvent{Type: DispatchEventType(event.Type), RequestID: event.RequestID, TraceID: event.TraceID, Text: event.Text, Status: event.Status, Done: event.Done}
-	if event.Type == execution.EventError {
-		if IsContextCancellation(event.Err) {
-			result.Error = ErrExecutionCanceled.Error()
-		} else {
-			result.Error = ErrExecution.Error()
-		}
-	}
-	return result
-}
-
-func (run *dispatchExecution) finishForwardOutput(ctx context.Context, terminalErr error, terminalErrorEmitted bool) {
-	if IsContextCancellation(terminalErr) {
-		if !terminalErrorEmitted {
-			trySendDispatchEvent(run.output, DispatchEvent{Type: DispatchEventError, RequestID: run.metadata.requestID, TraceID: run.metadata.traceID, Error: ErrExecutionCanceled.Error()})
-		}
-		trySendDispatchEvent(run.output, DispatchEvent{Type: DispatchEventDone, RequestID: run.metadata.requestID, TraceID: run.metadata.traceID, Status: cancellationStatus(ctx), Done: true})
-		return
-	}
-	if terminalErr != nil {
-		if !terminalErrorEmitted {
-			errorText := ErrExecution.Error()
-			if errors.Is(terminalErr, ErrAuditWriteFailed) {
-				errorText = ErrAuditWriteFailed.Error()
-			}
-			trySendDispatchEvent(run.output, DispatchEvent{Type: DispatchEventError, RequestID: run.metadata.requestID, TraceID: run.metadata.traceID, Error: errorText})
-		}
-		trySendDispatchEvent(run.output, DispatchEvent{Type: DispatchEventDone, RequestID: run.metadata.requestID, TraceID: run.metadata.traceID, Status: "error", Done: true})
-		return
-	}
-	trySendDispatchEvent(run.output, DispatchEvent{Type: DispatchEventDone, RequestID: run.metadata.requestID, TraceID: run.metadata.traceID, Status: "complete", Done: true})
-}
-
-func (dispatcher *Dispatcher) finalizeForward(ctx context.Context, run *dispatchExecution, state *executionForwardState, mediaReplies []servicetool.ReplyIntent) error {
-	terminalErr := state.terminalErr
-	eventType := state.terminalEventType
-	errorType := state.terminalErrorType
-	if eventType == "" {
-		eventType = audit.EventExecutionCompleted
-		if terminalErr != nil {
-			eventType = audit.EventExecutionFailed
-			if IsContextCancellation(terminalErr) {
-				eventType = audit.EventExecutionCanceled
-			}
-		}
-	}
-	if errorType == "" {
-		errorType = terminalAuditError(terminalErr)
-	}
-	if dispatcher.handoffStore != nil {
-		result := audit.ResultSuccess
-		if terminalErr != nil {
-			result = audit.ResultFailure
-			if IsContextCancellation(terminalErr) {
-				result = audit.ResultCanceled
-			}
-		}
-		if _, err := dispatcher.handoffStore.Finalize(detachedCorrelationContext(ctx, run.metadata.requestID, run.metadata.traceID), audit.ExecutionHandoff{TenantID: run.metadata.principal.TenantID(), HandoffID: audit.NewEventID(run.metadata.requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType}); err != nil && (terminalErr == nil || IsContextCancellation(terminalErr)) {
-			terminalErr = auditWriteFailure()
-		}
-	}
-	if err := dispatcher.finalizeExecutionAudit(ctx, run, eventType, errorType); err != nil && (terminalErr == nil || IsContextCancellation(terminalErr)) {
-		terminalErr = auditWriteFailure()
-	}
-	dispatcher.finishDurable(ctx, run.metadata, run.durable, terminalErr, state.reply.String(), mediaReplies)
-	return terminalErr
-}
-
-func (dispatcher *Dispatcher) finalizeExecutionAudit(ctx context.Context, run *dispatchExecution, eventType audit.EventType, errorType string) error {
-	if run.auditFinalized {
-		return nil
-	}
-	err := dispatcher.writeExecutionAudit(detachedCorrelationContext(ctx, run.metadata.requestID, run.metadata.traceID), run.metadata, eventType, errorType)
-	if err == nil {
-		run.auditFinalized = true
-	}
-	return err
-}
-
-func auditWriteFailure() error {
-	return errors.Join(ErrExecution, ErrAuditWriteFailed)
-}
-
-func terminalAuditError(err error) string {
-	if err == nil {
-		return ""
-	}
-	if IsContextCancellation(err) {
-		return string(audit.ErrorCanceled)
-	}
-	return string(audit.ErrorUnavailable)
-}
-
-func (dispatcher *Dispatcher) writeExecutionAudit(ctx context.Context, metadata dispatchMetadata, eventType audit.EventType, errorType string) error {
-	return dispatcher.writeExecutionAuditRevision(ctx, metadata, eventType, errorType, nil)
-}
-
-func (dispatcher *Dispatcher) writeExecutionAuditRevision(ctx context.Context, metadata dispatchMetadata, eventType audit.EventType, errorType string, revision *int64) error {
-	if dispatcher.auditWriter == nil {
-		return nil
-	}
-	channel := string(metadata.principal.Kind())
-	if target, ok := metadata.principal.RoutingTarget(); ok {
-		channel = string(target.Channel)
-	}
-	event := audit.Event{SchemaVersion: audit.SchemaVersion, EventID: audit.NewEventID(metadata.requestID, string(eventType)), EventType: eventType, TenantID: metadata.principal.TenantID(), Channel: channel, UserID: metadata.message.ExternalUserID, SessionID: metadata.identity.SessionID, AgentAppID: metadata.principal.AppID(), Revision: revision, ErrorType: errorType, RequestID: metadata.requestID, TraceID: metadata.traceID, ActorType: string(metadata.principal.Kind()), ActorID: metadata.principal.SubjectID(), OccurredAt: time.Now().UTC()}
-	if _, err := dispatcher.auditWriter.Append(ctx, event); err != nil {
-		return err
-	}
-	return nil
-}
-
-func cancellationStatus(ctx context.Context) string {
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return "deadline_exceeded"
-	}
-	return "canceled"
-}
-
-func sendDispatchEvent(ctx context.Context, output chan<- DispatchEvent, event DispatchEvent) bool {
-	if ctx == nil || ctx.Err() != nil {
-		return false
-	}
-	select {
-	case <-ctx.Done():
-		return false
-	default:
-	}
-	select {
-	case output <- event:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
-func trySendDispatchEvent(output chan<- DispatchEvent, event DispatchEvent) {
-	select {
-	case output <- event:
-	default:
-	}
 }
 
 func normalizeCorrelationID(value string, generate bool) (string, error) {

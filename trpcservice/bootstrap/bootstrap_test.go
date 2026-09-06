@@ -17,7 +17,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
-	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
+	appmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -27,9 +27,11 @@ import (
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
 	runtimeservice "github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
+	modelruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
@@ -93,11 +95,11 @@ func TestBootstrapServesConcurrentTenantsWithIndependentProviders(t *testing.T) 
 		t.Fatal(err)
 	}
 	tenants := tenantmemory.NewRepository()
-	apps := agentmemory.NewRepository()
+	apps := appmemory.NewRepository()
 	models := modelmemory.NewRepository(modelCatalog)
 	backends := backendmemory.NewRepository(backendCatalog)
 	identities := make(map[string]gateway.APIIdentity)
-	secrets := modelprofile.NewSecretRegistry()
+	secrets := modelruntime.NewSecretRegistry()
 	for _, configured := range []struct {
 		token, tenantKey, appKey, modelName, secretRef, secretValue string
 	}{
@@ -303,7 +305,7 @@ func TestBootstrapCoversConstructionFailureBoundaries(t *testing.T) {
 	defer closeDependencies()
 	config.RuntimeTenantID = "runtime-tenant"
 	config.Sessions = nil
-	config.StorageFactory = backend.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+	config.StorageFactory = storagefactory.StorageFactoryFunc(func(context.Context, backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
 		return nil, nil
 	})
 	if _, err := New(context.Background(), config); !errors.Is(err, ErrInvalidConfig) {
@@ -587,7 +589,7 @@ func TestEnvironmentWeComAIBotComponentsUseTrustedBindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	tenants := tenantmemory.NewRepository()
-	apps := agentmemory.NewRepository()
+	apps := appmemory.NewRepository()
 	models := modelmemory.NewRepository(modelCatalog)
 	backends := backendmemory.NewRepository(backendCatalog)
 	channelsRepo := channelmemory.NewRepository()
@@ -610,7 +612,9 @@ func TestEnvironmentWeComAIBotComponentsUseTrustedBindings(t *testing.T) {
 		tenantID:    root.TenantID,
 		wecomAIBots: []environmentWeComAIBotConfig{{BindingID: binding.BindingID, SecretRef: binding.SecretRef, BotSecret: "bot-secret"}},
 	}
-	factories, bindingIDs, err := environmentWeComAIBotComponents(context.Background(), environment, channelsRepo, tenants, apps)
+	factories, bindingIDs, err := environmentWeComAIBotComponents(environmentWeComAIBotDependencies{
+		ctx: context.Background(), config: environment, channels: channelsRepo, tenants: tenants, apps: apps,
+	})
 	if err != nil || len(factories) != 1 || len(bindingIDs) != 1 {
 		t.Fatalf("AI Bot components = factories:%d bindings:%d err:%v", len(factories), len(bindingIDs), err)
 	}
@@ -630,7 +634,9 @@ func TestEnvironmentWeComAIBotComponentsUseTrustedBindings(t *testing.T) {
 		workerConfig = config
 		return outbox.New(config)
 	}
-	workerFactory := environmentOutboxWorkerFactory(environment, runtimeStore, nil, nil, bindingIDs)
+	workerFactory := environmentOutboxWorkerFactory(environmentOutboxWorkerDependencies{
+		config: environment, runtime: runtimeStore, aiBotBindings: bindingIDs,
+	})
 	if _, err := workerFactory([]channels.PollingAdapter{manager}); err != nil {
 		t.Fatalf("AI Bot outbox worker = %v", err)
 	}
@@ -640,17 +646,23 @@ func TestEnvironmentWeComAIBotComponentsUseTrustedBindings(t *testing.T) {
 	if err := manager.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if factories, bindingIDs, err := environmentWeComAIBotComponents(context.Background(), environmentConfig{tenantID: root.TenantID}, channelsRepo, tenants, apps); err != nil || factories != nil || bindingIDs != nil {
+	if factories, bindingIDs, err := environmentWeComAIBotComponents(environmentWeComAIBotDependencies{
+		ctx: context.Background(), config: environmentConfig{tenantID: root.TenantID}, channels: channelsRepo, tenants: tenants, apps: apps,
+	}); err != nil || factories != nil || bindingIDs != nil {
 		t.Fatalf("empty AI Bot components = %v %v %v", factories, bindingIDs, err)
 	}
 	duplicate := environment
 	duplicate.wecomAIBots = append(duplicate.wecomAIBots, environmentWeComAIBotConfig{BindingID: "other", SecretRef: binding.SecretRef, BotSecret: "other-secret"})
-	if _, _, err := environmentWeComAIBotComponents(context.Background(), duplicate, channelsRepo, tenants, apps); err == nil {
+	if _, _, err := environmentWeComAIBotComponents(environmentWeComAIBotDependencies{
+		ctx: context.Background(), config: duplicate, channels: channelsRepo, tenants: tenants, apps: apps,
+	}); err == nil {
 		t.Fatal("duplicate AI Bot secret reference was accepted")
 	}
 	unavailable := environment
 	unavailable.wecomAIBots[0].BindingID = "missing-binding"
-	if _, _, err := environmentWeComAIBotComponents(context.Background(), unavailable, channelsRepo, tenants, apps); err == nil {
+	if _, _, err := environmentWeComAIBotComponents(environmentWeComAIBotDependencies{
+		ctx: context.Background(), config: unavailable, channels: channelsRepo, tenants: tenants, apps: apps,
+	}); err == nil {
 		t.Fatal("unavailable AI Bot binding was accepted")
 	}
 }
@@ -675,7 +687,10 @@ func TestEnvironmentOutboxWorkerFactoryRoutesAIBotBindings(t *testing.T) {
 	}
 
 	const tenantID = "t_00000000000000000000000000"
-	factory := environmentOutboxWorkerFactory(environmentConfig{tenantID: tenantID}, store, nil, nil, map[string]struct{}{"aibot-binding": {}})
+	factory := environmentOutboxWorkerFactory(environmentOutboxWorkerDependencies{
+		config: environmentConfig{tenantID: tenantID}, runtime: store,
+		aiBotBindings: map[string]struct{}{"aibot-binding": {}},
+	})
 	manager := &wecom_aibot.Manager{}
 	if worker, err := factory([]channels.PollingAdapter{manager}); err == nil || worker != nil {
 		t.Fatal("manager without binding identity was accepted")
@@ -744,8 +759,8 @@ func TestBootstrapBuildsRuntimeRegistryFromStorageFactory(t *testing.T) {
 	config, closeDependencies := testConfig(t)
 	defer closeDependencies()
 	config.Sessions = nil
-	config.StorageFactory = backend.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
-		return backend.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: inmemory.NewSessionService()})
+	config.StorageFactory = storagefactory.StorageFactoryFunc(func(_ context.Context, input backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
+		return storagefactory.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: inmemory.NewSessionService()})
 	})
 	graph, err := New(context.Background(), config)
 	if err != nil {
@@ -1547,7 +1562,7 @@ func testConfig(t *testing.T) (Config, func()) {
 	}
 	sessions := inmemory.NewSessionService()
 	config := Config{
-		Tenants: tenantmemory.NewRepository(), Apps: agentmemory.NewRepository(),
+		Tenants: tenantmemory.NewRepository(), Apps: appmemory.NewRepository(),
 		Models: modelmemory.NewRepository(modelCatalog), Backends: backendmemory.NewRepository(backendCatalog),
 		Channels: channelmemory.NewRepository(), ModelCatalog: modelCatalog, BackendCatalog: backendCatalog,
 		SecretResolver: testSecretResolver{}, ModelFactory: testModelFactory{}, Sessions: sessions,
@@ -1597,7 +1612,7 @@ type candidateOnly struct{ channels.CandidateConsumer }
 func createBootstrapTenantExecutionState(
 	t *testing.T,
 	tenants *tenantmemory.InMemoryRepository,
-	apps *agentmemory.InMemoryRepository,
+	apps *appmemory.InMemoryRepository,
 	models *modelmemory.InMemoryRepository,
 	backends *backendmemory.InMemoryRepository,
 	tenantKey, appKey, modelName, secretRef string,
@@ -1685,14 +1700,14 @@ type bootstrapRecordingStorageFactory struct {
 	sessions map[string]int
 }
 
-func (factory *bootstrapRecordingStorageFactory) New(_ context.Context, input backend.StorageFactoryInput) (*backend.CapabilitySet, error) {
+func (factory *bootstrapRecordingStorageFactory) New(_ context.Context, input backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
 	factory.mu.Lock()
 	if factory.sessions == nil {
 		factory.sessions = make(map[string]int)
 	}
 	factory.sessions[input.TenantID]++
 	factory.mu.Unlock()
-	return backend.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: inmemory.NewSessionService()})
+	return storagefactory.NewCapabilitySet(input.TenantID, map[backend.Capability]any{backend.CapabilitySession: inmemory.NewSessionService()})
 }
 
 func (factory *bootstrapRecordingStorageFactory) SessionCount(tenantID string) int {
@@ -1751,7 +1766,7 @@ func (*bootstrapBlockingProvider) Reconcile(context.Context, runtimestorage.Repl
 
 var (
 	_ tenant.Repository          = (*tenantmemory.InMemoryRepository)(nil)
-	_ appmodel.Repository        = (*agentmemory.InMemoryRepository)(nil)
+	_ appmodel.Repository        = (*appmemory.InMemoryRepository)(nil)
 	_ channels.CandidateConsumer = (*channelmemory.InMemoryRepository)(nil)
 	_ session.Service            = (*inmemory.SessionService)(nil)
 )

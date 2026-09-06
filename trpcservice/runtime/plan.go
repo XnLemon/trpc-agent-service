@@ -1,4 +1,4 @@
-// Package runtime composes immutable control-plane snapshots into one
+// Package runtime composes immutable configuration snapshots into one
 // tenant-scoped execution plan and exposes internal scheduling boundaries.
 package runtime
 
@@ -42,14 +42,17 @@ type ExecutionPlan struct {
 	backend backend.BackendExecutionSnapshot
 }
 
-type executionPlanInputs struct {
-	tenantSnapshot tenant.ConfigurationSnapshot
-	appRoot        *appmodel.App
-	revision       *appmodel.Revision
-	modelProfile   *modelprofile.Profile
-	modelCatalog   *modelprofile.ProviderCatalog
-	backendProfile *backend.Profile
-	backendCatalog *backend.ProviderCatalog
+// ExecutionPlanInput contains the tenant-scoped configuration selected for one
+// execution. The input is borrowed during construction; NewExecutionPlanFromInput
+// validates it and freezes defensive copies into the returned plan.
+type ExecutionPlanInput struct {
+	TenantSnapshot tenant.ConfigurationSnapshot
+	AppRoot        *appmodel.App
+	Revision       *appmodel.Revision
+	ModelProfile   *modelprofile.Profile
+	ModelCatalog   *modelprofile.ProviderCatalog
+	BackendProfile *backend.Profile
+	BackendCatalog *backend.ProviderCatalog
 }
 
 // NewExecutionPlan validates and freezes one Tenant, current Agent Revision,
@@ -64,41 +67,44 @@ func NewExecutionPlan(
 	backendProfile *backend.Profile,
 	backendCatalog *backend.ProviderCatalog,
 ) (ExecutionPlan, error) {
-	return newExecutionPlan(executionPlanInputs{
-		tenantSnapshot: tenantSnapshot,
-		appRoot:        appRoot,
-		revision:       revision,
-		modelProfile:   modelProfile,
-		modelCatalog:   modelCatalog,
-		backendProfile: backendProfile,
-		backendCatalog: backendCatalog,
+	return NewExecutionPlanFromInput(ExecutionPlanInput{
+		TenantSnapshot: tenantSnapshot,
+		AppRoot:        appRoot,
+		Revision:       revision,
+		ModelProfile:   modelProfile,
+		ModelCatalog:   modelCatalog,
+		BackendProfile: backendProfile,
+		BackendCatalog: backendCatalog,
 	})
 }
 
-func newExecutionPlan(inputs executionPlanInputs) (ExecutionPlan, error) {
-	tenantValue := inputs.tenantSnapshot.Tenant()
+// NewExecutionPlanFromInput validates and freezes one explicit execution-plan
+// input group. New callers should prefer this constructor over positional
+// arguments so adding another snapshot cannot silently reorder call sites.
+func NewExecutionPlanFromInput(input ExecutionPlanInput) (ExecutionPlan, error) {
+	tenantValue := input.TenantSnapshot.Tenant()
 	if err := tenantValue.Validate(); err != nil {
 		return ExecutionPlan{}, errors.New("invalid execution plan: tenant snapshot is invalid")
 	}
 	if !tenantValue.CanAcceptExecution() {
 		return ExecutionPlan{}, errors.New("invalid execution plan: tenant cannot accept execution")
 	}
-	if inputs.appRoot != nil && inputs.revision != nil && inputs.appRoot.AppID != inputs.revision.AppID {
+	if input.AppRoot != nil && input.Revision != nil && input.AppRoot.AppID != input.Revision.AppID {
 		return ExecutionPlan{}, errors.New("invalid execution plan: revision does not belong to App")
 	}
-	agentSnapshot, err := agent.NewAgentExecutionSnapshot(inputs.tenantSnapshot, inputs.appRoot, inputs.revision)
+	agentSnapshot, err := agent.NewAgentExecutionSnapshot(input.TenantSnapshot, input.AppRoot, input.Revision)
 	if err != nil {
 		return ExecutionPlan{}, fmt.Errorf("invalid execution plan: agent snapshot: %w", err)
 	}
-	modelSnapshot, err := modelprofile.NewModelExecutionSnapshot(inputs.tenantSnapshot, inputs.modelProfile, inputs.modelCatalog)
+	modelSnapshot, err := modelprofile.NewModelExecutionSnapshot(input.TenantSnapshot, input.ModelProfile, input.ModelCatalog)
 	if err != nil {
 		return ExecutionPlan{}, fmt.Errorf("invalid execution plan: model snapshot: %w", err)
 	}
-	backendSnapshot, err := backend.NewBackendExecutionSnapshot(inputs.tenantSnapshot, inputs.backendProfile, inputs.backendCatalog)
+	backendSnapshot, err := backend.NewBackendExecutionSnapshot(input.TenantSnapshot, input.BackendProfile, input.BackendCatalog)
 	if err != nil {
 		return ExecutionPlan{}, fmt.Errorf("invalid execution plan: backend snapshot: %w", err)
 	}
-	if inputs.revision == nil || inputs.modelProfile == nil || inputs.revision.ModelProfileID != inputs.modelProfile.ProfileID {
+	if input.Revision == nil || input.ModelProfile == nil || input.Revision.ModelProfileID != input.ModelProfile.ProfileID {
 		return ExecutionPlan{}, errors.New("invalid execution plan: revision model reference does not match profile")
 	}
 	tenantCopy := tenantValue.Clone()
@@ -175,6 +181,10 @@ func (plan ExecutionPlan) StorageFactoryInput() (backend.StorageFactoryInput, er
 
 // AgentRunnerInput projects a validated plan into the external-agent adapter
 // boundary. Runtime owns the complete plan; agent owns tRPC-Agent-Go wiring.
+//
+// Deprecated: use the agent/runnerfactory adapter to project a plan. This
+// compatibility method remains for callers that still assemble a Runner
+// outside the standard runtime registry.
 func (plan ExecutionPlan) AgentRunnerInput() (agent.RunnerInput, error) {
 	if err := plan.validate(); err != nil {
 		return agent.RunnerInput{}, err

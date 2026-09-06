@@ -2,7 +2,6 @@ package model
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -10,13 +9,6 @@ import (
 )
 
 type executionSnapshotContextKey struct{}
-
-var (
-	// ErrSecretResolution is returned when a resolver cannot provide a secret.
-	ErrSecretResolution = errors.New("model secret resolution failed")
-	// ErrModelFactory is returned when a Model Factory cannot build a model.
-	ErrModelFactory = errors.New("model factory failed")
-)
 
 // FactoryCacheKey is the comparable identity for one materialized model.
 // It contains no Secret value or live client.
@@ -234,51 +226,9 @@ type ModelFactory interface {
 	New(context.Context, ModelFactoryInput, SecretValue) (trpcmodel.Model, error)
 }
 
-// ResolveAndBuild resolves the optional secret and passes it directly to the
-// ModelFactory. Resolver and Factory errors are intentionally sanitized so
-// provider credentials cannot escape through an error chain.
-func ResolveAndBuild(ctx context.Context, input ModelFactoryInput, resolver SecretResolver, factory ModelFactory) (trpcmodel.Model, error) {
-	if ctx == nil {
-		return nil, fmt.Errorf("%w: context is required", ErrInvalid)
-	}
-	if factory == nil {
-		return nil, fmt.Errorf("%w: model factory is required", ErrInvalid)
-	}
-	if err := validateFactoryInput(input); err != nil {
-		return nil, err
-	}
-	secret := SecretValue{}
-	if input.SecretRef != "" {
-		if resolver == nil {
-			return nil, fmt.Errorf("%w: secret resolver is required", ErrInvalid)
-		}
-		scope := SecretScope{TenantID: input.TenantID, SecretRef: input.SecretRef}
-		if err := scope.Validate(); err != nil {
-			return nil, err
-		}
-		resolved, err := resolver.Resolve(ctx, scope)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, ErrSecretResolution
-		}
-		secret = resolved
-	}
-	model, err := factory.New(ctx, input.Clone(), secret)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, ErrModelFactory
-	}
-	if model == nil {
-		return nil, fmt.Errorf("%w: returned nil model", ErrModelFactory)
-	}
-	return model, nil
-}
-
-func validateFactoryInput(input ModelFactoryInput) error {
+// Validate checks the provider-neutral ModelFactory input before a runtime
+// adapter is allowed to resolve credentials or construct a client.
+func (input ModelFactoryInput) Validate() error {
 	if err := validateTenantID(input.TenantID); err != nil {
 		return err
 	}

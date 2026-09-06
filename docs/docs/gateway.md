@@ -79,8 +79,9 @@ Secret value 或 live client。
 
 ## 4. RunnerRegistry
 
-`trpcservice/runtime/runner` 持有由它创建的 Runner，借用调用方提供的 Session service、Secret Resolver、
-Model Factory 等共享依赖，不在关闭时关闭借用资源。
+`trpcservice/runtime/runner` 只持有由它创建的 Runner，并管理缓存、lease、失效和关闭；具体的
+Agent/Model/Storage 组装由 `trpcservice/agent/runnerfactory` 和 runtime-owned materializer 完成。
+Registry 不直接依赖具体 Agent、Secret Resolver、Model Factory 或 Storage Factory。
 
 ### 生命周期契约
 
@@ -104,10 +105,11 @@ Dispatch 是与 HTTP/IM 协议无关的执行边界：
 1. Gateway 校验可信 principal、规范化消息和执行 Context。
 2. Gateway 生成 Binding-aware 或 API-aware Runner user/session identity。
 3. Gateway Resolve 固定 `ExecutionPlan`，交给 `runtime/execution.Coordinator`。
-4. Coordinator Acquire Registry lease，调用 `runner.Run`，并以 Revision runtime policy
+4. Coordinator Acquire Registry lease，调用 `agent.Invoke`，并以 Revision runtime policy
    和请求 deadline 约束执行。
-5. Coordinator 将 Runner Event 转为中立文本/状态/错误事件；Gateway 再映射为 JSON/SSE
-   事件，不把 Repository、Secret、Plan 可变对象暴露给 Handler。
+5. `agent` 先将上游 Runner Event 转为 `agent.RunnerEvent`；Coordinator 再将其转为中立
+   文本/状态/错误事件，Gateway 最后映射为 JSON/SSE 事件，不把 Repository、Secret、Plan
+   可变对象暴露给 Handler。
 6. Coordinator 在正常完成、错误、调用方取消或 server shutdown 时，以有界时间排空
    Event channel、Release lease，并让 Registry 负责旧 Runner 的最终关闭。
 

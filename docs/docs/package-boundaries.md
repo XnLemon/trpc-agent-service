@@ -35,7 +35,10 @@ bootstrap 负责把 app、agent、runtime、storage 和 Gateway 的具体实现�
 | `trpcservice/app` | Agent App、不可变 Revision、发布/回滚生命周期、领域校验和 Repository 契约 | Runner、Agent 组装、执行调度、队列、Outbox、运行时存储实现 |
 | `trpcservice/agent` | tRPC-Agent-Go 的 Agent/Runner/Session 适配、Agent execution snapshot、Runner 构造和租户能力绑定 | ExecutionPlan 解析、租约/队列调度、回复投递、数据迁移、App/Revision 生命周期变更 |
 | `trpcservice/runtime` | ExecutionPlan、配置快照组合、PlanResolver、Runner Registry、执行协调和内部调度 | App/Revision 领域生命周期、具体 `llmagent`/Runner 组装、协议适配和渠道回复 |
+| `trpcservice/agent/runnerfactory` | 把完整 ExecutionPlan 的工厂输入接到 Agent Runner 组装，并注入 runtime-owned Model/Storage materializer | Runner 缓存、租约、领域 Profile 持久化 |
+| `trpcservice/runtime/model` | SecretResolver、ModelProviderRegistry 和 ModelFactory 的运行时物化 | Model Profile 持久化、配置生命周期和带凭据的计划状态 |
 | `trpcservice/runtime/storage` | 租户范围内的 Session、Event、Memory、Artifact 等能力契约及其后端适配 | 选择执行租户、解析 Plan、驱动 Runner、回复发送策略 |
+| `trpcservice/runtime/storage/factory` | Backend ProviderRegistry、StorageFactory、CapabilitySet 及 capability 生命周期 | Backend Profile 领域校验和持久化 |
 | `trpcservice/runtime/outbox` | 回复物化、发送、重试和死信边界 | Agent 编排、控制面配置和执行调度 |
 | `trpcservice/runtime/migration` | 后端迁移、双写、校验和切换工具 | 在线执行、Runner 生命周期和请求路由 |
 | `trpcservice/gateway` | 可信身份建立、协议中立的请求/事件转换、入口幂等和调用 runtime | Agent/Runner 的具体构造、控制面领域变更 |
@@ -44,6 +47,13 @@ bootstrap 负责把 app、agent、runtime、storage 和 Gateway 的具体实现�
 `app` 是最稳定的领域底座；`agent` 是平台与上游 Agent 框架之间的适配
 边界；`runtime` 使用这些能力完成一次服务内部执行，但不反向拥有上游
 Agent 的实现。
+
+`runtime/model` 与 `runtime/storage/factory` 虽然位于 runtime 目录下，属于
+运行时物化的叶子适配器，不属于调度核心：它们只接收无密钥的 Profile 输入，
+在 `agent/runnerfactory` 组装时创建 Model/Storage capability。这样保留了
+现有导出路径和兼容调用，同时让 `runtime/runner`、`runtime/execution` 不再
+直接依赖上游 Agent-Go 的实现；后续若物化实现需要独立演进，再单独移动这两
+个叶子包。
 
 `runtime/storage` 的基础持久化契约已经按能力拆成
 `SessionStateStore`、`EventHistoryStore`、`MessageStore` 和 `ReplyStore`。
@@ -63,18 +73,24 @@ Agent 的实现。
    的领域不变量不能由执行路径反向定义。
 2. `agent` 可以消费 `app` 的不可变快照，以及 Backend、Model、Tool 和
    Tenant 的能力；上游 `trpc-agent-go` 的 Agent、Runner、Session 类型和
-   组装逻辑由 `agent` 持有。
+   组装逻辑由 `agent` 持有。`agent/runnerfactory` 作为组合适配层接入
+   runtime-owned 的 Model/Storage 物化实现。
 3. `runtime` 可以消费 `app` 和 `agent` 提供的快照/工厂输入契约，并持有
    Plan、调度和执行协调；具体 Agent/Runner 的构造必须通过 `agent` 的
    边界完成。
-4. `runtime/execution` 可以在窄的 Runner 事件转换边界使用上游事件类型，
-   但不得在这里组装 `llmagent`、模型 Provider 或 Session 实现。
-5. `runtime/storage`、`runtime/outbox` 和 `runtime/migration` 是 runtime
+4. `runtime/runner` 只持有通用 Runner Factory、Registry、lease、失效和关闭
+   逻辑，不依赖具体 Agent、Model 或 Storage 实现。`runtime/execution` 只消费
+   `agent.RunnerEvent` 这样的服务内事件契约；上游事件类型、错误脱敏和 source
+   channel 的 bounded drain 全部由 `agent` 适配边界拥有。这里不得组装
+   `llmagent`、模型 Provider 或 Session 实现。
+5. `runtime/model` 和 `runtime/storage/factory` 负责运行时物化；它们只消费
+   `model`/`backend` 的无密钥契约，不把物化实现放回领域包。
+6. `runtime/storage`、`runtime/outbox` 和 `runtime/migration` 是 runtime
    的子边界。它们可以提供能力给调用方，但不能把调度、认证或控制面
    生命周期带回存储实现。
-6. `bootstrap` 是具体实现的组合根。新的跨包依赖优先在组合根注入，
+7. `bootstrap` 是具体实现的组合根。新的跨包依赖优先在组合根注入，
    不通过全局变量、隐式 Context 值或跨层反向调用建立。
-7. 新增接口应放在实际消费者所属的包；只有同一契约确实被多个独立
+8. 新增接口应放在实际消费者所属的包；只有同一契约确实被多个独立
    消费者共享时，才考虑建立中立的能力包。
 
 ## 当前过渡性边界
@@ -100,11 +116,17 @@ Gateway
 
 runtime
   - 按固定 Plan 获取 Runner lease
-  - 驱动一次执行并负责取消、drain、lease 和执行事件流
+  - 驱动一次执行并负责取消、lease、协议中立的执行事件流和 bounded drain
+  - 通过 agent 的中立事件契约消费 Runner，不接触上游事件对象
+
+agent/runnerfactory
+  - 从 Plan 投影 Model/Storage factory input
+  - 调用 runtime-owned materializer 后交给 agent 组装
 
 agent
   - 根据固定输入构造或复用上游 Agent / Runner
   - 绑定租户范围的 Model、Tool、Session 和 Storage 能力
+  - 调用上游 Runner，归一化事件和错误，并在取消/终止时有界排空 upstream source
 
 runtime/storage 与 runtime/outbox
   - 分别负责持久化能力和回复交付
