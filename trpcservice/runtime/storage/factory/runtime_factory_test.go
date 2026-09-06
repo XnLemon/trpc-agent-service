@@ -55,6 +55,20 @@ func TestCapabilitySetMaterializesExplicitSummary(t *testing.T) {
 	}
 }
 
+func TestCapabilitySetSummaryRequiresExplicitCapability(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	store := runtimeinmemory.New()
+	set, err := NewCapabilitySet(tenantID, map[Capability]any{CapabilityMemory: store})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	defer set.Close()
+	if _, err := set.Summary(); !errors.Is(err, ErrCapabilityUnavailable) {
+		t.Fatalf("Summary() without explicit capability = %v", err)
+	}
+}
+
 func TestCapabilitySetTypedAccessors(t *testing.T) {
 	const tenantID = "t_00000000000000000000000000"
 	store := runtimeinmemory.New()

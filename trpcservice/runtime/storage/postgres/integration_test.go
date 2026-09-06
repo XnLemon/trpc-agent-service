@@ -11,6 +11,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	"github.com/google/uuid"
 )
 
@@ -88,7 +89,7 @@ func runtimePostgresSeed(t *testing.T, ctx context.Context, store *Store, tenant
 		t.Fatal(err)
 	}
 	payload := []byte("{\"id\":\"" + eventID + "\",\"done\":true}")
-	if _, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: tenantID, SessionID: sessionID, EventID: "runner-" + eventID, Payload: payload}); err != nil {
+	if _, err := store.AppendEventPayload(ctx, sessionstorage.EventPayload{TenantID: tenantID, SessionID: sessionID, EventID: "runner-" + eventID, Payload: payload}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: tenantID, ReplyID: replyID, EventID: eventID, SegmentIndex: 0, SegmentCount: 1, Payload: "durable reply"}); err != nil {

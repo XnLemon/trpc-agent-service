@@ -19,6 +19,7 @@ import (
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
@@ -85,7 +86,7 @@ func (*durableOutboxProvider) Reconcile(context.Context, runtimestorage.ReplyOut
 }
 
 type gatewayStore interface {
-	runtimestorage.SessionStateStore
+	sessionstorage.SessionStateStore
 	runtimestorage.MessageStore
 	runtimestorage.ReplyStore
 }
@@ -127,15 +128,15 @@ func (s dispatchAttachmentStore) Load(ctx context.Context, tenantID, eventID str
 	}
 	return attachment.Content{}, errors.New("attachment unavailable")
 }
-func (s *claimStoreStub) GetSession(context.Context, string, string) (runtimestorage.Session, error) {
+func (s *claimStoreStub) GetSession(context.Context, string, string) (sessionstorage.Session, error) {
 	if s.getErr != nil {
-		return runtimestorage.Session{}, s.getErr
+		return sessionstorage.Session{}, s.getErr
 	}
 	return s.gatewayStore.GetSession(context.Background(), "unused", "unused")
 }
-func (s *claimStoreStub) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (runtimestorage.Session, error) {
+func (s *claimStoreStub) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (sessionstorage.Session, error) {
 	if s.createErr != nil {
-		return runtimestorage.Session{}, s.createErr
+		return sessionstorage.Session{}, s.createErr
 	}
 	return s.gatewayStore.CreateSession(ctx, tenantID, sessionID, state)
 }
@@ -179,7 +180,7 @@ func newTestDispatcher(t *testing.T, runnerValue *testRunner) (*Dispatcher, Prin
 func newTestDispatcherWithFactory(t *testing.T, factory runtimerunner.RunnerFactory) (*Dispatcher, Principal) {
 	t.Helper()
 	fixture := newGatewayFixture(t)
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})
@@ -752,7 +753,7 @@ func TestDispatcherUsesVerifiedChannelIdentity(t *testing.T) {
 		close(events)
 		return events, nil
 	}
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})
@@ -797,7 +798,7 @@ func TestDispatcherDurableChannelClaimSuppressesDuplicateRunner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})
@@ -862,7 +863,7 @@ func TestDispatcherBindsStoredAttachmentBeforePassingVerifiedContentToRunner(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})
@@ -915,7 +916,7 @@ func TestDispatcherMaterializesDurableChannelReplyAndWorkerCompletesLifecycle(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})
@@ -971,7 +972,7 @@ func mustChannelPrincipal(t *testing.T, target channels.RoutingTarget) Principal
 
 func newToolMediaDispatcher(t *testing.T, fixture gatewayFixture) (*Dispatcher, *inmemory.Store, *atomic.Int32) {
 	t.Helper()
-	resolver, err := NewPlanResolver(PlanResolverConfig{Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog})
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1068,7 +1069,7 @@ func TestDispatcherToolFailureMaterializesFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver, err := NewPlanResolver(PlanResolverConfig{Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog})
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1111,7 +1112,7 @@ func TestDispatcherDurableInboundLeaseCoversAgentRuntimeTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})
@@ -1158,7 +1159,7 @@ func TestDispatcherDurableChannelModelErrorMaterializesFallbackReply(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})
@@ -1444,7 +1445,7 @@ func TestDispatcherDurableDispatchFailurePaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver, err := NewPlanResolver(PlanResolverConfig{Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog})
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1512,7 +1513,7 @@ func TestDispatcherDurableAttachmentFailurePaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver, err := NewPlanResolver(PlanResolverConfig{Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog})
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -18,8 +18,8 @@ var (
 	ErrDuplicate = errors.New("runtime record already exists")
 	// ErrInvalid reports malformed session persistence input.
 	ErrInvalid = errors.New("invalid runtime record")
-	// ErrStorage is the stable, redacted storage failure category retained for
-	// compatibility with the existing runtime storage adapters.
+	// ErrStorage is the stable, redacted storage failure category shared by
+	// session and runtime storage adapters.
 	ErrStorage = storageerrors.ErrPostgres
 )
 

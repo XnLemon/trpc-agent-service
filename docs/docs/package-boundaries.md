@@ -101,13 +101,12 @@ Registry 的组合实现位于 `trpcservice/channels/provider`，Binding 根包�
 8. 新增接口应放在实际消费者所属的包；只有同一契约确实被多个独立
    消费者共享时，才考虑建立中立的能力包。
 
-## 当前过渡性边界
+## 当前边界说明
 
 `trpcservice/agent/sessionstore` 消费
 `trpcservice/storage/session` 提供的中立 Session 持久化契约，把上游
-Session 行为接到租户范围的持久化能力。`runtime/storage` 只为兼容旧导出
-路径保留类型别名，并由具体存储实现这些契约；因此 Session 适配器不再反向
-依赖 runtime 调度或 runtime 存储包。
+Session 行为接到租户范围的持久化能力。具体存储实现直接实现该契约；Session
+适配器不反向依赖 runtime 调度或 runtime 存储包。
 
 同样，`runtime` 当前需要读取 `agent` 的 execution snapshot 和 factory
 input，以便为完整 Plan 建立 Runner 缓存键。这是 runtime 消费 agent 契约，

@@ -72,21 +72,22 @@ erDiagram
 
 ## Repository 契约
 
-平台层使用小接口，避免把 PostgreSQL 类型泄漏给 Gateway。规范定义在
-`trpcservice/runtime/storage/storage.go`；下面的接口与当前实现保持一致，新的
-消费者应只依赖自己需要的最窄能力：
+平台层使用小接口，避免把 PostgreSQL 类型泄漏给 Gateway。Session 状态和事件
+历史契约定义在 `trpcservice/storage/session`，runtime 专属的消息和回复契约
+定义在 `trpcservice/runtime/storage/storage.go`；下面的接口与当前实现保持一致，
+新的消费者应只依赖自己需要的最窄能力：
 
 ```go
 type SessionStateStore interface {
-    GetSession(ctx context.Context, tenantID, sessionID string) (Session, error)
-    CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (Session, error)
-    UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (Session, error)
+    GetSession(ctx context.Context, tenantID, sessionID string) (sessionstorage.Session, error)
+    CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (sessionstorage.Session, error)
+    UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (sessionstorage.Session, error)
     DeleteSession(ctx context.Context, tenantID, sessionID string) error
 }
 
 type EventHistoryStore interface {
-    AppendEventPayload(ctx context.Context, payload EventPayload) (EventPayload, error)
-    ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]EventPayload, error)
+    AppendEventPayload(ctx context.Context, payload sessionstorage.EventPayload) (sessionstorage.EventPayload, error)
+    ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]sessionstorage.EventPayload, error)
 }
 
 type MessageStore interface {

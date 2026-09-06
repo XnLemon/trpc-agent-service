@@ -12,6 +12,7 @@ import (
 
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	redisstore "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	"github.com/alicebob/miniredis/v2"
 	redisclient "github.com/redis/go-redis/v9"
 )
@@ -135,18 +136,18 @@ func TestRedisHistoryOrderingAndDefensiveCopies(t *testing.T) {
 	store := newStore(t, server)
 	seedEvent(t, store, "tenant-a", "session", "inbound")
 	payload := []byte(`{"id":1}`)
-	first, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "runner-1", Payload: payload})
+	first, err := store.AppendEventPayload(context.Background(), sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "runner-1", Payload: payload})
 	if err != nil || first.HistorySeq != 1 {
 		t.Fatalf("first history = %+v, %v", first, err)
 	}
 	first.Payload[0] = 'x'
-	if _, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "runner-1", Payload: []byte(`{"id":1}`)}); err != nil {
+	if _, err := store.AppendEventPayload(context.Background(), sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "runner-1", Payload: []byte(`{"id":1}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "runner-1", Payload: []byte(`{"id":2}`)}); !errors.Is(err, runtimestorage.ErrConflict) {
+	if _, err := store.AppendEventPayload(context.Background(), sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "runner-1", Payload: []byte(`{"id":2}`)}); !errors.Is(err, runtimestorage.ErrConflict) {
 		t.Fatalf("history conflict = %v", err)
 	}
-	second, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "runner-2", Payload: []byte(`{"id":2}`)})
+	second, err := store.AppendEventPayload(context.Background(), sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "runner-2", Payload: []byte(`{"id":2}`)})
 	if err != nil || second.HistorySeq != 2 {
 		t.Fatalf("second history = %+v, %v", second, err)
 	}
@@ -338,7 +339,7 @@ func TestRedisSessionCASAndDeleteCascade(t *testing.T) {
 	if err != nil || duplicate {
 		t.Fatalf("event = %+v duplicate=%v err=%v", event, duplicate, err)
 	}
-	if _, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "runner", Payload: []byte(`{"kind":"event"}`)}); err != nil {
+	if _, err := store.AppendEventPayload(ctx, sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "runner", Payload: []byte(`{"kind":"event"}`)}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: event.EventID, SegmentCount: 1, Payload: "payload"}); err != nil {
@@ -583,7 +584,7 @@ func TestRedisSessionAndEventValidation(t *testing.T) {
 		}},
 		{name: "invalid message read", call: func() error { _, err := store.GetMessage(ctx, "", "event"); return err }},
 		{name: "invalid history payload", call: func() error {
-			_, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: []byte("not-json")})
+			_, err := store.AppendEventPayload(ctx, sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: []byte("not-json")})
 			return err
 		}},
 		{name: "invalid history tenant", call: func() error { _, err := store.ListEventPayloads(ctx, "", "session"); return err }},
@@ -705,7 +706,7 @@ func TestRedisOperationsHonorCanceledContext(t *testing.T) {
 			return err
 		}},
 		{name: "append payload", call: func() error {
-			_, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: []byte(`{}`)})
+			_, err := store.AppendEventPayload(ctx, sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: []byte(`{}`)})
 			return err
 		}},
 		{name: "list payloads", call: func() error { _, err := store.ListEventPayloads(ctx, "tenant-a", "session"); return err }},
@@ -766,7 +767,7 @@ func TestRedisMissingRecordsReturnNotFound(t *testing.T) {
 			return err
 		}},
 		{name: "payload append", call: func() error {
-			_, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: []byte(`{}`)})
+			_, err := store.AppendEventPayload(ctx, sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: []byte(`{}`)})
 			return err
 		}},
 		{name: "payload list", call: func() error { _, err := store.ListEventPayloads(ctx, "tenant-a", "session"); return err }},

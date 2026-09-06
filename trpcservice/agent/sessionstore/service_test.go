@@ -10,6 +10,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent/sessionstore"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
@@ -17,35 +18,35 @@ import (
 )
 
 type failingCreateStore struct {
-	runtimestorage.SessionStateStore
-	runtimestorage.EventHistoryStore
+	sessionstorage.SessionStateStore
+	sessionstorage.EventHistoryStore
 }
 
 type serviceStore struct {
 	*runtimestorageinmemory.Store
-	history   []runtimestorage.EventPayload
+	history   []sessionstorage.EventPayload
 	listErr   error
 	appendErr error
 	updateErr error
 }
 
-func (s *serviceStore) ListEventPayloads(context.Context, string, string) ([]runtimestorage.EventPayload, error) {
+func (s *serviceStore) ListEventPayloads(context.Context, string, string) ([]sessionstorage.EventPayload, error) {
 	if s.listErr != nil {
 		return nil, s.listErr
 	}
 	return s.history, nil
 }
 
-func (s *serviceStore) AppendEventPayload(ctx context.Context, value runtimestorage.EventPayload) (runtimestorage.EventPayload, error) {
+func (s *serviceStore) AppendEventPayload(ctx context.Context, value sessionstorage.EventPayload) (sessionstorage.EventPayload, error) {
 	if s.appendErr != nil {
-		return runtimestorage.EventPayload{}, s.appendErr
+		return sessionstorage.EventPayload{}, s.appendErr
 	}
 	return s.Store.AppendEventPayload(ctx, value)
 }
 
-func (s *serviceStore) UpdateSessionState(ctx context.Context, tenant, sessionID string, version int64, state map[string]any) (runtimestorage.Session, error) {
+func (s *serviceStore) UpdateSessionState(ctx context.Context, tenant, sessionID string, version int64, state map[string]any) (sessionstorage.Session, error) {
 	if s.updateErr != nil {
-		return runtimestorage.Session{}, s.updateErr
+		return sessionstorage.Session{}, s.updateErr
 	}
 	return s.Store.UpdateSessionState(ctx, tenant, sessionID, version, state)
 }
@@ -64,8 +65,8 @@ func (d failingDelegate) UpdateSessionState(context.Context, session.Key, sessio
 	return d.updateErr
 }
 
-func (failingCreateStore) CreateSession(context.Context, string, string, map[string]any) (runtimestorage.Session, error) {
-	return runtimestorage.Session{}, fmt.Errorf("create unavailable")
+func (failingCreateStore) CreateSession(context.Context, string, string, map[string]any) (sessionstorage.Session, error) {
+	return sessionstorage.Session{}, fmt.Errorf("create unavailable")
 }
 
 func (failingCreateStore) DeleteSession(context.Context, string, string) error {
@@ -356,7 +357,7 @@ func TestServiceHistoryAndDurableAppendErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.history = []runtimestorage.EventPayload{{EventID: "bad", Payload: []byte("{")}}
+	store.history = []sessionstorage.EventPayload{{EventID: "bad", Payload: []byte("{")}}
 	if _, err := service.GetSession(context.Background(), key); !errors.Is(err, runtimestorage.ErrStorage) {
 		t.Fatalf("invalid history = %v", err)
 	}
@@ -400,7 +401,7 @@ func TestServiceHistoryAndDurableAppendErrorBranches(t *testing.T) {
 		t.Fatalf("delegate state error = %v", err)
 	}
 	historyPayload, _ := json.Marshal(&trpcevent.Event{ID: "history-error"})
-	store.history = []runtimestorage.EventPayload{{EventID: "history-error", Payload: historyPayload}}
+	store.history = []sessionstorage.EventPayload{{EventID: "history-error", Payload: historyPayload}}
 	service, err = sessionstore.New("tenant-a", failingDelegate{Service: sessioninmemory.NewSessionService(), appendErr: delegateError}, store)
 	if err != nil {
 		t.Fatal(err)
