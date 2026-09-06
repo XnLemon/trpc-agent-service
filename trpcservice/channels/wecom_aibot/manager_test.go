@@ -14,7 +14,7 @@ import (
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	storage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"

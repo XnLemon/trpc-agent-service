@@ -11,7 +11,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	"github.com/google/uuid"

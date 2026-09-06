@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/google/uuid"

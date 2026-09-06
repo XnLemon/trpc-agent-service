@@ -30,7 +30,8 @@ Gateway 不保存 session 粘性，也不能由请求体选择租户；它把已
 
 ## 执行队列契约
 
-`trpcservice/runtime/queue` 提供协议中立的 `Store` 和 `Worker`：
+`trpcservice/runtime/queue` 提供协议中立的 `Store` 和 `Worker`；耐久回复由
+`trpcservice/outbox` 独立拥有：
 
 - `Enqueue` 以 `(tenant_id, task_id)` 幂等；相同 payload 返回已有任务，冲突返回
   `ErrConflict`。
