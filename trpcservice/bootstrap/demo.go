@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
-	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
+	apppostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -111,7 +111,10 @@ func initializeDemoAfterInit(ctx context.Context, db *sql.DB, config DemoConfig,
 	if err != nil {
 		return DemoResult{}, err
 	}
-	return initializeDemoGraph(ctx, db, config, initial, tenantRepo, appRepo, modelRepo, backendRepo)
+	return initializeDemoGraph(demoGraphDependencies{
+		ctx: ctx, db: db, config: config, initial: initial,
+		tenantRepo: tenantRepo, appRepo: appRepo, modelRepo: modelRepo, backendRepo: backendRepo,
+	})
 }
 
 func newDemoRepositories(db *sql.DB, loadCatalogs demoCatalogLoader) (tenant.Repository, appmodel.Repository, modelprofile.Repository, backend.Repository, error) {
@@ -121,10 +124,29 @@ func newDemoRepositories(db *sql.DB, loadCatalogs demoCatalogLoader) (tenant.Rep
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("%w: demo catalogs", ErrDemoInitialization)
 	}
-	return tenantpostgres.NewRepository(db), agentpostgres.NewRepository(db), modelpostgres.NewRepository(db, modelCatalog), backendpostgres.NewRepository(db, backendCatalog), nil
+	return tenantpostgres.NewRepository(db), apppostgres.NewRepository(db), modelpostgres.NewRepository(db, modelCatalog), backendpostgres.NewRepository(db, backendCatalog), nil
 }
 
-func initializeDemoGraph(ctx context.Context, db *sql.DB, config DemoConfig, initial InitResult, tenantRepo tenant.Repository, appRepo appmodel.Repository, modelRepo modelprofile.Repository, backendRepo backend.Repository) (DemoResult, error) {
+type demoGraphDependencies struct {
+	ctx         context.Context
+	db          *sql.DB
+	config      DemoConfig
+	initial     InitResult
+	tenantRepo  tenant.Repository
+	appRepo     appmodel.Repository
+	modelRepo   modelprofile.Repository
+	backendRepo backend.Repository
+}
+
+func initializeDemoGraph(dependencies demoGraphDependencies) (DemoResult, error) {
+	ctx := dependencies.ctx
+	db := dependencies.db
+	config := dependencies.config
+	initial := dependencies.initial
+	tenantRepo := dependencies.tenantRepo
+	appRepo := dependencies.appRepo
+	modelRepo := dependencies.modelRepo
+	backendRepo := dependencies.backendRepo
 	tenantRoot, app, err := loadDemoRootApp(ctx, tenantRepo, appRepo, initial, config)
 	if err != nil {
 		return DemoResult{}, err

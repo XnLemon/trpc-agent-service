@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
-	pgstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	storageerrors "github.com/XnLemon/trpc-agent-service/trpcservice/storage/errors"
 )
 
 // ValidateText enforces the same character bounds used by the runtime DDL.
@@ -70,8 +70,10 @@ var (
 	ErrInvalid = errors.New("invalid runtime record")
 	// ErrIllegalTransition reports a disallowed runtime lifecycle change.
 	ErrIllegalTransition = errors.New("illegal runtime state transition")
-	// ErrStorage reports unavailable runtime persistence.
-	ErrStorage = pgstorage.ErrStorage
+	// ErrStorage reports unavailable runtime persistence without coupling the
+	// runtime contract to a particular database adapter. The legacy error text is
+	// retained for callers that expose it in diagnostics.
+	ErrStorage = storageerrors.ErrPostgres
 )
 
 const (

@@ -31,7 +31,12 @@ type Materializer struct {
 
 // MaterializerConfig controls durable reply segmentation.
 type MaterializerConfig struct {
-	Store         runtimestorage.RuntimeStore
+	// Store is retained for compatibility with callers that provide the
+	// historical RuntimeStore aggregate.
+	Store runtimestorage.RuntimeStore
+	// BatchStore is the narrow reply materialization capability preferred by new
+	// callers. When omitted, NewMaterializer derives it from Store.
+	BatchStore    runtimestorage.ReplyBatchEnqueuer
 	SegmentSize   int
 	Observability observability.Provider
 	Backend       string
@@ -62,10 +67,13 @@ type ReplySegment struct {
 
 // NewMaterializer creates a reply materializer with a default segment size.
 func NewMaterializer(config MaterializerConfig) (*Materializer, error) {
-	if config.Store == nil {
+	if config.Store == nil && config.BatchStore == nil {
 		return nil, ErrInvalid
 	}
-	batchStore, _ := config.Store.(runtimestorage.ReplyBatchEnqueuer)
+	batchStore := config.BatchStore
+	if batchStore == nil {
+		batchStore, _ = config.Store.(runtimestorage.ReplyBatchEnqueuer)
+	}
 	if config.SegmentSize <= 0 {
 		config.SegmentSize = defaultSegmentRunes
 	}

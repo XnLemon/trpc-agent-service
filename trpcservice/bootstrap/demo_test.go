@@ -10,7 +10,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
-	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
+	appmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -711,7 +711,7 @@ func TestInitializeDemoEarlyReturns(t *testing.T) {
 func TestLoadDemoRootAppBranches(t *testing.T) {
 	ctx := context.Background()
 	tenants := tenantmemory.NewRepository()
-	apps := agentmemory.NewRepository()
+	apps := appmemory.NewRepository()
 	root, err := tenants.Create(ctx, tenant.CreateInput{TenantKey: "demo", DisplayName: "Demo"})
 	if err != nil {
 		t.Fatal(err)
@@ -737,7 +737,7 @@ func TestLoadDemoRootAppBranches(t *testing.T) {
 		t.Fatalf("key mismatch error = %v", err)
 	}
 	suspendedTenants := tenantmemory.NewRepository()
-	suspendedApps := agentmemory.NewRepository()
+	suspendedApps := appmemory.NewRepository()
 	suspendedRoot, err := suspendedTenants.Create(ctx, tenant.CreateInput{TenantKey: demoTenantKey, DisplayName: "Paused", Status: tenant.StatusSuspended})
 	if err != nil {
 		t.Fatal(err)
@@ -1422,7 +1422,10 @@ func TestInitializeDemoGraphSuccess(t *testing.T) {
 	expectEmptyDemoProfile(mock)
 	expectEmptyDemoProfile(mock)
 	expectEmptyDemoRevision(mock)
-	result, err := initializeDemoGraph(context.Background(), db, config, initial, tenants, apps, models, backends)
+	result, err := initializeDemoGraph(demoGraphDependencies{
+		ctx: context.Background(), db: db, config: config, initial: initial,
+		tenantRepo: tenants, appRepo: apps, modelRepo: models, backendRepo: backends,
+	})
 	if err != nil {
 		t.Fatalf("graph error = %v", err)
 	}
@@ -1451,7 +1454,10 @@ func TestInitializeDemoGraphLoadFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			if _, err := initializeDemoGraph(context.Background(), db, config, initial, tenants, apps, models, backends); !errors.Is(err, sql.ErrConnDone) {
+			if _, err := initializeDemoGraph(demoGraphDependencies{
+				ctx: context.Background(), db: db, config: config, initial: initial,
+				tenantRepo: tenants, appRepo: apps, modelRepo: models, backendRepo: backends,
+			}); !errors.Is(err, sql.ErrConnDone) {
 				t.Fatalf("load error = %v", err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
@@ -1489,7 +1495,10 @@ func TestInitializeDemoGraphPreflightFailures(t *testing.T) {
 			}
 			defer db.Close()
 			test.expectFunc(mock)
-			if _, err := initializeDemoGraph(context.Background(), db, config, initial, tenants, apps, models, backends); !errors.Is(err, ErrDemoInitialization) {
+			if _, err := initializeDemoGraph(demoGraphDependencies{
+				ctx: context.Background(), db: db, config: config, initial: initial,
+				tenantRepo: tenants, appRepo: apps, modelRepo: models, backendRepo: backends,
+			}); !errors.Is(err, ErrDemoInitialization) {
 				t.Fatalf("preflight error = %v", err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
@@ -1541,7 +1550,10 @@ func TestInitializeDemoGraphEnsureFailures(t *testing.T) {
 			}
 			defer db.Close()
 			test.expectFunc(mock)
-			if _, err := initializeDemoGraph(context.Background(), db, config, initial, tenants, apps, models, backends); !errors.Is(err, ErrDemoInitialization) {
+			if _, err := initializeDemoGraph(demoGraphDependencies{
+				ctx: context.Background(), db: db, config: config, initial: initial,
+				tenantRepo: tenants, appRepo: apps, modelRepo: models, backendRepo: backends,
+			}); !errors.Is(err, ErrDemoInitialization) {
 				t.Fatalf("ensure error = %v", err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {

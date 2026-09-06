@@ -298,7 +298,10 @@ Runner 装配逻辑为：
 4. 将 Backend 的 Session binding 映射到已选择的 Session service；本阶段的集成测试使用
    上游 `session/inmemory.NewSessionService()`，并在其外层包裹固定 Tenant 的
    `TenantSessionService`，不实现真实持久化后端 adapter。
-5. 使用上游 `runner.NewRunner(appID, llmAgent, runner.WithSessionService(sessionService))`。
+5. 由 `trpcservice/agent` 使用上游
+   `runner.NewRunner(appID, llmAgent, runner.WithSessionService(sessionService))`，
+   并由同一适配边界负责调用、错误脱敏、事件归一化和取消时的 bounded drain。
+   `runtime/execution` 不直接依赖上游 Runner 或 Event 类型。
 6. 用 `tenant.NewRunnerIdentity` 生成无歧义的 `userID`/`sessionID`，再由
    `TenantSessionService` 把所有 app/user/session/state 操作固定到 Plan 的 Tenant。Runner 的
    字符串命名空间只是第二层防碰撞，不能替代 adapter 的授权检查；双租户 conformance test
@@ -310,10 +313,11 @@ Runner 装配逻辑为：
 model.NewUserMessage("hello")
         │
         ▼
-runner.Run(ctx, userID, sessionID, message)
+agent.Invoke(ctx, runner, invocation, drainTimeout)
         │
         ├── LLMAgent 调用 deterministic fake model
-        ├── 返回 *event.Event，直至 channel close
+        ├── `agent` 将上游 Event 转为服务内 RunnerEvent
+        ├── runtime/execution 消费 RunnerEvent，直至 channel close
         └── 上游 Session service 写入有效 user/assistant event
         │
         ▼
@@ -321,10 +325,13 @@ GetSession(session.Key{AppName, UserID, SessionID})
         └── 断言最终 assistant reply 和 session.Events
 ```
 
-消费者必须完整消费 Event channel。取消时的正确顺序是：
+消费者必须完整消费服务内 RunnerEvent channel。取消时，`agent` 适配边界负责在
+有界时间内排空上游 Event channel；runtime 只需要消费并关闭自己的中立事件流：
 
 ```go
-events, err := runner.Run(ctx, userID, sessionID, message)
+events, err := agent.Invoke(ctx, runner, agent.Invocation{
+    UserID: userID, SessionID: sessionID, Message: message, RequestID: requestID,
+}, drainTimeout)
 if err != nil { return err }
 for event := range events {
     // 处理或丢弃事件，但继续 drain 到 channel 关闭。
@@ -332,7 +339,8 @@ for event := range events {
 ```
 
 不能只 `break` 然后放弃 channel，因为 Runner 可能仍在向 channel 写事件。取消由传入的
-`context.Context` 传播到模型、工具、Session 和 Runner；测试使用有界等待确认 channel 最终关闭。
+`context.Context` 传播到模型、工具、Session 和 Runner；测试使用有界等待确认上游 source
+和服务内事件 channel 最终关闭。
 Runner、外部 Session service 和任何 fake model 的资源都由创建方明确 `Close` 或等待收尾。
 
 ## 5. Deterministic fake model

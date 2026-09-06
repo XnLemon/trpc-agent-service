@@ -26,7 +26,15 @@ import (
 
 func TestExecutionPlanFreezesAllTenantScopedInputs(t *testing.T) {
 	fixture := runtimeFixture(t)
-	plan, err := NewExecutionPlan(fixture.tenantSnapshot, fixture.app, fixture.revision, fixture.modelProfile, fixture.modelCatalog, fixture.backendProfile, fixture.backendCatalog)
+	plan, err := NewExecutionPlanFromInput(ExecutionPlanInput{
+		TenantSnapshot: fixture.tenantSnapshot,
+		AppRoot:        fixture.app,
+		Revision:       fixture.revision,
+		ModelProfile:   fixture.modelProfile,
+		ModelCatalog:   fixture.modelCatalog,
+		BackendProfile: fixture.backendProfile,
+		BackendCatalog: fixture.backendCatalog,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
+	serviceagent "github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
-	trpcrunner "trpc.group/trpc-go/trpc-agent-go/runner"
 )
 
 var (
@@ -40,10 +40,10 @@ const (
 	defaultRunnerRegistryCloseWait  = 5 * time.Second
 )
 
-// Runner is the minimal tRPC-Agent-Go Runner lifecycle contract owned by the
-// Registry. The registry never closes borrowed Session/Secret/Model
-// dependencies captured by a Runner factory.
-type Runner = trpcrunner.Runner
+// Runner is the external Agent Runner lifecycle contract cached by the
+// service runtime registry. The registry never closes borrowed
+// Session/Secret/Model dependencies captured by a Runner factory.
+type Runner = serviceagent.Runner
 
 // RunnerFactory builds one Runner from one immutable, validated plan.
 type RunnerFactory func(context.Context, runtime.ExecutionPlan) (Runner, error)

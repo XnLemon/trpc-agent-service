@@ -310,6 +310,29 @@ type legacyRuntimeStore struct {
 	runtimestorage.RuntimeStore
 }
 
+type batchOnlyStore struct {
+	rows []runtimestorage.ReplyOutbox
+}
+
+func (store *batchOnlyStore) EnqueueReplies(_ context.Context, rows []runtimestorage.ReplyOutbox) ([]runtimestorage.ReplyOutbox, error) {
+	store.rows = append(store.rows, rows...)
+	return rows, nil
+}
+
+func TestMaterializerUsesNarrowBatchCapability(t *testing.T) {
+	store := &batchOnlyStore{}
+	m, err := NewMaterializer(MaterializerConfig{BatchStore: store, SegmentSize: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, err := m.Materialize(context.Background(), MaterializeInput{
+		TenantID: "tenant-a", EventID: "event", ReplyID: "reply", Payload: "abcd",
+	})
+	if err != nil || count != 2 || len(store.rows) != 2 || store.rows[0].Payload != "ab" || store.rows[1].Payload != "cd" {
+		t.Fatalf("narrow materialization = count:%d rows:%+v err:%v", count, store.rows, err)
+	}
+}
+
 func TestMaterializerRejectsMissingBatchCapability(t *testing.T) {
 	m, err := NewMaterializer(MaterializerConfig{Store: legacyRuntimeStore{}})
 	if err != nil {

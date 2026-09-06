@@ -48,6 +48,13 @@ bootstrap 负责把 app、agent、runtime、storage 和 Gateway 的具体实现�
 边界；`runtime` 使用这些能力完成一次服务内部执行，但不反向拥有上游
 Agent 的实现。
 
+`runtime/model` 与 `runtime/storage/factory` 虽然位于 runtime 目录下，属于
+运行时物化的叶子适配器，不属于调度核心：它们只接收无密钥的 Profile 输入，
+在 `agent/runnerfactory` 组装时创建 Model/Storage capability。这样保留了
+现有导出路径和兼容调用，同时让 `runtime/runner`、`runtime/execution` 不再
+直接依赖上游 Agent-Go 的实现；后续若物化实现需要独立演进，再单独移动这两
+个叶子包。
+
 `runtime/storage` 的基础持久化契约已经按能力拆成
 `SessionStateStore`、`EventHistoryStore`、`MessageStore` 和 `ReplyStore`。
 `RuntimeStore` 暂时保留为兼容性组合接口；新的消费者应依赖自己需要的最窄
@@ -72,8 +79,10 @@ Agent 的实现。
    Plan、调度和执行协调；具体 Agent/Runner 的构造必须通过 `agent` 的
    边界完成。
 4. `runtime/runner` 只持有通用 Runner Factory、Registry、lease、失效和关闭
-   逻辑，不依赖具体 Agent、Model 或 Storage 实现。`runtime/execution` 可以在窄的 Runner 事件转换边界使用上游事件类型，
-   但不得在这里组装 `llmagent`、模型 Provider 或 Session 实现。
+   逻辑，不依赖具体 Agent、Model 或 Storage 实现。`runtime/execution` 只消费
+   `agent.RunnerEvent` 这样的服务内事件契约；上游事件类型、错误脱敏和 source
+   channel 的 bounded drain 全部由 `agent` 适配边界拥有。这里不得组装
+   `llmagent`、模型 Provider 或 Session 实现。
 5. `runtime/model` 和 `runtime/storage/factory` 负责运行时物化；它们只消费
    `model`/`backend` 的无密钥契约，不把物化实现放回领域包。
 6. `runtime/storage`、`runtime/outbox` 和 `runtime/migration` 是 runtime
@@ -107,7 +116,8 @@ Gateway
 
 runtime
   - 按固定 Plan 获取 Runner lease
-  - 驱动一次执行并负责取消、drain、lease 和执行事件流
+  - 驱动一次执行并负责取消、lease、协议中立的执行事件流和 bounded drain
+  - 通过 agent 的中立事件契约消费 Runner，不接触上游事件对象
 
 agent/runnerfactory
   - 从 Plan 投影 Model/Storage factory input
@@ -116,6 +126,7 @@ agent/runnerfactory
 agent
   - 根据固定输入构造或复用上游 Agent / Runner
   - 绑定租户范围的 Model、Tool、Session 和 Storage 能力
+  - 调用上游 Runner，归一化事件和错误，并在取消/终止时有界排空 upstream source
 
 runtime/storage 与 runtime/outbox
   - 分别负责持久化能力和回复交付

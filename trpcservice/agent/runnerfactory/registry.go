@@ -39,14 +39,39 @@ func NewRuntimeRunnerRegistry(config Config) (*runtimerunner.RunnerRegistry, err
 		return nil, fmt.Errorf("%w: runtime Runner dependencies are required", runtimerunner.ErrInvalid)
 	}
 	config.Registry.Factory = func(ctx context.Context, plan runtime.ExecutionPlan) (runtimerunner.Runner, error) {
-		input, err := plan.AgentRunnerInput()
+		input, err := runnerInputFromPlan(plan)
 		if err != nil {
 			return nil, err
 		}
 		if config.StorageFactory != nil {
-			return serviceagent.NewRunnerWithToolRegistry(ctx, input, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability, config.ToolRegistry, config.StorageFactory)
+			return serviceagent.NewRunnerWithConfig(ctx, serviceagent.RunnerConfig{
+				Input: input, SecretResolver: config.SecretResolver, ModelFactory: config.ModelFactory,
+				Sessions: config.Sessions, StorageFactory: config.StorageFactory,
+				Observability: config.Observability, ToolRegistry: config.ToolRegistry,
+			})
 		}
-		return serviceagent.NewRunnerWithToolRegistry(ctx, input, config.SecretResolver, config.ModelFactory, config.Sessions, config.Observability, config.ToolRegistry)
+		return serviceagent.NewRunnerWithConfig(ctx, serviceagent.RunnerConfig{
+			Input: input, SecretResolver: config.SecretResolver, ModelFactory: config.ModelFactory,
+			Sessions: config.Sessions, Observability: config.Observability, ToolRegistry: config.ToolRegistry,
+		})
 	}
 	return runtimerunner.NewRunnerRegistry(config.Registry)
+}
+
+func runnerInputFromPlan(plan runtime.ExecutionPlan) (serviceagent.RunnerInput, error) {
+	agentInput, err := plan.AgentFactoryInput()
+	if err != nil {
+		return serviceagent.RunnerInput{}, err
+	}
+	modelInput, err := plan.ModelFactoryInput()
+	if err != nil {
+		return serviceagent.RunnerInput{}, err
+	}
+	storageInput, err := plan.StorageFactoryInput()
+	if err != nil {
+		return serviceagent.RunnerInput{}, err
+	}
+	return serviceagent.RunnerInput{
+		Tenant: plan.Tenant(), Agent: agentInput, Model: modelInput, Storage: storageInput,
+	}, nil
 }

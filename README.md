@@ -157,14 +157,14 @@ kubectl apply -k deploy/kubernetes
 cmd/trpc-service/       CLI：init、demo 和服务进程
 trpcservice/bootstrap/  数据库、provider、runtime 和 HTTP 装配
 trpcservice/tenant/     多租户模型与 repository
-trpcservice/agent/      tRPC-Agent-Go Agent/Runner 适配
+trpcservice/agent/      tRPC-Agent-Go Agent/Runner 组装、调用与事件适配
 trpcservice/model/      Model Profile 与无密钥执行契约
 trpcservice/backend/    Backend Profile 与无密钥能力契约
 trpcservice/gateway/    鉴权、路由、Dispatch、HTTP/SSE
 trpcservice/channels/   Telegram、企业微信 Channel Adapter
-trpcservice/runtime/    Execution Plan、Runner 生命周期、Session、Event、Queue、Outbox、Storage
-trpcservice/runtime/model/  Secret/Model 运行时解析与 Provider Registry
-trpcservice/runtime/storage/factory/  Storage Factory、CapabilitySet 与 Provider Registry
+trpcservice/runtime/    Execution Plan、调度、lease、执行协调、Queue、Outbox、Storage
+trpcservice/runtime/model/  Secret/Model 运行时物化适配器与 Provider Registry
+trpcservice/runtime/storage/factory/  Storage capability 物化与 Provider Registry
 trpcservice/runtime/runner/  通用 Runner Registry、lease、失效与关闭
 trpcservice/admin/      Admin API 与管理员认证
 migrations/             PostgreSQL/MySQL schema 与 migration

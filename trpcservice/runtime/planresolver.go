@@ -107,14 +107,14 @@ func (resolver *PlanResolver) Resolve(ctx context.Context, request PlanRequest) 
 	if err != nil {
 		return ExecutionPlan{}, err
 	}
-	plan, err := newExecutionPlan(executionPlanInputs{
-		tenantSnapshot: inputs.tenantSnapshot,
-		appRoot:        inputs.app,
-		revision:       inputs.revision,
-		modelProfile:   inputs.model,
-		modelCatalog:   resolver.modelCatalog,
-		backendProfile: inputs.backend,
-		backendCatalog: resolver.backendCatalog,
+	plan, err := NewExecutionPlanFromInput(ExecutionPlanInput{
+		TenantSnapshot: inputs.tenantSnapshot,
+		AppRoot:        inputs.app,
+		Revision:       inputs.revision,
+		ModelProfile:   inputs.model,
+		ModelCatalog:   resolver.modelCatalog,
+		BackendProfile: inputs.backend,
+		BackendCatalog: resolver.backendCatalog,
 	})
 	if err != nil {
 		return ExecutionPlan{}, ErrPlanUnavailable

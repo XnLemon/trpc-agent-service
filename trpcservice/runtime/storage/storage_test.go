@@ -9,7 +9,14 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
+
+func TestStorageErrorIdentityRemainsSharedWithPostgresPrimitive(t *testing.T) {
+	if storage.ErrStorage != storagepostgres.ErrStorage {
+		t.Fatal("runtime and low-level PostgreSQL storage errors diverged")
+	}
+}
 
 func TestValidationContracts(t *testing.T) {
 	if !errors.Is(storage.ValidateTenant(""), storage.ErrInvalid) || storage.ValidateTenant("tenant-a") != nil {

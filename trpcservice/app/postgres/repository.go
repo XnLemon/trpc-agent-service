@@ -13,7 +13,7 @@ import (
 )
 
 // List returns a stable page of Apps belonging to one tenant.
-func (r *AgentRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*appmodel.App, string, error) {
+func (r *AppRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*appmodel.App, string, error) {
 	if err := r.checkList(ctx); err != nil {
 		return nil, "", err
 	}
@@ -78,7 +78,7 @@ func (r *AgentRepository) List(ctx context.Context, tenantID, query, status, cur
 }
 
 // ListRevisions returns a stable page of revisions belonging to one App.
-func (r *AgentRepository) ListRevisions(ctx context.Context, tenantID, appID, query, status, cursor string, limit int) ([]*appmodel.Revision, string, error) {
+func (r *AppRepository) ListRevisions(ctx context.Context, tenantID, appID, query, status, cursor string, limit int) ([]*appmodel.Revision, string, error) {
 	if err := r.checkList(ctx); err != nil {
 		return nil, "", err
 	}
@@ -148,18 +148,26 @@ func scanRevisionNumbers(rows *sql.Rows) ([]int64, error) {
 	return revisions, rows.Close()
 }
 
-// AgentRepository persists Agent App roots, mutable drafts and immutable
-// published revisions.
-type AgentRepository struct {
+// AppRepository persists App roots, mutable drafts and immutable published
+// revisions. It is named after the app domain rather than the external Agent
+// framework so the storage implementation does not blur those ownerships.
+type AppRepository struct {
 	db *sql.DB
 }
 
-var _ appmodel.Repository = (*AgentRepository)(nil)
+var _ appmodel.Repository = (*AppRepository)(nil)
 
-// NewRepository creates an Agent App repository over a PostgreSQL pool.
-func NewRepository(db *sql.DB) *AgentRepository { return &AgentRepository{db: db} }
+// AgentRepository is retained as a source-compatible alias for callers that
+// used the pre-app-boundary name.
+type AgentRepository = AppRepository
 
-func (r *AgentRepository) checkList(ctx context.Context) error {
+// NewAppRepository creates an App repository over a PostgreSQL pool.
+func NewAppRepository(db *sql.DB) *AppRepository { return &AppRepository{db: db} }
+
+// NewRepository is the compatibility constructor for the App repository.
+func NewRepository(db *sql.DB) *AppRepository { return NewAppRepository(db) }
+
+func (r *AppRepository) checkList(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -170,7 +178,7 @@ func (r *AgentRepository) checkList(ctx context.Context) error {
 }
 
 // Create persists a new agent application.
-func (r *AgentRepository) Create(ctx context.Context, input appmodel.CreateInput) (*appmodel.App, error) {
+func (r *AppRepository) Create(ctx context.Context, input appmodel.CreateInput) (*appmodel.App, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -204,7 +212,7 @@ func (r *AgentRepository) Create(ctx context.Context, input appmodel.CreateInput
 }
 
 // Get loads an agent application within a tenant.
-func (r *AgentRepository) Get(ctx context.Context, tenantID, appID string) (*appmodel.App, error) {
+func (r *AppRepository) Get(ctx context.Context, tenantID, appID string) (*appmodel.App, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -222,7 +230,7 @@ func (r *AgentRepository) Get(ctx context.Context, tenantID, appID string) (*app
 }
 
 // UpdateMetadata applies an expected-version metadata update.
-func (r *AgentRepository) UpdateMetadata(ctx context.Context, input appmodel.UpdateMetadataInput) (*appmodel.App, error) {
+func (r *AppRepository) UpdateMetadata(ctx context.Context, input appmodel.UpdateMetadataInput) (*appmodel.App, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -272,7 +280,7 @@ func (r *AgentRepository) UpdateMetadata(ctx context.Context, input appmodel.Upd
 }
 
 // CreateDraft persists a draft revision.
-func (r *AgentRepository) CreateDraft(ctx context.Context, input appmodel.CreateDraftInput) (*appmodel.Revision, error) {
+func (r *AppRepository) CreateDraft(ctx context.Context, input appmodel.CreateDraftInput) (*appmodel.Revision, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -331,7 +339,7 @@ func (r *AgentRepository) CreateDraft(ctx context.Context, input appmodel.Create
 }
 
 // UpdateDraft applies an expected-version draft update.
-func (r *AgentRepository) UpdateDraft(ctx context.Context, input appmodel.UpdateDraftInput) (*appmodel.Revision, error) {
+func (r *AppRepository) UpdateDraft(ctx context.Context, input appmodel.UpdateDraftInput) (*appmodel.Revision, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -399,7 +407,7 @@ func (r *AgentRepository) UpdateDraft(ctx context.Context, input appmodel.Update
 }
 
 // GetRevision loads a specific application revision.
-func (r *AgentRepository) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (*appmodel.Revision, error) {
+func (r *AppRepository) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (*appmodel.Revision, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -417,7 +425,7 @@ func (r *AgentRepository) GetRevision(ctx context.Context, tenantID, appID strin
 }
 
 // Publish makes a draft revision active and returns its change event.
-func (r *AgentRepository) Publish(ctx context.Context, input appmodel.PublishInput) (*appmodel.App, *appmodel.Revision, appmodel.ChangeEvent, error) {
+func (r *AppRepository) Publish(ctx context.Context, input appmodel.PublishInput) (*appmodel.App, *appmodel.Revision, appmodel.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, appmodel.ChangeEvent{}, err
 	}
@@ -527,7 +535,7 @@ func loadPublishState(ctx context.Context, tx *sql.Tx, input appmodel.PublishInp
 }
 
 // Rollback restores an earlier published revision.
-func (r *AgentRepository) Rollback(ctx context.Context, input appmodel.RollbackInput) (*appmodel.App, appmodel.ChangeEvent, error) {
+func (r *AppRepository) Rollback(ctx context.Context, input appmodel.RollbackInput) (*appmodel.App, appmodel.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
 	}
@@ -606,7 +614,7 @@ func (r *AgentRepository) Rollback(ctx context.Context, input appmodel.RollbackI
 // SetCanary selects or clears a published candidate revision.
 //
 //nolint:gocyclo // The transaction validates and persists one complete control-plane mutation.
-func (r *AgentRepository) SetCanary(ctx context.Context, input appmodel.SetCanaryInput) (*appmodel.App, appmodel.ChangeEvent, error) {
+func (r *AppRepository) SetCanary(ctx context.Context, input appmodel.SetCanaryInput) (*appmodel.App, appmodel.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
 	}
@@ -711,7 +719,7 @@ func sameAgentRevision(left, right *int64) bool {
 }
 
 // TransitionStatus changes an application status with optimistic concurrency.
-func (r *AgentRepository) TransitionStatus(ctx context.Context, input appmodel.TransitionStatusInput) (*appmodel.App, appmodel.ChangeEvent, error) {
+func (r *AppRepository) TransitionStatus(ctx context.Context, input appmodel.TransitionStatusInput) (*appmodel.App, appmodel.ChangeEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
 	}

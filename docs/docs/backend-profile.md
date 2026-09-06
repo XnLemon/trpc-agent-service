@@ -168,7 +168,7 @@ Profile 或其他租户。未来若 Agent Revision 或 Channel Binding 支持显
 trpcservice/backend/
 ├── backend.go       # 包说明、Profile、binding、Catalog 和领域校验
 ├── repository.go    # 租户作用域 Repository、写入输入和事件
-├── runtime.go       # BackendExecutionSnapshot 与 Factory 输入
+├── execution.go      # BackendExecutionSnapshot 与 Factory 输入
 └── inmemory/
     ├── inmemory.go  # 单进程 Repository
     └── rwmutex.go   # 可响应 Context 取消的锁边界

@@ -69,16 +69,20 @@ func TestNewRunnerCarriesPublishedRuntimePolicy(t *testing.T) {
 			t.Errorf("sessions.Close() error = %v", err)
 		}
 	}()
-	runner, err := NewRunner(context.Background(), RunnerInput{
-		Tenant: *tenantRoot,
-		Agent:  agentInput,
-		Model: modelprofile.ModelFactoryInput{
-			TenantID: tenantRoot.TenantID, TenantVersion: tenantRoot.Version,
-			ProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", ProfileVersion: 1,
-			ContentDigest: "model-digest", SchemaVersion: modelprofile.SchemaVersionV1,
-			Provider: "fake", Model: "deterministic",
+	runner, err := NewRunnerWithConfig(context.Background(), RunnerConfig{
+		Input: RunnerInput{
+			Tenant: *tenantRoot,
+			Agent:  agentInput,
+			Model: modelprofile.ModelFactoryInput{
+				TenantID: tenantRoot.TenantID, TenantVersion: tenantRoot.Version,
+				ProfileID: "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV", ProfileVersion: 1,
+				ContentDigest: "model-digest", SchemaVersion: modelprofile.SchemaVersionV1,
+				Provider: "fake", Model: "deterministic",
+			},
 		},
-	}, nil, agentTestModelFactory{}, sessions)
+		ModelFactory: agentTestModelFactory{},
+		Sessions:     sessions,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

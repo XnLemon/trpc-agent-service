@@ -16,9 +16,9 @@ import (
 	agentrunnerfactory "github.com/XnLemon/trpc-agent-service/trpcservice/agent/runnerfactory"
 	agentsessionstore "github.com/XnLemon/trpc-agent-service/trpcservice/agent/sessionstore"
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
-	agentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
-	agentmysql "github.com/XnLemon/trpc-agent-service/trpcservice/app/mysql"
-	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
+	appmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
+	appmysql "github.com/XnLemon/trpc-agent-service/trpcservice/app/mysql"
+	apppostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
@@ -276,7 +276,7 @@ func prepareMySQLDatabaseConfig(ctx context.Context, config *Config) error {
 		config.Tenants = tenantmysql.NewRepository(config.DB)
 	}
 	if config.Apps == nil {
-		config.Apps = agentmysql.NewRepository(config.DB)
+		config.Apps = appmysql.NewRepository(config.DB)
 	}
 	if config.Models == nil {
 		config.Models = modelmysql.NewRepository(config.DB, config.ModelCatalog)
@@ -300,7 +300,7 @@ func preparePostgresDatabaseConfig(ctx context.Context, config *Config) error {
 		config.Tenants = tenantpostgres.NewRepository(config.DB)
 	}
 	if config.Apps == nil {
-		config.Apps = agentpostgres.NewRepository(config.DB)
+		config.Apps = apppostgres.NewRepository(config.DB)
 	}
 	if config.Models == nil {
 		config.Models = modelpostgres.NewRepository(config.DB, config.ModelCatalog)
@@ -362,8 +362,15 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, ErrInvalidConfig
 	}
+	var replyBatchStore runtimestorage.ReplyBatchEnqueuer
+	if config.RuntimeStore != nil {
+		replyBatchStore, _ = config.RuntimeStore.(runtimestorage.ReplyBatchEnqueuer)
+	}
 	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{
-		Resolver: resolver, Registry: registry, RuntimeStore: config.RuntimeStore, DrainTimeout: config.DrainTimeout, AuditWriter: config.AuditWriter, Observability: config.Observability,
+		Resolver: resolver, Registry: registry,
+		RuntimeStore: config.RuntimeStore, SessionStore: config.RuntimeStore,
+		MessageStore: config.RuntimeStore, ReplyBatchStore: replyBatchStore,
+		DrainTimeout: config.DrainTimeout, AuditWriter: config.AuditWriter, Observability: config.Observability,
 	})
 	if err != nil {
 		_ = registry.Close()
@@ -674,7 +681,7 @@ func NewUnavailable() (*Runtime, error) {
 	}
 	sessions := inmemory.NewSessionService()
 	config := Config{
-		Tenants: tenantmemory.NewRepository(), Apps: agentmemory.NewRepository(),
+		Tenants: tenantmemory.NewRepository(), Apps: appmemory.NewRepository(),
 		Models: modelmemory.NewRepository(modelCatalog), Backends: backendmemory.NewRepository(backendCatalog),
 		Channels: channelmemory.NewRepository(), ModelCatalog: modelCatalog, BackendCatalog: backendCatalog,
 		SecretResolver: unavailableSecretResolver{}, ModelFactory: unavailableModelFactory{},

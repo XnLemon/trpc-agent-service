@@ -18,7 +18,8 @@ import (
 // The cross-domain suite exercises the public domain repositories through the
 // same shared storage primitives used by bootstrap. These aliases exist only
 // in tests and do not add a production storage-to-domain dependency.
-type AgentRepository = agentpostgres.AgentRepository
+type AppRepository = agentpostgres.AppRepository
+type AgentRepository = AppRepository
 type BackendRepository = backendpostgres.BackendRepository
 type ChannelRepository = channelpostgres.ChannelRepository
 type ModelRepository = modelpostgres.ModelRepository
@@ -26,8 +27,12 @@ type TenantRepository = tenantpostgres.TenantRepository
 
 var ErrStorage = storagepostgres.ErrStorage
 
+func NewAppRepository(db *sql.DB) *AppRepository {
+	return agentpostgres.NewAppRepository(db)
+}
+
 func NewAgentRepository(db *sql.DB) *AgentRepository {
-	return agentpostgres.NewRepository(db)
+	return NewAppRepository(db)
 }
 
 func NewBackendRepository(db *sql.DB, catalog *backend.ProviderCatalog) *BackendRepository {

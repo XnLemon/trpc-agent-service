@@ -25,7 +25,7 @@ Worker、Dashboard、KMS/Vault 或新的 Admin API；这些能力只消费本页
 ## 驱动与配置边界
 
 Repository 继续使用 `database/sql` 的 `*sql.DB`，因此调用方可以复用连接池、Context
-取消和现有的所有权约定。MySQL 适配器由独立的 `tenant/mysql`、`agent/mysql`、
+取消和现有的所有权约定。MySQL 适配器由独立的 `tenant/mysql`、`app/mysql`、
 `model/mysql`、`backend/mysql` 和 `channels/mysql` 包提供；实现细节不泄漏到领域接口。
 
 生产 Bootstrap 使用显式驱动选择：
