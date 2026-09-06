@@ -134,10 +134,10 @@ InMemory 与 PostgreSQL 必须运行同一 conformance suite，覆盖：
 
 ## PostgreSQL 持久化边界
 
-`trpcservice/audit/postgres/schema.sql` 持有 `audit_event` 和 `execution_audit_handoff` 的
-基础表与索引，主键和索引都以 `tenant_id` 开头。事件字段使用类型/检查约束，`usage` 数值列
-使用 nullable non-negative 整数；不保存自由 JSON payload。0006/0007 migration 提供
-append-only 写入口、RLS 和可恢复投影行为。handoff 不是
+有序 migration 新增 `audit_event`，主键为 `(tenant_id, event_id)`，所有索引以
+`tenant_id` 开头。事件字段使用类型/检查约束，`usage` 数值列使用 nullable non-negative
+整数；不保存自由 JSON payload。当前 0006 migration 先提供 append-only `audit_event`；
+`execution_audit_handoff` 作为可恢复的投影 outbox 已由 0007 migration 提供。handoff 不是
 最终 AuditEvent，只有受 fence/状态约束的 SECURITY DEFINER reserve/finalize/repair 入口可以修改；
 一旦 projected 就不能改变 terminal payload。索引至少支持：
 

@@ -39,7 +39,8 @@ func TestWorkerInternalBranchCoverage(t *testing.T) {
 func ptrTime(value time.Time) *time.Time { return &value }
 
 type branchStore struct {
-	runtimestorage.RuntimeStore
+	runtimestorage.ReplyStore
+	runtimestorage.MessageStore
 	candidates         []runtimestorage.ReplyOutbox
 	listErr            error
 	event              runtimestorage.MessageEvent
@@ -125,7 +126,7 @@ func TestAdvanceEventBranchCoverage(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			worker := &Worker{store: tc.store, tenantID: "tenant-a", owner: "worker"}
+			worker := &Worker{store: tc.store, messageStore: tc.store, tenantID: "tenant-a", owner: "worker"}
 			worker.advanceEvent(ctx, "event")
 			if got := len(tc.store.messageTransitions); got != tc.wantTransitions {
 				t.Fatalf("message transitions = %d, want %d", got, tc.wantTransitions)
@@ -185,7 +186,7 @@ func TestWorkerRunAndRetryDueBoundaryBranches(t *testing.T) {
 	if err := nilWorker.Run(context.Background(), time.Second); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("nil worker run = %v", err)
 	}
-	worker, err := New(Config{Store: inmemory.New(), Provider: branchProvider{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second})
+	worker, err := New(Config{Store: inmemory.New(), MessageStore: inmemory.New(), Provider: branchProvider{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,13 +267,13 @@ func TestRunOnceProviderAndTransitionErrorBranches(t *testing.T) {
 }
 
 func TestWorkerRetryBackoffAndValidationBranches(t *testing.T) {
-	if _, err := New(Config{Store: inmemory.New(), Provider: branchProvider{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, BackoffBase: -time.Second}); !errors.Is(err, ErrInvalid) {
+	if _, err := New(Config{Store: inmemory.New(), MessageStore: inmemory.New(), Provider: branchProvider{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, BackoffBase: -time.Second}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("negative backoff = %v", err)
 	}
-	if _, err := New(Config{Store: inmemory.New(), Provider: branchProvider{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, BackoffBase: time.Second, BackoffMax: time.Millisecond}); !errors.Is(err, ErrInvalid) {
+	if _, err := New(Config{Store: inmemory.New(), MessageStore: inmemory.New(), Provider: branchProvider{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, BackoffBase: time.Second, BackoffMax: time.Millisecond}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("inverted backoff = %v", err)
 	}
-	worker, err := New(Config{Store: inmemory.New(), Provider: branchProvider{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, BackoffBase: time.Second, BackoffMax: 2 * time.Second, Jitter: .2})
+	worker, err := New(Config{Store: inmemory.New(), MessageStore: inmemory.New(), Provider: branchProvider{}, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, BackoffBase: time.Second, BackoffMax: 2 * time.Second, Jitter: .2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +296,7 @@ func TestMaterializerValidationBranches(t *testing.T) {
 	if _, err := NewMaterializer(MaterializerConfig{}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("nil materializer = %v", err)
 	}
-	m, err := NewMaterializer(MaterializerConfig{Store: inmemory.New(), SegmentSize: 2})
+	m, err := NewMaterializer(MaterializerConfig{BatchStore: inmemory.New(), SegmentSize: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,10 +305,6 @@ func TestMaterializerValidationBranches(t *testing.T) {
 			t.Fatalf("invalid materialization %#v = %v", input, err)
 		}
 	}
-}
-
-type legacyRuntimeStore struct {
-	runtimestorage.RuntimeStore
 }
 
 type batchOnlyStore struct {
@@ -333,15 +330,8 @@ func TestMaterializerUsesNarrowBatchCapability(t *testing.T) {
 	}
 }
 
-func TestMaterializerRejectsMissingBatchCapability(t *testing.T) {
-	m, err := NewMaterializer(MaterializerConfig{Store: legacyRuntimeStore{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = m.Materialize(context.Background(), MaterializeInput{
-		TenantID: "tenant-a", EventID: "event", ReplyID: "reply", Payload: "reply",
-	})
-	if !errors.Is(err, ErrMaterialization) || !errors.Is(err, runtimestorage.ErrInvalid) {
+func TestMaterializerRequiresBatchCapability(t *testing.T) {
+	if _, err := NewMaterializer(MaterializerConfig{}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing batch capability error = %v", err)
 	}
 }
@@ -371,7 +361,7 @@ func TestRedactedMaterializationErrorDropsUnknownDetails(t *testing.T) {
 }
 
 func TestMaterializerPreservesNotFoundErrorClass(t *testing.T) {
-	m, err := NewMaterializer(MaterializerConfig{Store: inmemory.New(), SegmentSize: 2})
+	m, err := NewMaterializer(MaterializerConfig{BatchStore: inmemory.New(), SegmentSize: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +384,7 @@ func TestMaterializerDefaultSegmentSizeAndUnicodeSplit(t *testing.T) {
 	if _, _, err := store.RecordMessage(context.Background(), runtimestorage.MessageEventInput{TenantID: "tenant-a", EventID: "event-default", SessionID: "session-default", BindingID: "binding", ExternalMessageID: "external-default"}); err != nil {
 		t.Fatal(err)
 	}
-	m, err := NewMaterializer(MaterializerConfig{Store: store, SegmentSize: 0})
+	m, err := NewMaterializer(MaterializerConfig{BatchStore: store, SegmentSize: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +428,7 @@ func TestRunOnceDoesNotRedeliverUnknownSendingLease(t *testing.T) {
 	provider := &countingProvider{status: DeliveryUnknown}
 	store := &branchStore{candidates: []runtimestorage.ReplyOutbox{{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", Status: runtimestorage.ReplySending, LeaseExpiresAt: ptrTime(time.Now().Add(-time.Second))}}}
 	telemetry := &recordingTelemetry{}
-	worker, err := New(Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, Observability: telemetry})
+	worker, err := New(Config{Store: store, MessageStore: store, Provider: provider, TenantID: "tenant-a", Owner: "worker", LeaseDuration: time.Second, Observability: telemetry})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +542,7 @@ func TestWorkerTelemetryPropagatesCorrelationAndRedactsProviderClasses(t *testin
 	}
 	telemetry := &recordingTelemetry{}
 	provider := &correlatedProvider{}
-	worker, err := New(Config{Store: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, MaxAttempts: 1, Observability: telemetry})
+	worker, err := New(Config{Store: store, MessageStore: store, Provider: provider, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, MaxAttempts: 1, Observability: telemetry})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -609,7 +599,7 @@ func TestWorkerDeliveryAuditUsesPersistedCorrelation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker, err := New(Config{Store: store, Provider: branchProvider{id: "provider"}, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, AuditWriter: auditStore})
+	worker, err := New(Config{Store: store, MessageStore: store, Provider: branchProvider{id: "provider"}, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, AuditWriter: auditStore})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -637,7 +627,7 @@ func TestWorkerTelemetryRecordsSuccessfulDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	telemetry := &recordingTelemetry{}
-	worker, err := New(Config{Store: store, Provider: branchProvider{id: "provider-success"}, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, Observability: telemetry})
+	worker, err := New(Config{Store: store, MessageStore: store, Provider: branchProvider{id: "provider-success"}, TenantID: "tenant-a", Owner: "worker-a", LeaseDuration: time.Second, Observability: telemetry})
 	if err != nil {
 		t.Fatal(err)
 	}

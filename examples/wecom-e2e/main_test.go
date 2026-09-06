@@ -22,19 +22,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/migrations"
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	agentinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelsinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
@@ -70,14 +70,14 @@ func TestWeComCallbackOutboxE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
-	if err := bootstrap.ApplyPostgresMigrations(ctx, db); err != nil {
+	if err := migrations.Apply(ctx, db); err != nil {
 		t.Fatal(err)
 	}
 	fixture := newWeComFixture(t, ctx, db)
 	providerServer := newProviderServer(t)
 	defer providerServer.Close()
 	provider := &wecom.BindingProvider{Bindings: fixture.channels, Credentials: fixture.credentials, BaseURL: providerServer.URL, HTTPClient: providerServer.Client()}
-	worker, err := outbox.New(outbox.Config{Store: fixture.store, Provider: provider, TenantID: fixture.tenant.TenantID, Owner: "wecom-example-e2e", LeaseDuration: 30 * time.Second})
+	worker, err := outbox.New(outbox.Config{Store: fixture.store, MessageStore: fixture.store, Provider: provider, TenantID: fixture.tenant.TenantID, Owner: "wecom-example-e2e", LeaseDuration: 30 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestWeComCallbackOutboxE2E(t *testing.T) {
 	}
 }
 
-func waitForReplyCandidates(ctx context.Context, store runtimestorage.RuntimeStore, tenantID, payload string) ([]runtimestorage.ReplyOutbox, error) {
+func waitForReplyCandidates(ctx context.Context, store runtimestorage.ReplyStore, tenantID, payload string) ([]runtimestorage.ReplyOutbox, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -248,7 +248,7 @@ func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	planResolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{Tenants: tenantRepo, Apps: appRepo, Models: modelRepo, Backends: backendRepo, ModelCatalog: modelCatalog, BackendCatalog: backendCatalog})
+	planResolver, err := gateway.NewPlanResolver(runtime.PlanResolverConfig{Tenants: tenantRepo, Apps: appRepo, Models: modelRepo, Backends: backendRepo, ModelCatalog: modelCatalog, BackendCatalog: backendCatalog})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func newWeComFixture(t *testing.T, ctx context.Context, db *sql.DB) weComFixture
 	}
 	t.Cleanup(func() { _ = registry.Close() })
 	store := runtimestoragepostgres.New(db)
-	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: planResolver, Registry: registry, RuntimeStore: store})
+	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: planResolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store, Attachments: store, AttachmentStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}

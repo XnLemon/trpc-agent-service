@@ -10,8 +10,8 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/execution"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -83,7 +83,7 @@ func TestDispatchStoreViewFailsClosedAndDelegatesNarrowCapabilities(t *testing.T
 func TestResolveDispatchAttachmentsUsesReaderOwnedStore(t *testing.T) {
 	store := inmemory.New()
 	t.Cleanup(func() { _ = store.Close() })
-	reader, attachmentStore := resolveDispatchAttachments(DispatchConfig{Attachments: store})
+	reader, attachmentStore := resolveDispatchAttachments(DispatchConfig{Attachments: store, AttachmentStore: store})
 	if reader != store || attachmentStore != store {
 		t.Fatalf("resolved attachments = reader:%T store:%T", reader, attachmentStore)
 	}
@@ -151,7 +151,7 @@ func TestClaimInboundAndPrepareInboundEventDefensiveBranches(t *testing.T) {
 		t.Fatalf("missing external message ID error = %v", err)
 	}
 
-	transitionStore := &duplicateClaimStore{RuntimeStore: store, event: runtimestorage.MessageEvent{TenantID: principal.TenantID(), EventID: "event", SessionID: "session", Status: runtimestorage.EventReceived, ReplyTarget: runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: string(channels.ConversationDirect), ReceiverID: "peer"}}, transitionErr: runtimestorage.ErrConflict}
+	transitionStore := &duplicateClaimStore{gatewayStore: store, event: runtimestorage.MessageEvent{TenantID: principal.TenantID(), EventID: "event", SessionID: "session", Status: runtimestorage.EventReceived, ReplyTarget: runtimestorage.ReplyTarget{BindingID: target.BindingID, ConversationKind: string(channels.ConversationDirect), ReceiverID: "peer"}}, transitionErr: runtimestorage.ErrConflict}
 	dispatcher.runtimeStore = transitionStore
 	metadata.message.ExternalMessageID = "external"
 	if _, err := dispatcher.claimInboundWithLease(context.Background(), metadata, time.Minute); !errors.Is(err, ErrDuplicateMessage) {
@@ -308,7 +308,7 @@ func TestMapExecutionEventAndCorrelationCancellationVariants(t *testing.T) {
 }
 
 type duplicateClaimStore struct {
-	runtimestorage.RuntimeStore
+	gatewayStore
 	event         runtimestorage.MessageEvent
 	transitionErr error
 }

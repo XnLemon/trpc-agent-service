@@ -1,13 +1,17 @@
 package migrations
 
 import (
-	runtimequeuepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue/postgres"
+	"os"
 	"strings"
 	"testing"
 )
 
 func TestExecutionQueueMigrationDefinesLeaseAndTenantInvariants(t *testing.T) {
-	sql := runtimequeuepostgres.SchemaSQL
+	contents, err := os.ReadFile("0013_execution_queue.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
 	for _, fragment := range []string{
 		"PRIMARY KEY (tenant_id, task_id)",
 		"FOREIGN KEY (tenant_id) REFERENCES public.tenant(tenant_id)",

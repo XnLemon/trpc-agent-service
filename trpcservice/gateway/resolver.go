@@ -8,10 +8,6 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 )
 
-// PlanResolverConfig is kept as a Gateway compatibility alias while plan
-// lookup and snapshot assembly are owned by runtime.
-type PlanResolverConfig = runtime.PlanResolverConfig
-
 // PlanResolver adapts a trusted Gateway Principal to the neutral runtime
 // PlanRequest. Authentication remains Gateway-owned; runtime owns repository
 // lookup and immutable execution-plan construction.
@@ -20,9 +16,7 @@ type PlanResolver struct {
 }
 
 // NewPlanResolver constructs the runtime resolver behind the Gateway adapter.
-// The compatibility constructor avoids changing the Dispatcher and Bootstrap
-// public boundaries in the same migration.
-func NewPlanResolver(config PlanResolverConfig) (*PlanResolver, error) {
+func NewPlanResolver(config runtime.PlanResolverConfig) (*PlanResolver, error) {
 	resolver, err := runtime.NewPlanResolver(config)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)

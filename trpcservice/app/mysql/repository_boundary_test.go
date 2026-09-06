@@ -14,7 +14,7 @@ import (
 func TestAgentRepositoryRejectsCancelledContextsBeforeStorage(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	r := NewRepository(nil)
+	r := NewAppRepository(nil)
 	cases := []struct {
 		name string
 		call func() error
@@ -43,10 +43,10 @@ func TestAgentRepositoryRejectsCancelledContextsBeforeStorage(t *testing.T) {
 
 func TestAgentRepositoryListBoundaryBranches(t *testing.T) {
 	ctx := context.Background()
-	if _, _, err := NewRepository(nil).List(ctx, "tenant", "", "", "", 1); !errors.Is(err, ErrStorage) {
+	if _, _, err := NewAppRepository(nil).List(ctx, "tenant", "", "", "", 1); !errors.Is(err, ErrStorage) {
 		t.Fatalf("nil-storage List error = %v", err)
 	}
-	if _, _, err := NewRepository(nil).ListRevisions(ctx, "tenant", "app", "", "", "", 1); !errors.Is(err, ErrStorage) {
+	if _, _, err := NewAppRepository(nil).ListRevisions(ctx, "tenant", "app", "", "", "", 1); !errors.Is(err, ErrStorage) {
 		t.Fatalf("nil-storage ListRevisions error = %v", err)
 	}
 	for _, tc := range []struct {
@@ -54,26 +54,26 @@ func TestAgentRepositoryListBoundaryBranches(t *testing.T) {
 		call func(*sql.DB, sqlmock.Sqlmock) error
 	}{
 		{"app invalid cursor", func(db *sql.DB, _ sqlmock.Sqlmock) error {
-			_, _, err := NewRepository(db).List(ctx, "tenant", "", "", "bad", 1)
+			_, _, err := NewAppRepository(db).List(ctx, "tenant", "", "", "bad", 1)
 			return err
 		}},
 		{"revision invalid cursor", func(db *sql.DB, _ sqlmock.Sqlmock) error {
-			_, _, err := NewRepository(db).ListRevisions(ctx, "tenant", "app", "", "", "bad", 1)
+			_, _, err := NewAppRepository(db).ListRevisions(ctx, "tenant", "app", "", "", "bad", 1)
 			return err
 		}},
 		{"app query error", func(db *sql.DB, mock sqlmock.Sqlmock) error {
 			mock.ExpectQuery("FROM agent_app WHERE tenant_id").WithArgs("tenant").WillReturnError(errors.New("list query"))
-			_, _, err := NewRepository(db).List(ctx, "tenant", "", "", "", 1)
+			_, _, err := NewAppRepository(db).List(ctx, "tenant", "", "", "", 1)
 			return err
 		}},
 		{"revision query error", func(db *sql.DB, mock sqlmock.Sqlmock) error {
 			mock.ExpectQuery("SELECT revision FROM agent_app_revision").WithArgs("tenant", "app").WillReturnError(errors.New("list query"))
-			_, _, err := NewRepository(db).ListRevisions(ctx, "tenant", "app", "", "", "", 1)
+			_, _, err := NewAppRepository(db).ListRevisions(ctx, "tenant", "app", "", "", "", 1)
 			return err
 		}},
 		{"app rows error", func(db *sql.DB, mock sqlmock.Sqlmock) error {
 			mock.ExpectQuery("FROM agent_app WHERE tenant_id").WithArgs("tenant").WillReturnRows(sqlmock.NewRows([]string{"app_id"}).AddRow("app").RowError(0, errors.New("rows")))
-			_, _, err := NewRepository(db).List(ctx, "tenant", "", "", "", 1)
+			_, _, err := NewAppRepository(db).List(ctx, "tenant", "", "", "", 1)
 			return err
 		}},
 	} {
@@ -116,7 +116,7 @@ func TestAgentRepositoryListCoversFilteringPagingAndScanReturns(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	mock.ExpectQuery(`FROM agent_app WHERE tenant_id = \? ORDER BY app_id`).WithArgs(first.TenantID).
 		WillReturnRows(agentMySQLAppRows(first, &second, &disabled))
-	items, next, err := NewRepository(db).List(ctx, first.TenantID, "primary", string(appmodel.StatusDraft), "", 1)
+	items, next, err := NewAppRepository(db).List(ctx, first.TenantID, "primary", string(appmodel.StatusDraft), "", 1)
 	if err != nil || len(items) != 1 || items[0].AppID != first.AppID || next != "" {
 		t.Fatalf("filtered app page = items=%+v next=%q err=%v", items, next, err)
 	}
@@ -131,7 +131,7 @@ func TestAgentRepositoryListCoversFilteringPagingAndScanReturns(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	mock.ExpectQuery(`FROM agent_app WHERE tenant_id = \? ORDER BY app_id`).WithArgs(first.TenantID).
 		WillReturnRows(agentMySQLAppRows(first, &second))
-	items, next, err = NewRepository(db).List(ctx, first.TenantID, "", "", "", 201)
+	items, next, err = NewAppRepository(db).List(ctx, first.TenantID, "", "", "", 201)
 	if err != nil || len(items) != 2 || next != "" {
 		t.Fatalf("maximum app page = items=%+v next=%q err=%v", items, next, err)
 	}
@@ -146,7 +146,7 @@ func TestAgentRepositoryListCoversFilteringPagingAndScanReturns(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	mock.ExpectQuery(`FROM agent_app WHERE tenant_id = \? ORDER BY app_id`).WithArgs(first.TenantID).
 		WillReturnRows(agentMySQLAppRows(first))
-	items, next, err = NewRepository(db).List(ctx, first.TenantID, "", "", "1", 0)
+	items, next, err = NewAppRepository(db).List(ctx, first.TenantID, "", "", "1", 0)
 	if err != nil || items == nil || len(items) != 0 || next != "" {
 		t.Fatalf("past-end app page = items=%+v next=%q err=%v", items, next, err)
 	}
@@ -169,7 +169,7 @@ func TestAgentRepositoryListCoversFilteringPagingAndScanReturns(t *testing.T) {
 			}
 			defer func() { _ = db.Close() }()
 			mock.ExpectQuery(`FROM agent_app WHERE tenant_id = \? ORDER BY app_id`).WithArgs(first.TenantID).WillReturnRows(tc.rows)
-			if _, _, err := NewRepository(db).List(ctx, first.TenantID, "", "", "", 1); !errors.Is(err, ErrStorage) {
+			if _, _, err := NewAppRepository(db).List(ctx, first.TenantID, "", "", "", 1); !errors.Is(err, ErrStorage) {
 				t.Fatalf("error = %v", err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
@@ -189,7 +189,7 @@ func TestAgentRepositoryListCoversFilteringPagingAndScanReturns(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(firstRevision.Revision).AddRow(secondRevision.Revision))
 	expectAgentRevision(t, mock, firstRevision)
 	expectAgentRevision(t, mock, secondRevision)
-	itemsRevision, nextRevision, err := NewRepository(db).ListRevisions(ctx, first.TenantID, first.AppID, "answer", string(appmodel.RevisionStateDraft), "", 1)
+	itemsRevision, nextRevision, err := NewAppRepository(db).ListRevisions(ctx, first.TenantID, first.AppID, "answer", string(appmodel.RevisionStateDraft), "", 1)
 	if err != nil || len(itemsRevision) != 1 || itemsRevision[0].Revision != firstRevision.Revision || nextRevision == "" {
 		t.Fatalf("filtered revision page = items=%+v next=%q err=%v", itemsRevision, nextRevision, err)
 	}
@@ -206,7 +206,7 @@ func TestAgentRepositoryListCoversFilteringPagingAndScanReturns(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(firstRevision.Revision).AddRow(secondRevision.Revision))
 	expectAgentRevision(t, mock, firstRevision)
 	expectAgentRevision(t, mock, secondRevision)
-	itemsRevision, nextRevision, err = NewRepository(db).ListRevisions(ctx, first.TenantID, first.AppID, "", "", "", 201)
+	itemsRevision, nextRevision, err = NewAppRepository(db).ListRevisions(ctx, first.TenantID, first.AppID, "", "", "", 201)
 	if err != nil || len(itemsRevision) != 2 || nextRevision != "" {
 		t.Fatalf("maximum revision page = items=%+v next=%q err=%v", itemsRevision, nextRevision, err)
 	}
@@ -222,7 +222,7 @@ func TestAgentRepositoryListCoversFilteringPagingAndScanReturns(t *testing.T) {
 	mock.ExpectQuery(`SELECT revision FROM agent_app_revision WHERE tenant_id = \? AND app_id = \? ORDER BY revision`).WithArgs(first.TenantID, first.AppID).
 		WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(firstRevision.Revision))
 	expectAgentRevision(t, mock, firstRevision)
-	if _, _, err = NewRepository(db).ListRevisions(ctx, first.TenantID, first.AppID, "", "", "1", 0); err != nil {
+	if _, _, err = NewAppRepository(db).ListRevisions(ctx, first.TenantID, first.AppID, "", "", "1", 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -243,7 +243,7 @@ func TestAgentRepositoryListCoversFilteringPagingAndScanReturns(t *testing.T) {
 			}
 			defer func() { _ = db.Close() }()
 			mock.ExpectQuery(`SELECT revision FROM agent_app_revision WHERE tenant_id = \? AND app_id = \? ORDER BY revision`).WithArgs(first.TenantID, first.AppID).WillReturnRows(tc.rows)
-			if _, _, err := NewRepository(db).ListRevisions(ctx, first.TenantID, first.AppID, "", "", "", 1); !errors.Is(err, ErrStorage) {
+			if _, _, err := NewAppRepository(db).ListRevisions(ctx, first.TenantID, first.AppID, "", "", "", 1); !errors.Is(err, ErrStorage) {
 				t.Fatalf("error = %v", err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
@@ -322,7 +322,7 @@ func TestSetCanaryRejectsInactiveTenantBeforeTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	_, _, err = NewRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{
+	_, _, err = NewAppRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{
 		TenantID: "tenant", AppID: "app", TenantActive: false,
 		Metadata: appmodel.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "inactive", CorrelationID: "inactive-tenant"},
 	})
@@ -364,7 +364,7 @@ func TestSetCanaryGuardsStateAndCandidateBoundaries(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = db.Close() })
 			tc.setup(mock, tc.app)
-			_, _, err = NewRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: tc.app.TenantID, AppID: tc.app.AppID, CandidateRevision: tc.candidate, ExpectedAppVersion: tc.app.Version, TenantActive: true, Metadata: metadata})
+			_, _, err = NewAppRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: tc.app.TenantID, AppID: tc.app.AppID, CandidateRevision: tc.candidate, ExpectedAppVersion: tc.app.Version, TenantActive: true, Metadata: metadata})
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("error = %v, want %v", err, tc.want)
 			}
@@ -396,7 +396,7 @@ func TestRollbackRejectsUnpublishedAndUnchangedTargets(t *testing.T) {
 			expectAgentApp(mock, app)
 			expectAgentRevision(t, mock, tc.target)
 			mock.ExpectRollback()
-			_, _, err = NewRepository(db).Rollback(context.Background(), appmodel.RollbackInput{TenantID: app.TenantID, AppID: app.AppID, TargetRevision: tc.targetRevision, ExpectedAppVersion: app.Version, Metadata: metadata})
+			_, _, err = NewAppRepository(db).Rollback(context.Background(), appmodel.RollbackInput{TenantID: app.TenantID, AppID: app.AppID, TargetRevision: tc.targetRevision, ExpectedAppVersion: app.Version, Metadata: metadata})
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("error = %v, want %v", err, tc.want)
 			}
@@ -471,7 +471,7 @@ func TestSetCanaryPersistenceErrorBranches(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = db.Close() })
 			tc.setup(mock)
-			_, _, err = NewRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: app.TenantID, AppID: app.AppID, CandidateRevision: agentInt64(2), ExpectedAppVersion: app.Version, TenantActive: true, Metadata: metadata})
+			_, _, err = NewAppRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: app.TenantID, AppID: app.AppID, CandidateRevision: agentInt64(2), ExpectedAppVersion: app.Version, TenantActive: true, Metadata: metadata})
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("error = %v, want %v", err, tc.want)
 			}
@@ -550,7 +550,7 @@ func TestRollbackPersistenceErrorBranches(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = db.Close() })
 			tc.setup(mock)
-			_, _, err = NewRepository(db).Rollback(context.Background(), appmodel.RollbackInput{TenantID: app.TenantID, AppID: app.AppID, TargetRevision: 1, ExpectedAppVersion: app.Version, Metadata: metadata})
+			_, _, err = NewAppRepository(db).Rollback(context.Background(), appmodel.RollbackInput{TenantID: app.TenantID, AppID: app.AppID, TargetRevision: 1, ExpectedAppVersion: app.Version, Metadata: metadata})
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("error = %v, want %v", err, tc.want)
 			}
@@ -634,7 +634,7 @@ func TestTransitionStatusPersistenceErrorBranches(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = db.Close() })
 			tc.setup(mock)
-			_, _, err = NewRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: appmodel.StatusSuspended, Metadata: metadata})
+			_, _, err = NewAppRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: app.TenantID, AppID: app.AppID, ExpectedVersion: app.Version, NextStatus: appmodel.StatusSuspended, Metadata: metadata})
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("error = %v, want %v", err, tc.want)
 			}
@@ -696,7 +696,7 @@ func TestDraftPersistenceErrorBranches(t *testing.T) {
 		t.Run("create "+tc.name, func(t *testing.T) {
 			db, mock := newDB(t)
 			tc.setup(mock)
-			if _, err := NewRepository(db).CreateDraft(context.Background(), input); !errors.Is(err, ErrStorage) {
+			if _, err := NewAppRepository(db).CreateDraft(context.Background(), input); !errors.Is(err, ErrStorage) {
 				t.Fatalf("error = %v", err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
@@ -747,7 +747,7 @@ func TestDraftPersistenceErrorBranches(t *testing.T) {
 		t.Run("update "+tc.name, func(t *testing.T) {
 			db, mock := newDB(t)
 			tc.setup(mock)
-			if _, err := NewRepository(db).UpdateDraft(context.Background(), updateInput); !errors.Is(err, ErrStorage) {
+			if _, err := NewAppRepository(db).UpdateDraft(context.Background(), updateInput); !errors.Is(err, ErrStorage) {
 				t.Fatalf("error = %v", err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {

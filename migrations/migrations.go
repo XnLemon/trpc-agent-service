@@ -14,13 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	sharedschema "github.com/XnLemon/trpc-agent-service/trpcservice/schema"
 )
 
-// Files is the ordered migration history for cross-package behavior. Domain
-// table and index definitions live in the backend packages and are supplied to
-// Apply/Verify as schema modules.
+// Files is the ordered, immutable migration set owned by bootstrap.
 //
 //go:embed 0*_*.sql
 var Files embed.FS
@@ -73,14 +69,11 @@ func orderedFiles() ([]file, error) {
 
 // Apply runs every missing migration while holding a database-wide advisory
 // lock. A digest mismatch or history gap fails closed.
-func Apply(ctx context.Context, db *sql.DB, modules ...sharedschema.Module) error {
+func Apply(ctx context.Context, db *sql.DB) error {
 	if ctx == nil || db == nil {
 		return ErrMigration
 	}
 	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := validateModules(modules, sharedschema.DriverPostgres); err != nil {
 		return err
 	}
 	files, err := orderedFiles()
@@ -98,9 +91,6 @@ func Apply(ctx context.Context, db *sql.DB, modules ...sharedschema.Module) erro
 	defer func() {
 		_, _ = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock(hashtext($1))", lockKey)
 	}()
-	if err := sharedschema.ExecuteModules(ctx, conn, modules); err != nil {
-		return fmt.Errorf("%w: initialize PostgreSQL schema modules", ErrMigration)
-	}
 	if err := ensureHistory(ctx, conn); err != nil {
 		return err
 	}
@@ -143,12 +133,9 @@ func Apply(ctx context.Context, db *sql.DB, modules ...sharedschema.Module) erro
 }
 
 // Verify checks the embedded migration history without mutating the database.
-func Verify(ctx context.Context, db *sql.DB, modules ...sharedschema.Module) error {
+func Verify(ctx context.Context, db *sql.DB) error {
 	if ctx == nil || db == nil {
 		return ErrMigration
-	}
-	if err := validateModules(modules, sharedschema.DriverPostgres); err != nil {
-		return err
 	}
 	files, err := orderedFiles()
 	if err != nil {
@@ -169,21 +156,6 @@ func Verify(ctx context.Context, db *sql.DB, modules ...sharedschema.Module) err
 	for _, migration := range files {
 		if history[migration.version] != migration.digest {
 			return ErrInvalidHistory
-		}
-	}
-	if err := sharedschema.VerifyModules(ctx, db, modules); err != nil {
-		return fmt.Errorf("%w: verify PostgreSQL schema modules", ErrInvalidHistory)
-	}
-	return nil
-}
-
-func validateModules(modules []sharedschema.Module, driver sharedschema.Driver) error {
-	if _, err := sharedschema.Order(modules); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidHistory, err)
-	}
-	for _, module := range modules {
-		if module.Driver != driver {
-			return fmt.Errorf("%w: module %s uses driver %s, want %s", ErrInvalidHistory, module.Name, module.Driver, driver)
 		}
 	}
 	return nil

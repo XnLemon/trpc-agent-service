@@ -14,6 +14,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -116,7 +117,7 @@ func TestNilStoreReturnsStorageError(t *testing.T) {
 			return err
 		}},
 		{name: "append event", call: func() error {
-			_, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-1", EventID: "event-1", Payload: []byte(`{}`)})
+			_, err := store.AppendEventPayload(ctx, sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session-1", EventID: "event-1", Payload: []byte(`{}`)})
 			return err
 		}},
 		{name: "list events", call: func() error { _, err := store.ListEventPayloads(ctx, "tenant-a", "session-1"); return err }},
@@ -314,7 +315,7 @@ func TestRuntimeStoreCoversEventHistoryAndMessageLifecycle(t *testing.T) {
 	when := time.Now().UTC()
 	payload := []byte("{\"ID\":\"runner-1\"}")
 	mock.ExpectQuery("INSERT INTO public.runtime_event_history").WithArgs("tenant-a", "session-1", "runner-1", payload).WillReturnRows(sqlmock.NewRows(historyColumns).AddRow("tenant-a", "session-1", "runner-1", string(payload), int64(1), when))
-	value, err := store.AppendEventPayload(context.Background(), runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session-1", EventID: "runner-1", Payload: payload})
+	value, err := store.AppendEventPayload(context.Background(), sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session-1", EventID: "runner-1", Payload: payload})
 	if err != nil || value.HistorySeq != 1 {
 		t.Fatalf("append = %+v err=%v", value, err)
 	}
@@ -992,7 +993,7 @@ func TestRuntimeStoreAppendEventPayloadValidationAndErrors(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	store := runtimepostgres.New(db)
 	ctx := context.Background()
-	invalid := []runtimestorage.EventPayload{
+	invalid := []sessionstorage.EventPayload{
 		{TenantID: "", SessionID: "session", EventID: "event", Payload: []byte("{}")},
 		{TenantID: "tenant-a", SessionID: "", EventID: "event", Payload: []byte("{}")},
 		{TenantID: "tenant-a", SessionID: "session", EventID: "", Payload: []byte("{}")},
@@ -1006,16 +1007,16 @@ func TestRuntimeStoreAppendEventPayloadValidationAndErrors(t *testing.T) {
 	}
 	payload := []byte("{\"ok\":true}")
 	mock.ExpectQuery("INSERT INTO public.runtime_event_history").WithArgs("tenant-a", "session", "event", payload).WillReturnError(sql.ErrNoRows)
-	if _, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: payload}); !errors.Is(err, runtimestorage.ErrConflict) {
+	if _, err := store.AppendEventPayload(ctx, sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: payload}); !errors.Is(err, runtimestorage.ErrConflict) {
 		t.Fatalf("duplicate payload = %v", err)
 	}
 	mock.ExpectQuery("INSERT INTO public.runtime_event_history").WithArgs("tenant-a", "session", "error", payload).WillReturnError(errors.New("insert failed"))
-	if _, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "error", Payload: payload}); !errors.Is(err, runtimestorage.ErrStorage) {
+	if _, err := store.AppendEventPayload(ctx, sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "error", Payload: payload}); !errors.Is(err, runtimestorage.ErrStorage) {
 		t.Fatalf("insert error = %v", err)
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := store.AppendEventPayload(canceled, runtimestorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: payload}); !errors.Is(err, context.Canceled) {
+	if _, err := store.AppendEventPayload(canceled, sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: payload}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled append = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

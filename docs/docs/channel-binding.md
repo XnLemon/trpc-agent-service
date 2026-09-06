@@ -24,9 +24,8 @@ Channel Binding 把一个外部 IM 账号绑定到同一租户的 Agent App。�
 - 使用 fake resolver/verifier 的离线集成测试。
 
 明确不在范围内：真实供应商 SDK、企业微信 AES 解密、Telegram webhook、HTTP Gateway、KMS/
-Vault、消息去重/回复 Outbox、队列和生产审计持久化。Issue #37 的
-`trpcservice/channels/postgres/schema.sql` 已落地本页的 `channel_binding` 表；跨包行为
-由 migration 提供，SQL Repository 与运行时 bootstrap 仍由该 Issue 的代码阶段实现。
+Vault、消息去重/回复 Outbox、队列和生产审计持久化。Issue #37 的控制面 migration 已落地
+本页的 `channel_binding` 表；SQL Repository 与运行时 bootstrap 仍由该 Issue 的代码阶段实现。
 Telegram long
 polling 运行时契约见 [Telegram 长轮询 Adapter](telegram.md)，不属于本 Binding 领域模型。
 
@@ -40,7 +39,7 @@ Issue #60 在控制面模型之上定义了窄的运行时边界：`channels.Ada
 
 该边界不把 Telegram long polling 和 WeCom HTTP callback 伪装成相同的传输协议。
 验签、解密、供应商 SDK、poll loop 和 HTTP 生命周期继续由具体 Adapter 负责；
-Gateway 的 `InboundMessage` 是共享入站契约，`runtime/outbox.Provider` 是由
+Gateway 的 `InboundMessage` 是共享入站契约，`outbox.Provider` 是由
 Channel Provider 适配到的协议中立出站回复契约。Binding 根包只定义候选、验证和
 可信路由；Provider 与回复渲染分别由 `channels/provider` 和 `gateway/replies`
 拥有。Telegram 与 WeCom Provider 都以稳定的 reply/segment identity 实现出站交付。
@@ -69,7 +68,7 @@ trace 或缓存键。Secret Resolver 在可信 Tenant 已确定后，必须以 `
 
 ### PostgreSQL 形状
 
-下面是已经由 Issue #37 包级 schema 与行为 migration 落地的持久化形状摘要；`protocol_config` 仍只有在应用层按
+下面是已经由 Issue #37 migration 落地的持久化形状摘要；`protocol_config` 仍只有在应用层按
 Channel schema 解码、拒绝未知字段和敏感字段后才能写入。
 
 ```sql

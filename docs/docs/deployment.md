@@ -139,11 +139,10 @@ curl --fail http://127.0.0.1:8080/readyz
 `OTEL_SERVICE_NAME` 已由 ConfigMap 提供；其余非敏感配置可在 overlay 中覆盖。任何缺失的
 数据库、identity、Admin 或模型配置都会在绑定 HTTP 端口前 fail closed。
 
-本次包级 schema 拆分是有意的 breaking change：根行为 migration 的 digest 已变化，旧版本的
-`schema_migrations` 不能直接被新代码复用。已有环境必须按发布流程建立新的 migration 基线或在
-隔离数据库重建，并先完成备份、变更窗口和回滚评估；服务不会自动删除表或数据。完成基线后，
-`0011_reply_trace_parent.up.sql`、`0012_runtime_capabilities.up.sql` 等后续版本仍按顺序执行，
-不得手工改写版本号或 digest。
+升级已有环境时不要改写已执行 migration 的版本号。当前发布顺序中 trace-parent 使用
+`0011_reply_trace_parent.up.sql`，运行时能力使用 `0012_runtime_capabilities.up.sql`；这两个
+文件的版本与 digest 必须保持不变，数据库应通过服务 bootstrap 继续增量升级。首次部署前请确认
+`schema_migrations` 没有未经审计的版本或 digest 修改。
 
 ## 配置参考
 

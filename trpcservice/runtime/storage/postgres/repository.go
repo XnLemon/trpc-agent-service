@@ -12,6 +12,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	pgstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 )
 
 // Store persists tenant-scoped runtime state in PostgreSQL.
@@ -42,81 +43,81 @@ func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID strin
 }
 
 // GetSession loads a tenant-scoped session.
-func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (runtimestorage.Session, error) {
+func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (sessionstorage.Session, error) {
 	if err := checkStore(ctx, s); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
-	var value runtimestorage.Session
+	var value sessionstorage.Session
 	var state []byte
 	err := s.db.QueryRowContext(ctx, "SELECT tenant_id, session_id, status, version, state, created_at, updated_at FROM public.runtime_session WHERE tenant_id=$1 AND session_id=$2", tenantID, sessionID).Scan(&value.TenantID, &value.SessionID, &value.Status, &value.Version, &state, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
-		return runtimestorage.Session{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return sessionstorage.Session{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if err := pgstorage.DecodeJSON(state, &value.State); err != nil {
-		return runtimestorage.Session{}, runtimestorage.ErrStorage
+		return sessionstorage.Session{}, runtimestorage.ErrStorage
 	}
 	return cloneSession(value), nil
 }
 
 // CreateSession persists a new tenant-scoped session.
-func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (runtimestorage.Session, error) {
+func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (sessionstorage.Session, error) {
 	if err := checkStore(ctx, s); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	if state == nil {
 		state = map[string]any{}
 	}
 	encoded, err := pgstorage.EncodeJSON(state)
 	if err != nil {
-		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+		return sessionstorage.Session{}, runtimestorage.ErrInvalid
 	}
-	var value runtimestorage.Session
+	var value sessionstorage.Session
 	var persisted []byte
 	err = s.db.QueryRowContext(ctx, "INSERT INTO public.runtime_session (tenant_id, session_id, status, version, state) VALUES ($1,$2,'active',1,$3) RETURNING tenant_id,session_id,status,version,state,created_at,updated_at", tenantID, sessionID, encoded).Scan(&value.TenantID, &value.SessionID, &value.Status, &value.Version, &persisted, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
-		return runtimestorage.Session{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return sessionstorage.Session{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if err := pgstorage.DecodeJSON(persisted, &value.State); err != nil {
-		return runtimestorage.Session{}, runtimestorage.ErrStorage
+		return sessionstorage.Session{}, runtimestorage.ErrStorage
 	}
 	return cloneSession(value), nil
 }
 
 // UpdateSessionState applies an expected-version session state update.
-func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (runtimestorage.Session, error) {
+func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (sessionstorage.Session, error) {
 	if err := checkStore(ctx, s); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	if err := runtimestorage.ValidateSession(tenantID, sessionID); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	if state == nil {
 		state = map[string]any{}
 	}
 	encoded, err := pgstorage.EncodeJSON(state)
 	if err != nil {
-		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+		return sessionstorage.Session{}, runtimestorage.ErrInvalid
 	}
-	var value runtimestorage.Session
+	var value sessionstorage.Session
 	var persisted []byte
 	err = s.db.QueryRowContext(ctx, "UPDATE public.runtime_session SET version=version+1,state=$4,updated_at=now() WHERE tenant_id=$1 AND session_id=$2 AND version=$3 RETURNING tenant_id,session_id,status,version,state,created_at,updated_at", tenantID, sessionID, expectedVersion, encoded).Scan(&value.TenantID, &value.SessionID, &value.Status, &value.Version, &persisted, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			if _, getErr := s.GetSession(ctx, tenantID, sessionID); getErr != nil {
-				return runtimestorage.Session{}, getErr
+				return sessionstorage.Session{}, getErr
 			}
-			return runtimestorage.Session{}, runtimestorage.ErrConflict
+			return sessionstorage.Session{}, runtimestorage.ErrConflict
 		}
-		return runtimestorage.Session{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return sessionstorage.Session{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if err := pgstorage.DecodeJSON(persisted, &value.State); err != nil {
-		return runtimestorage.Session{}, runtimestorage.ErrStorage
+		return sessionstorage.Session{}, runtimestorage.ErrStorage
 	}
 	return cloneSession(value), nil
 }
@@ -272,26 +273,26 @@ func (s *Store) transitionMessageWithReply(ctx context.Context, transition runti
 }
 
 // AppendEventPayload stores an immutable session event payload.
-func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.EventPayload) (runtimestorage.EventPayload, error) {
+func (s *Store) AppendEventPayload(ctx context.Context, payload sessionstorage.EventPayload) (sessionstorage.EventPayload, error) {
 	if err := checkStore(ctx, s); err != nil {
-		return runtimestorage.EventPayload{}, err
+		return sessionstorage.EventPayload{}, err
 	}
 	if err := validatePayload(payload); err != nil {
-		return runtimestorage.EventPayload{}, err
+		return sessionstorage.EventPayload{}, err
 	}
-	var value runtimestorage.EventPayload
+	var value sessionstorage.EventPayload
 	err := s.db.QueryRowContext(ctx, "INSERT INTO public.runtime_event_history (tenant_id,session_id,event_id,payload) VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT (tenant_id,session_id,event_id) DO UPDATE SET event_id=public.runtime_event_history.event_id WHERE public.runtime_event_history.payload=EXCLUDED.payload RETURNING tenant_id,session_id,event_id,payload::text,history_seq,created_at", payload.TenantID, payload.SessionID, payload.EventID, payload.Payload).Scan(&value.TenantID, &value.SessionID, &value.EventID, &value.Payload, &value.HistorySeq, &value.CreatedAt)
 	if err == nil {
 		return clonePayload(value), nil
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		return runtimestorage.EventPayload{}, runtimestorage.ErrConflict
+		return sessionstorage.EventPayload{}, runtimestorage.ErrConflict
 	}
-	return runtimestorage.EventPayload{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	return sessionstorage.EventPayload{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 }
 
 // ListEventPayloads returns ordered event history for a session.
-func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]runtimestorage.EventPayload, error) {
+func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]sessionstorage.EventPayload, error) {
 	if err := checkStore(ctx, s); err != nil {
 		return nil, err
 	}
@@ -303,9 +304,9 @@ func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID strin
 		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer func() { _ = rows.Close() }()
-	var result []runtimestorage.EventPayload
+	var result []sessionstorage.EventPayload
 	for rows.Next() {
-		var value runtimestorage.EventPayload
+		var value sessionstorage.EventPayload
 		if err := rows.Scan(&value.TenantID, &value.SessionID, &value.EventID, &value.Payload, &value.HistorySeq, &value.CreatedAt); err != nil {
 			return nil, runtimestorage.ErrStorage
 		}
@@ -318,7 +319,7 @@ func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID strin
 		if _, err := s.GetSession(ctx, tenantID, sessionID); err != nil {
 			return nil, err
 		}
-		result = []runtimestorage.EventPayload{}
+		result = []sessionstorage.EventPayload{}
 	}
 	return result, nil
 }
@@ -686,7 +687,7 @@ func replyArgs(value *runtimestorage.ReplyOutbox) []any {
 		&value.ProviderMessageID, &value.LastErrorClass, &value.CreatedAt, &value.UpdatedAt,
 	}
 }
-func cloneSession(value runtimestorage.Session) runtimestorage.Session {
+func cloneSession(value sessionstorage.Session) sessionstorage.Session {
 	if value.State != nil {
 		copy := make(map[string]any, len(value.State))
 		for k, v := range value.State {
@@ -706,11 +707,11 @@ func cloneEvent(value runtimestorage.MessageEvent) runtimestorage.MessageEvent {
 	}
 	return value
 }
-func clonePayload(value runtimestorage.EventPayload) runtimestorage.EventPayload {
+func clonePayload(value sessionstorage.EventPayload) sessionstorage.EventPayload {
 	value.Payload = append([]byte(nil), value.Payload...)
 	return value
 }
-func validatePayload(value runtimestorage.EventPayload) error {
+func validatePayload(value sessionstorage.EventPayload) error {
 	if runtimestorage.ValidateSession(value.TenantID, value.SessionID) != nil || value.EventID == "" || len(value.Payload) == 0 || !json.Valid(value.Payload) {
 		return runtimestorage.ErrInvalid
 	}
@@ -724,5 +725,8 @@ func cloneReply(value runtimestorage.ReplyOutbox) runtimestorage.ReplyOutbox {
 	return value
 }
 
-var _ runtimestorage.RuntimeStore = (*Store)(nil)
+var _ sessionstorage.SessionStateStore = (*Store)(nil)
+var _ sessionstorage.EventHistoryStore = (*Store)(nil)
+var _ runtimestorage.MessageStore = (*Store)(nil)
+var _ runtimestorage.ReplyStore = (*Store)(nil)
 var _ runtimestorage.ReplyReceiptRecorder = (*Store)(nil)

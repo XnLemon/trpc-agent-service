@@ -27,7 +27,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	storage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	attachmentmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"

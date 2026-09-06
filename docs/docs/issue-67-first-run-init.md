@@ -51,7 +51,7 @@ export TRPC_APP_ID='app_...'
 3. 保护 Job stdout 和审计记录。输出只有 Tenant/App ID，不包含 DSN、数据库凭据、模型/API/IM secret；只将 ID 写入后续服务的受控配置。
 4. 初始化成功后，使用生成的 `TRPC_TENANT_ID` 和 `TRPC_APP_ID` 启动服务。启动仍要求这些 ID 显式存在，不会因为数据库已初始化而自动推断它们。
 
-命令会先按依赖应用并校验包级 schema，再应用并校验内置行为 migration。不要在 production 中手工写表或绕过受控写函数；执行前应确认连接到目标数据库并遵循现有备份、变更窗口和回滚流程。
+命令会先应用并校验内置 migration。不要在 production 中手工写表或绕过受控写函数；执行前应确认连接到目标数据库并遵循现有备份、变更窗口和回滚流程。
 
 ## 幂等、并发与异常状态
 

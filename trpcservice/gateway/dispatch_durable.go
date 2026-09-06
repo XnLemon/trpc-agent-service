@@ -11,8 +11,9 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	"github.com/google/uuid"
 )
@@ -151,7 +152,7 @@ func replyTarget(target channels.RoutingTarget, message InboundMessage) (runtime
 	return reply, nil
 }
 
-func ensureInboundSession(ctx context.Context, store runtimestorage.SessionStateStore, tenantID, sessionID string) error {
+func ensureInboundSession(ctx context.Context, store sessionstorage.SessionStateStore, tenantID, sessionID string) error {
 	if _, err := store.GetSession(ctx, tenantID, sessionID); err == nil {
 		return nil
 	} else if !errors.Is(err, runtimestorage.ErrNotFound) {

@@ -2,7 +2,7 @@
 
 本页是 Issue #76 的 docs-first 合约和实现 ledger。目标是让 Gateway 只负责鉴权、
 限流和投递，Worker 只消费不可变执行任务；所有跨节点状态都落在共享的耐久后端。
-本 Issue 不改变已有 `RuntimeStore`/Reply Outbox 状态机，也不把 InMemory 声称为生产
+本 Issue 不改变已有运行时存储能力/Reply Outbox 状态机，也不把 InMemory 声称为生产
 耐久存储。`runtime/queue` 是可注入的异步执行边界；当前同步 Gateway 不会隐式把请求
 改成排队语义，Bootstrap 只在显式提供 Worker 时接管其生命周期。
 
@@ -30,7 +30,8 @@ Gateway 不保存 session 粘性，也不能由请求体选择租户；它把已
 
 ## 执行队列契约
 
-`trpcservice/runtime/queue` 提供协议中立的 `Store` 和 `Worker`：
+`trpcservice/runtime/queue` 提供协议中立的 `Store` 和 `Worker`；耐久回复由
+`trpcservice/outbox` 独立拥有：
 
 - `Enqueue` 以 `(tenant_id, task_id)` 幂等；相同 payload 返回已有任务，冲突返回
   `ErrConflict`。
@@ -60,7 +61,7 @@ leased (lease expired) -> leased  (new fencing token)
 
 ## 迁移、双写与切换
 
-`trpcservice/runtime/migration` 将迁移拆成可重放阶段，每一步都按租户隔离并产生
+`trpcservice/internal/migration` 将迁移拆成可重放阶段，每一步都按租户隔离并产生
 `Report`。阶段状态通过 `StateStore` 持久化；默认的 `MemoryStateStore` 只用于测试和
 dry-run，生产部署必须注入共享实现：
 
@@ -95,10 +96,10 @@ ETag，元数据事务仍由 SQL 负责。迁移工具不会把 secret、原始�
 | --- | --- | --- | --- |
 | 无状态 Gateway/Worker 角色和共享后端边界 | 文档/组合入口 | 本页角色、Bootstrap 可选 Worker | ✅ |
 | Durable queue lease/fencing/retry/shutdown | 代码 | `runtime/queue` 契约与测试 | ✅ |
-| 可恢复的迁移阶段状态 | 代码 | `runtime/migration.StateStore` 与重建测试 | ✅ |
+| 可恢复的迁移阶段状态 | 代码 | `internal/migration.StateStore` 与重建测试 | ✅ |
 | copy、dual-write、catch-up、checksum 工具 | 代码 | 迁移报告和阶段测试 | ✅ |
 | Session/IM 容量与故障测试 | 代码 | 队列/迁移并发、取消测试 | ✅ |
-| migration DDL 与权限 | 代码 | `runtime/queue/postgres/schema.sql`、`0013_execution_queue.up.sql` 和 migration 测试 | ✅ |
+| migration DDL 与权限 | 代码 | `0013_execution_queue.up.sql` 和 migration 测试 | ✅ |
 
 完成代码阶段后，本表与 PR 描述同步；未实现的生产 queue/migration provider、
 分布式锁和压测环境不会被标记为已交付。

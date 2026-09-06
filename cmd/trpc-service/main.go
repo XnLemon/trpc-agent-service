@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/migrations"
 	"github.com/XnLemon/trpc-agent-service/trpcservice"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
@@ -58,8 +59,8 @@ type demoOptions struct {
 
 var (
 	openInitDatabase     = postgres.Open
-	applyInitMigrations  = bootstrap.ApplyPostgresMigrations
-	verifyInitMigrations = bootstrap.VerifyPostgresMigrations
+	applyInitMigrations  = migrations.Apply
+	verifyInitMigrations = migrations.Verify
 	initializeDemo       = bootstrap.InitializeDemo
 	writeDemoResult      = bootstrap.WriteDemoResult
 )

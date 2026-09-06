@@ -9,35 +9,20 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
-	agentmysql "github.com/XnLemon/trpc-agent-service/trpcservice/app/mysql"
-	agentpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
-	auditpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/audit/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
-	backendmysql "github.com/XnLemon/trpc-agent-service/trpcservice/backend/mysql"
-	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
-	channelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/channels/mysql"
-	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
-	modelprofilemysql "github.com/XnLemon/trpc-agent-service/trpcservice/model/mysql"
-	modelprofilepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
-	runtimebudgetpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget/postgres"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
-	runtimequeuepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
-	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	runtimestorageredis "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
-	sharedschema "github.com/XnLemon/trpc-agent-service/trpcservice/schema"
-	commonpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/schema/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
-	tenantmysql "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/mysql"
-	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
@@ -114,83 +99,17 @@ const (
 var (
 	openEnvironmentDatabase                         = postgres.Open
 	openMySQLEnvironmentDatabase                    = mysql.Open
-	applyEnvironmentMigrations                      = applyPostgresEnvironmentMigrations
-	applyMySQLEnvironmentMigrations                 = applyMySQLEnvironmentMigrationsWithModules
-	verifyEnvironmentMigrations                     = verifyPostgresEnvironmentMigrations
-	verifyMySQLEnvironmentMigrations                = verifyMySQLEnvironmentMigrationsWithModules
+	applyEnvironmentMigrations                      = migrations.Apply
+	applyMySQLEnvironmentMigrations                 = migrations.ApplyMySQL
+	verifyEnvironmentMigrations                     = migrations.Verify
+	verifyMySQLEnvironmentMigrations                = migrations.VerifyMySQL
 	newEnvironmentRuntimeStore                      = environmentRuntimeStore
 	newEnvironmentRedisRuntimeStore                 = environmentRedisRuntimeStore
-	newEnvironmentInMemoryFallback                  = func() runtimestorage.RuntimeStore { return runtimestorageinmemory.New() }
+	newEnvironmentInMemoryFallback                  = func() environmentStorage { return runtimestorageinmemory.New() }
 	newEnvironmentS3Store            s3StoreFactory = newEnvironmentS3StoreFromConfig
 	environmentWeComOwnerFunc                       = environmentWeComOwner
 	newEnvironmentWeComWorker                       = outbox.New
 )
-
-// ApplyPostgresMigrations initializes all package-owned PostgreSQL schemas and
-// then applies the cross-package behavior migrations. It is exported for the
-// init/demo commands and for operators that bootstrap a database explicitly.
-func ApplyPostgresMigrations(ctx context.Context, db *sql.DB) error {
-	return applyPostgresEnvironmentMigrations(ctx, db)
-}
-
-// VerifyPostgresMigrations verifies both package-owned PostgreSQL schemas and
-// the cross-package migration history.
-func VerifyPostgresMigrations(ctx context.Context, db *sql.DB) error {
-	return verifyPostgresEnvironmentMigrations(ctx, db)
-}
-
-// ApplyMySQLMigrations initializes all package-owned MySQL schemas and then
-// applies the cross-package behavior migrations with the migration account.
-func ApplyMySQLMigrations(ctx context.Context, db *sql.DB) error {
-	return applyMySQLEnvironmentMigrationsWithModules(ctx, db)
-}
-
-// VerifyMySQLMigrations verifies both package-owned MySQL schemas and the
-// cross-package migration history.
-func VerifyMySQLMigrations(ctx context.Context, db *sql.DB) error {
-	return verifyMySQLEnvironmentMigrationsWithModules(ctx, db)
-}
-
-func postgresEnvironmentSchemaModules() []sharedschema.Module {
-	return []sharedschema.Module{
-		commonpostgres.SchemaModule(),
-		tenantpostgres.SchemaModule(),
-		modelprofilepostgres.SchemaModule(),
-		agentpostgres.SchemaModule(),
-		backendpostgres.SchemaModule(),
-		channelpostgres.SchemaModule(),
-		runtimestoragepostgres.SchemaModule(),
-		runtimequeuepostgres.SchemaModule(),
-		auditpostgres.SchemaModule(),
-		runtimebudgetpostgres.SchemaModule(),
-	}
-}
-
-func mysqlEnvironmentSchemaModules() []sharedschema.Module {
-	return []sharedschema.Module{
-		tenantmysql.SchemaModule(),
-		modelprofilemysql.SchemaModule(),
-		agentmysql.SchemaModule(),
-		backendmysql.SchemaModule(),
-		channelmysql.SchemaModule(),
-	}
-}
-
-func applyPostgresEnvironmentMigrations(ctx context.Context, db *sql.DB) error {
-	return migrations.Apply(ctx, db, postgresEnvironmentSchemaModules()...)
-}
-
-func verifyPostgresEnvironmentMigrations(ctx context.Context, db *sql.DB) error {
-	return migrations.Verify(ctx, db, postgresEnvironmentSchemaModules()...)
-}
-
-func applyMySQLEnvironmentMigrationsWithModules(ctx context.Context, db *sql.DB) error {
-	return migrations.ApplyMySQL(ctx, db, mysqlEnvironmentSchemaModules()...)
-}
-
-func verifyMySQLEnvironmentMigrationsWithModules(ctx context.Context, db *sql.DB) error {
-	return migrations.VerifyMySQL(ctx, db, mysqlEnvironmentSchemaModules()...)
-}
 
 type s3StoreFactory func(context.Context, string, backend.CapabilityBinding, modelprofile.SecretValue) (environmentS3Store, error)
 
@@ -255,9 +174,20 @@ type environmentWeComAIBotConfig struct {
 // store serves ingress and outbox processing; provider stores serve Backend
 // Profile capability materialization.
 type environmentRuntimeStores struct {
-	primary   runtimestorage.RuntimeStore
-	providers map[string]runtimestorage.RuntimeStore
-	owned     []runtimestorage.RuntimeStore
+	primary   environmentStorage
+	providers map[string]environmentStorage
+	owned     []environmentStorage
+}
+
+// environmentStorage is the private composition shape used while Bootstrap
+// builds runtime providers. It is deliberately not exported from runtime
+// storage: callers receive the narrow capability interfaces they need.
+type environmentStorage interface {
+	sessionstorage.SessionStateStore
+	sessionstorage.EventHistoryStore
+	runtimestorage.MessageStore
+	runtimestorage.ReplyStore
+	Close() error
 }
 
 func (stores environmentRuntimeStores) Close() error {
@@ -270,7 +200,7 @@ func (stores environmentRuntimeStores) Close() error {
 	return errors.Join(errs...)
 }
 
-func environmentPrimaryRuntimeCapabilities(runtimeStore runtimestorage.RuntimeStore) (runtimestorage.ReplyBatchEnqueuer, attachment.Reader, runtimestorage.AttachmentStore, error) {
+func environmentPrimaryRuntimeCapabilities(runtimeStore environmentStorage) (runtimestorage.ReplyBatchEnqueuer, attachment.Reader, runtimestorage.AttachmentStore, error) {
 	replyBatchStore, ok := runtimeStore.(runtimestorage.ReplyBatchEnqueuer)
 	if !ok {
 		return nil, nil, nil, fmt.Errorf("%w: runtime storage does not support atomic reply batches", ErrInvalidConfig)
@@ -356,6 +286,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	replyStore, messageStore, deliveryStore := environmentPrimaryDeliveryCapabilities(runtimeStore)
 	tenantRepo, appRepo, channelRepo, auditWriter, err := environmentRepositories(config, db)
 	if err != nil {
 		_ = delegateSessions.Close()
@@ -366,7 +297,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	auditWriter = metrics.WrapAuditWriter(auditWriter, config.telemetry)
 	wecomFactory, wecomProvider, err := environmentWeComComponents(environmentWeComDependencies{
 		config: config, channels: channelRepo, tenants: tenantRepo, apps: appRepo,
-		runtime: runtimeStore, auditWriter: auditWriter,
+		attachments: attachmentStore, auditWriter: auditWriter,
 	})
 	if err != nil {
 		_ = delegateSessions.Close()
@@ -391,7 +322,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		return nil, fmt.Errorf("%w: wecom ai bot components: %v", ErrInvalidConfig, err)
 	}
 	workerFactory := environmentOutboxWorkerFactory(environmentOutboxWorkerDependencies{
-		config: config, runtime: runtimeStore, auditWriter: auditWriter,
+		config: config, replyStore: replyStore, messageStore: messageStore, deliveryStore: deliveryStore, auditWriter: auditWriter,
 		legacy: wecomProvider, aiBotBindings: aiBotBindingIDs,
 	})
 	storageFactory, err := storagefactory.NewRegistryStorageFactory(backendRegistry, secretRegistry)
@@ -420,7 +351,6 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		ReplyBatchStore:     replyBatchStore,
 		Attachments:         attachments,
 		AttachmentStore:     attachmentStore,
-		RuntimeStore:        runtimeStore,
 		RuntimeTenantID:     "",
 		Authenticator:       authenticator,
 		AdminAuthenticator:  adminAuthenticator,
@@ -430,7 +360,8 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		OutboxPollInterval:  time.Second,
 		AuditWriter:         auditWriter,
 		Ping: func(pingContext context.Context) error {
-			return environmentPing(pingContext, config.driver, db, runtimeStore)
+			pinger, _ := runtimeStore.(interface{ Ping(context.Context) error })
+			return environmentPing(pingContext, config.driver, db, pinger)
 		},
 		Migrate:          applyMigrations,
 		VerifyMigrations: verifyMigrations,

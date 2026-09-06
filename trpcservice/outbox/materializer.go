@@ -31,13 +31,7 @@ type Materializer struct {
 
 // MaterializerConfig controls durable reply segmentation.
 type MaterializerConfig struct {
-	// Store is retained for compatibility with callers that provide the
-	// historical RuntimeStore aggregate.
-	//
-	// Deprecated: use BatchStore.
-	Store runtimestorage.RuntimeStore
-	// BatchStore is the narrow reply materialization capability preferred by new
-	// callers. When omitted, NewMaterializer derives it from Store.
+	// BatchStore is the reply materialization capability owned by the outbox.
 	BatchStore    runtimestorage.ReplyBatchEnqueuer
 	SegmentSize   int
 	Observability observability.Provider
@@ -69,12 +63,8 @@ type ReplySegment struct {
 
 // NewMaterializer creates a reply materializer with a default segment size.
 func NewMaterializer(config MaterializerConfig) (*Materializer, error) {
-	if config.Store == nil && config.BatchStore == nil {
+	if config.BatchStore == nil {
 		return nil, ErrInvalid
-	}
-	batchStore := config.BatchStore
-	if batchStore == nil {
-		batchStore, _ = config.Store.(runtimestorage.ReplyBatchEnqueuer)
 	}
 	if config.SegmentSize <= 0 {
 		config.SegmentSize = defaultSegmentRunes
@@ -85,7 +75,7 @@ func NewMaterializer(config MaterializerConfig) (*Materializer, error) {
 	if config.Backend == "" {
 		config.Backend = "other"
 	}
-	return &Materializer{store: batchStore, segmentSize: config.SegmentSize, telemetry: config.Observability, metrics: metrics.New(config.Observability), backend: config.Backend}, nil
+	return &Materializer{store: config.BatchStore, segmentSize: config.SegmentSize, telemetry: config.Observability, metrics: metrics.New(config.Observability), backend: config.Backend}, nil
 }
 
 // Materialize writes all segments under the stable reply identity. A repeated

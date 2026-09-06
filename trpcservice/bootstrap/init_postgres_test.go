@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/migrations"
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 )
 
@@ -102,10 +103,10 @@ func openPostgresDemoTestDB(t *testing.T) (context.Context, *sql.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := ApplyPostgresMigrations(ctx, db); err != nil {
+	if err := migrations.Apply(ctx, db); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyPostgresMigrations(ctx, db); err != nil {
+	if err := migrations.Verify(ctx, db); err != nil {
 		t.Fatal(err)
 	}
 	return ctx, db
@@ -144,10 +145,10 @@ func openPostgresInitTestDB(t *testing.T) (context.Context, *sql.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if err := ApplyPostgresMigrations(ctx, db); err != nil {
+	if err := migrations.Apply(ctx, db); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyPostgresMigrations(ctx, db); err != nil {
+	if err := migrations.Verify(ctx, db); err != nil {
 		t.Fatal(err)
 	}
 	if !isEmptyInitDatabase(t, ctx, db) {

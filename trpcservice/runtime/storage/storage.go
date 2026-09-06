@@ -109,9 +109,6 @@ const (
 	ReplyDeadLetter = "dead_letter"
 )
 
-// Session is the durable tenant-scoped conversation state.
-type Session = sessionstorage.Session
-
 // MessageEvent is the durable inbound message lifecycle record.
 type MessageEvent struct {
 	TenantID          string
@@ -142,11 +139,6 @@ type MessageEventInput struct {
 	IdempotencyKey    string
 	ReplyTarget       ReplyTarget
 }
-
-// EventPayload is one immutable upstream Runner event retained for durable
-// session recovery. Payload is JSON and must never be included in logs or
-// returned through an unauthorised HTTP surface.
-type EventPayload = sessionstorage.EventPayload
 
 // MessageTransition advances a persisted inbound message through its execution
 // lifecycle. Transitions out of running require the current owner and fence.
@@ -223,14 +215,6 @@ type ReplyTransition struct {
 	ProviderID    string
 }
 
-// SessionStateStore is the tenant-scoped persistence contract for session
-// state. It deliberately excludes message lifecycle and reply delivery.
-type SessionStateStore = sessionstorage.SessionStateStore
-
-// EventHistoryStore is the immutable event-history contract used to recover a
-// session's upstream Runner state.
-type EventHistoryStore = sessionstorage.EventHistoryStore
-
 // MessageStore is the durable inbound message lifecycle contract. It owns
 // idempotency, execution leases, and fenced message transitions.
 type MessageStore interface {
@@ -250,24 +234,10 @@ type ReplyStore interface {
 	TransitionReply(context.Context, ReplyTransition) (ReplyOutbox, error)
 }
 
-// RuntimeStore is the tenant-scoped compatibility aggregate used by the
-// runtime persistence implementations. Consumers should depend on the
-// narrowest capability interface they need.
-//
-// Deprecated: use the narrow capability interfaces such as SessionStateStore,
-// EventHistoryStore, MessageStore, ReplyStore, and ReplyBatchEnqueuer.
-type RuntimeStore interface {
-	SessionStateStore
-	EventHistoryStore
-	MessageStore
-	ReplyStore
-	Close() error
-}
-
 // ReplyBatchEnqueuer is the atomic reply-materialization capability. A batch
 // either makes every segment durable or makes none of its new segments visible
-// to a delivery worker. It remains separate from RuntimeStore so existing
-// readers can keep a narrow dependency surface.
+// to a delivery worker. It remains separate from the segment lifecycle
+// capabilities so consumers can keep a narrow dependency surface.
 type ReplyBatchEnqueuer interface {
 	EnqueueReplies(context.Context, []ReplyOutbox) ([]ReplyOutbox, error)
 }

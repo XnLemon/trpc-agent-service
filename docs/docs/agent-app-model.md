@@ -21,8 +21,8 @@ Agent App 是租户创建、发布和路由 Agent 的控制面对象。它必须
 
 本阶段覆盖领域模型、发布/回滚、InMemory Repository 和执行快照契约；不实现 Gateway、
 Worker、Admin HTTP API、具体模型客户端、Secret Manager 或跨节点缓存。Issue #37 的
-`trpcservice/app/postgres/schema.sql` 持有本页表 DDL，`0001`/`0002` 行为 migration
-提供跨包约束和受控写入口；SQL Repository 和运行时装配仍由该 Issue 的代码阶段实现。
+`migrations/0001_control_plane.up.sql` 复用本页 DDL，`0002` 提供受控写入口；SQL Repository
+和运行时装配仍由该 Issue 的代码阶段实现。
 
 ## 核心决策
 

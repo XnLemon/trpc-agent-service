@@ -134,15 +134,6 @@ type Tool struct {
 	state       StateStore
 }
 
-// NewTool validates migration adapters and creates a Tool with process-local
-// state. It is retained for tests and dry-runs; production callers should use
-// NewToolWithStateStore with shared durable state.
-//
-// Deprecated: use NewToolWithStateStore for a restart-safe migration.
-func NewTool(source Source, destination Destination, router Router) (*Tool, error) {
-	return NewToolWithStateStore(source, destination, router, NewMemoryStateStore())
-}
-
 // NewToolWithStateStore creates a migration Tool with caller-owned durable
 // phase state. New production integrations should use this constructor with a
 // shared StateStore so another process can resume after a restart.

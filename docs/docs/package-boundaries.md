@@ -42,8 +42,8 @@ bootstrap 负责把 app、agent、runtime、storage 和 Gateway 的具体实现�
 | `trpcservice/runtime/model` | SecretResolver、ModelProviderRegistry 和 ModelFactory 的运行时物化 | Model Profile 持久化、配置生命周期和带凭据的计划状态 |
 | `trpcservice/runtime/storage` | 租户范围内的 Session、Event、Memory、Artifact 等能力契约及其后端适配 | 选择执行租户、解析 Plan、驱动 Runner、回复发送策略 |
 | `trpcservice/runtime/storage/factory` | Backend ProviderRegistry、StorageFactory、CapabilitySet 及 capability 生命周期 | Backend Profile 领域校验和持久化 |
-| `trpcservice/runtime/outbox` | 回复物化、发送、重试和死信边界 | Agent 编排、控制面配置和执行调度 |
-| `trpcservice/runtime/migration` | 后端迁移、双写、校验和切换工具 | 在线执行、Runner 生命周期和请求路由 |
+| `trpcservice/outbox` | 回复物化、发送、重试和死信边界 | Agent 编排、控制面配置和执行调度 |
+| `trpcservice/internal/migration` | 后端迁移、双写、校验和切换工具 | 在线执行、Runner 生命周期和请求路由 |
 | `trpcservice/gateway` | 可信身份建立、协议中立的请求/事件转换、入口幂等和调用 runtime | Agent/Runner 的具体构造、控制面领域变更 |
 | `trpcservice/bootstrap` | 具体 Repository、Provider、Registry、Dispatcher 和 Worker 的组合装配 | 业务领域规则和新的跨层抽象 |
 
@@ -60,17 +60,18 @@ Agent 的实现。
 
 `runtime/storage` 的基础持久化契约已经按能力拆成
 `SessionStateStore`、`EventHistoryStore`、`MessageStore` 和 `ReplyStore`。
-`RuntimeStore` 暂时保留为兼容性组合接口；Bootstrap 和 Gateway 的新生产路径已经
-显式注入自己需要的最窄接口。旧字段只在兼容调用没有提供窄能力时回退。
+存储后端可以在私有的环境 composition 中同时持有多项能力，用于创建后端 provider，
+但 `runtime/storage` 不再导出聚合存储接口。Bootstrap 公共 Config、Gateway 和
+Outbox 都只接受自己需要的最窄接口，不再从聚合存储隐式探测能力。
 
-`runtime/outbox` 的 Worker 现在分别接收 `ReplyStore` 和
+`trpcservice/outbox` 的 Worker 现在分别接收 `ReplyStore` 和
 `MessageStore`：前者拥有回复分片的 claim/transition，后者只负责所有分片
-投递完成后的 inbound message 状态推进。为了兼容旧调用，省略后者时 Worker
-会从 `ReplyStore` 中探测同一个能力；新的组合根应显式注入两个能力。
+投递完成后的 inbound message 状态推进。Worker 不再从一个聚合存储中探测
+隐式能力；组合根必须显式注入两个能力。
 
-`trpcservice/channels/replies` 仅保留为旧导入路径服务的兼容 facade；新的事件
-渲染所有权在 `trpcservice/gateway/replies`。同样，Channel Provider Registry
-的组合实现位于 `trpcservice/channels/provider`，Binding 根包不再承载投递注册表。
+事件渲染所有权在 `trpcservice/gateway/replies`。同样，Channel Provider
+Registry 的组合实现位于 `trpcservice/channels/provider`，Binding 根包不再承载
+投递注册表。
 
 ## 允许的依赖
 
@@ -92,21 +93,20 @@ Agent 的实现。
    `llmagent`、模型 Provider 或 Session 实现。
 5. `runtime/model` 和 `runtime/storage/factory` 负责运行时物化；它们只消费
    `model`/`backend` 的无密钥契约，不把物化实现放回领域包。
-6. `runtime/storage`、`runtime/outbox` 和 `runtime/migration` 是 runtime
-   的子边界。它们可以提供能力给调用方，但不能把调度、认证或控制面
-   生命周期带回存储实现。
+6. `runtime/storage` 是 runtime 的持久化子边界；`trpcservice/outbox` 和
+   `trpcservice/internal/migration` 是服务级的交付/迁移边界。它们可以提供
+   能力给调用方，但不能把调度、认证或控制面生命周期带回存储实现。
 7. `bootstrap` 是具体实现的组合根。新的跨包依赖优先在组合根注入，
    不通过全局变量、隐式 Context 值或跨层反向调用建立。
 8. 新增接口应放在实际消费者所属的包；只有同一契约确实被多个独立
    消费者共享时，才考虑建立中立的能力包。
 
-## 当前过渡性边界
+## 当前边界说明
 
 `trpcservice/agent/sessionstore` 消费
 `trpcservice/storage/session` 提供的中立 Session 持久化契约，把上游
-Session 行为接到租户范围的持久化能力。`runtime/storage` 只为兼容旧导出
-路径保留类型别名，并由具体存储实现这些契约；因此 Session 适配器不再反向
-依赖 runtime 调度或 runtime 存储包。
+Session 行为接到租户范围的持久化能力。具体存储实现直接实现该契约；Session
+适配器不反向依赖 runtime 调度或 runtime 存储包。
 
 同样，`runtime` 当前需要读取 `agent` 的 execution snapshot 和 factory
 input，以便为完整 Plan 建立 Runner 缓存键。这是 runtime 消费 agent 契约，
@@ -135,7 +135,7 @@ agent
   - 绑定租户范围的 Model、Tool、Session 和 Storage 能力
   - 调用上游 Runner，归一化事件和错误，并在取消/终止时有界排空 upstream source
 
-runtime/storage 与 runtime/outbox
+runtime/storage 与 trpcservice/outbox
   - 分别负责持久化能力和回复交付
   - 不拥有 Gateway 的协议输出或 Runner 的生命周期
 ```
@@ -147,9 +147,10 @@ Outbox 负责回复投递资源。Context 始终由调用链显式传递，不�
 
 ## 后续重构规则
 
-- queue 和 migration 都是 runtime 的独立、显式组合边界：Bootstrap 可选地接管
-  `runtime/queue.Worker` 的生命周期；migration 的阶段状态通过 `StateStore` 注入，
-  不再由 Tool 自己保存进程内 map。它们不会被默认塞进同步 Gateway 请求路径。
+- queue 是 runtime 的独立、显式组合边界：Bootstrap 可选地接管
+  `runtime/queue.Worker` 的生命周期。`trpcservice/internal/migration` 的阶段状态
+  通过 `StateStore` 注入，不再由 Tool 自己保存进程内 map；它不会被默认塞进同步
+  Gateway 请求路径，也不属于 runtime 调度包。
 - 移动代码时优先移动所有权和测试，不为了包名创建重复类型或兼容层。
 - 任何跨租户存储能力都必须携带显式 `tenant_id`；字符串前缀不能替代
   授权和数据隔离。

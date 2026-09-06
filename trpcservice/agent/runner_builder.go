@@ -35,8 +35,7 @@ type RunnerConfig struct {
 }
 
 // NewRunnerWithConfig materializes one Runner from an explicit dependency
-// group. It is the preferred constructor for new callers; the legacy
-// positional constructors remain as compatibility wrappers.
+// group.
 func NewRunnerWithConfig(ctx context.Context, config RunnerConfig) (trpcrunner.Runner, error) {
 	if err := validateRunnerConfig(ctx, config); err != nil {
 		return nil, err

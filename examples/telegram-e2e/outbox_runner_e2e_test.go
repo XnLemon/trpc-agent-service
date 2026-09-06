@@ -20,8 +20,8 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
@@ -94,7 +94,7 @@ func runTelegramOutboxScenario(t *testing.T, ctx context.Context, provider outbo
 		t.Fatal(err)
 	}
 	defer func() { _ = registry.Close() }()
-	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: fixture.resolver, Registry: registry, RuntimeStore: store})
+	dispatcher, err := gateway.NewDispatcher(gateway.DispatchConfig{Resolver: fixture.resolver, Registry: registry, SessionStore: store, MessageStore: store, ReplyBatchStore: store, Attachments: store, AttachmentStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func runTelegramOutboxScenario(t *testing.T, ctx context.Context, provider outbo
 	assertTelegramOutboxDispatch(t, dispatchEvents, runner)
 	rows, err := store.ListReplyCandidates(ctx, fixture.target.TenantID)
 	assertTelegramOutboxRows(t, rows, err, runner.reply)
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: provider, TenantID: fixture.target.TenantID, Owner: "telegram-example-e2e", LeaseDuration: 30 * time.Second})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: provider, TenantID: fixture.target.TenantID, Owner: "telegram-example-e2e", LeaseDuration: 30 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func newDurableTelegramFixture(t *testing.T, providerAccountID string) durableTe
 	if err != nil {
 		t.Fatal(err)
 	}
-	planResolver, err := gateway.NewPlanResolver(gateway.PlanResolverConfig{Tenants: tenants, Apps: apps, Models: modelsRepo, Backends: backends, ModelCatalog: modelCatalog, BackendCatalog: backendCatalog})
+	planResolver, err := gateway.NewPlanResolver(runtime.PlanResolverConfig{Tenants: tenants, Apps: apps, Models: modelsRepo, Backends: backends, ModelCatalog: modelCatalog, BackendCatalog: backendCatalog})
 	if err != nil {
 		t.Fatal(err)
 	}

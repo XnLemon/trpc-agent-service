@@ -14,13 +14,11 @@ import (
 	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
-	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	trpcrunner "trpc.group/trpc-go/trpc-agent-go/runner"
-	"trpc.group/trpc-go/trpc-agent-go/session"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -32,87 +30,6 @@ type RunnerInput struct {
 	Agent   LLMAgentFactoryInput
 	Model   modelprofile.ModelFactoryInput
 	Storage backend.StorageFactoryInput
-}
-
-// NewRunner resolves a model from a fixed RunnerInput and assembles the
-// minimum tRPC-Agent-Go LLMAgent/Runner spine. The supplied Session service is
-// borrowed by the returned Runner and remains owned by the caller.
-//
-// Deprecated: use NewRunnerWithConfig. This positional constructor remains as
-// a source-compatible adapter for callers that have not migrated their
-// dependency group yet.
-func NewRunner(
-	ctx context.Context,
-	input RunnerInput,
-	resolver modelprofile.SecretResolver,
-	factory modelprofile.ModelFactory,
-	sessions session.Service,
-	storageFactories ...storagefactory.StorageFactory,
-) (trpcrunner.Runner, error) {
-	return NewRunnerWithObservability(ctx, input, resolver, factory, sessions, nil, storageFactories...)
-}
-
-// NewRunnerWithObservability is NewRunner with provider-neutral model and tool telemetry.
-//
-// Deprecated: use NewRunnerWithConfig. This positional constructor remains as
-// a source-compatible adapter for callers that have not migrated their
-// dependency group yet.
-func NewRunnerWithObservability(
-	ctx context.Context,
-	input RunnerInput,
-	resolver modelprofile.SecretResolver,
-	factory modelprofile.ModelFactory,
-	sessions session.Service,
-	telemetry observability.Provider,
-	storageFactories ...storagefactory.StorageFactory,
-) (trpcrunner.Runner, error) {
-	return NewRunnerWithToolRegistry(ctx, input, resolver, factory, sessions, telemetry, servicetool.DefaultRegistry(), storageFactories...)
-}
-
-// NewRunnerWithToolRegistry is NewRunnerWithObservability with an explicit
-// installed-tool registry. A nil registry uses the built-in platform tools.
-// The returned Runner borrows the registry and never mutates it.
-//
-// Deprecated: use NewRunnerWithConfig. This positional constructor remains as
-// a source-compatible adapter for callers that have not migrated their
-// dependency group yet.
-//
-//nolint:gocyclo // Runner construction validates and wires several independent capability boundaries.
-func NewRunnerWithToolRegistry(
-	ctx context.Context,
-	input RunnerInput,
-	resolver modelprofile.SecretResolver,
-	factory modelprofile.ModelFactory,
-	sessions session.Service,
-	telemetry observability.Provider,
-	toolRegistry *servicetool.Registry,
-	storageFactories ...storagefactory.StorageFactory,
-) (trpcrunner.Runner, error) {
-	if ctx == nil {
-		return nil, errors.New("invalid runner: context is required")
-	}
-	if sessions == nil && len(storageFactories) == 0 {
-		return nil, errors.New("invalid runner: session service is required")
-	}
-	if len(storageFactories) > 1 {
-		return nil, errors.New("invalid runner: multiple storage factories")
-	}
-	if len(storageFactories) == 1 && storageFactories[0] == nil {
-		return nil, errors.New("invalid runner: storage factory is required")
-	}
-	var storageFactory storagefactory.StorageFactory
-	if len(storageFactories) == 1 {
-		storageFactory = storageFactories[0]
-	}
-	return NewRunnerWithConfig(ctx, RunnerConfig{
-		Input:          input,
-		SecretResolver: resolver,
-		ModelFactory:   factory,
-		Sessions:       sessions,
-		Observability:  telemetry,
-		ToolRegistry:   toolRegistry,
-		StorageFactory: storageFactory,
-	})
 }
 
 func llmAgentOptions(input LLMAgentFactoryInput, model trpcmodel.Model, toolSets ...[]trpctool.Tool) []llmagent.Option {

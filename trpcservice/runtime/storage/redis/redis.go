@@ -19,6 +19,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	"github.com/google/uuid"
 	redisclient "github.com/redis/go-redis/v9"
 )
@@ -41,7 +42,7 @@ type Config struct {
 	PoolSize     int
 }
 
-// Store implements RuntimeStore and MemoryStore over Redis.
+// Store implements the tenant-scoped runtime capabilities and MemoryStore over Redis.
 type Store struct {
 	client    redisclient.UniversalClient
 	keyPrefix string
@@ -52,10 +53,10 @@ type Store struct {
 
 type state struct {
 	Version             int                                        `json:"version"`
-	Sessions            map[string]runtimestorage.Session          `json:"sessions,omitempty"`
+	Sessions            map[string]sessionstorage.Session          `json:"sessions,omitempty"`
 	Events              map[string]runtimestorage.MessageEvent     `json:"events,omitempty"`
 	Messages            map[string]string                          `json:"messages,omitempty"`
-	Histories           map[string][]runtimestorage.EventPayload   `json:"histories,omitempty"`
+	Histories           map[string][]sessionstorage.EventPayload   `json:"histories,omitempty"`
 	Replies             map[string]runtimestorage.ReplyOutbox      `json:"replies,omitempty"`
 	Correlations        map[string]runtimestorage.ReplyCorrelation `json:"correlations,omitempty"`
 	Memories            map[string]runtimestorage.MemoryRecord     `json:"memories,omitempty"`
@@ -163,7 +164,7 @@ func (s *Store) key(tenantID string) string {
 }
 
 func emptyState() state {
-	return state{Version: stateVersion, Sessions: map[string]runtimestorage.Session{}, Events: map[string]runtimestorage.MessageEvent{}, Messages: map[string]string{}, Histories: map[string][]runtimestorage.EventPayload{}, Replies: map[string]runtimestorage.ReplyOutbox{}, Correlations: map[string]runtimestorage.ReplyCorrelation{}, Memories: map[string]runtimestorage.MemoryRecord{}, MemoryIndexHandoffs: map[string]int64{}}
+	return state{Version: stateVersion, Sessions: map[string]sessionstorage.Session{}, Events: map[string]runtimestorage.MessageEvent{}, Messages: map[string]string{}, Histories: map[string][]sessionstorage.EventPayload{}, Replies: map[string]runtimestorage.ReplyOutbox{}, Correlations: map[string]runtimestorage.ReplyCorrelation{}, Memories: map[string]runtimestorage.MemoryRecord{}, MemoryIndexHandoffs: map[string]int64{}}
 }
 
 func normalizeState(value state) state {
@@ -171,7 +172,7 @@ func normalizeState(value state) state {
 		value.Version = stateVersion
 	}
 	if value.Sessions == nil {
-		value.Sessions = map[string]runtimestorage.Session{}
+		value.Sessions = map[string]sessionstorage.Session{}
 	}
 	if value.Events == nil {
 		value.Events = map[string]runtimestorage.MessageEvent{}
@@ -180,7 +181,7 @@ func normalizeState(value state) state {
 		value.Messages = map[string]string{}
 	}
 	if value.Histories == nil {
-		value.Histories = map[string][]runtimestorage.EventPayload{}
+		value.Histories = map[string][]sessionstorage.EventPayload{}
 	}
 	if value.Replies == nil {
 		value.Replies = map[string]runtimestorage.ReplyOutbox{}
@@ -319,7 +320,7 @@ func cloneMap(input map[string]any) map[string]any {
 	return output
 }
 
-func cloneSession(v runtimestorage.Session) runtimestorage.Session {
+func cloneSession(v sessionstorage.Session) sessionstorage.Session {
 	v.State = cloneMap(v.State)
 	return v
 }
@@ -330,7 +331,7 @@ func cloneEvent(v runtimestorage.MessageEvent) runtimestorage.MessageEvent {
 	}
 	return v
 }
-func clonePayload(v runtimestorage.EventPayload) runtimestorage.EventPayload {
+func clonePayload(v sessionstorage.EventPayload) sessionstorage.EventPayload {
 	v.Payload = append([]byte(nil), v.Payload...)
 	return v
 }
@@ -378,33 +379,33 @@ func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID strin
 }
 
 // GetSession returns one tenant-scoped session.
-func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (runtimestorage.Session, error) {
+func (s *Store) GetSession(ctx context.Context, tenantID, sessionID string) (sessionstorage.Session, error) {
 	if err := s.check(ctx); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	if runtimestorage.ValidateSession(tenantID, sessionID) != nil {
-		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+		return sessionstorage.Session{}, runtimestorage.ErrInvalid
 	}
 	value, err := s.load(ctx, tenantID)
 	if err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	result, ok := value.Sessions[sessionID]
 	if !ok {
-		return runtimestorage.Session{}, runtimestorage.ErrNotFound
+		return sessionstorage.Session{}, runtimestorage.ErrNotFound
 	}
 	return cloneSession(result), nil
 }
 
 // CreateSession creates an active tenant-scoped session.
-func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, stateValue map[string]any) (runtimestorage.Session, error) {
+func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, stateValue map[string]any) (sessionstorage.Session, error) {
 	if err := s.check(ctx); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	if runtimestorage.ValidateSession(tenantID, sessionID) != nil || (stateValue != nil && cloneMap(stateValue) == nil) {
-		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+		return sessionstorage.Session{}, runtimestorage.ErrInvalid
 	}
-	result := runtimestorage.Session{TenantID: tenantID, SessionID: sessionID, Status: runtimestorage.SessionActive, Version: 1, State: cloneMap(stateValue), CreatedAt: time.Now().UTC()}
+	result := sessionstorage.Session{TenantID: tenantID, SessionID: sessionID, Status: runtimestorage.SessionActive, Version: 1, State: cloneMap(stateValue), CreatedAt: time.Now().UTC()}
 	result.UpdatedAt = result.CreatedAt
 	err := s.mutate(ctx, tenantID, func(value *state) error {
 		if _, ok := value.Sessions[sessionID]; ok {
@@ -414,20 +415,20 @@ func (s *Store) CreateSession(ctx context.Context, tenantID, sessionID string, s
 		return nil
 	})
 	if err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	return cloneSession(result), nil
 }
 
 // UpdateSessionState applies an optimistic-concurrency session update.
-func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, stateValue map[string]any) (runtimestorage.Session, error) {
+func (s *Store) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, stateValue map[string]any) (sessionstorage.Session, error) {
 	if err := s.check(ctx); err != nil {
-		return runtimestorage.Session{}, err
+		return sessionstorage.Session{}, err
 	}
 	if runtimestorage.ValidateSession(tenantID, sessionID) != nil || (stateValue != nil && cloneMap(stateValue) == nil) {
-		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+		return sessionstorage.Session{}, runtimestorage.ErrInvalid
 	}
-	var result runtimestorage.Session
+	var result sessionstorage.Session
 	err := s.mutate(ctx, tenantID, func(value *state) error {
 		current, ok := value.Sessions[sessionID]
 		if !ok {
@@ -594,7 +595,7 @@ func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage
 	return result, err
 }
 
-func validatePayload(value runtimestorage.EventPayload) error {
+func validatePayload(value sessionstorage.EventPayload) error {
 	if runtimestorage.ValidateSession(value.TenantID, value.SessionID) != nil || value.EventID == "" || len(value.Payload) == 0 || !json.Valid(value.Payload) {
 		return runtimestorage.ErrInvalid
 	}
@@ -602,14 +603,14 @@ func validatePayload(value runtimestorage.EventPayload) error {
 }
 
 // AppendEventPayload appends or idempotently replays one session event payload.
-func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.EventPayload) (runtimestorage.EventPayload, error) {
+func (s *Store) AppendEventPayload(ctx context.Context, payload sessionstorage.EventPayload) (sessionstorage.EventPayload, error) {
 	if err := s.check(ctx); err != nil {
-		return runtimestorage.EventPayload{}, err
+		return sessionstorage.EventPayload{}, err
 	}
 	if err := validatePayload(payload); err != nil {
-		return runtimestorage.EventPayload{}, err
+		return sessionstorage.EventPayload{}, err
 	}
-	var result runtimestorage.EventPayload
+	var result sessionstorage.EventPayload
 	err := s.mutate(ctx, payload.TenantID, func(value *state) error {
 		if _, ok := value.Sessions[payload.SessionID]; !ok {
 			return runtimestorage.ErrNotFound
@@ -635,7 +636,7 @@ func (s *Store) AppendEventPayload(ctx context.Context, payload runtimestorage.E
 }
 
 // ListEventPayloads returns a session's event history in sequence order.
-func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]runtimestorage.EventPayload, error) {
+func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]sessionstorage.EventPayload, error) {
 	if err := s.check(ctx); err != nil {
 		return nil, err
 	}
@@ -650,7 +651,7 @@ func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID strin
 		return nil, runtimestorage.ErrNotFound
 	}
 	entries := value.Histories[sessionID]
-	result := make([]runtimestorage.EventPayload, len(entries))
+	result := make([]sessionstorage.EventPayload, len(entries))
 	for i, item := range entries {
 		result[i] = clonePayload(item)
 	}
@@ -1166,7 +1167,10 @@ func (s *Store) Close() error {
 	return s.closeErr
 }
 
-var _ runtimestorage.RuntimeStore = (*Store)(nil)
+var _ sessionstorage.SessionStateStore = (*Store)(nil)
+var _ sessionstorage.EventHistoryStore = (*Store)(nil)
+var _ runtimestorage.MessageStore = (*Store)(nil)
+var _ runtimestorage.ReplyStore = (*Store)(nil)
 var _ runtimestorage.MemoryStore = (*Store)(nil)
 var _ runtimestorage.ReplyBatchEnqueuer = (*Store)(nil)
 var _ runtimestorage.ReplyBatchCorrelationEnqueuer = (*Store)(nil)

@@ -8,17 +8,10 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
-	apppostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
-	auditpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/audit/postgres"
-	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
-	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
-	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
-	runtimequeuepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
-	commonpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/schema/postgres"
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
-	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	"github.com/google/uuid"
 )
 
@@ -33,7 +26,7 @@ func TestRuntimeStorePostgreSQLConformanceAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := migrations.Apply(ctx, db, commonpostgres.SchemaModule(), tenantpostgres.SchemaModule(), modelpostgres.SchemaModule(), apppostgres.SchemaModule(), backendpostgres.SchemaModule(), channelpostgres.SchemaModule(), SchemaModule(), runtimequeuepostgres.SchemaModule(), auditpostgres.SchemaModule()); err != nil {
+	if err := migrations.Apply(ctx, db); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -96,7 +89,7 @@ func runtimePostgresSeed(t *testing.T, ctx context.Context, store *Store, tenant
 		t.Fatal(err)
 	}
 	payload := []byte("{\"id\":\"" + eventID + "\",\"done\":true}")
-	if _, err := store.AppendEventPayload(ctx, runtimestorage.EventPayload{TenantID: tenantID, SessionID: sessionID, EventID: "runner-" + eventID, Payload: payload}); err != nil {
+	if _, err := store.AppendEventPayload(ctx, sessionstorage.EventPayload{TenantID: tenantID, SessionID: sessionID, EventID: "runner-" + eventID, Payload: payload}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: tenantID, ReplyID: replyID, EventID: eventID, SegmentIndex: 0, SegmentCount: 1, Payload: "durable reply"}); err != nil {
@@ -152,7 +145,7 @@ func TestRuntimeStorePostgreSQLOutboxWorkerRestartRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := migrations.Apply(ctx, db, commonpostgres.SchemaModule(), tenantpostgres.SchemaModule(), modelpostgres.SchemaModule(), apppostgres.SchemaModule(), backendpostgres.SchemaModule(), channelpostgres.SchemaModule(), SchemaModule(), runtimequeuepostgres.SchemaModule(), auditpostgres.SchemaModule()); err != nil {
+	if err := migrations.Apply(ctx, db); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -176,7 +169,7 @@ func TestRuntimeStorePostgreSQLOutboxWorkerRestartRecovery(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	store = New(db)
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: integrationProvider{id: "provider-restart"}, TenantID: tenantID, Owner: "restart-worker", LeaseDuration: time.Second})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: integrationProvider{id: "provider-restart"}, TenantID: tenantID, Owner: "restart-worker", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,11 +14,12 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/execution"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	"github.com/google/uuid"
@@ -93,16 +94,8 @@ type DispatchConfig struct {
 	Registry      *runtimerunner.RunnerRegistry
 	DrainTimeout  time.Duration
 	Observability observability.Provider
-	// RuntimeStore enables durable inbound claims for verified Channel principals.
-	// API principals remain protected by the HTTP IdempotencyStore. It is kept as
-	// a compatibility aggregate; new callers should provide the narrow fields
-	// below.
-	//
-	// Deprecated: provide SessionStore, MessageStore, and ReplyBatchStore
-	// explicitly.
-	RuntimeStore runtimestorage.RuntimeStore
 	// SessionStore is the session-state capability used by durable dispatch.
-	SessionStore runtimestorage.SessionStateStore
+	SessionStore sessionstorage.SessionStateStore
 	// MessageStore is the inbound message lifecycle capability used by durable
 	// dispatch.
 	MessageStore runtimestorage.MessageStore
@@ -141,32 +134,32 @@ type Dispatcher struct {
 }
 
 type dispatchStore interface {
-	runtimestorage.SessionStateStore
+	sessionstorage.SessionStateStore
 	runtimestorage.MessageStore
 }
 
 type dispatchStoreView struct {
-	sessions runtimestorage.SessionStateStore
+	sessions sessionstorage.SessionStateStore
 	messages runtimestorage.MessageStore
 }
 
-func (store dispatchStoreView) GetSession(ctx context.Context, tenantID, sessionID string) (runtimestorage.Session, error) {
+func (store dispatchStoreView) GetSession(ctx context.Context, tenantID, sessionID string) (sessionstorage.Session, error) {
 	if store.sessions == nil {
-		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+		return sessionstorage.Session{}, runtimestorage.ErrInvalid
 	}
 	return store.sessions.GetSession(ctx, tenantID, sessionID)
 }
 
-func (store dispatchStoreView) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (runtimestorage.Session, error) {
+func (store dispatchStoreView) CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (sessionstorage.Session, error) {
 	if store.sessions == nil {
-		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+		return sessionstorage.Session{}, runtimestorage.ErrInvalid
 	}
 	return store.sessions.CreateSession(ctx, tenantID, sessionID, state)
 }
 
-func (store dispatchStoreView) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (runtimestorage.Session, error) {
+func (store dispatchStoreView) UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (sessionstorage.Session, error) {
 	if store.sessions == nil {
-		return runtimestorage.Session{}, runtimestorage.ErrInvalid
+		return sessionstorage.Session{}, runtimestorage.ErrInvalid
 	}
 	return store.sessions.UpdateSessionState(ctx, tenantID, sessionID, expectedVersion, state)
 }
@@ -240,7 +233,7 @@ type dispatchExecution struct {
 }
 
 type dispatchCapabilities struct {
-	sessions     runtimestorage.SessionStateStore
+	sessions     sessionstorage.SessionStateStore
 	messages     runtimestorage.MessageStore
 	replyBatches runtimestorage.ReplyBatchEnqueuer
 }
@@ -251,60 +244,38 @@ func resolveDispatchCapabilities(config DispatchConfig) dispatchCapabilities {
 		messages:     config.MessageStore,
 		replyBatches: config.ReplyBatchStore,
 	}
-	if config.RuntimeStore == nil {
-		return capabilities
-	}
-	if capabilities.sessions == nil {
-		capabilities.sessions, _ = config.RuntimeStore.(runtimestorage.SessionStateStore)
-	}
-	if capabilities.messages == nil {
-		capabilities.messages, _ = config.RuntimeStore.(runtimestorage.MessageStore)
-	}
-	if capabilities.replyBatches == nil {
-		capabilities.replyBatches, _ = config.RuntimeStore.(runtimestorage.ReplyBatchEnqueuer)
-	}
 	return capabilities
 }
 
 func resolveDispatchAttachments(config DispatchConfig) (attachment.Reader, runtimestorage.AttachmentStore) {
 	reader := config.Attachments
-	if reader == nil {
-		reader, _ = config.RuntimeStore.(attachment.Reader)
-	}
-	store := config.AttachmentStore
-	if store != nil {
-		return reader, store
-	}
-	if value, ok := config.RuntimeStore.(runtimestorage.AttachmentStore); ok {
-		return reader, value
-	}
-	if value, ok := reader.(runtimestorage.AttachmentStore); ok {
-		return reader, value
-	}
-	return reader, nil
+	return reader, config.AttachmentStore
 }
 
-func newDispatchStore(config DispatchConfig, capabilities dispatchCapabilities) dispatchStore {
+func newDispatchStore(capabilities dispatchCapabilities) dispatchStore {
 	if capabilities.sessions != nil && capabilities.messages != nil {
 		return dispatchStoreView{sessions: capabilities.sessions, messages: capabilities.messages}
 	}
-	if config.RuntimeStore == nil {
-		return nil
-	}
-	store, _ := config.RuntimeStore.(dispatchStore)
-	return store
+	return nil
 }
 
 func newDispatchMaterializer(config DispatchConfig, batchStore runtimestorage.ReplyBatchEnqueuer) (*outbox.Materializer, error) {
 	if config.Materializer != nil {
 		return config.Materializer, nil
 	}
-	if batchStore == nil && config.RuntimeStore == nil {
+	if batchStore == nil {
 		return nil, nil
 	}
 	return outbox.NewMaterializer(outbox.MaterializerConfig{
-		Store: config.RuntimeStore, BatchStore: batchStore, Observability: config.Observability,
+		BatchStore: batchStore, Observability: config.Observability,
 	})
+}
+
+func validateDispatchCapabilities(config DispatchConfig, capabilities dispatchCapabilities) error {
+	if config.Materializer == nil && capabilities.sessions != nil && capabilities.messages != nil && capabilities.replyBatches == nil {
+		return fmt.Errorf("%w: durable dispatch requires reply materialization capability", ErrInvalid)
+	}
+	return nil
 }
 
 // NewDispatcher validates the protocol-neutral execution dependencies.
@@ -322,6 +293,9 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 		config.Observability = observability.NewNoopProvider()
 	}
 	capabilities := resolveDispatchCapabilities(config)
+	if err := validateDispatchCapabilities(config, capabilities); err != nil {
+		return nil, err
+	}
 	executor, err := execution.NewCoordinator(execution.Config{
 		Registry: config.Registry, DrainTimeout: config.DrainTimeout, Observability: config.Observability,
 	})
@@ -334,7 +308,7 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Dispatcher{resolver: config.Resolver, executor: executor, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: newDispatchStore(config, capabilities), materializer: materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore, attachments: config.Attachments, attachmentStore: config.AttachmentStore, budget: config.Budget}, nil
+	return &Dispatcher{resolver: config.Resolver, executor: executor, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: newDispatchStore(capabilities), materializer: materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore, attachments: config.Attachments, attachmentStore: config.AttachmentStore, budget: config.Budget}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.

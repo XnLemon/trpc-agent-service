@@ -171,7 +171,11 @@ func newRegistryTestPlan(t *testing.T) runtime.ExecutionPlan {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := runtime.NewExecutionPlan(snapshot, appRoot, &published, modelProfile, modelCatalog, backendProfile, backendCatalog)
+	plan, err := runtime.NewExecutionPlanFromInput(runtime.ExecutionPlanInput{
+		TenantSnapshot: snapshot, AppRoot: appRoot, Revision: &published,
+		ModelProfile: modelProfile, ModelCatalog: modelCatalog,
+		BackendProfile: backendProfile, BackendCatalog: backendCatalog,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

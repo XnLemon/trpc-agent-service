@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/migrations"
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	appmysql "github.com/XnLemon/trpc-agent-service/trpcservice/app/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmysql "github.com/XnLemon/trpc-agent-service/trpcservice/backend/mysql"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/channels/mysql"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -95,11 +95,11 @@ func openMySQLControlPlaneTestDB(t *testing.T, ctx context.Context, dsn, migrati
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := bootstrap.ApplyMySQLMigrations(ctx, migrationDB); err != nil {
+	if err := migrations.ApplyMySQL(ctx, migrationDB); err != nil {
 		_ = migrationDB.Close()
 		t.Fatal(err)
 	}
-	if err := bootstrap.VerifyMySQLMigrations(ctx, migrationDB); err != nil {
+	if err := migrations.VerifyMySQL(ctx, migrationDB); err != nil {
 		_ = migrationDB.Close()
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func createMySQLTestBackend(t *testing.T, ctx context.Context, db *sql.DB, tenan
 
 func createMySQLTestDraft(t *testing.T, ctx context.Context, db *sql.DB, tenantID, profileID, suffix string) (*appmodel.App, *appmodel.Revision) {
 	t.Helper()
-	repo := appmysql.NewRepository(db)
+	repo := appmysql.NewAppRepository(db)
 	appRoot, err := repo.Create(ctx, appmodel.CreateInput{TenantID: tenantID, AppKey: "assistant-" + suffix, DisplayName: "Assistant"})
 	if err != nil {
 		t.Fatal(err)
@@ -235,7 +235,7 @@ func createMySQLTestDraft(t *testing.T, ctx context.Context, db *sql.DB, tenantI
 
 func publishMySQLTestDraft(t *testing.T, ctx context.Context, db *sql.DB, tenantID string, appRoot *appmodel.App, draft *appmodel.Revision, suffix string) (*appmodel.App, *appmodel.Revision) {
 	t.Helper()
-	repo := appmysql.NewRepository(db)
+	repo := appmysql.NewAppRepository(db)
 	publishedApp, publishedRevision, _, err := repo.Publish(ctx, appmodel.PublishInput{
 		TenantID: tenantID, AppID: appRoot.AppID, Revision: draft.Revision, ExpectedAppVersion: appRoot.Version,
 		ExpectedDraftVersion: draft.DraftVersion, TenantActive: true,

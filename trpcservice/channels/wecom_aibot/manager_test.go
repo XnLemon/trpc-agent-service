@@ -14,7 +14,7 @@ import (
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/outbox"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	storage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -215,7 +215,7 @@ func TestProviderReconcilesDurableAcknowledgementAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker, err := outbox.New(outbox.Config{Store: store, Provider: restartedProvider, TenantID: "tenant", Owner: "worker-after-restart", LeaseDuration: time.Second})
+	worker, err := outbox.New(outbox.Config{Store: store, MessageStore: store, Provider: restartedProvider, TenantID: "tenant", Owner: "worker-after-restart", LeaseDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

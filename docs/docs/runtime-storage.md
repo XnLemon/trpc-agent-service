@@ -1,6 +1,6 @@
 # Tenant 运行时持久化契约（Issue #48）
 
-> 本页记录 Issue #48 的通用 RuntimeStore 契约，以及 Issue #108 的 Redis 实现边界。
+> 本页记录 Issue #48 的通用运行时存储能力契约，以及 Issue #108 的 Redis 实现边界。
 > 代码、测试和部署示例只把已经验证的能力标为已实现；未覆盖的外部后端仍属于后续工作。
 
 > 状态补充：预算账本现由 `trpcservice/runtime/budget` 独立持有，PostgreSQL 实现支持执行前
@@ -76,21 +76,22 @@ erDiagram
 
 ## Repository 契约
 
-平台层使用小接口，避免把 PostgreSQL 类型泄漏给 Gateway。规范定义在
-`trpcservice/runtime/storage/storage.go`；下面的接口与当前实现保持一致，新的
-消费者应只依赖自己需要的最窄能力：
+平台层使用小接口，避免把 PostgreSQL 类型泄漏给 Gateway。Session 状态和事件
+历史契约定义在 `trpcservice/storage/session`，runtime 专属的消息和回复契约
+定义在 `trpcservice/runtime/storage/storage.go`；下面的接口与当前实现保持一致，
+新的消费者应只依赖自己需要的最窄能力：
 
 ```go
 type SessionStateStore interface {
-    GetSession(ctx context.Context, tenantID, sessionID string) (Session, error)
-    CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (Session, error)
-    UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (Session, error)
+    GetSession(ctx context.Context, tenantID, sessionID string) (sessionstorage.Session, error)
+    CreateSession(ctx context.Context, tenantID, sessionID string, state map[string]any) (sessionstorage.Session, error)
+    UpdateSessionState(ctx context.Context, tenantID, sessionID string, expectedVersion int64, state map[string]any) (sessionstorage.Session, error)
     DeleteSession(ctx context.Context, tenantID, sessionID string) error
 }
 
 type EventHistoryStore interface {
-    AppendEventPayload(ctx context.Context, payload EventPayload) (EventPayload, error)
-    ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]EventPayload, error)
+    AppendEventPayload(ctx context.Context, payload sessionstorage.EventPayload) (sessionstorage.EventPayload, error)
+    ListEventPayloads(ctx context.Context, tenantID, sessionID string) ([]sessionstorage.EventPayload, error)
 }
 
 type MessageStore interface {
@@ -107,17 +108,10 @@ type ReplyStore interface {
     TransitionReply(ctx context.Context, transition ReplyTransition) (ReplyOutbox, error)
 }
 
-type RuntimeStore interface {
-    SessionStateStore
-    EventHistoryStore
-    MessageStore
-    ReplyStore
-    Close() error
-}
 ```
 
-`RuntimeStore` 是兼容性聚合接口，不是新的消费者默认依赖。原子回复物化、
-correlation 和 provider receipt 分别由 `ReplyBatchEnqueuer`、
+运行时存储不再导出聚合接口。后端实现可以在内部由同一个对象同时提供多项能力，
+但消费者必须只依赖自己需要的最窄接口。原子回复物化、correlation 和 provider receipt 分别由 `ReplyBatchEnqueuer`、
 `ReplyBatchCorrelationEnqueuer`、`ReplyCorrelationStore` 和
 `ReplyReceiptRecorder` 等可选能力表达，也不应被错误地塞回所有消费者的基础
 接口。
@@ -145,7 +139,7 @@ Session adapter 在上游 delegate 恢复后按 history_seq 增量回放，避�
 入站状态为 `received → running → completed → reply_pending → replied`；租约过期进入
 `execution_reconciling`，无法安全对账则进入 `failed`/死信。重复回调在
 `running`、`completed` 或 `replied` 时只返回已有结果，不重新启动 Runner。Gateway 在
-配置了 RuntimeStore 时，会在 verified Channel principal 的 Runner 调用前以
+配置了对应的 MessageStore 时，会在 verified Channel principal 的 Runner 调用前以
 `(tenant_id, binding_id, external_message_id)` 原子 claim；已有 claim 直接返回
 `ErrDuplicateMessage`，因此第二个进程不会获取 Runner。
 
@@ -269,7 +263,7 @@ Manager 注入密码。可选 live conformance/reconnect 测试读取 `REDIS_RUN
 时显式 skip，不把本地 miniredis 测试冒充生产 Redis 证据。
 真实验收测试使用可选的 `POSTGRES_RUNTIME_TEST_DSN`，并要求该 DSN 已有可写的
 `POSTGRES_RUNTIME_TEST_TENANT_ID` 与 `POSTGRES_RUNTIME_TEST_BINDING_ID`；测试会执行
-完整 RuntimeStore 操作、关闭连接、重新打开连接并验证 Session/Event/History/Outbox
+完整运行时存储能力操作、关闭连接、重新打开连接并验证 Session/Event/History/Outbox
 仍可读取。未提供这些变量时测试显式 skip，不得把 skip 记为 live PostgreSQL 证据。
 
 ## Issue ledger
@@ -277,16 +271,16 @@ Manager 注入密码。可选 live conformance/reconnect 测试读取 `REDIS_RUN
 | 项目 | 阶段 | 完成证据 | 状态 |
 | --- | --- | --- | --- |
 | 契约、表关系、状态机和提交顺序文档 | 文档 | 本页与 `data-model.md`/`ops.md` 交叉链接 | ✅ |
-| InMemory/PostgreSQL RuntimeStore 接口 | 1 | Go 接口、错误分类、深拷贝测试 | ✅ |
-| 包级 schema、有序 migration、复合 FK、唯一约束、状态约束和 Session 删除级联 | 2 | `runtime/storage/postgres/schema.sql`、`0003_runtime_storage.up.sql`、`0004_runtime_session_delete_cascade.up.sql`、`0005_runtime_event_history.up.sql` 与 migration 测试 | ✅ |
+| InMemory/PostgreSQL 运行时存储能力接口 | 1 | Go 接口、错误分类、深拷贝测试 | ✅ |
+| 有序 migration、复合 FK、唯一约束、状态约束和 Session 删除级联 | 2 | `0003_runtime_storage.up.sql`、`0004_runtime_session_delete_cascade.up.sql`、`0005_runtime_event_history.up.sql` 与 migration 测试 | ✅ |
 | CAS/event_seq、重复入站和 Outbox fencing | 2 | 并发、乱序、重试、死信测试 | ✅ |
-| Bootstrap 显式 Session capability 与 fail-closed | 3 | 环境配置、RuntimeStore-backed session.Service、重启恢复测试 | ✅ |
+| Bootstrap 显式 Session capability 与 fail-closed | 3 | 环境配置、显式 Session capability-backed session.Service、重启恢复测试 | ✅ |
 | durable Event payload/history 与完整 Event 状态生命周期 | 4 | `runtime_event_history`、fresh delegate replay、状态迁移测试 | ✅ |
 | Outbox worker/reconciliation/provider delivery | 5 | fenced worker、重试/死信/过期 lease 与 provider 测试 | ✅ |
-| Redis RuntimeStore/MemoryStore 与 tenant-scoped bootstrap | Issue #108 | `runtime/storage/redis` miniredis conformance、配置/Catalog 边界、Compose 服务与可选 live reconnect 测试 | ✅* |
+| Redis Session/Memory capability 与 tenant-scoped bootstrap | Issue #108 | `runtime/storage/redis` miniredis conformance、配置/Catalog 边界、Compose 服务与可选 live reconnect 测试 | ✅* |
 | S3 Artifact/Object provider 与 tenant-scoped bootstrap | Issue #113 | `runtime/storage/s3` contract tests、S3 Catalog/Secret/Probe 边界、可选 MinIO live conformance | ✅* |
 | 真实 PostgreSQL/InMemory conformance 与 fresh-process restart | 6 | `POSTGRES_RUNTIME_TEST_DSN` 可选 live suite 与 reopen 证据 | ✅* |
-| verified Channel duplicate Runner suppression | 6 | RuntimeStore claim + 并发 Gateway Runner invocation-count 测试 | ✅ |
+| verified Channel duplicate Runner suppression | 6 | MessageStore claim + 并发 Gateway Runner invocation-count 测试 | ✅ |
 | 租户越权、取消、脱敏和防御性返回 | 1–6 | 双租户 conformance 与错误边界测试 | ✅ |
 | `go test`、race、vet、build、MkDocs strict | 最终 | PR 验证记录与 CI | ✅ |
 

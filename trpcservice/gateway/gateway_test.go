@@ -17,6 +17,7 @@ import (
 	channelsinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
 )
@@ -158,7 +159,7 @@ func TestPlanResolverUsesTenantCanaryRevision(t *testing.T) {
 
 func TestPlanResolverBuildsFixedPlanFromRepositoryInterfaces(t *testing.T) {
 	fixture := newGatewayFixture(t)
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})
@@ -203,7 +204,7 @@ func TestPlanResolverBuildsFixedPlanFromRepositoryInterfaces(t *testing.T) {
 
 func TestPlanResolverResolveAuthenticatedAPIRequiresProofAndResolvesPlan(t *testing.T) {
 	fixture := newGatewayFixture(t)
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})
@@ -234,7 +235,7 @@ func TestPlanResolverResolveAuthenticatedAPIRequiresProofAndResolvesPlan(t *test
 
 func TestPlanResolverPreservesCancellationAndRedactsDependencyFailures(t *testing.T) {
 	fixture := newGatewayFixture(t)
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})
@@ -259,16 +260,16 @@ func TestPlanResolverPreservesCancellationAndRedactsDependencyFailures(t *testin
 }
 
 func TestPlanResolverStopsAfterLateRepositoryCancellation(t *testing.T) {
-	for name, wrap := range map[string]func(gatewayFixture, context.CancelFunc) PlanResolverConfig{
-		"model": func(fixture gatewayFixture, cancel context.CancelFunc) PlanResolverConfig {
-			return PlanResolverConfig{
+	for name, wrap := range map[string]func(gatewayFixture, context.CancelFunc) runtime.PlanResolverConfig{
+		"model": func(fixture gatewayFixture, cancel context.CancelFunc) runtime.PlanResolverConfig {
+			return runtime.PlanResolverConfig{
 				Tenants: fixture.tenants, Apps: fixture.apps,
 				Models:   cancelAfterModelGet{Repository: fixture.models, cancel: cancel},
 				Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 			}
 		},
-		"backend": func(fixture gatewayFixture, cancel context.CancelFunc) PlanResolverConfig {
-			return PlanResolverConfig{
+		"backend": func(fixture gatewayFixture, cancel context.CancelFunc) runtime.PlanResolverConfig {
+			return runtime.PlanResolverConfig{
 				Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models,
 				Backends:     cancelAfterBackendGet{Repository: fixture.backends, cancel: cancel},
 				ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
@@ -589,7 +590,7 @@ func TestInboundMessageAndResolverBoundaryEdges(t *testing.T) {
 		})
 	}
 
-	if _, err := NewPlanResolver(PlanResolverConfig{}); !errors.Is(err, ErrInvalid) {
+	if _, err := NewPlanResolver(runtime.PlanResolverConfig{}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("missing resolver dependencies error = %v", err)
 	}
 	var nilResolver *PlanResolver
@@ -600,7 +601,7 @@ func TestInboundMessageAndResolverBoundaryEdges(t *testing.T) {
 		t.Fatalf("nil resolver error = %v", err)
 	}
 	fixture := newGatewayFixture(t)
-	resolver, err := NewPlanResolver(PlanResolverConfig{
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
 		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
 	})

@@ -334,11 +334,11 @@ func TestEnvironmentRuntimeCapabilityProviderNew(t *testing.T) {
 		t.Fatalf("invalid session dependencies error = %v", err)
 	}
 
-	knowledgeOnly := &environmentKnowledgeOnlyStore{RuntimeStore: store, knowledge: store}
+	knowledgeOnly := &environmentKnowledgeOnlyStore{environmentStorage: store, knowledge: store}
 	if _, err := (environmentRuntimeCapabilityProvider{capability: backend.CapabilityKnowledge, store: knowledgeOnly}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, storagefactory.ErrStorageFactory) {
 		t.Fatalf("missing vector store error = %v", err)
 	}
-	artifactOnly := &environmentArtifactOnlyStore{RuntimeStore: store, artifact: store}
+	artifactOnly := &environmentArtifactOnlyStore{environmentStorage: store, artifact: store}
 	if _, err := (environmentRuntimeCapabilityProvider{capability: backend.CapabilityArtifact, store: artifactOnly}).New(context.Background(), input, backend.CapabilityBinding{}, modelprofile.SecretValue{}); !errors.Is(err, storagefactory.ErrStorageFactory) {
 		t.Fatalf("missing object store error = %v", err)
 	}
@@ -576,7 +576,7 @@ func (store *testS3CapabilityStore) Probe(context.Context) error {
 func (store *testS3CapabilityStore) Close() error { store.closes++; return nil }
 
 type environmentKnowledgeOnlyStore struct {
-	runtimestorage.RuntimeStore
+	environmentStorage
 	knowledge runtimestorage.KnowledgeStore
 }
 
@@ -597,7 +597,7 @@ func (store *environmentKnowledgeOnlyStore) DeleteKnowledge(ctx context.Context,
 }
 
 type environmentArtifactOnlyStore struct {
-	runtimestorage.RuntimeStore
+	environmentStorage
 	artifact runtimestorage.ArtifactStore
 }
 
@@ -792,7 +792,7 @@ func TestEnvironmentRedisCatalogAndRegistryBoundaries(t *testing.T) {
 	t.Cleanup(func() { _ = delegate.Close(); _ = redisStore.Close(); _ = inMemoryStore.Close() })
 	secrets, _, providers, err := environmentRegistriesForStores(config, delegate, environmentRuntimeStores{
 		primary: redisStore,
-		providers: map[string]runtimestorage.RuntimeStore{
+		providers: map[string]environmentStorage{
 			"redis":    redisStore,
 			"inmemory": inMemoryStore,
 		},
@@ -866,7 +866,7 @@ func TestEnvironmentRedisProfilesUseSeparateInMemoryProvider(t *testing.T) {
 	t.Cleanup(func() { _ = delegate.Close(); _ = redisStore.Close(); _ = inMemoryStore.Close() })
 	secrets, _, providers, err := environmentRegistriesForStores(config, delegate, environmentRuntimeStores{
 		primary: redisStore,
-		providers: map[string]runtimestorage.RuntimeStore{
+		providers: map[string]environmentStorage{
 			"redis":    redisStore,
 			"inmemory": inMemoryStore,
 		},
@@ -923,10 +923,10 @@ func TestEnvironmentRedisRuntimeStoresOwnPrimaryAndFallback(t *testing.T) {
 	fallback := &environmentRuntimeStoreSpy{}
 	previousRedis := newEnvironmentRedisRuntimeStore
 	previousFallback := newEnvironmentInMemoryFallback
-	newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (runtimestorage.RuntimeStore, error) {
+	newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (environmentStorage, error) {
 		return primary, nil
 	}
-	newEnvironmentInMemoryFallback = func() runtimestorage.RuntimeStore { return fallback }
+	newEnvironmentInMemoryFallback = func() environmentStorage { return fallback }
 	t.Cleanup(func() {
 		newEnvironmentRedisRuntimeStore = previousRedis
 		newEnvironmentInMemoryFallback = previousFallback
@@ -941,7 +941,7 @@ func TestEnvironmentRedisRuntimeStoresOwnPrimaryAndFallback(t *testing.T) {
 	if err := stores.Close(); err != nil || primary.closed != 1 || fallback.closed != 1 {
 		t.Fatalf("runtime store close = %v, primary closes=%d fallback closes=%d", err, primary.closed, fallback.closed)
 	}
-	if _, err := environmentRuntimeProviders(environmentConfig{runtimeStorage: "redis"}, environmentRuntimeStores{providers: map[string]runtimestorage.RuntimeStore{"redis": primary}}); !errors.Is(err, ErrInvalidConfig) {
+	if _, err := environmentRuntimeProviders(environmentConfig{runtimeStorage: "redis"}, environmentRuntimeStores{providers: map[string]environmentStorage{"redis": primary}}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("missing in-memory fallback = %v", err)
 	}
 	if _, err := environmentRuntimeProviders(environmentConfig{runtimeStorage: "redis"}, environmentRuntimeStores{}); !errors.Is(err, ErrInvalidConfig) {
@@ -967,7 +967,7 @@ func TestEnvironmentRedisRuntimeStoreFailsClosed(t *testing.T) {
 }
 
 type environmentRuntimeStoreSpy struct {
-	runtimestorage.RuntimeStore
+	environmentStorage
 	closed int
 }
 
@@ -976,7 +976,7 @@ func (store *environmentRuntimeStoreSpy) Close() error {
 	return nil
 }
 
-func assertEnvironmentRuntimeStoreIsolation(t *testing.T, redisStore, inMemoryStore runtimestorage.RuntimeStore, tenantA, tenantB, sessionID, memoryID string) {
+func assertEnvironmentRuntimeStoreIsolation(t *testing.T, redisStore, inMemoryStore environmentStorage, tenantA, tenantB, sessionID, memoryID string) {
 	t.Helper()
 	ctx := context.Background()
 	redisSession, err := redisStore.GetSession(ctx, tenantA, sessionID)
@@ -1033,7 +1033,7 @@ func TestNewFromEnvironmentRedisConnectionFailureIsRedacted(t *testing.T) {
 	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
 	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
 	verifyEnvironmentMigrations = func(context.Context, *sql.DB) error { return nil }
-	newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (runtimestorage.RuntimeStore, error) {
+	newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (environmentStorage, error) {
 		return nil, errors.New("dial redis.internal:6379 with password redis-password failed")
 	}
 	_, err = NewFromEnvironment(context.Background())
@@ -1056,7 +1056,7 @@ func TestNewFromEnvironmentRuntimeStoreFailureBoundaries(t *testing.T) {
 			name:           "redis cancellation wins",
 			runtimeStorage: "redis",
 			configureStore: func(cancel context.CancelFunc) {
-				newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (runtimestorage.RuntimeStore, error) {
+				newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (environmentStorage, error) {
 					cancel()
 					return nil, errors.New("redis dial failure")
 				}
@@ -1067,7 +1067,7 @@ func TestNewFromEnvironmentRuntimeStoreFailureBoundaries(t *testing.T) {
 			name:           "non redis preserves source error",
 			runtimeStorage: "inmemory",
 			configureStore: func(context.CancelFunc) {
-				newEnvironmentRuntimeStore = func(string, *sql.DB) (runtimestorage.RuntimeStore, error) {
+				newEnvironmentRuntimeStore = func(string, *sql.DB) (environmentStorage, error) {
 					return nil, errEnvironmentRuntimeStore
 				}
 			},
@@ -1077,7 +1077,7 @@ func TestNewFromEnvironmentRuntimeStoreFailureBoundaries(t *testing.T) {
 			name:           "runtime store lacks reply batches",
 			runtimeStorage: "inmemory",
 			configureStore: func(context.CancelFunc) {
-				newEnvironmentRuntimeStore = func(string, *sql.DB) (runtimestorage.RuntimeStore, error) {
+				newEnvironmentRuntimeStore = func(string, *sql.DB) (environmentStorage, error) {
 					return &environmentRuntimeStoreSpy{}, nil
 				}
 			},
@@ -1152,11 +1152,11 @@ func TestNewFromEnvironmentDoesNotInitializeRedisStoresBeforeMigrationSucceeds(t
 	})
 	openEnvironmentDatabase = func(context.Context, string, postgres.Options) (*sql.DB, error) { return db, nil }
 	applyEnvironmentMigrations = func(context.Context, *sql.DB) error { return errors.New("migration failed") }
-	newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (runtimestorage.RuntimeStore, error) {
+	newEnvironmentRedisRuntimeStore = func(context.Context, environmentConfig) (environmentStorage, error) {
 		primaryCreated++
 		return primary, nil
 	}
-	newEnvironmentInMemoryFallback = func() runtimestorage.RuntimeStore {
+	newEnvironmentInMemoryFallback = func() environmentStorage {
 		fallbackCreated++
 		return fallback
 	}

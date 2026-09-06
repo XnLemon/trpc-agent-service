@@ -85,7 +85,7 @@ Secret value 不进入 Binding、digest、Event、Outbox、日志、trace、错�
 
 - `gateway.InboundMessage` 是 Telegram 与 WeCom 都提交的规范文本和外部身份；
 - `gateway.DispatchService` 是两者共同调用的 Gateway/Runner 入口；
-- `runtime/outbox.Provider` 是两者共同使用的异步回复交付接口；
+- `outbox.Provider` 是两者共同使用的异步回复交付接口；
 - 每个 Adapter 明确自己的 transport 生命周期。Telegram Adapter 拥有 polling 的
   `Run/Close`；WeCom Handler 实现 `http.Handler`，由 HTTP Server 拥有 listener，
   Handler 自己拥有 ACK 后的 bounded execution drain，并由 Runtime 的

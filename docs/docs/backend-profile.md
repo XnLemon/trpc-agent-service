@@ -22,8 +22,7 @@ provider 配置，使 Gateway/Worker 可以固定 Session、Memory、Knowledge�
 
 本阶段不创建 Redis、SQL、向量库、对象存储或审计后端客户端，不引入 tRPC-Agent-Go 依赖，
 不实现 Secret Manager、数据迁移、Gateway、Worker 或跨节点配置缓存。Issue #37 的
-`trpcservice/backend/postgres/schema.sql` 持有本页 DDL，行为 migration 补充跨包约束；
-SQL Repository 和运行时装配另行实现。
+`migrations/0001_control_plane.up.sql` 复用本页 DDL；SQL Repository 和运行时装配另行实现。
 
 ## 核心模型
 
@@ -252,7 +251,7 @@ Factory 函数或任意 `any` 字段。其 `SecretRef` 仍只是引用；后续 
 ## PostgreSQL 目标模型
 
 以下 DDL 描述完整性和事务边界，已由 Issue #37 的
-`trpcservice/backend/postgres/schema.sql` 与行为 migration 落地；本页继续作为领域约束的详细说明。
+`migrations/0001_control_plane.up.sql` 落地；本页继续作为领域约束的详细说明。
 
 ```sql
 -- Match Go strings.TrimSpace/unicode.IsSpace for every boundary field that

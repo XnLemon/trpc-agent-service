@@ -1,14 +1,17 @@
 package migrations
 
 import (
-	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	"os"
 	"strings"
 	"testing"
 )
 
 func TestRuntimeStorageMigrationDefinesTenantScopedInvariants(t *testing.T) {
-	sql := runtimestoragepostgres.SchemaSQL
+	contents, err := os.ReadFile("0003_runtime_storage.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
 	for _, fragment := range []string{
 		"PRIMARY KEY (tenant_id, session_id)",
 		"UNIQUE (tenant_id, session_id, event_seq)",
@@ -46,7 +49,7 @@ func TestRuntimeEventHistoryMigrationIsTenantScopedAndCascades(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sql := runtimestoragepostgres.SchemaSQL + "\n" + string(contents)
+	sql := string(contents)
 	for _, fragment := range []string{
 		"PRIMARY KEY (tenant_id, session_id, event_id)",
 		"UNIQUE (tenant_id, session_id, history_seq)",
@@ -66,7 +69,11 @@ func TestRuntimeEventHistoryMigrationIsTenantScopedAndCascades(t *testing.T) {
 }
 
 func TestRuntimeCapabilityMigrationNamespacesVectors(t *testing.T) {
-	sql := runtimestoragepostgres.SchemaSQL
+	contents, err := os.ReadFile("0012_runtime_capabilities.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
 	for _, fragment := range []string{
 		"source      TEXT NOT NULL DEFAULT 'generic'",
 		"PRIMARY KEY (tenant_id, source, document_id)",
