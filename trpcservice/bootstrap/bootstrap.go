@@ -55,6 +55,8 @@ import (
 	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/plugin"
+	"trpc.group/trpc-go/trpc-agent-go/plugin/identity"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
@@ -441,6 +443,11 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 		Registry: config.Registry, SecretResolver: config.SecretResolver,
 		ModelFactory: config.ModelFactory, Sessions: config.Sessions, StorageFactory: config.StorageFactory,
 		Observability: config.Observability, ToolRegistry: config.ToolRegistry, EnableUsageCallbacks: config.BudgetStore != nil,
+		PluginFactory: func(_ context.Context, _ runtime.ExecutionPlan) ([]plugin.Plugin, error) {
+			return []plugin.Plugin{identity.NewPlugin(identity.ProviderFunc(func(_ context.Context, userID, _ string) (*identity.Identity, error) {
+				return &identity.Identity{UserID: userID}, nil
+			}))}, nil
+		},
 	})
 	if err != nil {
 		return nil, ErrInvalidConfig
