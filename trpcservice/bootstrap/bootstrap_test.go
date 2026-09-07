@@ -419,12 +419,25 @@ func TestBootstrapFailureClosesConstructedGraph(t *testing.T) {
 func TestBootstrapRoutesAdminCacheInvalidationsToRuntimeRegistry(t *testing.T) {
 	config, closeDependencies := testConfig(t)
 	defer closeDependencies()
+	config.AdminAuthenticator, _ = admin.NewStaticAuthenticator("admin-token", []string{"*"})
 	graph, err := New(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = graph.Close() }()
 	const tenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	created, err := config.Tenants.Create(context.Background(), tenant.CreateInput{TenantKey: "admin-cache", DisplayName: "Admin cache"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := httptest.NewRequest(http.MethodPatch, "/admin/v1/tenants/"+created.TenantID, bytes.NewBufferString(`{"expected_version":1,"display_name":"Admin cache updated"}`))
+	update.Header.Set("Authorization", "Bearer admin-token")
+	updateResponse := httptest.NewRecorder()
+	graph.HandlerValue().ServeHTTP(updateResponse, update)
+	if updateResponse.Code != http.StatusOK {
+		t.Fatalf("admin mutation status = %d, body=%s", updateResponse.Code, updateResponse.Body.String())
+	}
+	invalidator := &bootstrapTenantRuntimeInvalidator{}
 	for _, change := range []admin.CacheInvalidation{
 		{TenantID: tenantID, Kind: admin.CacheInvalidationTenant},
 		{TenantID: tenantID, AppID: "app-1", Kind: admin.CacheInvalidationApp},
@@ -432,7 +445,10 @@ func TestBootstrapRoutesAdminCacheInvalidationsToRuntimeRegistry(t *testing.T) {
 		{TenantID: tenantID, ProfileID: "backend-1", Kind: admin.CacheInvalidationBackend},
 		{TenantID: tenantID, BindingID: "binding-1", Kind: admin.CacheInvalidationBinding},
 	} {
-		invalidateRuntimeCache(graph.Registry, nil, change)
+		invalidateRuntimeCache(graph.Registry, invalidator, change)
+	}
+	if invalidator.calls.Load() != 5 || invalidator.tenantID != tenantID {
+		t.Fatalf("tenant runtime invalidations = %d/%q", invalidator.calls.Load(), invalidator.tenantID)
 	}
 }
 
@@ -893,6 +909,32 @@ func TestBootstrapCreatesExecutionWorkerFromQueueStore(t *testing.T) {
 	}
 	if _, err := queue.Claim(context.Background(), "tenant-a", "after-close", time.Second); !errors.Is(err, runtimequeue.ErrClosed) {
 		t.Fatalf("queue after owned close = %v", err)
+	}
+}
+
+func TestBootstrapClosesQueueStoreWhenRuntimeGraphConstructionFails(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{name: "resolver", mutate: func(config *Config) { config.ModelCatalog = nil }},
+		{name: "runner registry", mutate: func(config *Config) { config.ModelFactory = nil }},
+		{name: "dispatcher", mutate: func(config *Config) { config.DrainTimeout = -time.Millisecond }},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			config, closeDependencies := testConfig(t)
+			defer closeDependencies()
+			queue := runtimequeue.NewMemory()
+			config.ExecutionQueueStore = queue
+			test.mutate(&config)
+			if _, err := newRuntimeGraph(config); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("runtime graph error = %v", err)
+			}
+			if _, err := queue.Claim(context.Background(), "tenant-a", "after-failure", time.Second); !errors.Is(err, runtimequeue.ErrClosed) {
+				t.Fatalf("queue after graph failure = %v", err)
+			}
+		})
 	}
 }
 
@@ -1834,6 +1876,21 @@ type testModelFactory struct{}
 func (testModelFactory) New(context.Context, modelprofile.ModelFactoryInput, modelprofile.SecretValue) (trpcmodel.Model, error) {
 	return nil, errors.New("test factory failure")
 }
+
+type bootstrapTenantRuntimeInvalidator struct {
+	calls    atomic.Int32
+	tenantID string
+}
+
+func (*bootstrapTenantRuntimeInvalidator) Ensure(context.Context, string) error { return nil }
+
+func (invalidator *bootstrapTenantRuntimeInvalidator) InvalidateTenant(tenantID string) {
+	invalidator.calls.Add(1)
+	invalidator.tenantID = tenantID
+}
+
+var _ runtimeservice.TenantRuntime = (*bootstrapTenantRuntimeInvalidator)(nil)
+var _ runtimeservice.TenantRuntimeInvalidator = (*bootstrapTenantRuntimeInvalidator)(nil)
 
 type bootstrapNoopDispatcher struct{}
 

@@ -203,6 +203,35 @@ func TestTenantRuntimeRegistryWaitersObserveMaterializationCompletion(t *testing
 	})
 }
 
+func TestTenantRuntimeRegistryReturnsWaiterContextErrorAfterCompletion(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	registry, err := NewTenantRuntimeRegistry(func(context.Context, string) error {
+		close(started)
+		<-release
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerResult := make(chan error, 1)
+	go func() { ownerResult <- registry.Ensure(context.Background(), "tenant-a") }()
+	<-started
+
+	waiterContext := &completionContext{observed: make(chan struct{}, 1)}
+	waiterResult := make(chan error, 1)
+	go func() { waiterResult <- registry.Ensure(waiterContext, "tenant-a") }()
+	<-waiterContext.observed
+	waiterContext.setErr(context.Canceled)
+	close(release)
+	if err := <-ownerResult; err != nil {
+		t.Fatalf("owner completion error = %v", err)
+	}
+	if err := <-waiterResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiter completion context error = %v", err)
+	}
+}
+
 func TestTenantRuntimeRegistryInvalidationRacesWithMaterialization(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -264,4 +293,31 @@ func (ctx observedDoneContext) Done() <-chan struct{} {
 	default:
 	}
 	return ctx.Context.Done()
+}
+
+type completionContext struct {
+	context.Context
+	observed chan struct{}
+	mu       sync.Mutex
+	err      error
+}
+
+func (ctx *completionContext) Done() <-chan struct{} {
+	select {
+	case ctx.observed <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (ctx *completionContext) Err() error {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	return ctx.err
+}
+
+func (ctx *completionContext) setErr(err error) {
+	ctx.mu.Lock()
+	ctx.err = err
+	ctx.mu.Unlock()
 }

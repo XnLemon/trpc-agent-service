@@ -62,6 +62,15 @@ func TestExecutionTaskCodecRejectsMalformedPayloads(t *testing.T) {
 	if _, err := marshalExecutionTask(executionTaskPayload{RequestID: strings.Repeat("x", maxExecutionTaskPayloadSize)}); !errors.Is(err, ErrInvalidExecutionTask) {
 		t.Fatalf("oversized marshal error = %v", err)
 	}
+	if sameExecutionTaskIdentity(validTask, []byte("{")) {
+		t.Fatal("malformed candidate payload matched an existing task identity")
+	}
+	accepted := make(chan struct{}, 1)
+	accepted <- struct{}{}
+	notifyAccepted(accepted)
+	if len(accepted) != 1 {
+		t.Fatalf("notifyAccepted replaced a pending signal: len=%d", len(accepted))
+	}
 }
 
 func TestEnqueueExecutionTaskPreservesAcceptedPayloadAndCancellation(t *testing.T) {
@@ -161,6 +170,34 @@ func TestDispatcherEnqueueLeavesDurableTaskWhenEventPersistenceFails(t *testing.
 	task, err := queue.Get(context.Background(), fixture.tenant.TenantID, store.lastRecordInput.EventID)
 	if err != nil || task.Status != runtimequeue.StatusQueued {
 		t.Fatalf("recoverable task = %+v, err=%v", task, err)
+	}
+}
+
+func TestDispatcherEnqueueAttachmentFailureLeavesDurableEventRecoverable(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	principal, _ := newQueueChannelPrincipal(t, fixture)
+	resolver, err := NewPlanResolver(resolverTestConfig(fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &queueMessageStoreStub{}
+	queue := runtimequeue.NewMemory()
+	t.Cleanup(func() { _ = queue.Close() })
+	dispatcher := &Dispatcher{resolver: resolver, runtimeStore: store, executionQueue: queue}
+	request := DispatchRequest{Principal: principal, Message: InboundMessage{
+		Content: "caption", ContentType: ContentTypeMedia, ExternalMessageID: "attachment-external", ExternalUserID: "user",
+		ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer",
+		Attachments: []attachment.Reference{testAttachmentReference(t, attachment.KindImage, "image/png", []byte("image"))},
+	}}
+	if _, err := dispatcher.Enqueue(context.Background(), request); !errors.Is(err, ErrExecution) {
+		t.Fatalf("attachment admission error = %v", err)
+	}
+	if len(store.transitions) != 1 || store.transitions[0].To != runtimestorage.EventFailed {
+		t.Fatalf("attachment admission transitions = %+v", store.transitions)
+	}
+	task, err := queue.Get(context.Background(), principal.TenantID(), store.lastRecordInput.EventID)
+	if err != nil || task.Status != runtimequeue.StatusQueued {
+		t.Fatalf("recoverable attachment task = %+v, err=%v", task, err)
 	}
 }
 
@@ -354,6 +391,10 @@ func TestHandleExecutionTaskRejectsStaleAndUnavailableState(t *testing.T) {
 	if err := dispatcher.HandleExecutionTask(context.Background(), task); !errors.Is(err, storageErr) || !isRetryableQueueError(err) {
 		t.Fatalf("storage error = %v", err)
 	}
+	store.getMessageErr = context.Canceled
+	if err := dispatcher.HandleExecutionTask(context.Background(), task); !errors.Is(err, context.Canceled) {
+		t.Fatalf("context cancellation from event store = %v", err)
+	}
 	store.getMessageErr = nil
 	store.event.BindingID = "other-binding"
 	if err := dispatcher.HandleExecutionTask(context.Background(), task); !errors.Is(err, ErrInvalidExecutionTask) {
@@ -389,6 +430,18 @@ func TestHandleExecutionTaskRejectsStaleAndUnavailableState(t *testing.T) {
 	store.transitionErr = errors.New("claim unavailable")
 	if err := dispatcher.HandleExecutionTask(context.Background(), task); err == nil || !strings.Contains(err.Error(), "claim unavailable") {
 		t.Fatalf("claim failure = %v", err)
+	}
+
+	if err := (&Dispatcher{runtimeStore: store}).rejectExecutionTask(context.Background(), payload, context.Canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled task rejection = %v", err)
+	}
+	store.getMessageErr = runtimestorage.ErrNotFound
+	if err := (&Dispatcher{runtimeStore: store}).rejectExecutionTask(context.Background(), payload, ErrInvalidExecutionTask); !errors.Is(err, ErrInvalidExecutionTask) {
+		t.Fatalf("missing task rejection = %v", err)
+	}
+	store.getMessageErr = errors.New("rejection lookup failed")
+	if err := (&Dispatcher{runtimeStore: store}).rejectExecutionTask(context.Background(), payload, ErrInvalidExecutionTask); !isRetryableQueueError(err) {
+		t.Fatalf("lookup task rejection = %v", err)
 	}
 }
 
