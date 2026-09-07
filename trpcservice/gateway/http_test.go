@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
@@ -26,6 +27,29 @@ type httpDispatchStub struct {
 	calls     int
 	last      DispatchRequest
 	blockCall bool
+}
+
+func TestHTTPBudgetRejectionsAreRedacted(t *testing.T) {
+	for _, test := range []struct {
+		err     error
+		status  int
+		message string
+	}{
+		{budget.ErrExceeded, http.StatusTooManyRequests, "budget exceeded"},
+		{budget.ErrCostUnavailable, http.StatusServiceUnavailable, "cost configuration unavailable"},
+		{budget.ErrUnavailable, http.StatusServiceUnavailable, "budget unavailable"},
+	} {
+		t.Run(test.message, func(t *testing.T) {
+			stub := &httpDispatchStub{err: errors.Join(test.err, errors.New("private ledger detail"))}
+			handler := newHTTPTestHandler(t, stub, func() bool { return true })
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, newHTTPChatRequest(http.MethodPost, "/v1/chat", validHTTPChatBody("budget-rejection")))
+			body := decodeHTTPBody(t, recorder)
+			if recorder.Code != test.status || body["error"] != test.message {
+				t.Fatalf("HTTP status=%d body=%v", recorder.Code, body)
+			}
+		})
+	}
 }
 
 func TestHTTPHandlerAdminRouteBoundary(t *testing.T) {

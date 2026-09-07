@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // RevisionState distinguishes mutable draft content from immutable published
@@ -26,15 +27,18 @@ const (
 type Kind string
 
 const (
-	// KindLLM is the only executable kind supported by schema version 1.
+	// KindLLM identifies a single LLMAgent definition.
 	KindLLM Kind = "llm"
+	// KindChain identifies a sequential composition of LLMAgent steps.
+	KindChain Kind = "chain"
 )
 
 const (
-	// SchemaVersionV1 is the initial LLMAgent configuration schema.
+	// SchemaVersionV1 is the initial LLM and Chain configuration schema.
 	SchemaVersionV1     = 1
 	maxInstructionRunes = 65536
 	maxReferenceRunes   = 256
+	maxChainSteps       = 32
 )
 
 // GenerationConfig is the provider-neutral subset materialized by the first
@@ -43,6 +47,31 @@ type GenerationConfig struct {
 	Temperature     *float64 `json:"temperature,omitempty"`
 	TopP            *float64 `json:"top_p,omitempty"`
 	MaxOutputTokens *int     `json:"max_output_tokens,omitempty"`
+}
+
+// ChainStep is one tenant-authored LLMAgent step in a sequential Chain.
+// Every step uses the parent Revision's Model Profile and Tool allowlist.
+type ChainStep struct {
+	Name              string `json:"name"`
+	Instruction       string `json:"instruction"`
+	GlobalInstruction string `json:"global_instruction,omitempty"`
+}
+
+// ChainConfiguration describes the ordered child Agents of a Chain Revision.
+// The list is immutable after publication and bounded to keep execution and
+// budget estimates predictable.
+type ChainConfiguration struct {
+	Steps []ChainStep `json:"steps"`
+}
+
+// Clone returns a defensive copy of the Chain configuration.
+func (configuration *ChainConfiguration) Clone() *ChainConfiguration {
+	if configuration == nil {
+		return nil
+	}
+	clone := *configuration
+	clone.Steps = append([]ChainStep(nil), configuration.Steps...)
+	return &clone
 }
 
 // RuntimePolicy contains bounded execution controls captured by a published
@@ -80,6 +109,7 @@ type DraftConfiguration struct {
 	Generation        GenerationConfig
 	Runtime           RuntimePolicy
 	Tools             []ToolAuthorization
+	Chain             *ChainConfiguration
 }
 
 // Revision is one tenant-scoped version of an Agent App definition.
@@ -99,6 +129,7 @@ type Revision struct {
 	Generation        GenerationConfig
 	Runtime           RuntimePolicy
 	Tools             []ToolAuthorization
+	Chain             *ChainConfiguration
 	ContentDigest     string
 	PublishedAt       *time.Time
 	CreatedAt         time.Time
@@ -158,6 +189,7 @@ func NewRevision(input CreateRevisionInput) (*Revision, error) {
 		Generation:        cloneGenerationConfig(configuration.Generation),
 		Runtime:           configuration.Runtime,
 		Tools:             cloneTools(configuration.Tools),
+		Chain:             configuration.Chain.Clone(),
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
@@ -169,6 +201,7 @@ func (r Revision) Clone() Revision {
 	clone := r
 	clone.Generation = cloneGenerationConfig(r.Generation)
 	clone.Tools = cloneTools(r.Tools)
+	clone.Chain = r.Chain.Clone()
 	clone.PublishedAt = cloneTime(r.PublishedAt)
 	return clone
 }
@@ -183,6 +216,7 @@ func (r Revision) Configuration() DraftConfiguration {
 		Generation:        cloneGenerationConfig(r.Generation),
 		Runtime:           r.Runtime,
 		Tools:             cloneTools(r.Tools),
+		Chain:             r.Chain.Clone(),
 	}
 }
 
@@ -280,6 +314,7 @@ func (r Revision) ComputeContentDigest() (string, error) {
 		Generation        GenerationConfig    `json:"generation"`
 		Runtime           RuntimePolicy       `json:"runtime"`
 		Tools             []ToolAuthorization `json:"tools"`
+		Chain             *ChainConfiguration `json:"chain,omitempty"`
 	}{
 		Kind:              r.Kind,
 		SchemaVersion:     r.SchemaVersion,
@@ -290,6 +325,7 @@ func (r Revision) ComputeContentDigest() (string, error) {
 		Generation:        cloneGenerationConfig(configuration.Generation),
 		Runtime:           configuration.Runtime,
 		Tools:             cloneTools(configuration.Tools),
+		Chain:             configuration.Chain.Clone(),
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -339,11 +375,28 @@ func normalizeDraftConfiguration(configuration DraftConfiguration) (DraftConfigu
 		return DraftConfiguration{}, err
 	}
 	normalized.Tools = tools
+	chain, err := normalizeChainConfiguration(configuration.Chain)
+	if err != nil {
+		return DraftConfiguration{}, err
+	}
+	normalized.Chain = chain
 	return normalized, nil
 }
 
 func validateRevisionDefinition(kind Kind, schemaVersion int, configuration DraftConfiguration) error {
-	if kind != KindLLM || schemaVersion != SchemaVersionV1 {
+	if schemaVersion != SchemaVersionV1 {
+		return fmt.Errorf("%w: unsupported agent kind %q or schema version %d", ErrInvalid, kind, schemaVersion)
+	}
+	switch kind {
+	case KindLLM:
+		if configuration.Chain != nil {
+			return fmt.Errorf("%w: LLM revision cannot contain chain configuration", ErrInvalid)
+		}
+	case KindChain:
+		if err := validateChainConfiguration(configuration.Chain); err != nil {
+			return err
+		}
+	default:
 		return fmt.Errorf("%w: unsupported agent kind %q or schema version %d", ErrInvalid, kind, schemaVersion)
 	}
 	if len([]rune(configuration.Description)) > 2000 {
@@ -366,6 +419,64 @@ func validateRevisionDefinition(kind Kind, schemaVersion int, configuration Draf
 	}
 	if _, err := normalizeTools(configuration.Tools); err != nil {
 		return err
+	}
+	return nil
+}
+
+func normalizeChainConfiguration(configuration *ChainConfiguration) (*ChainConfiguration, error) {
+	if configuration == nil {
+		return nil, nil
+	}
+	normalized := configuration.Clone()
+	for index := range normalized.Steps {
+		step := &normalized.Steps[index]
+		step.Name = strings.TrimSpace(step.Name)
+		step.Instruction = strings.TrimSpace(step.Instruction)
+		step.GlobalInstruction = strings.TrimSpace(step.GlobalInstruction)
+		if len([]rune(step.Name)) > maxReferenceRunes {
+			return nil, fmt.Errorf("%w: chain step name must contain at most %d characters", ErrInvalid, maxReferenceRunes)
+		}
+		if len([]rune(step.Instruction)) > maxInstructionRunes {
+			return nil, fmt.Errorf("%w: chain step instruction must contain at most %d characters", ErrInvalid, maxInstructionRunes)
+		}
+		if len([]rune(step.GlobalInstruction)) > maxInstructionRunes {
+			return nil, fmt.Errorf("%w: chain step global instruction must contain at most %d characters", ErrInvalid, maxInstructionRunes)
+		}
+	}
+	return normalized, nil
+}
+
+func validateChainConfiguration(configuration *ChainConfiguration) error {
+	if configuration == nil {
+		return fmt.Errorf("%w: chain configuration is required for chain revisions", ErrInvalid)
+	}
+	if len(configuration.Steps) < 2 || len(configuration.Steps) > maxChainSteps {
+		return fmt.Errorf("%w: chain must contain 2-%d steps", ErrInvalid, maxChainSteps)
+	}
+	seen := make(map[string]struct{}, len(configuration.Steps))
+	for index, step := range configuration.Steps {
+		if n := len([]rune(step.Name)); n < 1 || n > maxReferenceRunes {
+			return fmt.Errorf("%w: chain step %d name must contain 1-%d characters", ErrInvalid, index, maxReferenceRunes)
+		}
+		if strings.IndexFunc(step.Name, unicode.IsControl) >= 0 {
+			return fmt.Errorf("%w: chain step %q name contains a control character", ErrInvalid, step.Name)
+		}
+		if _, exists := seen[step.Name]; exists {
+			return fmt.Errorf("%w: duplicate chain step %q", ErrInvalid, step.Name)
+		}
+		seen[step.Name] = struct{}{}
+		if n := len([]rune(step.Instruction)); n < 1 || n > maxInstructionRunes {
+			return fmt.Errorf("%w: chain step %q instruction must contain 1-%d characters", ErrInvalid, step.Name, maxInstructionRunes)
+		}
+		if strings.IndexFunc(step.Instruction, unicode.IsControl) >= 0 {
+			return fmt.Errorf("%w: chain step %q instruction contains a control character", ErrInvalid, step.Name)
+		}
+		if len([]rune(step.GlobalInstruction)) > maxInstructionRunes {
+			return fmt.Errorf("%w: chain step %q global instruction must contain at most %d characters", ErrInvalid, step.Name, maxInstructionRunes)
+		}
+		if strings.IndexFunc(step.GlobalInstruction, unicode.IsControl) >= 0 {
+			return fmt.Errorf("%w: chain step %q global instruction contains a control character", ErrInvalid, step.Name)
+		}
 	}
 	return nil
 }
@@ -429,8 +540,26 @@ func sameDraftConfiguration(left, right DraftConfiguration) bool {
 	if !sameGenerationConfig(left.Generation, right.Generation) || len(left.Tools) != len(right.Tools) {
 		return false
 	}
+	if !sameChainConfiguration(left.Chain, right.Chain) {
+		return false
+	}
 	for i := range left.Tools {
 		if left.Tools[i] != right.Tools[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameChainConfiguration(left, right *ChainConfiguration) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	if len(left.Steps) != len(right.Steps) {
+		return false
+	}
+	for index := range left.Steps {
+		if left.Steps[index] != right.Steps[index] {
 			return false
 		}
 	}

@@ -2,8 +2,16 @@ package mysql
 
 import appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 
+type storedGenerationConfig struct {
+	appmodel.GenerationConfig
+	Chain *appmodel.ChainConfiguration `json:"chain,omitempty"`
+}
+
 func encodeAgentRevisionParts(revision appmodel.Revision) ([]byte, []byte, []byte, error) {
-	generation, err := encodeJSON(revision.Generation)
+	generation, err := encodeJSON(storedGenerationConfig{
+		GenerationConfig: revision.Generation,
+		Chain:            revision.Chain.Clone(),
+	})
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -19,8 +27,11 @@ func encodeAgentRevisionParts(revision appmodel.Revision) ([]byte, []byte, []byt
 }
 
 func decodeAgentRevisionParts(generation, runtime []byte, revision *appmodel.Revision) error {
-	if err := decodeJSON(generation, &revision.Generation); err != nil {
+	var stored storedGenerationConfig
+	if err := decodeJSON(generation, &stored); err != nil {
 		return err
 	}
+	revision.Generation = stored.GenerationConfig
+	revision.Chain = stored.Chain.Clone()
 	return decodeJSON(runtime, &revision.Runtime)
 }

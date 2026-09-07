@@ -11,6 +11,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
@@ -50,6 +51,29 @@ func llmAgentOptions(input LLMAgentFactoryInput, model trpcmodel.Model, toolSets
 }
 
 type callbackStateKey struct{}
+type usageObserverContextKey struct{}
+
+// UsageObserver receives one terminal provider usage sample for each model
+// call. It is carried by execution context so cached Runners can be reused
+// without sharing accounting state between requests.
+type UsageObserver func(context.Context, runtimebudget.Usage)
+
+// WithUsageObserver attaches per-execution usage accounting to a context.
+func WithUsageObserver(ctx context.Context, observer UsageObserver) context.Context {
+	if ctx == nil || observer == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, usageObserverContextKey{}, observer)
+}
+
+func usageObserverFromContext(ctx context.Context) UsageObserver {
+	if ctx == nil {
+		return nil
+	}
+	observer, _ := ctx.Value(usageObserverContextKey{}).(UsageObserver)
+	return observer
+}
+
 type callbackState struct {
 	finishSpan func(error)
 	started    time.Time
@@ -90,6 +114,9 @@ func (state *callbackState) finish(err error) {
 			}
 			_ = state.catalog.Tokens(state.ctx, int64(usage.PromptTokens), labels)
 			_ = state.catalog.Tokens(state.ctx, int64(usage.CompletionTokens), labels)
+			if observer := usageObserverFromContext(state.ctx); observer != nil {
+				observer(state.ctx, runtimebudget.Usage{InputTokens: int64(usage.PromptTokens), OutputTokens: int64(usage.CompletionTokens)})
+			}
 		}
 		if state.finishSpan != nil {
 			state.finishSpan(err)

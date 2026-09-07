@@ -9,6 +9,7 @@ import (
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
@@ -36,6 +37,26 @@ func TestPolicyRunnerCloseReleasesDelegateAndCapabilities(t *testing.T) {
 	var nilRunner *policyRunner
 	if err := nilRunner.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWithUsageObserverPreservesOnlyValidObservers(t *testing.T) {
+	ctx := context.Background()
+	if WithUsageObserver(nil, func(context.Context, runtimebudget.Usage) {}) != nil {
+		t.Fatal("nil context unexpectedly accepted")
+	}
+	if WithUsageObserver(ctx, nil) != ctx {
+		t.Fatal("nil observer unexpectedly changed context")
+	}
+	called := false
+	observed := WithUsageObserver(ctx, func(context.Context, runtimebudget.Usage) { called = true })
+	observer := usageObserverFromContext(observed)
+	if observer == nil {
+		t.Fatal("observer missing from context")
+	}
+	observer(context.Background(), runtimebudget.Usage{InputTokens: 1})
+	if !called {
+		t.Fatal("observer was not callable")
 	}
 }
 

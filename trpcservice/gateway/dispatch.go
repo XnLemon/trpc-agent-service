@@ -8,12 +8,14 @@ import (
 	"strings"
 	"time"
 
+	serviceagent "github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
+	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/execution"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -110,6 +112,9 @@ type DispatchConfig struct {
 	// contains attachment references. Text-only dispatches remain independent of it.
 	Attachments     attachment.Reader
 	AttachmentStore runtimestorage.AttachmentStore
+	// Budget reserves tenant monthly capacity before execution and settles
+	// provider-reported token/cost usage after the event stream closes.
+	Budget *runtimebudget.Controller
 }
 
 // Dispatcher resolves a fixed plan, prepares the Gateway execution context,
@@ -125,6 +130,7 @@ type Dispatcher struct {
 	handoffStore    audit.HandoffStore
 	attachments     attachment.Reader
 	attachmentStore runtimestorage.AttachmentStore
+	budget          *runtimebudget.Controller
 }
 
 type dispatchStore interface {
@@ -198,54 +204,78 @@ type durableExecution struct {
 // dispatchMetadata contains the trusted identity and correlation data shared
 // by Gateway execution phases.
 type dispatchMetadata struct {
-	principal Principal
-	message   InboundMessage
-	identity  tenant.RunnerIdentity
-	requestID string
-	traceID   string
+	principal      Principal
+	message        InboundMessage
+	identity       tenant.RunnerIdentity
+	requestID      string
+	traceID        string
+	modelProfileID string
+	modelProvider  string
+	modelName      string
 }
 
 // dispatchExecution owns Gateway-side state for one asynchronous execution.
 // Gateway consumes the runtime event stream; the runtime Coordinator owns its
 // closure.
 type dispatchExecution struct {
-	metadata        dispatchMetadata
-	durable         *durableExecution
-	mediaReplies    *servicetool.ReplyCollector
-	span            observability.Span
-	started         time.Time
-	executionEvents <-chan execution.Event
-	output          chan<- DispatchEvent
-	auditFinalized  bool
+	metadata          dispatchMetadata
+	durable           *durableExecution
+	mediaReplies      *servicetool.ReplyCollector
+	span              observability.Span
+	started           time.Time
+	executionEvents   <-chan execution.Event
+	output            chan<- DispatchEvent
+	auditFinalized    bool
+	budgetReservation runtimebudget.Reservation
+	usageAccumulator  *usageAccumulator
+	pricing           runtimebudget.Pricing
+	auditUsage        *audit.Usage
 }
 
-type dispatchDependencies struct {
-	store        dispatchStore
-	materializer *outbox.Materializer
-	auditWriter  audit.Writer
+type dispatchCapabilities struct {
+	sessions     sessionstorage.SessionStateStore
+	messages     runtimestorage.MessageStore
+	replyBatches runtimestorage.ReplyBatchEnqueuer
 }
 
-func resolveDispatchDependencies(config DispatchConfig) (dispatchDependencies, error) {
-	dependencies := dispatchDependencies{
-		materializer: config.Materializer,
-		auditWriter:  metrics.WrapAuditWriter(config.AuditWriter, config.Observability),
+func resolveDispatchCapabilities(config DispatchConfig) dispatchCapabilities {
+	capabilities := dispatchCapabilities{
+		sessions:     config.SessionStore,
+		messages:     config.MessageStore,
+		replyBatches: config.ReplyBatchStore,
 	}
-	if config.SessionStore != nil && config.MessageStore != nil {
-		if config.Materializer == nil && config.ReplyBatchStore == nil {
-			return dispatchDependencies{}, fmt.Errorf("%w: durable dispatch requires reply materialization capability", ErrInvalid)
-		}
-		dependencies.store = dispatchStoreView{sessions: config.SessionStore, messages: config.MessageStore}
+	return capabilities
+}
+
+func resolveDispatchAttachments(config DispatchConfig) (attachment.Reader, runtimestorage.AttachmentStore) {
+	reader := config.Attachments
+	return reader, config.AttachmentStore
+}
+
+func newDispatchStore(capabilities dispatchCapabilities) dispatchStore {
+	if capabilities.sessions != nil && capabilities.messages != nil {
+		return dispatchStoreView{sessions: capabilities.sessions, messages: capabilities.messages}
 	}
-	if dependencies.materializer == nil && config.ReplyBatchStore != nil {
-		materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{
-			BatchStore: config.ReplyBatchStore, Observability: config.Observability,
-		})
-		if err != nil {
-			return dispatchDependencies{}, err
-		}
-		dependencies.materializer = materializer
+	return nil
+}
+
+func newDispatchMaterializer(config DispatchConfig, batchStore runtimestorage.ReplyBatchEnqueuer) (*outbox.Materializer, error) {
+	if config.Materializer != nil {
+		return config.Materializer, nil
 	}
-	return dependencies, nil
+	if batchStore == nil {
+		return nil, nil
+	}
+	return outbox.NewMaterializer(outbox.MaterializerConfig{
+		BatchStore: batchStore, Observability: config.Observability,
+	})
+}
+
+func validateDispatchCapabilities(config DispatchConfig, capabilities dispatchCapabilities) error {
+	if config.Materializer == nil && capabilities.sessions != nil && capabilities.messages != nil && capabilities.replyBatches == nil {
+		return fmt.Errorf("%w: durable dispatch requires reply materialization capability", ErrInvalid)
+	}
+	return nil
 }
 
 // NewDispatcher validates the protocol-neutral execution dependencies.
@@ -262,8 +292,8 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
 	}
-	dependencies, err := resolveDispatchDependencies(config)
-	if err != nil {
+	capabilities := resolveDispatchCapabilities(config)
+	if err := validateDispatchCapabilities(config, capabilities); err != nil {
 		return nil, err
 	}
 	executor, err := execution.NewCoordinator(execution.Config{
@@ -272,13 +302,13 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Dispatcher{
-		resolver: config.Resolver, executor: executor,
-		telemetry: config.Observability, metrics: metrics.New(config.Observability),
-		runtimeStore: dependencies.store, materializer: dependencies.materializer,
-		auditWriter: dependencies.auditWriter, handoffStore: config.HandoffStore,
-		attachments: config.Attachments, attachmentStore: config.AttachmentStore,
-	}, nil
+	config.Attachments, config.AttachmentStore = resolveDispatchAttachments(config)
+	config.AuditWriter = metrics.WrapAuditWriter(config.AuditWriter, config.Observability)
+	materializer, err := newDispatchMaterializer(config, capabilities.replyBatches)
+	if err != nil {
+		return nil, err
+	}
+	return &Dispatcher{resolver: config.Resolver, executor: executor, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: newDispatchStore(capabilities), materializer: materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore, attachments: config.Attachments, attachmentStore: config.AttachmentStore, budget: config.Budget}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.
@@ -326,6 +356,10 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	metadata.identity = identity
 	planSnapshot := plan.AgentSnapshot()
 	planApp := planSnapshot.App()
+	modelProfile := plan.ModelSnapshot().Profile()
+	metadata.modelProfileID = modelProfile.ProfileID
+	metadata.modelProvider = modelProfile.Configuration.Provider
+	metadata.modelName = modelProfile.Configuration.Model
 	durable, err := dispatcher.claimInboundWithLease(ctx, metadata, durableInboundLeaseForRuntime(planSnapshot.Revision().Runtime))
 	if err != nil {
 		finishWithError(err)
@@ -365,12 +399,27 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 			return nil, auditWriteFailure()
 		}
 	}
+	budgetReservation, usageAccumulator, pricing, err := dispatcher.reserveBudget(ctx, plan, requestID)
+	if err != nil {
+		dispatcher.failDurable(durable, err)
+		if auditErr := budgetAdmissionAudit(context.Background(), dispatcher.auditWriter, metadata.principal.TenantID(), metadata.requestID, metadata.traceID); auditErr != nil {
+			finishWithError(auditWriteFailure())
+			return nil, auditWriteFailure()
+		}
+		finishWithError(err)
+		return nil, err
+	}
+	releaseBudget := func() {
+		_ = dispatcher.releaseBudget(context.Background(), budgetReservation)
+	}
 	if err := dispatcher.writeExecutionAudit(ctx, metadata, audit.EventExecutionStarted, ""); err != nil {
+		releaseBudget()
 		dispatcher.failDurable(durable, err)
 		finishWithError(err)
 		return nil, auditWriteFailure()
 	}
 	if err := dispatcher.reserveHandoff(ctx, metadata); err != nil {
+		releaseBudget()
 		finishWithError(err)
 		return nil, auditWriteFailure()
 	}
@@ -389,10 +438,14 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 			Audit: audit.NewRecorder(dispatcher.auditWriter, request.Principal.TenantID()),
 		})
 	}
+	if usageAccumulator != nil {
+		runnerCtx = serviceagent.WithUsageObserver(runnerCtx, usageAccumulator.Observe)
+	}
 	runnerEvents, err := dispatcher.executor.Execute(runnerCtx, execution.Request{
 		Plan: plan, Identity: identity, Message: userMessage, RequestID: requestID, TraceID: traceID,
 	})
 	if err != nil {
+		releaseBudget()
 		executionErr := err
 		if errors.Is(executionErr, execution.ErrExecution) {
 			executionErr = ErrExecution
@@ -418,7 +471,8 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	output := make(chan DispatchEvent, 32)
 	run := &dispatchExecution{
 		metadata: metadata, durable: durable, mediaReplies: mediaReplies, span: span, started: started,
-		executionEvents: runnerEvents, output: output,
+		executionEvents: runnerEvents, output: output, budgetReservation: budgetReservation,
+		usageAccumulator: usageAccumulator, pricing: pricing,
 	}
 	go dispatcher.forwardExecution(runnerCtx, run)
 	return output, nil
