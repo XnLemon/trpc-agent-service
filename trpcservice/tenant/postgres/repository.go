@@ -7,15 +7,22 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
-// List returns a stable page of only the requested tenant scopes. Scope
-// filtering is part of the database query and therefore precedes pagination.
+// List filters and orders tenant roots in SQL before applying offset pagination.
+// Cursors are numeric offsets, not snapshots: concurrent changes may shift a page.
 func (r *TenantRepository) List(ctx context.Context, scopes []string, query, status, cursor string, limit int) ([]*tenant.Tenant, string, error) {
+	if ctx == nil {
+		return nil, "", ErrStorage
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
 	scopeClause, arguments, allowed := tenantScopeClause(scopes)
 	if !allowed {
 		return []*tenant.Tenant{}, "", nil
@@ -31,46 +38,59 @@ func (r *TenantRepository) List(ctx context.Context, scopes []string, query, sta
 	}
 	offset := 0
 	if cursor != "" {
-		if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
-			return nil, "", fmt.Errorf("invalid cursor")
+		var err error
+		offset, err = strconv.Atoi(cursor)
+		if err != nil || offset < 0 || strconv.Itoa(offset) != cursor {
+			return nil, "", fmt.Errorf("%w: invalid cursor", tenant.ErrInvalid)
 		}
 	}
-	rows, err := r.db.QueryContext(ctx, tenantSelect+scopeClause+` ORDER BY tenant_id`, arguments...)
+	querySQL, arguments := tenantListQuery(scopeClause, arguments, query, status, offset, limit)
+	rows, err := r.db.QueryContext(ctx, querySQL, arguments...)
 	if err != nil {
 		return nil, "", mapDBError(ctx, err, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid)
 	}
 	defer rows.Close()
-	q := strings.ToLower(strings.TrimSpace(query))
-	items := make([]*tenant.Tenant, 0)
+	items := make([]*tenant.Tenant, 0, limit+1)
 	for rows.Next() {
 		v, scanErr := scanTenant(rows)
 		if scanErr != nil {
 			return nil, "", ErrStorage
 		}
-		if status != "" && string(v.Status) != status {
-			continue
-		}
-		if q != "" && !strings.Contains(strings.ToLower(v.TenantID+" "+v.TenantKey+" "+v.DisplayName), q) {
-			continue
-		}
 		items = append(items, v)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", ErrStorage
-	}
-	sort.Slice(items, func(i, j int) bool { return items[i].TenantID < items[j].TenantID })
-	if offset >= len(items) {
-		return []*tenant.Tenant{}, "", nil
-	}
-	end := offset + limit
-	if end > len(items) {
-		end = len(items)
+		return nil, "", mapDBError(ctx, err, tenant.ErrNotFound, tenant.ErrDuplicateKey, tenant.ErrConflict, tenant.ErrInvalid)
 	}
 	next := ""
-	if end < len(items) {
-		next = fmt.Sprintf("%d", end)
+	if len(items) > limit {
+		if offset > int(^uint(0)>>1)-limit {
+			return nil, "", fmt.Errorf("%w: cursor overflow", tenant.ErrInvalid)
+		}
+		next = strconv.Itoa(offset + limit)
+		items = items[:limit]
 	}
-	return items[offset:end], next, nil
+	return items, next, nil
+}
+
+func tenantListQuery(scopeClause string, arguments []any, query, status string, offset, limit int) (string, []any) {
+	querySQL := tenantSelect + scopeClause
+	separator := " WHERE "
+	if scopeClause != "" {
+		separator = " AND "
+	}
+	if status != "" {
+		arguments = append(arguments, status)
+		querySQL += separator + fmt.Sprintf("status = $%d", len(arguments))
+		separator = " AND "
+	}
+	if query = strings.ToLower(strings.TrimSpace(query)); query != "" {
+		arguments = append(arguments, query)
+		// STRPOS preserves literal substring matching, including percent and underscore.
+		querySQL += separator + fmt.Sprintf("STRPOS(LOWER(tenant_id || ' ' || tenant_key || ' ' || display_name), $%d) > 0", len(arguments))
+	}
+	arguments = append(arguments, limit+1, offset)
+	querySQL += fmt.Sprintf(" ORDER BY tenant_id LIMIT $%d OFFSET $%d", len(arguments)-1, len(arguments))
+	return querySQL, arguments
 }
 
 // tenantScopeClause returns a deterministic SQL predicate and arguments for

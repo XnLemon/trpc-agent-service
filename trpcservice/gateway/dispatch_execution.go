@@ -8,6 +8,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/execution"
 	runtimequeue "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
@@ -149,6 +150,10 @@ func (run *dispatchExecution) finishForwardOutput(ctx context.Context, terminalE
 			errorText := ErrExecution.Error()
 			if errors.Is(terminalErr, ErrAuditWriteFailed) {
 				errorText = ErrAuditWriteFailed.Error()
+			} else if errors.Is(terminalErr, runtimebudget.ErrExceeded) {
+				errorText = runtimebudget.ErrExceeded.Error()
+			} else if errors.Is(terminalErr, runtimebudget.ErrCostUnavailable) {
+				errorText = runtimebudget.ErrCostUnavailable.Error()
 			}
 			trySendDispatchEvent(run.output, DispatchEvent{Type: DispatchEventError, RequestID: run.metadata.requestID, TraceID: run.metadata.traceID, Error: errorText})
 		}
@@ -177,6 +182,14 @@ func (dispatcher *Dispatcher) finalizeForward(ctx context.Context, run *dispatch
 	if errorType == "" {
 		errorType = terminalAuditError(terminalErr)
 	}
+	if budgetErr := dispatcher.settleBudget(detachedCorrelationContext(ctx, run.metadata.requestID, run.metadata.traceID), run, eventType); budgetErr != nil && (terminalErr == nil || IsContextCancellation(terminalErr)) {
+		terminalErr = budgetErr
+		eventType = audit.EventExecutionFailed
+		errorType = terminalAuditError(budgetErr)
+	}
+	if run.auditUsage != nil {
+		run.auditUsage.ExecutionResult = executionAuditResult(eventType)
+	}
 	if dispatcher.handoffStore != nil {
 		result := audit.ResultSuccess
 		if terminalErr != nil {
@@ -200,7 +213,7 @@ func (dispatcher *Dispatcher) finalizeExecutionAudit(ctx context.Context, run *d
 	if run.auditFinalized {
 		return nil
 	}
-	err := dispatcher.writeExecutionAudit(detachedCorrelationContext(ctx, run.metadata.requestID, run.metadata.traceID), run.metadata, eventType, errorType)
+	err := dispatcher.writeExecutionAuditWithCost(detachedCorrelationContext(ctx, run.metadata.requestID, run.metadata.traceID), run.metadata, eventType, errorType, run.auditUsage)
 	if err == nil {
 		run.auditFinalized = true
 	}
@@ -215,6 +228,9 @@ func terminalAuditError(err error) string {
 	if err == nil {
 		return ""
 	}
+	if isBudgetRejection(err) {
+		return string(audit.ErrorBudget)
+	}
 	if IsContextCancellation(err) {
 		return string(audit.ErrorCanceled)
 	}
@@ -226,6 +242,14 @@ func (dispatcher *Dispatcher) writeExecutionAudit(ctx context.Context, metadata 
 }
 
 func (dispatcher *Dispatcher) writeExecutionAuditRevision(ctx context.Context, metadata dispatchMetadata, eventType audit.EventType, errorType string, revision *int64) error {
+	return dispatcher.writeExecutionAuditRevisionWithCost(ctx, metadata, eventType, errorType, revision, nil)
+}
+
+func (dispatcher *Dispatcher) writeExecutionAuditWithCost(ctx context.Context, metadata dispatchMetadata, eventType audit.EventType, errorType string, cost *audit.Usage) error {
+	return dispatcher.writeExecutionAuditRevisionWithCost(ctx, metadata, eventType, errorType, nil, cost)
+}
+
+func (dispatcher *Dispatcher) writeExecutionAuditRevisionWithCost(ctx context.Context, metadata dispatchMetadata, eventType audit.EventType, errorType string, revision *int64, cost *audit.Usage) error {
 	if dispatcher.auditWriter == nil {
 		return nil
 	}
@@ -233,11 +257,22 @@ func (dispatcher *Dispatcher) writeExecutionAuditRevision(ctx context.Context, m
 	if target, ok := metadata.principal.RoutingTarget(); ok {
 		channel = string(target.Channel)
 	}
-	event := audit.Event{SchemaVersion: audit.SchemaVersion, EventID: audit.NewEventID(metadata.requestID, string(eventType)), EventType: eventType, TenantID: metadata.principal.TenantID(), Channel: channel, UserID: metadata.message.ExternalUserID, SessionID: metadata.identity.SessionID, AgentAppID: metadata.principal.AppID(), Revision: revision, ErrorType: errorType, RequestID: metadata.requestID, TraceID: metadata.traceID, ActorType: string(metadata.principal.Kind()), ActorID: metadata.principal.SubjectID(), OccurredAt: time.Now().UTC()}
+	event := audit.Event{SchemaVersion: audit.SchemaVersion, EventID: audit.NewEventID(metadata.requestID, string(eventType)), EventType: eventType, TenantID: metadata.principal.TenantID(), Channel: channel, UserID: metadata.message.ExternalUserID, SessionID: metadata.identity.SessionID, AgentAppID: metadata.principal.AppID(), Revision: revision, ModelProfileID: metadata.modelProfileID, ErrorType: errorType, Cost: cost, RequestID: metadata.requestID, TraceID: metadata.traceID, ActorType: string(metadata.principal.Kind()), ActorID: metadata.principal.SubjectID(), OccurredAt: time.Now().UTC()}
 	if _, err := dispatcher.auditWriter.Append(ctx, event); err != nil {
 		return err
 	}
 	return nil
+}
+
+func executionAuditResult(eventType audit.EventType) audit.ExecutionResult {
+	switch eventType {
+	case audit.EventExecutionCanceled, audit.EventExecutionTimedOut:
+		return audit.ResultCanceled
+	case audit.EventExecutionFailed, audit.EventExecutionFallback:
+		return audit.ResultFailure
+	default:
+		return audit.ResultSuccess
+	}
 }
 
 func cancellationStatus(ctx context.Context) string {

@@ -60,14 +60,14 @@ func TestHandleUpdateAuditFailureBranches(t *testing.T) {
 	target := newTrustedTarget(t, channels.ChannelTelegram, "audit-branches", "12345")
 	update := textUpdate(41, models.ChatTypePrivate, 100, 42, "input", 0)
 	admission := newTestAdapter(t, target, &dispatchStub{events: []gateway.DispatchEvent{{Type: gateway.DispatchEventDone, Done: true}}}, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
-	admission.audit.Writer = &telegramAuditWriter{alwaysFail: true}
+	admission.audit = audit.NewRecorder(&telegramAuditWriter{alwaysFail: true}, target.TenantID)
 	if err := admission.HandleUpdate(context.Background(), update); !errors.Is(err, ErrDispatch) {
 		t.Fatalf("admission audit err=%v", err)
 	}
 	replayWriter := &telegramAuditWriter{failAfter: 2}
 	replayDispatcher := &dispatchStub{events: []gateway.DispatchEvent{{Type: gateway.DispatchEventMessage, Text: "reply"}, {Type: gateway.DispatchEventDone, Done: true}}}
 	replay := newTestAdapter(t, target, replayDispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
-	replay.audit.Writer = replayWriter
+	replay.audit = audit.NewRecorder(replayWriter, target.TenantID)
 	if err := replay.HandleUpdate(context.Background(), textUpdate(42, models.ChatTypePrivate, 100, 42, "replay", 0)); err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestHandleUpdateDuplicateAuditAndDispatchSendFailure(t *testing.T) {
 		return eventStream(gateway.DispatchEvent{Type: gateway.DispatchEventDone, Done: true}), nil
 	}}
 	adapter := newTestAdapter(t, target, dispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
-	adapter.audit.Writer = &telegramAuditWriter{failAfter: 1}
+	adapter.audit = audit.NewRecorder(&telegramAuditWriter{failAfter: 1}, target.TenantID)
 	update := textUpdate(43, models.ChatTypePrivate, 100, 42, "pending", 0)
 	first := make(chan error, 1)
 	go func() { first <- adapter.HandleUpdate(context.Background(), update) }()
@@ -381,7 +381,7 @@ func TestHandleUpdateMapsPrivateTextAndAggregatesDispatchEvents(t *testing.T) {
 	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
 	adapter := newTestAdapter(t, target, dispatcher, client)
 	aw := &telegramAuditWriter{}
-	adapter.audit.Writer = aw
+	adapter.audit = audit.NewRecorder(aw, target.TenantID)
 	key := contextKey("request-context")
 	ctx := context.WithValue(context.Background(), key, "preserved")
 	update := textUpdate(7, models.ChatTypePrivate, 100, 42, "  hello  ", 0)
@@ -404,7 +404,8 @@ func TestHandleUpdateUsesDurableEnqueueAndReplaysAccepted(t *testing.T) {
 	dispatcher := &asyncDispatchStub{ready: true}
 	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
 	adapter := newTestAdapter(t, target, dispatcher, client)
-	adapter.audit.Writer = &telegramAuditWriter{}
+	auditWriter := &telegramAuditWriter{}
+	adapter.audit = audit.NewRecorder(auditWriter, target.TenantID)
 	update := textUpdate(71, models.ChatTypePrivate, 100, 42, "queued", 0)
 
 	if err := adapter.HandleUpdate(context.Background(), update); err != nil {
@@ -419,8 +420,8 @@ func TestHandleUpdateUsesDurableEnqueueAndReplaysAccepted(t *testing.T) {
 	if got := len(client.sent()); got != 0 {
 		t.Fatalf("accepted update sent %d immediate replies", got)
 	}
-	if got := len(adapter.audit.Writer.(*telegramAuditWriter).events); got != 1 || adapter.audit.Writer.(*telegramAuditWriter).events[0].EventType != audit.EventIMIngressAccepted {
-		t.Fatalf("accepted audit events=%+v", adapter.audit.Writer.(*telegramAuditWriter).events)
+	if got := len(auditWriter.events); got != 1 || auditWriter.events[0].EventType != audit.EventIMIngressAccepted {
+		t.Fatalf("accepted audit events=%+v", auditWriter.events)
 	}
 
 	if err := adapter.HandleUpdate(context.Background(), update); err != nil {
@@ -432,9 +433,10 @@ func TestHandleUpdateUsesDurableEnqueueAndReplaysAccepted(t *testing.T) {
 
 	failingDispatcher := &asyncDispatchStub{ready: true, enqueueErr: errors.New("queue unavailable")}
 	failingClient := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
-	failingAdapter := newTestAdapter(t, newTrustedTarget(t, channels.ChannelTelegram, "async-failure", "12345"), failingDispatcher, failingClient)
+	failingTarget := newTrustedTarget(t, channels.ChannelTelegram, "async-failure", "12345")
+	failingAdapter := newTestAdapter(t, failingTarget, failingDispatcher, failingClient)
 	failingWriter := &telegramAuditWriter{}
-	failingAdapter.audit.Writer = failingWriter
+	failingAdapter.audit = audit.NewRecorder(failingWriter, failingTarget.TenantID)
 	if err := failingAdapter.HandleUpdate(context.Background(), textUpdate(72, models.ChatTypePrivate, 100, 42, "rejected", 0)); !errors.Is(err, ErrDispatch) {
 		t.Fatalf("enqueue failure err=%v", err)
 	}
@@ -450,22 +452,24 @@ func TestHandleUpdateDurableEnqueueFailureBranches(t *testing.T) {
 	target := newTrustedTarget(t, channels.ChannelTelegram, "async-error-branches", "12345")
 	canceledDispatcher := &asyncDispatchStub{ready: true, enqueueErr: context.Canceled}
 	canceledAdapter := newTestAdapter(t, target, canceledDispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
-	canceledAdapter.audit.Writer = &telegramAuditWriter{}
+	canceledAdapter.audit = audit.NewRecorder(&telegramAuditWriter{}, target.TenantID)
 	if err := canceledAdapter.HandleUpdate(context.Background(), textUpdate(73, models.ChatTypePrivate, 100, 42, "canceled", 0)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled enqueue error = %v", err)
 	}
 
 	failingDispatcher := &asyncDispatchStub{ready: true, enqueueErr: errors.New("queue unavailable")}
 	failingClient := &fakeBot{me: &models.User{ID: 12345, IsBot: true}, sendErr: errors.New("send unavailable")}
-	failingAdapter := newTestAdapter(t, newTrustedTarget(t, channels.ChannelTelegram, "async-send-error", "12345"), failingDispatcher, failingClient)
-	failingAdapter.audit.Writer = &telegramAuditWriter{}
+	failingTarget := newTrustedTarget(t, channels.ChannelTelegram, "async-send-error", "12345")
+	failingAdapter := newTestAdapter(t, failingTarget, failingDispatcher, failingClient)
+	failingAdapter.audit = audit.NewRecorder(&telegramAuditWriter{}, failingTarget.TenantID)
 	if err := failingAdapter.HandleUpdate(context.Background(), textUpdate(74, models.ChatTypePrivate, 100, 42, "rejected", 0)); !errors.Is(err, ErrDispatch) {
 		t.Fatalf("enqueue/send failure error = %v", err)
 	}
 
 	auditDispatcher := &asyncDispatchStub{ready: true}
-	auditAdapter := newTestAdapter(t, newTrustedTarget(t, channels.ChannelTelegram, "async-audit-error", "12345"), auditDispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
-	auditAdapter.audit.Writer = &telegramAuditWriter{alwaysFail: true}
+	auditTarget := newTrustedTarget(t, channels.ChannelTelegram, "async-audit-error", "12345")
+	auditAdapter := newTestAdapter(t, auditTarget, auditDispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
+	auditAdapter.audit = audit.NewRecorder(&telegramAuditWriter{alwaysFail: true}, auditTarget.TenantID)
 	if err := auditAdapter.HandleUpdate(context.Background(), textUpdate(75, models.ChatTypePrivate, 100, 42, "audit failure", 0)); !errors.Is(err, ErrDispatch) {
 		t.Fatalf("accepted audit failure error = %v", err)
 	}

@@ -17,6 +17,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	runtimestorageredis "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
@@ -513,6 +514,7 @@ func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalo
 			Models:          config.modelNames,
 			EndpointPolicy:  modelprofile.FieldForbidden,
 			SecretRefPolicy: modelprofile.FieldForbidden,
+			Options:         environmentModelPricingOptions(),
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("%w: demo model catalog is invalid", ErrInvalidConfig)
@@ -533,6 +535,7 @@ func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalo
 		EndpointSchemes: []string{"https"},
 		EndpointHosts:   config.endpointHosts,
 		SecretRefPolicy: modelprofile.FieldRequired,
+		Options:         environmentModelPricingOptions(),
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: model catalog is invalid", ErrInvalidConfig)
@@ -542,6 +545,14 @@ func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalo
 		return nil, nil, err
 	}
 	return modelCatalog, backendCatalog, nil
+}
+
+func environmentModelPricingOptions() map[string]modelprofile.OptionSpec {
+	min, max := int64(0), int64(1_000_000_000_000)
+	return map[string]modelprofile.OptionSpec{
+		runtimebudget.InputCostOption:  {Kind: modelprofile.OptionInteger, MinInteger: &min, MaxInteger: &max},
+		runtimebudget.OutputCostOption: {Kind: modelprofile.OptionInteger, MinInteger: &min, MaxInteger: &max},
+	}
 }
 
 func newEnvironmentBackendCatalog(runtimeStorage string) (*backend.ProviderCatalog, error) {

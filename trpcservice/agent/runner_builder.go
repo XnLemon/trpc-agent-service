@@ -23,13 +23,15 @@ import (
 // the returned Runner; the optional StorageFactory produces capabilities owned
 // by that Runner.
 type RunnerConfig struct {
-	Input          RunnerInput
-	SecretResolver modelprofile.SecretResolver
-	ModelFactory   modelprofile.ModelFactory
-	Sessions       session.Service
-	StorageFactory storagefactory.StorageFactory
-	Observability  observability.Provider
-	ToolRegistry   *servicetool.Registry
+	Input                RunnerInput
+	SecretResolver       modelprofile.SecretResolver
+	ModelFactory         modelprofile.ModelFactory
+	Sessions             session.Service
+	StorageFactory       storagefactory.StorageFactory
+	Observability        observability.Provider
+	ToolRegistry         *servicetool.Registry
+	AgentFactories       *AgentFactoryRegistry
+	EnableUsageCallbacks bool
 }
 
 // NewRunnerWithConfig materializes one Runner from an explicit dependency
@@ -131,7 +133,11 @@ func assembleRunner(ctx context.Context, config RunnerConfig, resources runnerRe
 	if err != nil {
 		return nil, fmt.Errorf("build runner: model: %w", err)
 	}
-	if config.Observability != nil {
+	telemetryProvider := config.Observability
+	if telemetryProvider == nil && config.EnableUsageCallbacks {
+		telemetryProvider = observability.NewNoopProvider()
+	}
+	if telemetryProvider != nil {
 		model = wrapTelemetryModel(model)
 	}
 	toolRegistry := config.ToolRegistry
@@ -142,12 +148,21 @@ func assembleRunner(ctx context.Context, config RunnerConfig, resources runnerRe
 	if err != nil {
 		return nil, fmt.Errorf("build runner: tools: %w", err)
 	}
-	llmOptions := llmAgentOptions(agentInput, model, tools)
-	if config.Observability != nil {
-		llmOptions = append(llmOptions, telemetryOptions(config.Observability, config.Input.Model.Provider, config.Input.Model.Model)...)
+	modelOptions := []llmagent.Option(nil)
+	if telemetryProvider != nil {
+		modelOptions = append(modelOptions, telemetryOptions(telemetryProvider, config.Input.Model.Provider, config.Input.Model.Model)...)
 	}
-	llmAgent := llmagent.New(agentInput.Name, llmOptions...)
-	delegate := trpcrunner.NewRunner(agentInput.AppID, llmAgent, trpcrunner.WithSessionService(scopedSessions))
+	factories := config.AgentFactories
+	if factories == nil {
+		factories = DefaultAgentFactoryRegistry()
+	}
+	builtAgent, err := factories.Build(ctx, AgentBuildInput{
+		Definition: agentInput, Model: model, Tools: tools, ModelOptions: modelOptions,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build runner: Agent Factory: %w", err)
+	}
+	delegate := trpcrunner.NewRunner(agentInput.AppID, builtAgent, trpcrunner.WithSessionService(scopedSessions))
 	return &policyRunner{
 		delegate:     delegate,
 		capabilities: resources.capabilities,

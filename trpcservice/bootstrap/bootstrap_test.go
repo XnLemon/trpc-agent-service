@@ -28,6 +28,8 @@ import (
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	runtimeservice "github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
+	runtimebudgetmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget/inmemory"
+	runtimebudgetpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget/postgres"
 	modelruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/model"
 	runtimequeue "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
@@ -930,6 +932,48 @@ func TestPrepareRuntimeConfigOwnsDefaultCapabilities(t *testing.T) {
 	}
 	if !previousClosed.Load() {
 		t.Fatal("bootstrap did not preserve the existing dependency closer")
+	}
+}
+
+func TestPrepareRuntimeConfigSelectsBudgetStoreByDatabaseDriver(t *testing.T) {
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	postgresConfig := Config{DB: db, ControlPlaneDriver: ControlPlaneDriverPostgres}
+	if err := prepareRuntimeConfig(&postgresConfig); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := postgresConfig.BudgetStore.(*runtimebudgetpostgres.Store); !ok {
+		t.Fatalf("PostgreSQL budget store = %T, want *postgres.Store", postgresConfig.BudgetStore)
+	}
+	if err := postgresConfig.CloseDependencies(); err != nil {
+		t.Fatal(err)
+	}
+
+	injected := runtimebudgetmemory.New()
+	mysqlConfig := Config{DB: db, ControlPlaneDriver: ControlPlaneDriverMySQL, BudgetStore: injected}
+	if err := prepareRuntimeConfig(&mysqlConfig); err != nil {
+		t.Fatal(err)
+	}
+	if mysqlConfig.BudgetStore != injected {
+		t.Fatalf("injected budget store = %T, want preserved %T", mysqlConfig.BudgetStore, injected)
+	}
+	if err := mysqlConfig.CloseDependencies(); err != nil {
+		t.Fatal(err)
+	}
+
+	localConfig := Config{ControlPlaneDriver: ControlPlaneDriverMySQL}
+	if err := prepareRuntimeConfig(&localConfig); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := localConfig.BudgetStore.(*runtimebudgetmemory.Store); !ok {
+		t.Fatalf("local budget store = %T, want *inmemory.Store", localConfig.BudgetStore)
+	}
+	if err := localConfig.CloseDependencies(); err != nil {
+		t.Fatal(err)
 	}
 }
 

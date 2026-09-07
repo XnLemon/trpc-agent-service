@@ -38,6 +38,9 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
+	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
+	runtimebudgetinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget/inmemory"
+	runtimebudgetpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget/postgres"
 	runtimequeue "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -116,6 +119,10 @@ type Config struct {
 	// ReplyBatchStore is the atomic reply materialization capability used by the
 	// outbox materializer.
 	ReplyBatchStore runtimestorage.ReplyBatchEnqueuer
+	// BudgetStore is the atomic monthly token/cost ledger. A nil value selects
+	// the PostgreSQL ledger when DB is configured, otherwise an in-memory
+	// ledger for local/single-process deployments.
+	BudgetStore runtimebudget.Store
 	// Attachments loads verified tenant-owned media during Gateway dispatch.
 	// It is kept separate from the session/message/reply capabilities.
 	Attachments attachment.Reader
@@ -381,6 +388,12 @@ func validateConfig(config Config) error {
 }
 
 func prepareRuntimeConfig(config *Config) error {
+	if err := prepareBudgetConfig(config); err != nil {
+		return err
+	}
+	if config.BudgetStore == nil {
+		config.BudgetStore = runtimebudgetinmemory.New()
+	}
 	if config.SessionStore == nil && config.EventHistoryStore == nil && config.MessageStore == nil && config.ReplyBatchStore == nil {
 		store := runtimestorageinmemory.New()
 		config.SessionStore = store
@@ -416,6 +429,18 @@ func prepareRuntimeConfig(config *Config) error {
 	return nil
 }
 
+func prepareBudgetConfig(config *Config) error {
+	if config.BudgetStore != nil || config.DB == nil || config.ControlPlaneDriver != ControlPlaneDriverPostgres {
+		return nil
+	}
+	store, err := runtimebudgetpostgres.New(config.DB)
+	if err != nil {
+		return ErrInvalidConfig
+	}
+	config.BudgetStore = store
+	return nil
+}
+
 func newRuntimeGraph(config Config) (*Runtime, error) {
 	closeExecutionQueueStore := func() {
 		if config.ExecutionQueueStore != nil {
@@ -434,7 +459,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	registry, err := agentrunnerfactory.NewRuntimeRunnerRegistry(agentrunnerfactory.Config{
 		Registry: config.Registry, SecretResolver: config.SecretResolver,
 		ModelFactory: config.ModelFactory, Sessions: config.Sessions, StorageFactory: config.StorageFactory,
-		Observability: config.Observability, ToolRegistry: config.ToolRegistry,
+		Observability: config.Observability, ToolRegistry: config.ToolRegistry, EnableUsageCallbacks: config.BudgetStore != nil,
 	})
 	if err != nil {
 		closeExecutionQueueStore()
@@ -448,6 +473,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 		MessageStore: config.MessageStore, ReplyBatchStore: config.ReplyBatchStore,
 		Attachments: config.Attachments, AttachmentStore: config.AttachmentStore,
 		DrainTimeout: config.DrainTimeout, AuditWriter: config.AuditWriter, Observability: config.Observability,
+		Budget: runtimebudget.NewController(config.BudgetStore),
 	})
 	if err != nil {
 		_ = registry.Close()
