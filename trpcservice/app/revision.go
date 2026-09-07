@@ -31,6 +31,12 @@ const (
 	KindLLM Kind = "llm"
 	// KindChain identifies a sequential composition of LLMAgent steps.
 	KindChain Kind = "chain"
+	// KindParallel identifies concurrently executed LLMAgent steps.
+	KindParallel Kind = "parallel"
+	// KindCycle identifies repeatedly executed LLMAgent steps.
+	KindCycle Kind = "cycle"
+	// KindGraph identifies an explicit graph of LLMAgent steps.
+	KindGraph Kind = "graph"
 )
 
 const (
@@ -392,7 +398,7 @@ func validateRevisionDefinition(kind Kind, schemaVersion int, configuration Draf
 		if configuration.Chain != nil {
 			return fmt.Errorf("%w: LLM revision cannot contain chain configuration", ErrInvalid)
 		}
-	case KindChain:
+	case KindChain, KindParallel, KindCycle, KindGraph:
 		if err := validateChainConfiguration(configuration.Chain); err != nil {
 			return err
 		}

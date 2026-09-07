@@ -17,27 +17,19 @@ import (
 
 // Store is a concurrency-safe in-memory implementation of the runtime store.
 type Store struct {
-	mu           *sync.RWMutex
-	sessions     map[string]sessionstorage.Session
-	events       map[string]runtimestorage.MessageEvent
-	histories    map[string][]sessionstorage.EventPayload
-	messages     map[string]string
-	replies      map[string]runtimestorage.ReplyOutbox
-	correlations map[string]runtimestorage.ReplyCorrelation
-	memories     map[string]runtimestorage.MemoryRecord
-	summaries    map[string]runtimestorage.SummaryRecord
-	knowledge    map[string]runtimestorage.KnowledgeDocument
-	artifacts    map[string]runtimestorage.ArtifactRecord
-	audits       map[string][]runtimestorage.AuditRecord
-	vectors      map[string]runtimestorage.VectorRecord
-	objects      map[string]runtimestorage.ObjectInfo
-	objectData   map[string][]byte
-	attachments  map[string]storedAttachment
-	indexQueue   chan runtimestorage.MemoryRecord
-	indexDone    chan struct{}
-	indexMu      *sync.RWMutex
-	closeOnce    *sync.Once
-	lifecycle    *backendLifecycle
+	mu             *sync.RWMutex
+	sessions       map[string]sessionstorage.Session
+	events         map[string]runtimestorage.MessageEvent
+	histories      map[string][]sessionstorage.EventPayload
+	messages       map[string]string
+	replies        map[string]runtimestorage.ReplyOutbox
+	correlations   map[string]runtimestorage.ReplyCorrelation
+	summaries      map[string]runtimestorage.SummaryRecord
+	audits         map[string][]runtimestorage.AuditRecord
+	attachmentData map[string][]byte
+	attachments    map[string]storedAttachment
+	closeOnce      *sync.Once
+	lifecycle      *backendLifecycle
 }
 
 // Backend owns one in-memory state graph that can be shared by multiple
@@ -49,11 +41,10 @@ type Backend struct {
 }
 
 type backendLifecycle struct {
-	mu      sync.Mutex
-	refs    int
-	closed  bool
-	done    chan struct{}
-	indexMu *sync.RWMutex
+	mu     sync.Mutex
+	refs   int
+	closed bool
+	done   chan struct{}
 }
 
 func (l *backendLifecycle) retain() bool {
@@ -76,15 +67,13 @@ func (l *backendLifecycle) release() {
 		return
 	}
 	l.closed = true
-	l.mu.Unlock()
-	l.indexMu.Lock()
 	close(l.done)
-	l.indexMu.Unlock()
+	l.mu.Unlock()
 }
 
 // NewBackend creates an isolated shared in-memory backend.
 func NewBackend() *Backend {
-	lifecycle := &backendLifecycle{refs: 1, done: make(chan struct{}), indexMu: &sync.RWMutex{}}
+	lifecycle := &backendLifecycle{refs: 1, done: make(chan struct{})}
 	store := newStore(lifecycle)
 	return &Backend{store: store, lifecycle: lifecycle}
 }
@@ -97,7 +86,7 @@ func NewWithBackend(backend *Backend) *Store {
 		return New()
 	}
 	if backend.store == nil {
-		backend.lifecycle = &backendLifecycle{refs: 1, done: make(chan struct{}), indexMu: &sync.RWMutex{}}
+		backend.lifecycle = &backendLifecycle{refs: 1, done: make(chan struct{})}
 		backend.store = newStore(backend.lifecycle)
 	}
 	if backend.lifecycle == nil || !backend.lifecycle.retain() {
@@ -125,7 +114,7 @@ func (backend *Backend) Close() error {
 
 // New creates an empty runtime store.
 func New() *Store {
-	lifecycle := &backendLifecycle{refs: 1, done: make(chan struct{}), indexMu: &sync.RWMutex{}}
+	lifecycle := &backendLifecycle{refs: 1, done: make(chan struct{})}
 	return newStore(lifecycle)
 }
 
@@ -135,13 +124,10 @@ func newStore(lifecycle *backendLifecycle) *Store {
 		sessions: map[string]sessionstorage.Session{}, events: map[string]runtimestorage.MessageEvent{},
 		histories: map[string][]sessionstorage.EventPayload{}, messages: map[string]string{},
 		replies: map[string]runtimestorage.ReplyOutbox{}, correlations: map[string]runtimestorage.ReplyCorrelation{},
-		memories: map[string]runtimestorage.MemoryRecord{}, summaries: map[string]runtimestorage.SummaryRecord{},
-		knowledge: map[string]runtimestorage.KnowledgeDocument{}, artifacts: map[string]runtimestorage.ArtifactRecord{},
-		audits: map[string][]runtimestorage.AuditRecord{}, vectors: map[string]runtimestorage.VectorRecord{},
-		objects: map[string]runtimestorage.ObjectInfo{}, objectData: map[string][]byte{}, attachments: map[string]storedAttachment{},
-		indexQueue: make(chan runtimestorage.MemoryRecord, 128), indexDone: lifecycle.done, indexMu: lifecycle.indexMu, lifecycle: lifecycle, closeOnce: &sync.Once{},
+		summaries: map[string]runtimestorage.SummaryRecord{}, audits: map[string][]runtimestorage.AuditRecord{},
+		attachmentData: map[string][]byte{}, attachments: map[string]storedAttachment{},
+		lifecycle: lifecycle, closeOnce: &sync.Once{},
 	}
-	go store.indexWorker()
 	return store
 }
 

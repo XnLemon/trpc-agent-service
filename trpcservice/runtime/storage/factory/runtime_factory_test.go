@@ -10,8 +10,11 @@ import (
 	modelruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/model"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimeinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/knowledge"
+	memoryinmemory "trpc.group/trpc-go/trpc-agent-go/memory/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/session"
-	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
+	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
 func TestRegistryStorageFactoryMaterializesTenantSession(t *testing.T) {
@@ -57,10 +60,10 @@ func TestCapabilitySetMaterializesExplicitSummary(t *testing.T) {
 
 func TestCapabilitySetSummaryRequiresExplicitCapability(t *testing.T) {
 	const tenantID = "t_00000000000000000000000000"
-	store := runtimeinmemory.New()
-	set, err := NewCapabilitySet(tenantID, map[Capability]any{CapabilityMemory: store})
+	service := memoryinmemory.NewMemoryService()
+	set, err := NewCapabilitySet(tenantID, map[Capability]any{CapabilityMemory: service})
 	if err != nil {
-		_ = store.Close()
+		_ = service.Close()
 		t.Fatal(err)
 	}
 	defer set.Close()
@@ -73,11 +76,11 @@ func TestCapabilitySetTypedAccessors(t *testing.T) {
 	const tenantID = "t_00000000000000000000000000"
 	store := runtimeinmemory.New()
 	set, err := NewCapabilitySet(tenantID, map[Capability]any{
-		CapabilitySession:   inmemory.NewSessionService(),
-		CapabilityMemory:    store,
+		CapabilitySession:   sessioninmemory.NewSessionService(),
+		CapabilityMemory:    memoryinmemory.NewMemoryService(),
 		CapabilitySummary:   store,
-		CapabilityKnowledge: store,
-		CapabilityArtifact:  store,
+		CapabilityKnowledge: knowledge.New(),
+		CapabilityArtifact:  inmemory.NewService(),
 		CapabilityAudit:     store,
 	})
 	if err != nil {
@@ -93,8 +96,6 @@ func TestCapabilitySetTypedAccessors(t *testing.T) {
 		{"Knowledge", func() error { _, err := set.Knowledge(); return err }},
 		{"Artifact", func() error { _, err := set.Artifact(); return err }},
 		{"Audit", func() error { _, err := set.Audit(); return err }},
-		{"Vector", func() error { _, err := set.Vector(); return err }},
-		{"Object", func() error { _, err := set.Object(); return err }},
 	}
 	for _, check := range checks {
 		t.Run(check.name, func(t *testing.T) {
@@ -106,7 +107,7 @@ func TestCapabilitySetTypedAccessors(t *testing.T) {
 	if err := set.Close(); err != nil {
 		t.Fatal(err)
 	}
-	missing, err := NewCapabilitySet(tenantID, map[Capability]any{CapabilitySession: inmemory.NewSessionService()})
+	missing, err := NewCapabilitySet(tenantID, map[Capability]any{CapabilitySession: sessioninmemory.NewSessionService()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,8 +134,6 @@ func TestCapabilitySetTypedAccessorsRejectWrongTypes(t *testing.T) {
 		{"Knowledge", CapabilityKnowledge, func(set *CapabilitySet) error { _, err := set.Knowledge(); return err }},
 		{"Artifact", CapabilityArtifact, func(set *CapabilitySet) error { _, err := set.Artifact(); return err }},
 		{"Audit", CapabilityAudit, func(set *CapabilitySet) error { _, err := set.Audit(); return err }},
-		{"Vector", CapabilityKnowledge, func(set *CapabilitySet) error { _, err := set.Vector(); return err }},
-		{"Object", CapabilityArtifact, func(set *CapabilitySet) error { _, err := set.Object(); return err }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,10 +164,12 @@ func TestMatchesCapabilityRejectsUnsupportedAndNilValues(t *testing.T) {
 func TestMatchesCapabilityContracts(t *testing.T) {
 	store := runtimeinmemory.New()
 	t.Cleanup(func() { _ = store.Close() })
-	sessionService := inmemory.NewSessionService()
+	sessionService := sessioninmemory.NewSessionService()
 	t.Cleanup(func() { _ = sessionService.Close() })
-	knowledgeOnly := struct{ runtimestorage.KnowledgeStore }{KnowledgeStore: store}
-	artifactOnly := struct{ runtimestorage.ArtifactStore }{ArtifactStore: store}
+	memoryService := memoryinmemory.NewMemoryService()
+	t.Cleanup(func() { _ = memoryService.Close() })
+	knowledgeService := knowledge.New()
+	artifactService := inmemory.NewService()
 	for _, test := range []struct {
 		name  string
 		kind  Capability
@@ -176,12 +177,10 @@ func TestMatchesCapabilityContracts(t *testing.T) {
 		want  bool
 	}{
 		{name: "session", kind: CapabilitySession, value: sessionService, want: true},
-		{name: "memory", kind: CapabilityMemory, value: store, want: true},
+		{name: "memory", kind: CapabilityMemory, value: memoryService, want: true},
 		{name: "summary", kind: CapabilitySummary, value: store, want: true},
-		{name: "knowledge requires vector", kind: CapabilityKnowledge, value: knowledgeOnly},
-		{name: "knowledge with vector", kind: CapabilityKnowledge, value: store, want: true},
-		{name: "artifact requires object", kind: CapabilityArtifact, value: artifactOnly},
-		{name: "artifact with object", kind: CapabilityArtifact, value: store, want: true},
+		{name: "knowledge", kind: CapabilityKnowledge, value: knowledgeService, want: true},
+		{name: "artifact", kind: CapabilityArtifact, value: artifactService, want: true},
 		{name: "audit", kind: CapabilityAudit, value: store, want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -306,7 +305,7 @@ func TestCapabilitySetOwnsValuesAndAggregatesCloseFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	values[CapabilitySession] = inmemory.NewSessionService()
+	values[CapabilitySession] = sessioninmemory.NewSessionService()
 	if _, ok := set.Capability(CapabilitySession); ok {
 		t.Fatal("capability set retained caller map")
 	}
@@ -368,7 +367,7 @@ func TestRegistryStorageFactoryClosesEarlierCapabilityAndScopesSecrets(t *testin
 		if input.TenantID != tenantID || binding.SecretRef != "secret/session" || secret.Value() != "session-secret" {
 			t.Fatalf("provider input = %+v, %+v, %q", input, binding, secret.Value())
 		}
-		return &closeTrackingSession{Service: inmemory.NewSessionService(), closed: closed}, nil
+		return &closeTrackingSession{Service: sessioninmemory.NewSessionService(), closed: closed}, nil
 	})
 	second := capabilityProviderFunc(func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
 		return nil, errors.New("provider detail")
@@ -402,12 +401,12 @@ func TestRegistryStorageFactoryRejectsDuplicateCapabilities(t *testing.T) {
 	providers := NewProviderRegistry()
 	closed := make(chan struct{})
 	first := capabilityProviderFunc(func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
-		return &closeTrackingSession{Service: inmemory.NewSessionService(), closed: closed}, nil
+		return &closeTrackingSession{Service: sessioninmemory.NewSessionService(), closed: closed}, nil
 	})
 	called := false
 	second := capabilityProviderFunc(func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
 		called = true
-		return inmemory.NewSessionService(), nil
+		return sessioninmemory.NewSessionService(), nil
 	})
 	if err := providers.Register(tenantID, CapabilitySession, "one", first); err != nil {
 		t.Fatal(err)
@@ -450,7 +449,7 @@ func TestRegistryStorageFactoryValidationAndResolverFailures(t *testing.T) {
 	}
 	const tenantID = "t_00000000000000000000000000"
 	if err := providers.Register(tenantID, CapabilitySession, "session", capabilityProviderFunc(func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
-		return inmemory.NewSessionService(), nil
+		return sessioninmemory.NewSessionService(), nil
 	})); err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +478,7 @@ func (provider *sessionCapabilityProvider) New(context.Context, StorageFactoryIn
 	if provider.cancel != nil {
 		provider.cancel()
 	}
-	service := inmemory.NewSessionService()
+	service := sessioninmemory.NewSessionService()
 	if provider.closed != nil {
 		return &closeTrackingSession{Service: service, closed: provider.closed}, nil
 	}
@@ -534,7 +533,7 @@ func (provider *recordingSessionCapabilityProvider) New(_ context.Context, input
 	}
 	provider.calls[input.TenantID]++
 	provider.mu.Unlock()
-	return inmemory.NewSessionService(), nil
+	return sessioninmemory.NewSessionService(), nil
 }
 
 func (provider *recordingSessionCapabilityProvider) Count(tenantID string) int {

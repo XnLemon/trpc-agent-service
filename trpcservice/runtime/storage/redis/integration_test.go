@@ -50,10 +50,6 @@ func TestRedisRuntimeLiveReconnect(t *testing.T) {
 		_ = store.Close()
 		t.Fatalf("write live reply: %v", err)
 	}
-	if _, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: tenantID, MemoryID: "memory", UserID: "user", Content: "live"}); err != nil {
-		_ = store.Close()
-		t.Fatalf("write live memory: %v", err)
-	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("close live redis: %v", err)
 	}
@@ -68,9 +64,6 @@ func TestRedisRuntimeLiveReconnect(t *testing.T) {
 	}
 	if _, err := reopened.GetMessage(ctx, tenantID, eventID); err != nil {
 		t.Fatalf("reopened event: %v", err)
-	}
-	if _, err := reopened.GetMemory(ctx, tenantID, "memory"); err != nil {
-		t.Fatalf("reopened memory: %v", err)
 	}
 	if _, err := reopened.GetReply(ctx, tenantID, "reply", 0); err != nil {
 		t.Fatalf("reopened reply: %v", err)

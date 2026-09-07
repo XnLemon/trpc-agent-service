@@ -84,12 +84,12 @@ func (s *Store) persistAttachment(ctx context.Context, tenantID string, referenc
 }
 
 func ensureAttachmentObject(ctx context.Context, tx *sql.Tx, tenantID string, reference attachment.Reference, data []byte) error {
-	if _, err := tx.ExecContext(ctx, "INSERT INTO public.runtime_object (tenant_id,object_key,content_type,content,size,etag) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id,object_key) DO NOTHING", tenantID, reference.ID, reference.MIMEType, data, reference.Size, reference.SHA256); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO public.runtime_attachment_content (tenant_id,attachment_id,content_type,content,size,etag) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id,attachment_id) DO NOTHING", tenantID, reference.ID, reference.MIMEType, data, reference.Size, reference.SHA256); err != nil {
 		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	var objectType, objectETag string
 	var objectSize int64
-	if err := tx.QueryRowContext(ctx, "SELECT content_type,size,etag FROM public.runtime_object WHERE tenant_id=$1 AND object_key=$2", tenantID, reference.ID).Scan(&objectType, &objectSize, &objectETag); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT content_type,size,etag FROM public.runtime_attachment_content WHERE tenant_id=$1 AND attachment_id=$2", tenantID, reference.ID).Scan(&objectType, &objectSize, &objectETag); err != nil {
 		return mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	if objectType != reference.MIMEType || objectSize != reference.Size || objectETag != reference.SHA256 {
@@ -194,7 +194,7 @@ func (s *Store) Load(ctx context.Context, tenantID, eventID string, reference at
 		return attachment.Content{}, runtimestorage.ErrNotFound
 	}
 	var data []byte
-	if err := s.db.QueryRowContext(ctx, "SELECT content FROM public.runtime_object WHERE tenant_id=$1 AND object_key=$2", tenantID, normalized.ID).Scan(&data); err != nil {
+	if err := s.db.QueryRowContext(ctx, "SELECT content FROM public.runtime_attachment_content WHERE tenant_id=$1 AND attachment_id=$2", tenantID, normalized.ID).Scan(&data); err != nil {
 		return attachment.Content{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	content := attachment.Content{Data: bytes.Clone(data)}
@@ -235,7 +235,7 @@ func (s *Store) CleanupAttachments(ctx context.Context, tenantID string, before 
 		return 0, runtimestorage.ErrStorage
 	}
 	for _, id := range ids {
-		if _, err := tx.ExecContext(ctx, "DELETE FROM public.runtime_object WHERE tenant_id=$1 AND object_key=$2", tenantID, id); err != nil {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM public.runtime_attachment_content WHERE tenant_id=$1 AND attachment_id=$2", tenantID, id); err != nil {
 			return 0, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 		}
 	}

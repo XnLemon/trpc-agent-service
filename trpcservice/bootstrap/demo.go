@@ -327,7 +327,13 @@ func (config DemoConfig) validateWithCatalogs(loadCatalogs demoCatalogLoader) er
 	if _, err := modelprofile.NewProfile(modelprofile.CreateInput{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", ProfileKey: config.ModelProfileKey, DisplayName: demoModelDisplayName, Configuration: modelprofile.Configuration{Provider: demoModelProvider, Model: demoModelName}}, modelCatalog); err != nil {
 		return fmt.Errorf("%w: invalid demo model configuration", ErrDemoState)
 	}
-	if _, err := backend.NewProfile(backend.CreateInput{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", ProfileKey: config.BackendProfileKey, DisplayName: demoBackendName, Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory"}}}, backendCatalog); err != nil {
+	demoBindings := []backend.CapabilityBinding{
+		{Capability: backend.CapabilitySession, Provider: "inmemory"},
+		{Capability: backend.CapabilityMemory, Provider: "inmemory"},
+		{Capability: backend.CapabilityKnowledge, Provider: "inmemory"},
+		{Capability: backend.CapabilityArtifact, Provider: "inmemory"},
+	}
+	if _, err := backend.NewProfile(backend.CreateInput{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", ProfileKey: config.BackendProfileKey, DisplayName: demoBackendName, Bindings: demoBindings}, backendCatalog); err != nil {
 		return fmt.Errorf("%w: invalid demo backend configuration", ErrDemoState)
 	}
 	return nil
@@ -371,7 +377,15 @@ func ensureDemoBackend(ctx context.Context, db *sql.DB, repo backend.Repository,
 	}
 	metadata := demoBackendMetadata()
 	if !found {
-		value, _, createErr := repo.Create(ctx, backend.CreateInput{TenantID: tenantID, ProfileKey: profileKey, DisplayName: demoBackendName, Status: backend.StatusActive, Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory"}}, Metadata: metadata})
+		value, _, createErr := repo.Create(ctx, backend.CreateInput{
+			TenantID: tenantID, ProfileKey: profileKey, DisplayName: demoBackendName, Status: backend.StatusActive,
+			Bindings: []backend.CapabilityBinding{
+				{Capability: backend.CapabilitySession, Provider: "inmemory"},
+				{Capability: backend.CapabilityMemory, Provider: "inmemory"},
+				{Capability: backend.CapabilityKnowledge, Provider: "inmemory"},
+				{Capability: backend.CapabilityArtifact, Provider: "inmemory"},
+			}, Metadata: metadata,
+		})
 		if createErr != nil {
 			return "", false, demoDependencyError(createErr)
 		}

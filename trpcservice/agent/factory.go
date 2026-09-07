@@ -9,7 +9,12 @@ import (
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/chainagent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/cycleagent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/graphagent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/parallelagent"
+	"trpc.group/trpc-go/trpc-agent-go/graph"
+	"trpc.group/trpc-go/trpc-agent-go/knowledge"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -33,6 +38,7 @@ type AgentBuildInput struct {
 	Definition   LLMAgentFactoryInput
 	Model        trpcmodel.Model
 	Tools        []trpctool.Tool
+	Knowledge    knowledge.Knowledge
 	ModelOptions []llmagent.Option
 }
 
@@ -132,17 +138,74 @@ func DefaultAgentFactoryRegistry() *AgentFactoryRegistry {
 	registry, _ := NewAgentFactoryRegistry(
 		AgentFactoryRegistration{Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Factory: buildLLMAgent},
 		AgentFactoryRegistration{Kind: appmodel.KindChain, SchemaVersion: appmodel.SchemaVersionV1, Factory: buildChainAgent},
+		AgentFactoryRegistration{Kind: appmodel.KindParallel, SchemaVersion: appmodel.SchemaVersionV1, Factory: buildParallelAgent},
+		AgentFactoryRegistration{Kind: appmodel.KindCycle, SchemaVersion: appmodel.SchemaVersionV1, Factory: buildCycleAgent},
+		AgentFactoryRegistration{Kind: appmodel.KindGraph, SchemaVersion: appmodel.SchemaVersionV1, Factory: buildGraphAgent},
 	)
 	return registry
 }
 
 func buildLLMAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
 	options := llmAgentOptions(input.Definition, input.Model, input.Tools)
+	if input.Knowledge != nil {
+		options = append(options, llmagent.WithKnowledge(input.Knowledge))
+	}
 	options = append(options, input.ModelOptions...)
 	return llmagent.New(input.Definition.Name, options...), nil
 }
 
 func buildChainAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
+	children, err := buildCompositeChildren(input)
+	if err != nil {
+		return nil, err
+	}
+	return chainagent.New(input.Definition.Name, chainagent.WithSubAgents(children)), nil
+}
+
+func buildParallelAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
+	children, err := buildCompositeChildren(input)
+	if err != nil {
+		return nil, err
+	}
+	return parallelagent.New(input.Definition.Name, parallelagent.WithSubAgents(children)), nil
+}
+
+func buildCycleAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
+	children, err := buildCompositeChildren(input)
+	if err != nil {
+		return nil, err
+	}
+	iterations := input.Definition.Runtime.MaxLLMCalls / len(children)
+	if iterations < 1 {
+		iterations = 1
+	}
+	return cycleagent.New(input.Definition.Name, cycleagent.WithSubAgents(children), cycleagent.WithMaxIterations(iterations)), nil
+}
+
+func buildGraphAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
+	children, err := buildCompositeChildren(input)
+	if err != nil {
+		return nil, err
+	}
+	builder := graph.NewStateGraph(graph.MessagesStateSchema())
+	for index, child := range children {
+		name := child.Info().Name
+		builder.AddAgentNode(name)
+		if index == 0 {
+			builder.SetEntryPoint(name)
+		} else {
+			builder.AddEdge(children[index-1].Info().Name, name)
+		}
+	}
+	builder.SetFinishPoint(children[len(children)-1].Info().Name)
+	compiled, err := builder.Compile()
+	if err != nil {
+		return nil, fmt.Errorf("%w: compile graph: %v", ErrAgentFactory, err)
+	}
+	return graphagent.New(input.Definition.Name, compiled, graphagent.WithSubAgents(children))
+}
+
+func buildCompositeChildren(input AgentBuildInput) ([]trpcagent.Agent, error) {
 	configuration := input.Definition.Chain
 	if configuration == nil || len(configuration.Steps) < 2 {
 		return nil, fmt.Errorf("%w: chain requires at least two steps", ErrAgentFactory)
@@ -163,8 +226,11 @@ func buildChainAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent,
 		stepDefinition.GlobalInstruction = step.GlobalInstruction
 		stepDefinition.Chain = nil
 		options := llmAgentOptions(stepDefinition, input.Model, input.Tools)
+		if input.Knowledge != nil {
+			options = append(options, llmagent.WithKnowledge(input.Knowledge))
+		}
 		options = append(options, input.ModelOptions...)
 		children = append(children, llmagent.New(step.Name, options...))
 	}
-	return chainagent.New(input.Definition.Name, chainagent.WithSubAgents(children)), nil
+	return children, nil
 }

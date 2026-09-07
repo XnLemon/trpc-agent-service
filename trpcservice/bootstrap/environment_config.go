@@ -39,7 +39,7 @@ func loadEnvironment() (environmentConfig, error) {
 		demoMode:       demoMode,
 		telemetry:      observability.NewNoopProvider(),
 	}
-	loaders := []func() error{config.loadDatabase, config.loadIdentities, config.loadAdmin, config.loadModel, config.loadRuntime, config.loadS3, config.loadWeCom, config.loadWeComAIBots}
+	loaders := []func() error{config.loadDatabase, config.loadIdentities, config.loadAdmin, config.loadModel, config.loadRuntime, config.loadWeCom, config.loadWeComAIBots}
 	for _, load := range loaders {
 		if err := load(); err != nil {
 			return environmentConfig{}, err
@@ -49,29 +49,6 @@ func loadEnvironment() (environmentConfig, error) {
 		return environmentConfig{}, err
 	}
 	return config, nil
-}
-
-func (config *environmentConfig) loadS3() error {
-	config.s3AccessKeyID = strings.TrimSpace(os.Getenv(envS3AccessKeyID))
-	config.s3SecretKey = os.Getenv(envS3SecretKey)
-	config.s3SecretRef = environmentOrDefault(envS3SecretRef, "env/trpc-s3-credentials")
-	configured := config.s3AccessKeyID != "" || config.s3SecretKey != ""
-	if !configured {
-		config.s3SecretRef = ""
-		return nil
-	}
-	if config.s3AccessKeyID == "" || config.s3SecretKey == "" || strings.ContainsAny(config.s3AccessKeyID, "\r\n") || strings.ContainsAny(config.s3SecretKey, "\r\n") {
-		return fmt.Errorf("%w: S3 credentials must be configured together", ErrInvalidConfig)
-	}
-	if _, err := modelprofile.NewSecretValue(config.s3AccessKeyID + ":" + config.s3SecretKey); err != nil {
-		return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envS3SecretKey)
-	}
-	for _, identity := range config.apiIdentities {
-		if err := (modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.s3SecretRef}).Validate(); err != nil {
-			return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envS3SecretRef)
-		}
-	}
-	return nil
 }
 
 func (config *environmentConfig) loadTelemetry() error {
@@ -552,6 +529,7 @@ func environmentModelPricingOptions() map[string]modelprofile.OptionSpec {
 }
 
 func newEnvironmentBackendCatalog(runtimeStorage string) (*backend.ProviderCatalog, error) {
+	providers := []backend.ProviderSpec{chromaMemoryProviderSpec(), cosBackendProviderSpec()}
 	inMemory := backend.ProviderSpec{
 		Provider:        "inmemory",
 		Capabilities:    []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit},
@@ -559,50 +537,54 @@ func newEnvironmentBackendCatalog(runtimeStorage string) (*backend.ProviderCatal
 		SecretRefPolicy: backend.FieldForbidden,
 		Options:         map[string]backend.OptionSpec{},
 	}
+	providers = append(providers, inMemory)
 	if runtimeStorage == "redis" {
-		backendCatalog, err := backend.NewProviderCatalog(backend.ProviderSpec{
+		redis := backend.ProviderSpec{
 			Provider:        "redis",
 			Capabilities:    []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory},
 			EndpointPolicy:  backend.FieldRequired,
 			EndpointSchemes: []string{"redis"},
 			SecretRefPolicy: backend.FieldOptional,
 			Options:         map[string]backend.OptionSpec{},
-		}, s3BackendProviderSpec(), inMemory)
+		}
+		backendCatalog, err := backend.NewProviderCatalog(append([]backend.ProviderSpec{redis}, providers...)...)
 		if err != nil {
 			return nil, fmt.Errorf("%w: backend catalog is invalid", ErrInvalidConfig)
 		}
 		return backendCatalog, nil
 	}
-	backendCatalog, err := backend.NewProviderCatalog(s3BackendProviderSpec(), inMemory)
+	backendCatalog, err := backend.NewProviderCatalog(providers...)
 	if err != nil {
 		return nil, fmt.Errorf("%w: backend catalog is invalid", ErrInvalidConfig)
 	}
 	return backendCatalog, nil
 }
 
-func s3BackendProviderSpec() backend.ProviderSpec {
+func chromaMemoryProviderSpec() backend.ProviderSpec {
+	minDimension, maxDimension := int64(1), int64(65536)
 	return backend.ProviderSpec{
-		Provider:        "s3",
-		Capabilities:    []backend.Capability{backend.CapabilityArtifact},
+		Provider:        "chromadb",
+		Capabilities:    []backend.Capability{backend.CapabilityMemory},
 		EndpointPolicy:  backend.FieldRequired,
-		EndpointSchemes: []string{"http", "https"},
+		EndpointSchemes: []string{"https"},
 		SecretRefPolicy: backend.FieldRequired,
 		Options: map[string]backend.OptionSpec{
-			"bucket":             {Kind: backend.OptionString, Required: true},
-			"region":             {Kind: backend.OptionString, DefaultValue: stringOption("us-east-1")},
-			"path_style":         {Kind: backend.OptionBoolean, DefaultValue: stringOption("false")},
-			"allow_insecure":     {Kind: backend.OptionBoolean, DefaultValue: stringOption("false")},
-			"max_bytes":          {Kind: backend.OptionInteger, DefaultValue: stringOption("33554432"), MinInteger: int64Option(1), MaxInteger: int64Option(1073741824)},
-			"connect_timeout_ms": {Kind: backend.OptionInteger, DefaultValue: stringOption("15000"), MinInteger: int64Option(1), MaxInteger: int64Option(300000)},
-			"read_timeout_ms":    {Kind: backend.OptionInteger, DefaultValue: stringOption("15000"), MinInteger: int64Option(1), MaxInteger: int64Option(300000)},
-			"write_timeout_ms":   {Kind: backend.OptionInteger, DefaultValue: stringOption("15000"), MinInteger: int64Option(1), MaxInteger: int64Option(300000)},
+			"database":   {Kind: backend.OptionString, DefaultValue: stringOption("default_database")},
+			"collection": {Kind: backend.OptionString, DefaultValue: stringOption("memories")},
+			"dimension":  {Kind: backend.OptionInteger, MinInteger: &minDimension, MaxInteger: &maxDimension},
 		},
-		ValidateBinding: validEnvironmentS3Binding,
 	}
 }
 
-func validEnvironmentS3Binding(binding backend.CapabilityBinding) bool {
-	return validEnvironmentS3Endpoint(binding.Endpoint, binding.Options["allow_insecure"] == "true") && validS3Bucket(binding.Options["bucket"])
+func cosBackendProviderSpec() backend.ProviderSpec {
+	return backend.ProviderSpec{
+		Provider:        "cos",
+		Capabilities:    []backend.Capability{backend.CapabilityArtifact},
+		EndpointPolicy:  backend.FieldRequired,
+		EndpointSchemes: []string{"https"},
+		SecretRefPolicy: backend.FieldRequired,
+		Options:         map[string]backend.OptionSpec{},
+	}
 }
 
 func stringOption(value string) *string { return &value }

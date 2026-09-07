@@ -20,7 +20,6 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
-	"github.com/google/uuid"
 	redisclient "github.com/redis/go-redis/v9"
 )
 
@@ -42,7 +41,7 @@ type Config struct {
 	PoolSize     int
 }
 
-// Store implements the tenant-scoped runtime capabilities and MemoryStore over Redis.
+// Store implements tenant-scoped session, message, and reply state over Redis.
 type Store struct {
 	client    redisclient.UniversalClient
 	keyPrefix string
@@ -52,15 +51,13 @@ type Store struct {
 }
 
 type state struct {
-	Version             int                                        `json:"version"`
-	Sessions            map[string]sessionstorage.Session          `json:"sessions,omitempty"`
-	Events              map[string]runtimestorage.MessageEvent     `json:"events,omitempty"`
-	Messages            map[string]string                          `json:"messages,omitempty"`
-	Histories           map[string][]sessionstorage.EventPayload   `json:"histories,omitempty"`
-	Replies             map[string]runtimestorage.ReplyOutbox      `json:"replies,omitempty"`
-	Correlations        map[string]runtimestorage.ReplyCorrelation `json:"correlations,omitempty"`
-	Memories            map[string]runtimestorage.MemoryRecord     `json:"memories,omitempty"`
-	MemoryIndexHandoffs map[string]int64                           `json:"memory_index_handoffs,omitempty"`
+	Version      int                                        `json:"version"`
+	Sessions     map[string]sessionstorage.Session          `json:"sessions,omitempty"`
+	Events       map[string]runtimestorage.MessageEvent     `json:"events,omitempty"`
+	Messages     map[string]string                          `json:"messages,omitempty"`
+	Histories    map[string][]sessionstorage.EventPayload   `json:"histories,omitempty"`
+	Replies      map[string]runtimestorage.ReplyOutbox      `json:"replies,omitempty"`
+	Correlations map[string]runtimestorage.ReplyCorrelation `json:"correlations,omitempty"`
 }
 
 // New creates a store using a caller-owned Redis client.
@@ -164,7 +161,7 @@ func (s *Store) key(tenantID string) string {
 }
 
 func emptyState() state {
-	return state{Version: stateVersion, Sessions: map[string]sessionstorage.Session{}, Events: map[string]runtimestorage.MessageEvent{}, Messages: map[string]string{}, Histories: map[string][]sessionstorage.EventPayload{}, Replies: map[string]runtimestorage.ReplyOutbox{}, Correlations: map[string]runtimestorage.ReplyCorrelation{}, Memories: map[string]runtimestorage.MemoryRecord{}, MemoryIndexHandoffs: map[string]int64{}}
+	return state{Version: stateVersion, Sessions: map[string]sessionstorage.Session{}, Events: map[string]runtimestorage.MessageEvent{}, Messages: map[string]string{}, Histories: map[string][]sessionstorage.EventPayload{}, Replies: map[string]runtimestorage.ReplyOutbox{}, Correlations: map[string]runtimestorage.ReplyCorrelation{}}
 }
 
 func normalizeState(value state) state {
@@ -188,12 +185,6 @@ func normalizeState(value state) state {
 	}
 	if value.Correlations == nil {
 		value.Correlations = map[string]runtimestorage.ReplyCorrelation{}
-	}
-	if value.Memories == nil {
-		value.Memories = map[string]runtimestorage.MemoryRecord{}
-	}
-	if value.MemoryIndexHandoffs == nil {
-		value.MemoryIndexHandoffs = map[string]int64{}
 	}
 	return value
 }
@@ -342,17 +333,6 @@ func cloneReply(v runtimestorage.ReplyOutbox) runtimestorage.ReplyOutbox {
 	}
 	return v
 }
-func cloneMemory(v runtimestorage.MemoryRecord) runtimestorage.MemoryRecord {
-	v.Topics = append([]string(nil), v.Topics...)
-	v.Metadata = cloneMap(v.Metadata)
-	v.Embedding = append([]float64(nil), v.Embedding...)
-	if v.DeletedAt != nil {
-		x := *v.DeletedAt
-		v.DeletedAt = &x
-	}
-	return v
-}
-
 func jsonEqual(left, right []byte) bool {
 	var a, b any
 	return json.Unmarshal(left, &a) == nil && json.Unmarshal(right, &b) == nil && reflect.DeepEqual(a, b)
@@ -959,199 +939,6 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 	return result, err
 }
 
-// PutMemory creates or updates one durable tenant-scoped memory record.
-func (s *Store) PutMemory(ctx context.Context, input runtimestorage.MemoryInput) (runtimestorage.MemoryRecord, error) {
-	if err := s.check(ctx); err != nil {
-		return runtimestorage.MemoryRecord{}, err
-	}
-	if runtimestorage.ValidateTenant(input.TenantID) != nil || !runtimestorage.ValidateText(input.UserID, 256, true) || !runtimestorage.ValidateText(input.Content, 0, true) || !runtimestorage.ValidateText(input.MemoryID, 256, false) || !runtimestorage.ValidateText(input.SessionID, 256, false) || !runtimestorage.ValidateEmbedding(input.Embedding) || (input.Metadata != nil && cloneMap(input.Metadata) == nil) {
-		return runtimestorage.MemoryRecord{}, runtimestorage.ErrInvalid
-	}
-	if input.MemoryID == "" {
-		input.MemoryID = "mem_" + uuid.NewString()
-	}
-	if input.Topics == nil {
-		input.Topics = []string{}
-	}
-	if input.Metadata == nil {
-		input.Metadata = map[string]any{}
-	}
-	if input.Embedding == nil {
-		input.Embedding = []float64{}
-	}
-	var result runtimestorage.MemoryRecord
-	err := s.mutate(ctx, input.TenantID, func(value *state) error {
-		now := time.Now().UTC()
-		current, ok := value.Memories[input.MemoryID]
-		if ok {
-			current.Content, current.Topics, current.Metadata, current.Embedding = input.Content, append([]string(nil), input.Topics...), cloneMap(input.Metadata), append([]float64(nil), input.Embedding...)
-			current.UserID, current.SessionID, current.Version, current.UpdatedAt, current.DeletedAt = input.UserID, input.SessionID, current.Version+1, now, nil
-			value.Memories[input.MemoryID] = current
-			result = cloneMemory(current)
-			return nil
-		}
-		current = runtimestorage.MemoryRecord{TenantID: input.TenantID, MemoryID: input.MemoryID, UserID: input.UserID, SessionID: input.SessionID, Content: input.Content, Topics: append([]string(nil), input.Topics...), Metadata: cloneMap(input.Metadata), Embedding: append([]float64(nil), input.Embedding...), Version: 1, CreatedAt: now, UpdatedAt: now}
-		value.Memories[input.MemoryID] = current
-		result = cloneMemory(current)
-		return nil
-	})
-	return result, err
-}
-
-// GetMemory returns one non-deleted tenant-scoped memory record.
-func (s *Store) GetMemory(ctx context.Context, tenantID, memoryID string) (runtimestorage.MemoryRecord, error) {
-	if err := s.check(ctx); err != nil {
-		return runtimestorage.MemoryRecord{}, err
-	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || memoryID == "" {
-		return runtimestorage.MemoryRecord{}, runtimestorage.ErrInvalid
-	}
-	value, err := s.load(ctx, tenantID)
-	if err != nil {
-		return runtimestorage.MemoryRecord{}, err
-	}
-	result, ok := value.Memories[memoryID]
-	if !ok || result.DeletedAt != nil {
-		return runtimestorage.MemoryRecord{}, runtimestorage.ErrNotFound
-	}
-	return cloneMemory(result), nil
-}
-
-// ListMemories returns a tenant user's non-deleted memories.
-func (s *Store) ListMemories(ctx context.Context, tenantID, userID string, limit int) ([]runtimestorage.MemoryRecord, error) {
-	if err := s.check(ctx); err != nil {
-		return nil, err
-	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || strings.TrimSpace(userID) == "" || limit < 0 {
-		return nil, runtimestorage.ErrInvalid
-	}
-	value, err := s.load(ctx, tenantID)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]runtimestorage.MemoryRecord, 0)
-	for _, item := range value.Memories {
-		if item.UserID == userID && item.DeletedAt == nil {
-			result = append(result, cloneMemory(item))
-		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].UpdatedAt.Equal(result[j].UpdatedAt) {
-			return result[i].MemoryID < result[j].MemoryID
-		}
-		return result[i].UpdatedAt.After(result[j].UpdatedAt)
-	})
-	if limit > 0 && len(result) > limit {
-		result = result[:limit]
-	}
-	return result, nil
-}
-
-// SearchMemories searches a tenant user's memory content by text terms.
-func (s *Store) SearchMemories(ctx context.Context, tenantID, userID, query string, limit int) ([]runtimestorage.MemorySearchResult, error) {
-	if err := s.check(ctx); err != nil {
-		return nil, err
-	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || strings.TrimSpace(userID) == "" || strings.TrimSpace(query) == "" || limit < 0 {
-		return nil, runtimestorage.ErrInvalid
-	}
-	terms := strings.Fields(strings.ToLower(query))
-	value, err := s.load(ctx, tenantID)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]runtimestorage.MemorySearchResult, 0)
-	for _, item := range value.Memories {
-		if item.UserID != userID || item.DeletedAt != nil {
-			continue
-		}
-		hits := 0
-		text := strings.ToLower(item.Content)
-		for _, term := range terms {
-			if strings.Contains(text, term) {
-				hits++
-			}
-		}
-		if hits > 0 {
-			result = append(result, runtimestorage.MemorySearchResult{Memory: cloneMemory(item), Score: float64(hits) / float64(len(terms))})
-		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Score == result[j].Score {
-			return result[i].Memory.MemoryID < result[j].Memory.MemoryID
-		}
-		return result[i].Score > result[j].Score
-	})
-	if limit > 0 && len(result) > limit {
-		result = result[:limit]
-	}
-	return result, nil
-}
-
-// DeleteMemory tombstones one tenant-scoped memory record.
-func (s *Store) DeleteMemory(ctx context.Context, tenantID, memoryID string) error {
-	if err := s.check(ctx); err != nil {
-		return err
-	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || memoryID == "" {
-		return runtimestorage.ErrInvalid
-	}
-	return s.mutate(ctx, tenantID, func(value *state) error {
-		current, ok := value.Memories[memoryID]
-		if !ok || current.DeletedAt != nil {
-			return runtimestorage.ErrNotFound
-		}
-		now := time.Now().UTC()
-		current.DeletedAt, current.UpdatedAt, current.Version = &now, now, current.Version+1
-		value.Memories[memoryID] = current
-		delete(value.MemoryIndexHandoffs, scopedKey(memoryID))
-		return nil
-	})
-}
-
-// EnqueueMemoryIndex records a durable index handoff for a memory version.
-func (s *Store) EnqueueMemoryIndex(ctx context.Context, value runtimestorage.MemoryRecord) error {
-	if err := s.check(ctx); err != nil {
-		return err
-	}
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.MemoryID == "" || value.Version < 1 {
-		return runtimestorage.ErrInvalid
-	}
-	return s.mutate(ctx, value.TenantID, func(current *state) error {
-		stored, ok := current.Memories[value.MemoryID]
-		if !ok || stored.DeletedAt != nil {
-			return runtimestorage.ErrNotFound
-		}
-		if stored.Version != value.Version {
-			return runtimestorage.ErrConflict
-		}
-		current.MemoryIndexHandoffs[scopedKey(value.MemoryID)] = value.Version
-		return nil
-	})
-}
-
-// WaitForMemoryIndex verifies that a memory version has been handed off.
-func (s *Store) WaitForMemoryIndex(ctx context.Context, tenantID, memoryID string, version int64) error {
-	if err := s.check(ctx); err != nil {
-		return err
-	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || memoryID == "" || version < 1 {
-		return runtimestorage.ErrInvalid
-	}
-	value, err := s.load(ctx, tenantID)
-	if err != nil {
-		return err
-	}
-	current, ok := value.Memories[memoryID]
-	if !ok || current.DeletedAt != nil {
-		return runtimestorage.ErrNotFound
-	}
-	if current.Version < version || value.MemoryIndexHandoffs[scopedKey(memoryID)] < version {
-		return runtimestorage.ErrConflict
-	}
-	return nil
-}
-
 // Close is idempotent. A caller-owned client remains open.
 func (s *Store) Close() error {
 	if s == nil {
@@ -1171,7 +958,6 @@ var _ sessionstorage.SessionStateStore = (*Store)(nil)
 var _ sessionstorage.EventHistoryStore = (*Store)(nil)
 var _ runtimestorage.MessageStore = (*Store)(nil)
 var _ runtimestorage.ReplyStore = (*Store)(nil)
-var _ runtimestorage.MemoryStore = (*Store)(nil)
 var _ runtimestorage.ReplyBatchEnqueuer = (*Store)(nil)
 var _ runtimestorage.ReplyBatchCorrelationEnqueuer = (*Store)(nil)
 var _ runtimestorage.ReplyCorrelationStore = (*Store)(nil)

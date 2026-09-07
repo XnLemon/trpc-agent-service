@@ -55,6 +55,30 @@ func TestDefaultAgentFactoryRegistryBuildsLLMAndChain(t *testing.T) {
 	}
 }
 
+func TestDefaultAgentFactoryRegistryBuildsNativeComposites(t *testing.T) {
+	registry := DefaultAgentFactoryRegistry()
+	for _, kind := range []appmodel.Kind{appmodel.KindChain, appmodel.KindParallel, appmodel.KindCycle, appmodel.KindGraph} {
+		t.Run(string(kind), func(t *testing.T) {
+			built, err := registry.Build(context.Background(), AgentBuildInput{
+				Definition: LLMAgentFactoryInput{
+					Name: "composite", Kind: kind, SchemaVersion: appmodel.SchemaVersionV1,
+					Instruction: "Run.", Runtime: appmodel.DefaultRuntimePolicy(),
+					Chain: &appmodel.ChainConfiguration{Steps: []appmodel.ChainStep{
+						{Name: "first", Instruction: "First."}, {Name: "second", Instruction: "Second."},
+					}},
+				},
+				Model: agentTestModel{},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if built.Info().Name != "composite" || len(built.SubAgents()) != 2 {
+				t.Fatalf("native %s = %T, children=%d", kind, built, len(built.SubAgents()))
+			}
+		})
+	}
+}
+
 func TestAgentFactoryRegistryRejectsDuplicateAndUnknownFactories(t *testing.T) {
 	factory := func(context.Context, AgentBuildInput) (trpcagent.Agent, error) {
 		return llmagent.New("custom"), nil

@@ -68,18 +68,20 @@ func TestRuntimeEventHistoryMigrationIsTenantScopedAndCascades(t *testing.T) {
 	}
 }
 
-func TestRuntimeCapabilityMigrationNamespacesVectors(t *testing.T) {
+func TestRuntimeCapabilityMigrationContainsOnlyPlatformStorage(t *testing.T) {
 	contents, err := os.ReadFile("0012_runtime_capabilities.up.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
 	sql := string(contents)
-	for _, fragment := range []string{
-		"source      TEXT NOT NULL DEFAULT 'generic'",
-		"PRIMARY KEY (tenant_id, source, document_id)",
-	} {
+	for _, fragment := range []string{"runtime_summary", "runtime_audit_log", "runtime_attachment_content"} {
 		if !strings.Contains(sql, fragment) {
 			t.Fatalf("migration missing %q", fragment)
+		}
+	}
+	for _, obsolete := range []string{"runtime_memory", "runtime_knowledge", "runtime_artifact", "runtime_vector_index", "runtime_object"} {
+		if strings.Contains(sql, obsolete) {
+			t.Fatalf("migration retains obsolete Agent storage %q", obsolete)
 		}
 	}
 }

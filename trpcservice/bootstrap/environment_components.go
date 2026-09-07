@@ -28,6 +28,9 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmysql "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/mysql"
 	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
+	artifactinmemory "trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/knowledge"
+	memoryinmemory "trpc.group/trpc-go/trpc-agent-go/memory/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 )
 
@@ -246,11 +249,6 @@ func environmentRegistriesForStores(config environmentConfig, delegateSessions s
 				return nil, nil, nil, err
 			}
 		}
-		if config.s3AccessKeyID != "" {
-			if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.s3SecretRef}, config.s3AccessKeyID+":"+config.s3SecretKey); err != nil {
-				return nil, nil, nil, err
-			}
-		}
 		if err := registerEnvironmentRuntimeProviders(backendRegistry, identity.TenantID, delegateSessions, config, runtimeProviders); err != nil {
 			return nil, nil, nil, err
 		}
@@ -277,8 +275,15 @@ func environmentRuntimeProviders(config environmentConfig, stores environmentRun
 
 func registerEnvironmentRuntimeProviders(registry *storagefactory.ProviderRegistry, tenantID string, delegateSessions session.Service, config environmentConfig, runtimeProviders []environmentRuntimeProviderSpec) error {
 	for _, runtimeProvider := range runtimeProviders {
+		sharedMemory := memoryinmemory.NewMemoryService()
+		sharedArtifact := artifactinmemory.NewService()
+		sharedKnowledge := knowledge.New()
 		for _, capability := range runtimeProvider.capabilities {
-			provider := environmentRuntimeCapabilityProvider{capability: capability, delegate: delegateSessions, store: runtimeProvider.store, telemetry: config.telemetry, backend: runtimeProvider.name}
+			provider := environmentRuntimeCapabilityProvider{
+				capability: capability, delegate: delegateSessions, store: runtimeProvider.store,
+				telemetry: config.telemetry, backend: runtimeProvider.name,
+				memory: sharedMemory, artifact: sharedArtifact, knowledge: sharedKnowledge,
+			}
 			if runtimeProvider.name == "redis" {
 				provider.redisEndpoint = config.redisEndpoint
 				provider.redisSecretRef = config.redisSecretRef
@@ -289,7 +294,10 @@ func registerEnvironmentRuntimeProviders(registry *storagefactory.ProviderRegist
 			}
 		}
 	}
-	if err := registry.Register(tenantID, backend.CapabilityArtifact, "s3", environmentS3CapabilityProvider{tenantID: tenantID, secretRef: config.s3SecretRef}); err != nil {
+	if err := registry.Register(tenantID, backend.CapabilityMemory, "chromadb", environmentChromaMemoryProvider{}); err != nil {
+		return err
+	}
+	if err := registry.Register(tenantID, backend.CapabilityArtifact, "cos", environmentCOSCapabilityProvider{}); err != nil {
 		return err
 	}
 	return nil

@@ -182,30 +182,52 @@ func DefaultRegistry() *Registry {
 	return registry
 }
 
-// Resolve returns only installed tools explicitly authorized by the published
-// revision. Unknown optional tools remain unavailable; unknown required tools
-// fail closed during Runner construction.
-func (registry *Registry) Resolve(authorizations []appmodel.ToolAuthorization) ([]trpctool.Tool, error) {
+// ResolveWith returns installed platform and upstream tools explicitly
+// authorized by the published revision. Upstream candidates use their
+// declaration name as the stable authorization ID.
+func (registry *Registry) ResolveWith(authorizations []appmodel.ToolAuthorization, candidates ...trpctool.Tool) ([]trpctool.Tool, error) {
 	if registry == nil || len(authorizations) == 0 {
 		return nil, nil
+	}
+	available := make(map[string]trpctool.Tool, len(registry.factories)+len(candidates))
+	for id, factory := range registry.factories {
+		tool := factory.New()
+		if tool == nil || tool.Declaration() == nil || tool.Declaration().Name != id {
+			return nil, ErrUnavailable
+		}
+		available[id] = tool
+	}
+	for _, candidate := range candidates {
+		if candidate == nil || candidate.Declaration() == nil {
+			return nil, ErrUnavailable
+		}
+		id := strings.TrimSpace(candidate.Declaration().Name)
+		if id == "" {
+			return nil, ErrUnavailable
+		}
+		if _, duplicate := available[id]; duplicate {
+			return nil, ErrUnavailable
+		}
+		available[id] = candidate
 	}
 	tools := make([]trpctool.Tool, 0, len(authorizations))
 	for _, authorization := range authorizations {
 		id := strings.TrimSpace(authorization.ToolID)
-		factory, ok := registry.factories[id]
+		tool, ok := available[id]
 		if !ok {
 			if authorization.Required {
 				return nil, fmt.Errorf("%w: %s", ErrRequiredUnavailable, id)
 			}
 			continue
 		}
-		tool := factory.New()
-		if tool == nil || tool.Declaration() == nil || tool.Declaration().Name != id {
-			return nil, ErrUnavailable
-		}
 		tools = append(tools, tool)
 	}
 	return tools, nil
+}
+
+// Resolve retains the platform-only convenience API.
+func (registry *Registry) Resolve(authorizations []appmodel.ToolAuthorization) ([]trpctool.Tool, error) {
+	return registry.ResolveWith(authorizations)
 }
 
 type sendTestImageFactory struct{}

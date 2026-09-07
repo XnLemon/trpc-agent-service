@@ -10,6 +10,9 @@ import (
 	backendprofile "github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	"trpc.group/trpc-go/trpc-agent-go/artifact"
+	"trpc.group/trpc-go/trpc-agent-go/knowledge"
+	"trpc.group/trpc-go/trpc-agent-go/memory"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 )
 
@@ -86,13 +89,13 @@ func (set *CapabilitySet) Session() (session.Service, error) {
 	return service, nil
 }
 
-// Memory returns the tenant-scoped memory capability.
-func (set *CapabilitySet) Memory() (runtimestorage.MemoryStore, error) {
+// Memory returns the tRPC-Agent-Go memory service for this execution.
+func (set *CapabilitySet) Memory() (memory.Service, error) {
 	value, ok := set.Capability(CapabilityMemory)
 	if !ok {
 		return nil, ErrCapabilityUnavailable
 	}
-	service, ok := value.(runtimestorage.MemoryStore)
+	service, ok := value.(memory.Service)
 	if !ok || service == nil {
 		return nil, ErrCapabilityUnavailable
 	}
@@ -114,26 +117,26 @@ func (set *CapabilitySet) Summary() (runtimestorage.SummaryStore, error) {
 	return service, nil
 }
 
-// Knowledge returns the tenant-scoped knowledge capability.
-func (set *CapabilitySet) Knowledge() (runtimestorage.KnowledgeStore, error) {
+// Knowledge returns the tRPC-Agent-Go knowledge service for this execution.
+func (set *CapabilitySet) Knowledge() (knowledge.Knowledge, error) {
 	value, ok := set.Capability(CapabilityKnowledge)
 	if !ok {
 		return nil, ErrCapabilityUnavailable
 	}
-	service, ok := value.(runtimestorage.KnowledgeStore)
+	service, ok := value.(knowledge.Knowledge)
 	if !ok || service == nil {
 		return nil, ErrCapabilityUnavailable
 	}
 	return service, nil
 }
 
-// Artifact returns the tenant-scoped artifact capability.
-func (set *CapabilitySet) Artifact() (runtimestorage.ArtifactStore, error) {
+// Artifact returns the tRPC-Agent-Go artifact service for this execution.
+func (set *CapabilitySet) Artifact() (artifact.Service, error) {
 	value, ok := set.Capability(CapabilityArtifact)
 	if !ok {
 		return nil, ErrCapabilityUnavailable
 	}
-	service, ok := value.(runtimestorage.ArtifactStore)
+	service, ok := value.(artifact.Service)
 	if !ok || service == nil {
 		return nil, ErrCapabilityUnavailable
 	}
@@ -147,32 +150,6 @@ func (set *CapabilitySet) Audit() (runtimestorage.AuditStore, error) {
 		return nil, ErrCapabilityUnavailable
 	}
 	service, ok := value.(runtimestorage.AuditStore)
-	if !ok || service == nil {
-		return nil, ErrCapabilityUnavailable
-	}
-	return service, nil
-}
-
-// Vector returns a vector adapter carried by the knowledge capability.
-func (set *CapabilitySet) Vector() (runtimestorage.VectorStore, error) {
-	value, ok := set.Capability(CapabilityKnowledge)
-	if !ok {
-		return nil, ErrCapabilityUnavailable
-	}
-	service, ok := value.(runtimestorage.VectorStore)
-	if !ok || service == nil {
-		return nil, ErrCapabilityUnavailable
-	}
-	return service, nil
-}
-
-// Object returns an object adapter carried by the artifact capability.
-func (set *CapabilitySet) Object() (runtimestorage.ObjectStore, error) {
-	value, ok := set.Capability(CapabilityArtifact)
-	if !ok {
-		return nil, ErrCapabilityUnavailable
-	}
-	service, ok := value.(runtimestorage.ObjectStore)
 	if !ok || service == nil {
 		return nil, ErrCapabilityUnavailable
 	}
@@ -341,24 +318,16 @@ func matchesCapability(kind Capability, value any) bool {
 		_, ok := value.(session.Service)
 		return ok
 	case CapabilityMemory:
-		_, ok := value.(runtimestorage.MemoryStore)
+		_, ok := value.(memory.Service)
 		return ok
 	case CapabilitySummary:
 		_, ok := value.(runtimestorage.SummaryStore)
 		return ok
 	case CapabilityKnowledge:
-		_, ok := value.(runtimestorage.KnowledgeStore)
-		if !ok {
-			return false
-		}
-		_, ok = value.(runtimestorage.VectorStore)
+		_, ok := value.(knowledge.Knowledge)
 		return ok
 	case CapabilityArtifact:
-		_, ok := value.(runtimestorage.ArtifactStore)
-		if !ok {
-			return false
-		}
-		_, ok = value.(runtimestorage.ObjectStore)
+		_, ok := value.(artifact.Service)
 		return ok
 	case CapabilityAudit:
 		_, ok := value.(runtimestorage.AuditStore)

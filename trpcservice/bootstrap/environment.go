@@ -10,10 +10,8 @@ import (
 	"github.com/XnLemon/trpc-agent-service/migrations"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
-	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
-	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -65,12 +63,7 @@ const (
 	envRedisReadTimeout  = "TRPC_REDIS_READ_TIMEOUT"
 	envRedisWriteTimeout = "TRPC_REDIS_WRITE_TIMEOUT"
 	envRedisPoolSize     = "TRPC_REDIS_POOL_SIZE"
-	envS3AccessKeyID     = "TRPC_S3_ACCESS_KEY_ID"
-	// #nosec G101 -- environment variable name, not a secret.
-	envS3SecretKey = "TRPC_S3_SECRET_KEY"
-	// #nosec G101 -- environment variable name, not a secret.
-	envS3SecretRef = "TRPC_S3_SECRET_REF"
-	envDemoMode    = "TRPC_DEMO_MODE"
+	envDemoMode          = "TRPC_DEMO_MODE"
 	// #nosec G101 -- environment variable name, not a secret.
 	envWeComCallbackToken  = "WECOM_CALLBACK_TOKEN"
 	envWeComEncodingAESKey = "WECOM_ENCODING_AES_KEY"
@@ -97,27 +90,18 @@ const (
 )
 
 var (
-	openEnvironmentDatabase                         = postgres.Open
-	openMySQLEnvironmentDatabase                    = mysql.Open
-	applyEnvironmentMigrations                      = migrations.Apply
-	applyMySQLEnvironmentMigrations                 = migrations.ApplyMySQL
-	verifyEnvironmentMigrations                     = migrations.Verify
-	verifyMySQLEnvironmentMigrations                = migrations.VerifyMySQL
-	newEnvironmentRuntimeStore                      = environmentRuntimeStore
-	newEnvironmentRedisRuntimeStore                 = environmentRedisRuntimeStore
-	newEnvironmentInMemoryFallback                  = func() environmentStorage { return runtimestorageinmemory.New() }
-	newEnvironmentS3Store            s3StoreFactory = newEnvironmentS3StoreFromConfig
-	environmentWeComOwnerFunc                       = environmentWeComOwner
-	newEnvironmentWeComWorker                       = outbox.New
+	openEnvironmentDatabase          = postgres.Open
+	openMySQLEnvironmentDatabase     = mysql.Open
+	applyEnvironmentMigrations       = migrations.Apply
+	applyMySQLEnvironmentMigrations  = migrations.ApplyMySQL
+	verifyEnvironmentMigrations      = migrations.Verify
+	verifyMySQLEnvironmentMigrations = migrations.VerifyMySQL
+	newEnvironmentRuntimeStore       = environmentRuntimeStore
+	newEnvironmentRedisRuntimeStore  = environmentRedisRuntimeStore
+	newEnvironmentInMemoryFallback   = func() environmentStorage { return runtimestorageinmemory.New() }
+	environmentWeComOwnerFunc        = environmentWeComOwner
+	newEnvironmentWeComWorker        = outbox.New
 )
-
-type s3StoreFactory func(context.Context, string, backend.CapabilityBinding, modelprofile.SecretValue) (environmentS3Store, error)
-
-type environmentS3Store interface {
-	runtimestorage.ArtifactStore
-	runtimestorage.ObjectStore
-	Probe(context.Context) error
-}
 
 // environmentConfig is intentionally private: it contains the one secret
 // handed to the ModelFactory and must not become a serializable application
@@ -145,9 +129,6 @@ type environmentConfig struct {
 	redis          runtimestorageredis.Config
 	redisEndpoint  string
 	redisSecretRef string
-	s3AccessKeyID  string
-	s3SecretKey    string
-	s3SecretRef    string
 	demoMode       bool
 	wecom          *environmentWeComConfig
 	wecomAIBots    []environmentWeComAIBotConfig
