@@ -60,14 +60,14 @@ func TestHandleUpdateAuditFailureBranches(t *testing.T) {
 	target := newTrustedTarget(t, channels.ChannelTelegram, "audit-branches", "12345")
 	update := textUpdate(41, models.ChatTypePrivate, 100, 42, "input", 0)
 	admission := newTestAdapter(t, target, &dispatchStub{events: []gateway.DispatchEvent{{Type: gateway.DispatchEventDone, Done: true}}}, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
-	admission.audit.Writer = &telegramAuditWriter{alwaysFail: true}
+	admission.audit = audit.NewRecorder(&telegramAuditWriter{alwaysFail: true}, target.TenantID)
 	if err := admission.HandleUpdate(context.Background(), update); !errors.Is(err, ErrDispatch) {
 		t.Fatalf("admission audit err=%v", err)
 	}
 	replayWriter := &telegramAuditWriter{failAfter: 2}
 	replayDispatcher := &dispatchStub{events: []gateway.DispatchEvent{{Type: gateway.DispatchEventMessage, Text: "reply"}, {Type: gateway.DispatchEventDone, Done: true}}}
 	replay := newTestAdapter(t, target, replayDispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
-	replay.audit.Writer = replayWriter
+	replay.audit = audit.NewRecorder(replayWriter, target.TenantID)
 	if err := replay.HandleUpdate(context.Background(), textUpdate(42, models.ChatTypePrivate, 100, 42, "replay", 0)); err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestHandleUpdateDuplicateAuditAndDispatchSendFailure(t *testing.T) {
 		return eventStream(gateway.DispatchEvent{Type: gateway.DispatchEventDone, Done: true}), nil
 	}}
 	adapter := newTestAdapter(t, target, dispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
-	adapter.audit.Writer = &telegramAuditWriter{failAfter: 1}
+	adapter.audit = audit.NewRecorder(&telegramAuditWriter{failAfter: 1}, target.TenantID)
 	update := textUpdate(43, models.ChatTypePrivate, 100, 42, "pending", 0)
 	first := make(chan error, 1)
 	go func() { first <- adapter.HandleUpdate(context.Background(), update) }()
@@ -381,7 +381,7 @@ func TestHandleUpdateMapsPrivateTextAndAggregatesDispatchEvents(t *testing.T) {
 	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
 	adapter := newTestAdapter(t, target, dispatcher, client)
 	aw := &telegramAuditWriter{}
-	adapter.audit.Writer = aw
+	adapter.audit = audit.NewRecorder(aw, target.TenantID)
 	key := contextKey("request-context")
 	ctx := context.WithValue(context.Background(), key, "preserved")
 	update := textUpdate(7, models.ChatTypePrivate, 100, 42, "  hello  ", 0)

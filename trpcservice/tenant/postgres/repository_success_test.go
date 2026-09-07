@@ -102,7 +102,7 @@ func TestTenantRepositoryListsOnlyRequestedTenantScopes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	mock.ExpectQuery(`tenant_id IN \(\$1\)`).WithArgs(visible.TenantID).WillReturnRows(testTenantRows(visible))
+	mock.ExpectQuery(`tenant_id IN \(\$1\).*ORDER BY tenant_id LIMIT \$2 OFFSET \$3`).WithArgs(visible.TenantID, 51, 0).WillReturnRows(testTenantRows(visible))
 
 	items, next, err := NewRepository(db).List(context.Background(), []string{visible.TenantID}, "", "", "", 50)
 	if err != nil {
@@ -144,7 +144,7 @@ func TestTenantScopeClauseAndListInputBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	mock.ExpectQuery(`tenant_id IN \(\$1\)`).WithArgs(visible.TenantID).WillReturnRows(testTenantRows(visible))
+	mock.ExpectQuery(`tenant_id IN \(\$1\).*STRPOS\(LOWER\(.*\), \$2\) > 0 ORDER BY tenant_id LIMIT \$3 OFFSET \$4`).WithArgs(visible.TenantID, "absent", 51, 0).WillReturnRows(testTenantRows())
 	items, next, err := NewRepository(db).List(context.Background(), []string{visible.TenantID}, "absent", "", "", 0)
 	if err != nil || len(items) != 0 || next != "" {
 		t.Fatalf("filtered tenant list = items=%+v next=%q err=%v", items, next, err)

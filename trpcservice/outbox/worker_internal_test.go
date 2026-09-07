@@ -250,7 +250,7 @@ func TestRunOnceProviderAndTransitionErrorBranches(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			worker := &Worker{store: tc.store, provider: tc.provider, tenantID: "tenant-a", owner: "worker", leaseDuration: time.Second, maxAttempts: 3, backoffBase: time.Millisecond, backoffMax: time.Second}
+			worker := &Worker{store: tc.store, provider: tc.provider, tenantID: "tenant-a", owner: "worker", leaseDuration: time.Second, retry: retryPolicy{maxAttempts: 3, base: time.Millisecond, maximum: time.Second}}
 			processed, err := worker.RunOnce(ctx)
 			if tc.wantErr {
 				if err == nil {

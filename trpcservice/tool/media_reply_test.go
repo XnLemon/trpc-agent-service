@@ -43,7 +43,7 @@ func TestMediaReplyToolStoresBoundAttachmentWithoutExposingIt(t *testing.T) {
 	collector := NewReplyCollector()
 	ctx := WithExecutionContext(context.Background(), ExecutionContext{
 		TenantID: "tenant-a", EventID: "event-a", RequestID: "request-a", TraceID: "trace-a",
-		Attachments: store, Replies: collector, Audit: audit.Recorder{Writer: writer, TenantID: "tenant-a"},
+		Attachments: store, Replies: collector, Audit: audit.NewRecorder(writer, "tenant-a"),
 	})
 	callable := resolveTestImageTool(t)
 	queued := callTestImageTool(t, callable, ctx)
@@ -153,7 +153,7 @@ func TestMediaReplyToolRetriesWithDurableAudit(t *testing.T) {
 	collector := NewReplyCollector()
 	ctx := WithExecutionContext(context.Background(), ExecutionContext{
 		TenantID: "tenant-a", EventID: "event-a", RequestID: "request-a", TraceID: "trace-a", Attachments: store, Replies: collector,
-		Audit: audit.Recorder{Writer: auditStore, TenantID: "tenant-a", Now: func() time.Time { return time.Unix(0, ticks.Add(1)).UTC() }},
+		Audit: audit.NewRecorder(auditStore, "tenant-a", audit.WithRecorderClock(func() time.Time { return time.Unix(0, ticks.Add(1)).UTC() })),
 	})
 	callable := resolveTestImageTool(t)
 	assertParallelTestImageCallsSucceed(t, callable, ctx)

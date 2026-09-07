@@ -124,18 +124,19 @@ type InMemoryRepository struct {
 
 // NewInMemoryRepository creates an empty repository. A zero Options value uses
 // a 30-second candidate TTL, the default candidate capacity, and the UTC wall
-// clock.
+// clock. Options are applied in order; later positive values and non-nil clocks
+// override earlier ones. Zero and negative values leave the defaults unchanged.
 func NewInMemoryRepository(options ...Options) *InMemoryRepository {
 	configuration := Options{CandidateTTL: defaultCandidateTTL, Clock: func() time.Time { return time.Now().UTC() }, MaxCandidates: DefaultMaxCandidates}
-	if len(options) > 0 {
-		if options[0].CandidateTTL > 0 {
-			configuration.CandidateTTL = options[0].CandidateTTL
+	for _, option := range options {
+		if option.CandidateTTL > 0 {
+			configuration.CandidateTTL = option.CandidateTTL
 		}
-		if options[0].Clock != nil {
-			configuration.Clock = options[0].Clock
+		if option.Clock != nil {
+			configuration.Clock = option.Clock
 		}
-		if options[0].MaxCandidates > 0 {
-			configuration.MaxCandidates = options[0].MaxCandidates
+		if option.MaxCandidates > 0 {
+			configuration.MaxCandidates = option.MaxCandidates
 		}
 	}
 	if configuration.CandidateTTL > channels.MaxCandidateLifetime {

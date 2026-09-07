@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
@@ -83,10 +82,10 @@ type ReplyIntent struct {
 // ReplyCollector collects media reply intents for one Runner execution. It is
 // concurrency-safe because a revision may enable parallel tool calls.
 type ReplyCollector struct {
-	mu      sync.Mutex
-	intents []ReplyIntent
-	seen    map[string]struct{}
-	auditAt time.Time
+	mu            sync.Mutex
+	intents       []ReplyIntent
+	seen          map[string]struct{}
+	auditRecorder *audit.Recorder
 }
 
 // NewReplyCollector returns an empty collector for one execution.
@@ -137,17 +136,12 @@ func (collector *ReplyCollector) stableAuditRecorder(recorder audit.Recorder) au
 		return recorder
 	}
 	collector.mu.Lock()
-	if collector.auditAt.IsZero() {
-		now := recorder.Now
-		if now == nil {
-			now = time.Now
-		}
-		collector.auditAt = now().UTC()
+	defer collector.mu.Unlock()
+	if collector.auditRecorder == nil {
+		fixed := recorder.WithFixedTime()
+		collector.auditRecorder = &fixed
 	}
-	auditAt := collector.auditAt
-	collector.mu.Unlock()
-	recorder.Now = func() time.Time { return auditAt }
-	return recorder
+	return *collector.auditRecorder
 }
 
 // Factory constructs one stateless, context-bound platform tool.
