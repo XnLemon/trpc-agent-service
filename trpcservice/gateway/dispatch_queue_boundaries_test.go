@@ -236,7 +236,7 @@ func TestDispatcherQueueAdmissionDuplicateAndRecoveryBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.event = runtimestorage.MessageEvent{TenantID: payload.TenantID, EventID: payload.EventID, BindingID: payload.BindingID, ExternalMessageID: payload.Message.ExternalMessageID, Status: runtimestorage.EventReceived}
+	store.event = eventForTask(t, principal, payload, runtimestorage.EventReceived)
 	store.forceMissingEvent = true
 	store.recordDuplicate = true
 	if err := dispatcher.HandleExecutionTask(context.Background(), task); err != nil {
@@ -275,7 +275,7 @@ func TestDispatcherQueueAdmissionDuplicateAndRecoveryBoundaries(t *testing.T) {
 		t.Fatalf("missing event session error = %v", err)
 	}
 
-	store = &queueMessageStoreStub{event: runtimestorage.MessageEvent{TenantID: payload.TenantID, EventID: payload.EventID, BindingID: payload.BindingID, ExternalMessageID: payload.Message.ExternalMessageID, Status: runtimestorage.EventReceived}}
+	store = &queueMessageStoreStub{event: eventForTask(t, principal, payload, runtimestorage.EventReceived)}
 	dispatcher.runtimeStore = store
 	attachments := testAttachmentReference(t, attachment.KindImage, "image/png", []byte("image"))
 	payload.Message.Attachments = []attachment.Reference{attachments}
@@ -301,6 +301,44 @@ func TestEnsureQueuedEventRebuildsMissingEvent(t *testing.T) {
 	}
 	if task.TaskID != event.EventID {
 		t.Fatalf("task/event identity mismatch: task=%s event=%s", task.TaskID, event.EventID)
+	}
+}
+
+func TestHandleExecutionTaskRejectsPersistedIdentityDrift(t *testing.T) {
+	dispatcher, _, principal, store := newTaskHandlerBoundary(t)
+	task, payload := taskForPrincipal(t, principal, "identity-drift")
+	baseEvent := eventForTask(t, principal, payload, runtimestorage.EventReceived)
+	cases := map[string]struct {
+		mutateEvent   func(*runtimestorage.MessageEvent)
+		mutatePayload func(*executionTaskPayload)
+	}{
+		"persisted session mismatch": {
+			mutateEvent: func(event *runtimestorage.MessageEvent) { event.SessionID = "other-session" },
+		},
+		"persisted reply target mismatch": {
+			mutateEvent: func(event *runtimestorage.MessageEvent) { event.ReplyTarget.ReceiverID = "other-peer" },
+		},
+		"payload identity drift": {
+			mutatePayload: func(payload *executionTaskPayload) { payload.Message.ExternalPeerID = "other-peer" },
+		},
+	}
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			store.event = baseEvent
+			testEvent := store.event
+			if test.mutateEvent != nil {
+				test.mutateEvent(&testEvent)
+			}
+			testPayload := payload
+			if test.mutatePayload != nil {
+				test.mutatePayload(&testPayload)
+			}
+			store.event = testEvent
+			candidate := taskForPayload(t, task, testPayload)
+			if err := dispatcher.HandleExecutionTask(context.Background(), candidate); !errors.Is(err, ErrInvalidExecutionTask) {
+				t.Fatalf("identity drift error = %v", err)
+			}
+		})
 	}
 }
 
@@ -371,7 +409,7 @@ func TestHandleExecutionTaskRejectsStaleAndUnavailableState(t *testing.T) {
 	dispatcher, fixture, principal, store := newTaskHandlerBoundary(t)
 	const eventID = "event"
 	task, payload := taskForPrincipal(t, principal, eventID)
-	store.event = runtimestorage.MessageEvent{TenantID: fixture.tenant.TenantID, EventID: eventID, BindingID: payload.BindingID, ExternalMessageID: payload.Message.ExternalMessageID, Status: runtimestorage.EventReceived}
+	store.event = eventForTask(t, principal, payload, runtimestorage.EventReceived)
 	var nilDispatcher *Dispatcher
 	if err := nilDispatcher.HandleExecutionTask(context.Background(), task); !errors.Is(err, ErrNotReady) {
 		t.Fatalf("nil dispatcher = %v", err)
@@ -676,6 +714,24 @@ func taskForPrincipal(t *testing.T, principal Principal, eventID string) (runtim
 		EventID: eventID, Message: InboundMessage{Content: "hello", ContentType: ContentTypeText, ExternalMessageID: "external-" + eventID, ExternalUserID: "user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "peer"},
 	}
 	return taskForPayload(t, runtimequeue.Task{TenantID: payload.TenantID, TaskID: eventID, Kind: ExecutionTaskKind}, payload), payload
+}
+
+func eventForTask(t *testing.T, principal Principal, payload executionTaskPayload, status string) runtimestorage.MessageEvent {
+	t.Helper()
+	identity, err := dispatchRunnerIdentity(principal, payload.Message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := principalMustTarget(t, principal)
+	reply, err := replyTarget(target, payload.Message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return runtimestorage.MessageEvent{
+		TenantID: payload.TenantID, EventID: payload.EventID, SessionID: identity.SessionID,
+		BindingID: payload.BindingID, ExternalMessageID: payload.Message.ExternalMessageID,
+		Status: status, ReplyTarget: reply,
+	}
 }
 
 func taskForPayload(t *testing.T, task runtimequeue.Task, payload executionTaskPayload) runtimequeue.Task {

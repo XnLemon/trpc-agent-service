@@ -341,19 +341,22 @@ func (dispatcher *Dispatcher) HandleExecutionTask(ctx context.Context, task runt
 }
 
 func (dispatcher *Dispatcher) ensureQueuedEvent(ctx context.Context, payload executionTaskPayload, principal Principal, identity tenant.RunnerIdentity) (runtimestorage.MessageEvent, bool, error) {
-	event, err := dispatcher.runtimeStore.GetMessage(ctx, payload.TenantID, payload.EventID)
-	if err == nil {
-		return event, false, nil
-	}
-	if !errors.Is(err, runtimestorage.ErrNotFound) {
-		return runtimestorage.MessageEvent{}, false, err
-	}
 	target, ok := principal.RoutingTarget()
 	if !ok {
 		return runtimestorage.MessageEvent{}, false, ErrInvalidExecutionTask
 	}
 	reply, err := replyTarget(target, payload.Message)
 	if err != nil {
+		return runtimestorage.MessageEvent{}, false, err
+	}
+	event, err := dispatcher.runtimeStore.GetMessage(ctx, payload.TenantID, payload.EventID)
+	if err == nil {
+		if event.SessionID != identity.SessionID || event.ReplyTarget != reply {
+			return runtimestorage.MessageEvent{}, false, ErrInvalidExecutionTask
+		}
+		return event, false, nil
+	}
+	if !errors.Is(err, runtimestorage.ErrNotFound) {
 		return runtimestorage.MessageEvent{}, false, err
 	}
 	if err := ensureInboundSession(ctx, dispatcher.runtimeStore, payload.TenantID, identity.SessionID); err != nil {
@@ -364,6 +367,9 @@ func (dispatcher *Dispatcher) ensureQueuedEvent(ctx context.Context, payload exe
 		BindingID: payload.BindingID, ExternalMessageID: payload.Message.ExternalMessageID,
 		IdempotencyKey: payload.Message.ExternalMessageID, ReplyTarget: reply,
 	})
+	if err == nil && (event.SessionID != identity.SessionID || event.ReplyTarget != reply) {
+		return runtimestorage.MessageEvent{}, false, ErrInvalidExecutionTask
+	}
 	return event, duplicate, err
 }
 
