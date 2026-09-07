@@ -39,6 +39,7 @@ func TestPricingAndEstimateUseProviderNeutralRates(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // Boundary table covers independent validation and overflow cases.
 func TestBudgetLimitsPricingAndArithmeticBoundaries(t *testing.T) {
 	negative := int64(-1)
 	positive := int64(10)

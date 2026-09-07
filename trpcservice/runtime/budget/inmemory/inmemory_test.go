@@ -56,6 +56,7 @@ func TestStoreReserveIsAtomicAcrossConcurrentRequests(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // Lifecycle test intentionally exercises reserve, settle, and release transitions.
 func TestStoreLifecycleIsIdempotentAndReleasesCapacity(t *testing.T) {
 	store := New()
 	ctx := context.Background()
