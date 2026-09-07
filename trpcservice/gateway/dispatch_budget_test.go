@@ -5,9 +5,13 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
+	budgetmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget/inmemory"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
 func TestUsageAccumulatorAndSaturatingAdd(t *testing.T) {
@@ -59,5 +63,96 @@ func TestBudgetHelpersHandleNilAndClassification(t *testing.T) {
 	}
 	if err := budgetAdmissionAudit(ctx, nil, "tenant", "request", "trace"); err != nil {
 		t.Fatal(err)
+	}
+	var nilDispatcher *Dispatcher
+	if reservation, accumulator, pricing, err := nilDispatcher.reserveBudget(ctx, runtime.ExecutionPlan{}, "request"); err != nil || reservation.State != budget.ReservationStateDisabled || accumulator != nil || pricing.Configured {
+		t.Fatalf("nil dispatcher reserve = %+v, %v, %+v, %v", reservation, accumulator, pricing, err)
+	}
+}
+
+func TestReserveAndSettleBudgetFromExecutionPlan(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	tokenLimit := int64(100_000)
+	updated, err := fixture.tenants.UpdateConfiguration(context.Background(), tenant.UpdateConfigurationInput{
+		TenantID: fixture.tenant.TenantID, ExpectedVersion: fixture.tenant.Version, DisplayName: fixture.tenant.DisplayName,
+		MonthlyTokenBudget: &tokenLimit, AuditRetentionDays: fixture.tenant.AuditRetentionDays, LogMaskingLevel: fixture.tenant.LogMaskingLevel,
+		TraceSamplingRate: fixture.tenant.TraceSamplingRate, DefaultAgentAppID: fixture.tenant.DefaultAgentAppID, DefaultBackendProfileID: fixture.tenant.DefaultBackendProfileID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{
+		Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends,
+		ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := resolver.Resolve(context.Background(), mustAPIPrincipal(t, updated.TenantID, fixture.app.AppID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := budgetmemory.New()
+	dispatcher := &Dispatcher{budget: budget.NewController(store)}
+	reservation, accumulator, pricing, err := dispatcher.reserveBudget(context.Background(), plan, "budget-request")
+	if err != nil || reservation.State != budget.ReservationStateReserved || accumulator == nil || pricing.Configured {
+		t.Fatalf("reserve = %+v, accumulator=%v, pricing=%+v, err=%v", reservation, accumulator, pricing, err)
+	}
+	accumulator.Observe(context.Background(), budget.Usage{InputTokens: 4, OutputTokens: 6})
+	run := &dispatchExecution{budgetReservation: reservation, usageAccumulator: accumulator, pricing: pricing}
+	if err := dispatcher.settleBudget(context.Background(), run, audit.EventExecutionCompleted); err != nil {
+		t.Fatal(err)
+	}
+	if run.budgetReservation.State != budget.ReservationStateSettled || run.auditUsage == nil || run.auditUsage.BudgetUsedTokens == nil || *run.auditUsage.BudgetUsedTokens != 10 {
+		t.Fatalf("settled run = %+v", run)
+	}
+	if err := dispatcher.releaseBudget(context.Background(), run.budgetReservation); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := store.Snapshot(context.Background(), updated.TenantID, time.Now().UTC())
+	if err != nil || ledger.UsedTokens != 10 || ledger.ReservedTokens != 0 {
+		t.Fatalf("budget ledger = %+v, err=%v", ledger, err)
+	}
+}
+
+func TestExecutionAuditResultMapsTerminalEvents(t *testing.T) {
+	for _, test := range []struct {
+		event audit.EventType
+		want  audit.ExecutionResult
+	}{
+		{audit.EventExecutionCompleted, audit.ResultSuccess},
+		{audit.EventExecutionCanceled, audit.ResultCanceled},
+		{audit.EventExecutionFailed, audit.ResultFailure},
+		{audit.EventExecutionFallback, audit.ResultFailure},
+	} {
+		if got := executionAuditResult(test.event); got != test.want {
+			t.Fatalf("executionAuditResult(%q) = %q, want %q", test.event, got, test.want)
+		}
+	}
+}
+
+func TestReserveBudgetRequiresPricingForSpendLimits(t *testing.T) {
+	fixture := newGatewayFixture(t)
+	spendLimit := int64(100)
+	updated, err := fixture.tenants.UpdateConfiguration(context.Background(), tenant.UpdateConfigurationInput{
+		TenantID: fixture.tenant.TenantID, ExpectedVersion: fixture.tenant.Version, DisplayName: fixture.tenant.DisplayName,
+		MonthlySpendLimitMinor: &spendLimit, BillingCurrency: "USD", AuditRetentionDays: fixture.tenant.AuditRetentionDays,
+		LogMaskingLevel: fixture.tenant.LogMaskingLevel, TraceSamplingRate: fixture.tenant.TraceSamplingRate,
+		DefaultAgentAppID: fixture.tenant.DefaultAgentAppID, DefaultBackendProfileID: fixture.tenant.DefaultBackendProfileID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewPlanResolver(runtime.PlanResolverConfig{Tenants: fixture.tenants, Apps: fixture.apps, Models: fixture.models, Backends: fixture.backends, ModelCatalog: fixture.modelCatalog, BackendCatalog: fixture.backendCatalog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := resolver.Resolve(context.Background(), mustAPIPrincipal(t, updated.TenantID, fixture.app.AppID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err = (&Dispatcher{budget: budget.NewController(budgetmemory.New())}).reserveBudget(context.Background(), plan, "pricing-request")
+	if !errors.Is(err, budget.ErrCostUnavailable) {
+		t.Fatalf("reserve without pricing error = %v", err)
 	}
 }
