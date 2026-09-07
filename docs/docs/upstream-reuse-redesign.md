@@ -27,11 +27,11 @@
 | 位置 | 已核对事实 | 重构结论 |
 | --- | --- | --- |
 | `trpcservice/agent/factory.go` | 使用 `llmagent.New`、`chainagent.New`、`parallelagent.New`、`cycleagent.New`、`graphagent.New` | 默认注册上游 LLM/Chain/Parallel/Cycle/Graph；Graph 当前是线性 StateGraph 映射，尚未实现声明式条件路由 |
-| `trpcservice/agent/runner_builder.go` | Runner 使用 `WithSessionService`、`WithMemoryService`、`WithArtifactService` 和 `WithPlugins`；LLMAgent 使用 `WithKnowledge` | Memory tools 和自动提取受 Revision allowlist/`memory_auto_extract` 控制；Artifact 通过显式 `export_artifact` 工具按可信 app/user/session/version 导出到平台 Attachment，不暴露上游 URL |
+| `trpcservice/agent/runner_builder.go` | Runner 使用 `WithSessionService`、`WithMemoryService`、`WithArtifactService` 和 `WithPlugins`；LLMAgent 使用 `WithKnowledge` 与授权 ToolSet | Memory tools 和自动提取受 Revision allowlist/`memory_auto_extract` 控制；Artifact 通过显式 `export_artifact` 工具按可信 app/user/session/version 导出到平台 Attachment，不暴露上游 URL；MCP ToolSet 由 Runner 接管初始化和关闭生命周期 |
 | `trpcservice/bootstrap/bootstrap.go` | 每个封存 ExecutionPlan 创建独立上游插件实例 | 默认装配 Identity Plugin，只传播 Runner 已确认的 UserID；审批、PromptInjection 和 UnsafeIntent 在 reviewer 与预算合同完成前不虚假启用 |
 | `trpcservice/runtime/storage/factory/runtime_factory.go` | Session、Summary、Audit 使用平台合同；Memory/Knowledge/Artifact 使用上游接口 | 已移除 Vector/Object 等旧平台能力捆绑，能力集合只保留平台职责和上游原生服务 |
 | `trpcservice/runtime/storage/capabilities.go` | 自研记录、CRUD、向量与对象接口 | 不再作为 Agent 能力的主合同 |
-| `trpcservice/bootstrap/environment_providers.go` | 按租户装配上游 Session/Memory/Artifact/Knowledge 服务，以及平台审计和投递存储 | demo 使用上游 InMemory；生产 Memory 使用上游 ChromaDB，Artifact 使用上游 COS；尚无真实服务重启/双 Worker 验收 |
+| `trpcservice/bootstrap/environment_providers.go` | 按租户装配上游 Session/Memory/Artifact/Knowledge 服务，以及平台审计和投递存储 | demo 使用上游 InMemory；生产 Memory 使用上游 ChromaDB，Artifact 使用上游 COS；MCP 安全 Binding 和本地 HTTP 探针已完成，真实外部服务重启/双 Worker 验收仍待补充 |
 | `trpcservice/skill/skill.go` | 只有 package 声明与说明 | 未接入上游 Skill Repository/`WithSkills`，不计为 Skill 实现 |
 | `trpcservice/gateway/dispatch_durable.go` | durable claim 针对 Channel principal；平台保有 message/outbox 状态 | 新协议不可绕过可信主体、执行和可靠交付边界 |
 
@@ -119,7 +119,7 @@ IM attachment 继续负责来源验签、下载大小限制、媒体校验与投
 | --- | --- |
 | LLM/Chain/Graph/Parallel/Cycle | 复用具体上游 Agent；平台只保存声明式配置并校验。Graph 必须有节点、边、路由/终止条件与执行测试，不能仅加 kind；并行与循环须验证共享状态、取消和预算 |
 | Model | 普通模型路径优先上游 provider；自研 Responses 等实现先对照上游协议能力，只有明确缺口才保留 |
-| MCP | 上游 MCP Tool/client；平台管理端点授权、SSRF 防护、凭据、工具发现与白名单、连接生命周期及危险调用审批 |
+| MCP | 上游 MCP Tool/client；平台管理端点授权、SSRF 防护、凭据、工具发现与白名单、连接生命周期及危险调用审批 | 已实现 `MCPBinding` 的 HTTPS/stdio 基础校验、租户 SecretRef、工具 allowlist、上游 ToolSet 初始化/调用/关闭探针；DNS 解析级 SSRF 防护、控制面持久化和危险调用审批仍未接入 |
 | Skill | 上游加载/执行能力；平台管理可信工作目录、发布版本、工具授权与沙箱。不把 package 占位或读到 SKILL.md 算作执行闭环 |
 | Plugin/Guardrail/Callbacks | 复用上游扩展生命周期挂载平台策略；预算账本与审批事实仍在平台。自动注入工具、子 Agent、MCP 和 Skill 均不可绕过执行期授权 |
 | OpenTelemetry | 复用框架原生 span 和官方 OTel SDK；平台补 IM、队列、审计关联，避免 callbacks 与原生链路重复记录或导出敏感内容 |

@@ -72,6 +72,10 @@ func (binding MCPBinding) Normalize() (MCPBinding, error) {
 // separate from the factory: callers must still apply Revision allowlists to
 // the returned, prefixed tool names before passing it to a Runner.
 func NewMCPToolSet(ctx context.Context, tenantID string, binding MCPBinding, resolver modelprofile.SecretResolver) (*toolmcp.ToolSet, error) {
+	return newMCPToolSet(ctx, tenantID, binding, resolver)
+}
+
+func newMCPToolSet(ctx context.Context, tenantID string, binding MCPBinding, resolver modelprofile.SecretResolver, clientOptions ...trpcmcp.ClientOption) (*toolmcp.ToolSet, error) {
 	value, err := binding.Normalize()
 	if err != nil {
 		return nil, err
@@ -89,7 +93,9 @@ func NewMCPToolSet(ctx context.Context, tenantID string, binding MCPBinding, res
 		if err != nil {
 			return nil, fmt.Errorf("%w: resolve MCP secret", ErrInvalidMCPBinding)
 		}
-		options = append(options, toolmcp.WithMCPOptions(trpcmcp.WithHTTPHeaders(http.Header{"Authorization": []string{"Bearer " + secret.Value()}})))
+		options = append(options, toolmcp.WithMCPOptions(append(clientOptions, trpcmcp.WithHTTPHeaders(http.Header{"Authorization": []string{"Bearer " + secret.Value()}}))...))
+	} else if len(clientOptions) > 0 {
+		options = append(options, toolmcp.WithMCPOptions(clientOptions...))
 	}
 	set := toolmcp.NewMCPToolSet(config, options...)
 	if err := set.Init(ctx); err != nil {
