@@ -74,7 +74,7 @@ type Principal struct {
 // an APIAuthenticator can cross this boundary into a trusted Principal.
 func newAPIPrincipal(authenticated AuthenticatedAPI) (Principal, error) {
 	if err := authenticated.Validate(); err != nil {
-		return Principal{}, fmt.Errorf("%w: API authentication result: %v", ErrUnauthenticated, err)
+		return Principal{}, fmt.Errorf("%w: invalid authentication result", ErrUnauthenticated)
 	}
 	identity := authenticated.identity
 	return Principal{
@@ -103,7 +103,7 @@ func (p Principal) Validate() error {
 	switch p.kind {
 	case PrincipalAPI:
 		if p.apiProof == nil || p.apiProof.identity.TenantID != p.tenantID || p.apiProof.identity.AppID != p.appID || p.apiProof.identity.SubjectID != p.subjectID {
-			return fmt.Errorf("%w: API principal proof is missing or inconsistent", ErrInvalid)
+			return fmt.Errorf("%w: principal proof is missing or inconsistent", ErrInvalid)
 		}
 		if err := p.apiProof.validate(); err != nil {
 			return err

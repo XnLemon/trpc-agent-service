@@ -4,8 +4,6 @@ package outbox
 import (
 	"context"
 	"errors"
-	"hash/fnv"
-	"math"
 	"sort"
 	"sync"
 	"time"
@@ -62,10 +60,7 @@ type Worker struct {
 	tenantID      string
 	owner         string
 	leaseDuration time.Duration
-	maxAttempts   int
-	backoffBase   time.Duration
-	backoffMax    time.Duration
-	jitter        float64
+	retry         retryPolicy
 	telemetry     observability.Provider
 	metrics       metrics.Catalog
 	audit         audit.Recorder
@@ -112,20 +107,9 @@ func New(config Config) (*Worker, error) {
 	if config.Store == nil || config.MessageStore == nil || config.Provider == nil || runtimestorage.ValidateTenant(config.TenantID) != nil || config.Owner == "" || config.LeaseDuration <= 0 {
 		return nil, ErrInvalid
 	}
-	if config.MaxAttempts <= 0 {
-		config.MaxAttempts = 3
-	}
-	if config.BackoffBase < 0 || config.BackoffMax < 0 || config.Jitter < 0 || config.Jitter > 1 {
-		return nil, ErrInvalid
-	}
-	if config.BackoffBase == 0 {
-		config.BackoffBase = 100 * time.Millisecond
-	}
-	if config.BackoffMax == 0 {
-		config.BackoffMax = 30 * time.Second
-	}
-	if config.BackoffMax < config.BackoffBase {
-		return nil, ErrInvalid
+	retry, err := newRetryPolicy(config)
+	if err != nil {
+		return nil, err
 	}
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
@@ -136,7 +120,13 @@ func New(config Config) (*Worker, error) {
 	if config.ProviderName == "" {
 		config.ProviderName = "other"
 	}
-	return &Worker{store: config.Store, messageStore: config.MessageStore, provider: config.Provider, channel: config.Channel, providerName: config.ProviderName, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, jitter: config.Jitter, telemetry: config.Observability, metrics: metrics.New(config.Observability), audit: audit.Recorder{Writer: config.AuditWriter, TenantID: config.TenantID}}, nil
+	return &Worker{
+		store: config.Store, messageStore: config.MessageStore, provider: config.Provider,
+		channel: config.Channel, providerName: config.ProviderName,
+		tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration,
+		retry: retry, telemetry: config.Observability, metrics: metrics.New(config.Observability),
+		audit: audit.NewRecorder(config.AuditWriter, config.TenantID),
+	}, nil
 }
 
 // Run polls until ctx is canceled. It owns no goroutine after returning.
@@ -385,7 +375,7 @@ func (w *Worker) acceptDelivery(ctx, operationCtx context.Context, claimed runti
 func (w *Worker) rejectDelivery(ctx, operationCtx context.Context, claimed runtimestorage.ReplyOutbox, deliveryErr error) error {
 	class, retryable := classify(deliveryErr)
 	to := runtimestorage.ReplyRetryable
-	if !retryable || claimed.Attempts >= w.maxAttempts {
+	if !retryable || claimed.Attempts >= w.retry.maxAttempts {
 		to = runtimestorage.ReplyDeadLetter
 	}
 	_, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.ReplyOutbox, error) {
@@ -422,28 +412,17 @@ func (w *Worker) recordDelivery(ctx context.Context, eventType audit.EventType, 
 			requestID, traceID = correlation.RequestID, correlation.TraceID
 		}
 	}
-	return w.audit.IM(ctx, eventType, requestID, traceID, "", "", decision, class)
+	return w.audit.Record(ctx, audit.Event{
+		EventType: eventType, RequestID: requestID, TraceID: traceID,
+		Decision: decision, ErrorType: class,
+	})
 }
 
 func (w *Worker) retryDue(value runtimestorage.ReplyOutbox, now time.Time) bool {
-	if value.Status != runtimestorage.ReplyRetryable || w.backoffBase <= 0 || value.UpdatedAt.IsZero() {
+	if value.Status != runtimestorage.ReplyRetryable || w.retry.base <= 0 || value.UpdatedAt.IsZero() {
 		return true
 	}
-	attempt := value.Attempts
-	if attempt < 1 {
-		attempt = 1
-	}
-	delay := float64(w.backoffBase) * math.Pow(2, float64(attempt-1))
-	if delay > float64(w.backoffMax) {
-		delay = float64(w.backoffMax)
-	}
-	if w.jitter > 0 {
-		h := fnv.New32a()
-		_, _ = h.Write([]byte(value.ReplyID))
-		factor := 1 + ((float64(h.Sum32()%1000)/999)-0.5)*2*w.jitter
-		delay *= factor
-	}
-	return !now.Before(value.UpdatedAt.Add(time.Duration(delay)))
+	return !now.Before(value.UpdatedAt.Add(w.retry.delay(value.ReplyID, value.Attempts)))
 }
 
 func eligible(value runtimestorage.ReplyOutbox) bool {
