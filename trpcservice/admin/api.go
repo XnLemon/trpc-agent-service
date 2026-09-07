@@ -274,7 +274,7 @@ func (h *Handler) recordMutation(ctx context.Context, principal Principal, reque
 	}
 	tenants := fieldString("TenantID")
 	_ = principal
-	return (audit.Recorder{Writer: h.config.AuditWriter, TenantID: tenants}).Record(ctx, audit.Event{
+	return audit.NewRecorder(h.config.AuditWriter, tenants).Record(ctx, audit.Event{
 		EventID:   audit.NewEventID(requestID, tenants, fieldString("CorrelationID"), fieldString("EventType")),
 		EventType: audit.EventControlPlaneChanged, TenantID: tenants,
 		ActorType: fieldString("ActorType"), ActorID: fieldString("ActorID"),
@@ -318,7 +318,7 @@ func (h *Handler) recordRawMutation(ctx context.Context, principal Principal, re
 	if actorID == "" {
 		actorID = "admin"
 	}
-	return (audit.Recorder{Writer: h.config.AuditWriter, TenantID: tenantID}).Record(ctx, audit.Event{
+	return audit.NewRecorder(h.config.AuditWriter, tenantID).Record(ctx, audit.Event{
 		EventID:   audit.NewEventID(requestID, tenantID, fieldString("Version"), "raw"),
 		EventType: audit.EventControlPlaneChanged, TenantID: tenantID,
 		ActorType: "admin", ActorID: actorID, Reason: "admin mutation", CorrelationID: requestID,

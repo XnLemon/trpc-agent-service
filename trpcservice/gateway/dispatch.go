@@ -219,50 +219,33 @@ type dispatchExecution struct {
 	auditFinalized  bool
 }
 
-type dispatchCapabilities struct {
-	sessions     sessionstorage.SessionStateStore
-	messages     runtimestorage.MessageStore
-	replyBatches runtimestorage.ReplyBatchEnqueuer
+type dispatchDependencies struct {
+	store        dispatchStore
+	materializer *outbox.Materializer
+	auditWriter  audit.Writer
 }
 
-func resolveDispatchCapabilities(config DispatchConfig) dispatchCapabilities {
-	capabilities := dispatchCapabilities{
-		sessions:     config.SessionStore,
-		messages:     config.MessageStore,
-		replyBatches: config.ReplyBatchStore,
+func resolveDispatchDependencies(config DispatchConfig) (dispatchDependencies, error) {
+	dependencies := dispatchDependencies{
+		materializer: config.Materializer,
+		auditWriter:  metrics.WrapAuditWriter(config.AuditWriter, config.Observability),
 	}
-	return capabilities
-}
-
-func resolveDispatchAttachments(config DispatchConfig) (attachment.Reader, runtimestorage.AttachmentStore) {
-	reader := config.Attachments
-	return reader, config.AttachmentStore
-}
-
-func newDispatchStore(capabilities dispatchCapabilities) dispatchStore {
-	if capabilities.sessions != nil && capabilities.messages != nil {
-		return dispatchStoreView{sessions: capabilities.sessions, messages: capabilities.messages}
+	if config.SessionStore != nil && config.MessageStore != nil {
+		if config.Materializer == nil && config.ReplyBatchStore == nil {
+			return dispatchDependencies{}, fmt.Errorf("%w: durable dispatch requires reply materialization capability", ErrInvalid)
+		}
+		dependencies.store = dispatchStoreView{sessions: config.SessionStore, messages: config.MessageStore}
 	}
-	return nil
-}
-
-func newDispatchMaterializer(config DispatchConfig, batchStore runtimestorage.ReplyBatchEnqueuer) (*outbox.Materializer, error) {
-	if config.Materializer != nil {
-		return config.Materializer, nil
+	if dependencies.materializer == nil && config.ReplyBatchStore != nil {
+		materializer, err := outbox.NewMaterializer(outbox.MaterializerConfig{
+			BatchStore: config.ReplyBatchStore, Observability: config.Observability,
+		})
+		if err != nil {
+			return dispatchDependencies{}, err
+		}
+		dependencies.materializer = materializer
 	}
-	if batchStore == nil {
-		return nil, nil
-	}
-	return outbox.NewMaterializer(outbox.MaterializerConfig{
-		BatchStore: batchStore, Observability: config.Observability,
-	})
-}
-
-func validateDispatchCapabilities(config DispatchConfig, capabilities dispatchCapabilities) error {
-	if config.Materializer == nil && capabilities.sessions != nil && capabilities.messages != nil && capabilities.replyBatches == nil {
-		return fmt.Errorf("%w: durable dispatch requires reply materialization capability", ErrInvalid)
-	}
-	return nil
+	return dependencies, nil
 }
 
 // NewDispatcher validates the protocol-neutral execution dependencies.
@@ -279,8 +262,8 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if config.Observability == nil {
 		config.Observability = observability.NewNoopProvider()
 	}
-	capabilities := resolveDispatchCapabilities(config)
-	if err := validateDispatchCapabilities(config, capabilities); err != nil {
+	dependencies, err := resolveDispatchDependencies(config)
+	if err != nil {
 		return nil, err
 	}
 	executor, err := execution.NewCoordinator(execution.Config{
@@ -289,13 +272,13 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	config.Attachments, config.AttachmentStore = resolveDispatchAttachments(config)
-	config.AuditWriter = metrics.WrapAuditWriter(config.AuditWriter, config.Observability)
-	materializer, err := newDispatchMaterializer(config, capabilities.replyBatches)
-	if err != nil {
-		return nil, err
-	}
-	return &Dispatcher{resolver: config.Resolver, executor: executor, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: newDispatchStore(capabilities), materializer: materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore, attachments: config.Attachments, attachmentStore: config.AttachmentStore}, nil
+	return &Dispatcher{
+		resolver: config.Resolver, executor: executor,
+		telemetry: config.Observability, metrics: metrics.New(config.Observability),
+		runtimeStore: dependencies.store, materializer: dependencies.materializer,
+		auditWriter: dependencies.auditWriter, handoffStore: config.HandoffStore,
+		attachments: config.Attachments, attachmentStore: config.AttachmentStore,
+	}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.
@@ -403,7 +386,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		runnerCtx = servicetool.WithExecutionContext(runnerCtx, servicetool.ExecutionContext{
 			TenantID: request.Principal.TenantID(), EventID: durable.eventID, RequestID: requestID, TraceID: traceID,
 			Attachments: dispatcher.attachmentStore, Replies: mediaReplies,
-			Audit: audit.Recorder{Writer: dispatcher.auditWriter, TenantID: request.Principal.TenantID()},
+			Audit: audit.NewRecorder(dispatcher.auditWriter, request.Principal.TenantID()),
 		})
 	}
 	runnerEvents, err := dispatcher.executor.Execute(runnerCtx, execution.Request{

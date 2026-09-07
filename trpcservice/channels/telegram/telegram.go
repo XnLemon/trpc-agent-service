@@ -326,7 +326,7 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 	adapter := &Adapter{
 		dispatcher: config.Dispatcher, principal: normalized.principal, target: normalized.target,
 		idempotency: idempotency, ownIdempotency: ownIdempotency, errorHook: config.ErrorHook,
-		audit:       audit.Recorder{Writer: config.AuditWriter, TenantID: normalized.target.TenantID},
+		audit:       audit.NewRecorder(config.AuditWriter, normalized.target.TenantID),
 		attachments: config.Attachments, maxAttachmentBytes: normalized.maxAttachmentBytes,
 	}
 	if config.Observability == nil {
@@ -539,7 +539,10 @@ func (adapter *Adapter) beginUpdate(ctx context.Context, message gateway.Inbound
 		return claim, replay, nil
 	}
 	if errors.Is(err, gateway.ErrDuplicateMessage) {
-		if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressDuplicate, message.ExternalMessageID, "", message.ExternalUserID, "", audit.DecisionDuplicate, string(audit.ErrorDuplicate)); auditErr != nil {
+		if auditErr := adapter.audit.Record(ctx, audit.Event{
+			EventType: audit.EventIMIngressDuplicate, RequestID: message.ExternalMessageID,
+			UserID: message.ExternalUserID, Decision: audit.DecisionDuplicate, ErrorType: string(audit.ErrorDuplicate),
+		}); auditErr != nil {
 			adapter.report(ErrorOperationUpdate, ErrDispatch)
 			return nil, nil, ErrDispatch
 		}
@@ -555,7 +558,10 @@ func (adapter *Adapter) beginUpdate(ctx context.Context, message gateway.Inbound
 }
 
 func (adapter *Adapter) handleReplay(ctx context.Context, message *models.Message, inbound gateway.InboundMessage, replay []gateway.DispatchEvent) error {
-	if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressAccepted, inbound.ExternalMessageID, "", inbound.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
+	if auditErr := adapter.audit.Record(ctx, audit.Event{
+		EventType: audit.EventIMIngressAccepted, RequestID: inbound.ExternalMessageID,
+		UserID: inbound.ExternalUserID, Decision: audit.DecisionAccepted,
+	}); auditErr != nil {
 		return ErrDispatch
 	}
 	if err := adapter.sendEvents(ctx, message, replay); err != nil {
@@ -569,7 +575,10 @@ func (adapter *Adapter) handleReplay(ctx context.Context, message *models.Messag
 }
 
 func (adapter *Adapter) handleClaimedUpdate(ctx context.Context, message *models.Message, inbound gateway.InboundMessage, claim *gateway.IdempotencyClaim) error {
-	if auditErr := adapter.audit.IM(ctx, audit.EventIMIngressAccepted, inbound.ExternalMessageID, "", inbound.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
+	if auditErr := adapter.audit.Record(ctx, audit.Event{
+		EventType: audit.EventIMIngressAccepted, RequestID: inbound.ExternalMessageID,
+		UserID: inbound.ExternalUserID, Decision: audit.DecisionAccepted,
+	}); auditErr != nil {
 		_ = claim.Fail()
 		return ErrDispatch
 	}
@@ -598,7 +607,10 @@ func (adapter *Adapter) handleClaimedUpdate(ctx context.Context, message *models
 		adapter.report(ErrorOperationSend, ErrSendMessage)
 		return err
 	}
-	if auditErr := adapter.audit.IM(ctx, audit.EventIMDeliverySent, inbound.ExternalMessageID, "", inbound.ExternalUserID, "", audit.DecisionAccepted, ""); auditErr != nil {
+	if auditErr := adapter.audit.Record(ctx, audit.Event{
+		EventType: audit.EventIMDeliverySent, RequestID: inbound.ExternalMessageID,
+		UserID: inbound.ExternalUserID, Decision: audit.DecisionAccepted,
+	}); auditErr != nil {
 		return ErrDispatch
 	}
 	return nil
