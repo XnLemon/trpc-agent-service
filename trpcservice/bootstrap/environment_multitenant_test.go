@@ -8,16 +8,22 @@ import (
 	"testing"
 
 	agentsessionstore "github.com/XnLemon/trpc-agent-service/trpcservice/agent/sessionstore"
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	appmemory "github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
+	backendmemory "github.com/XnLemon/trpc-agent-service/trpcservice/backend/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
 	modelruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/model"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestorageredis "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/redis"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
+	tenantmemory "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/inmemory"
 	"github.com/alicebob/miniredis/v2"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
@@ -193,9 +199,11 @@ func TestEnvironmentTenantRuntimeMaterializesNewDemoTenantOnDemand(t *testing.T)
 	secretRegistry := modelruntime.NewSecretRegistry()
 	modelRegistry := modelruntime.NewModelProviderRegistry()
 	backendRegistry := storagefactory.NewProviderRegistry()
-	tenantRuntime, err := environmentTenantRuntimeForStores(config, delegate, environmentRuntimeStores{
-		primary: store, providers: map[string]environmentStorage{"inmemory": store},
-	}, secretRegistry, modelRegistry, backendRegistry)
+	tenantRuntime, err := environmentTenantRuntimeForStores(environmentTenantRuntimeOptions{
+		config: config, delegateSessions: delegate,
+		runtimeStores:  environmentRuntimeStores{primary: store, providers: map[string]environmentStorage{"inmemory": store}},
+		secretRegistry: secretRegistry, modelRegistry: modelRegistry, backendRegistry: backendRegistry,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,6 +220,150 @@ func TestEnvironmentTenantRuntimeMaterializesNewDemoTenantOnDemand(t *testing.T)
 	tenantRuntime.InvalidateTenant(tenantID)
 	if err := tenantRuntime.Ensure(context.Background(), tenantID); err != nil {
 		t.Fatalf("re-materialize new tenant after invalidation = %v", err)
+	}
+}
+
+//nolint:gocyclo // This is a vertical control-plane materialization and rotation contract test.
+func TestEnvironmentTenantRuntimeMaterializesControlPlaneSelectionAndRefreshes(t *testing.T) {
+	ctx := context.Background()
+	config := environmentConfig{
+		modelProvider: defaultModelProvider, modelNames: []string{"gpt-4o-mini"},
+		endpointHosts: []string{"api.openai.com"}, runtimeStorage: "inmemory",
+	}
+	modelCatalog, backendCatalog, err := environmentCatalogs(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenants := tenantmemory.NewRepository()
+	apps := appmemory.NewRepository()
+	models := modelmemory.NewRepository(modelCatalog)
+	backends := backendmemory.NewRepository(backendCatalog)
+	root, err := tenants.Create(ctx, tenant.CreateInput{
+		TenantKey: "control-plane-runtime", DisplayName: "Control Plane Runtime",
+		AuditRetentionDays: 30, LogMaskingLevel: tenant.MaskingBasic, TraceSamplingRate: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelProfile, _, err := models.Create(ctx, modelprofile.CreateInput{
+		TenantID: root.TenantID, ProfileKey: "control-model", DisplayName: "Control Model",
+		Configuration: modelprofile.Configuration{Provider: defaultModelProvider, Model: "gpt-4o-mini", SecretRef: "control/model-v1"},
+		Metadata:      modelprofile.ChangeMetadata{ActorType: "test", ActorID: "bootstrap", Reason: "fixture", CorrelationID: "control-model"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backendProfile, _, err := backends.Create(ctx, backend.CreateInput{
+		TenantID: root.TenantID, ProfileKey: "control-backend", DisplayName: "Control Backend",
+		Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory"}},
+		Metadata: backend.ChangeMetadata{ActorType: "test", ActorID: "bootstrap", Reason: "fixture", CorrelationID: "control-backend"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := apps.Create(ctx, appmodel.CreateInput{TenantID: root.TenantID, AppKey: "control-app", DisplayName: "Control App"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft, err := apps.CreateDraft(ctx, appmodel.CreateDraftInput{
+		TenantID: root.TenantID, AppID: app.AppID, ExpectedAppVersion: app.Version,
+		Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1,
+		Configuration: appmodel.DraftConfiguration{Instruction: "answer", ModelProfileID: modelProfile.ProfileID, Runtime: appmodel.DefaultRuntimePolicy()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, _, _, err := apps.Publish(ctx, appmodel.PublishInput{
+		TenantID: root.TenantID, AppID: app.AppID, Revision: draft.Revision,
+		ExpectedAppVersion: app.Version, ExpectedDraftVersion: draft.DraftVersion, TenantActive: true,
+		Metadata: appmodel.ChangeMetadata{ActorType: "test", ActorID: "bootstrap", Reason: "publish", CorrelationID: "control-publish"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedRoot, err := tenants.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{
+		TenantID: root.TenantID, ExpectedVersion: root.Version, DisplayName: root.DisplayName,
+		AuditRetentionDays: root.AuditRetentionDays, LogMaskingLevel: root.LogMaskingLevel,
+		TraceSamplingRate: root.TraceSamplingRate, DefaultAgentAppID: &published.AppID,
+		DefaultBackendProfileID: &backendProfile.ProfileID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets := modelruntime.NewSecretRegistry()
+	if err := secrets.RegisterValue(modelprofile.SecretScope{TenantID: updatedRoot.TenantID, SecretRef: "control/model-v1"}, "control-plane-key-v1"); err != nil {
+		t.Fatal(err)
+	}
+	delegate := inmemory.NewSessionService()
+	store := runtimestorageinmemory.New()
+	t.Cleanup(func() {
+		_ = delegate.Close()
+		_ = store.Close()
+	})
+	modelRegistry := modelruntime.NewModelProviderRegistry()
+	backendRegistry := storagefactory.NewProviderRegistry()
+	dependencies := environmentTenantRuntimeDependencies{
+		tenants: tenants, apps: apps, models: models, backends: backends,
+		modelCatalog: modelCatalog, backendCatalog: backendCatalog, secrets: secrets,
+	}
+	tenantRuntime, err := environmentTenantRuntimeForStores(environmentTenantRuntimeOptions{
+		config: config, delegateSessions: delegate,
+		runtimeStores:  environmentRuntimeStores{primary: store, providers: map[string]environmentStorage{"inmemory": store}},
+		secretRegistry: secrets, modelRegistry: modelRegistry, backendRegistry: backendRegistry,
+		controlPlane: &dependencies,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tenantRuntime.Close() })
+	if err := tenantRuntime.Ensure(ctx, updatedRoot.TenantID); err != nil {
+		t.Fatalf("control-plane materialization = %v", err)
+	}
+	modelInput, storageInput, err := dependencies.resolve(ctx, updatedRoot.TenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelSecret, err := secrets.Resolve(ctx, modelprofile.SecretScope{TenantID: updatedRoot.TenantID, SecretRef: modelInput.SecretRef})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := modelRegistry.New(ctx, modelInput, modelSecret); err != nil {
+		t.Fatalf("control-plane model provider = %v", err)
+	}
+	if _, err := backendRegistry.Resolve(ctx, storageInput, storageInput.Bindings[0]); err != nil {
+		t.Fatalf("control-plane backend provider = %v", err)
+	}
+
+	current, err := models.Get(ctx, updatedRoot.TenantID, modelProfile.ProfileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedConfiguration := current.Configuration.Clone()
+	updatedConfiguration.SecretRef = "control/model-v2"
+	if _, _, err := models.UpdateConfiguration(ctx, modelprofile.UpdateConfigurationInput{
+		TenantID: updatedRoot.TenantID, ProfileID: current.ProfileID, ExpectedVersion: current.Version,
+		DisplayName: current.DisplayName, Description: current.Description, SchemaVersion: current.SchemaVersion,
+		Configuration: updatedConfiguration, Metadata: modelprofile.ChangeMetadata{ActorType: "test", ActorID: "bootstrap", Reason: "rotate", CorrelationID: "control-rotate"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := secrets.RegisterValue(modelprofile.SecretScope{TenantID: updatedRoot.TenantID, SecretRef: "control/model-v2"}, "control-plane-key-v2"); err != nil {
+		t.Fatal(err)
+	}
+	tenantRuntime.InvalidateTenant(updatedRoot.TenantID)
+	if err := tenantRuntime.Ensure(ctx, updatedRoot.TenantID); err != nil {
+		t.Fatalf("control-plane refresh = %v", err)
+	}
+	rotated, err := secrets.Resolve(ctx, modelprofile.SecretScope{TenantID: updatedRoot.TenantID, SecretRef: "control/model-v2"})
+	if err != nil || rotated.Value() != "control-plane-key-v2" {
+		t.Fatalf("rotated model secret = %q, %v", rotated.Value(), err)
+	}
+	if err := secrets.Remove(modelprofile.SecretScope{TenantID: updatedRoot.TenantID, SecretRef: "control/model-v2"}); err != nil {
+		t.Fatal(err)
+	}
+	tenantRuntime.InvalidateTenant(updatedRoot.TenantID)
+	if err := tenantRuntime.Ensure(ctx, updatedRoot.TenantID); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("missing rotated model secret = %v", err)
 	}
 }
 

@@ -118,8 +118,9 @@ type environmentRuntimeCapabilityProvider struct {
 }
 
 type environmentS3CapabilityProvider struct {
-	tenantID  string
-	secretRef string
+	tenantID       string
+	secretRef      string
+	allowSecretRef bool
 }
 
 func (provider environmentS3CapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
@@ -129,7 +130,7 @@ func (provider environmentS3CapabilityProvider) New(ctx context.Context, input b
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if provider.tenantID == "" || input.TenantID != provider.tenantID || binding.Capability != backend.CapabilityArtifact || strings.ToLower(strings.TrimSpace(binding.Provider)) != "s3" || provider.secretRef == "" || binding.SecretRef != provider.secretRef {
+	if provider.tenantID == "" || input.TenantID != provider.tenantID || binding.Capability != backend.CapabilityArtifact || strings.ToLower(strings.TrimSpace(binding.Provider)) != "s3" || provider.secretRef == "" || (!provider.allowSecretRef && binding.SecretRef != provider.secretRef) {
 		return nil, storagefactory.ErrStorageFactory
 	}
 	store, err := newEnvironmentS3Store(ctx, provider.tenantID, binding, secret)

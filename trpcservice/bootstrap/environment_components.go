@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
@@ -14,6 +15,8 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	auditpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/audit/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
+	backendmysql "github.com/XnLemon/trpc-agent-service/trpcservice/backend/mysql"
+	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/channels/mysql"
 	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
@@ -21,6 +24,8 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom_aibot"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	modelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/model/mysql"
+	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	modelruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/model"
@@ -47,6 +52,20 @@ func environmentRepositories(config environmentConfig, db *sql.DB) (tenant.Repos
 		auditWriter, err = auditpostgres.New(db, config.tenantID)
 	}
 	return tenantRepo, appRepo, channelRepo, auditWriter, err
+}
+
+func environmentModelRepository(config environmentConfig, db *sql.DB, catalog *modelprofile.ProviderCatalog) modelprofile.Repository {
+	if config.driver == ControlPlaneDriverMySQL {
+		return modelmysql.NewRepository(db, catalog)
+	}
+	return modelpostgres.NewRepository(db, catalog)
+}
+
+func environmentBackendRepository(config environmentConfig, db *sql.DB, catalog *backend.ProviderCatalog) backend.Repository {
+	if config.driver == ControlPlaneDriverMySQL {
+		return backendmysql.NewRepository(db, catalog)
+	}
+	return backendpostgres.NewRepository(db, catalog)
 }
 
 type environmentWeComDependencies struct {
@@ -211,11 +230,38 @@ type environmentRuntimeProviderSpec struct {
 	store        environmentStorage
 }
 
+// environmentTenantRuntimeDependencies are the control-plane reads required
+// to turn one published tenant selection into runtime provider registrations.
+// The environment config remains the static provider boundary; repositories
+// select the tenant's active model and backend profile at materialization time.
+type environmentTenantRuntimeDependencies struct {
+	tenants        tenant.Repository
+	apps           appmodel.Repository
+	models         modelprofile.Repository
+	backends       backend.Repository
+	modelCatalog   *modelprofile.ProviderCatalog
+	backendCatalog *backend.ProviderCatalog
+	secrets        modelprofile.SecretResolver
+}
+
+type environmentTenantRuntimeOptions struct {
+	config           environmentConfig
+	delegateSessions session.Service
+	runtimeStores    environmentRuntimeStores
+	secretRegistry   *modelruntime.SecretRegistry
+	modelRegistry    *modelruntime.ModelProviderRegistry
+	backendRegistry  *storagefactory.ProviderRegistry
+	controlPlane     *environmentTenantRuntimeDependencies
+}
+
 func environmentRegistriesForStores(config environmentConfig, delegateSessions session.Service, runtimeStores environmentRuntimeStores) (*modelruntime.SecretRegistry, *modelruntime.ModelProviderRegistry, *storagefactory.ProviderRegistry, error) {
 	secretRegistry := modelruntime.NewSecretRegistry()
 	modelRegistry := modelruntime.NewModelProviderRegistry()
 	backendRegistry := storagefactory.NewProviderRegistry()
-	materializer, err := newEnvironmentTenantMaterializer(config, delegateSessions, runtimeStores, secretRegistry, modelRegistry, backendRegistry)
+	materializer, err := newEnvironmentTenantMaterializer(environmentTenantRuntimeOptions{
+		config: config, delegateSessions: delegateSessions, runtimeStores: runtimeStores,
+		secretRegistry: secretRegistry, modelRegistry: modelRegistry, backendRegistry: backendRegistry,
+	})
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -227,21 +273,18 @@ func environmentRegistriesForStores(config environmentConfig, delegateSessions s
 	return secretRegistry, modelRegistry, backendRegistry, nil
 }
 
-func newEnvironmentTenantMaterializer(
-	config environmentConfig,
-	delegateSessions session.Service,
-	runtimeStores environmentRuntimeStores,
-	secretRegistry *modelruntime.SecretRegistry,
-	modelRegistry *modelruntime.ModelProviderRegistry,
-	backendRegistry *storagefactory.ProviderRegistry,
-) (runtime.TenantRuntimeMaterializer, error) {
-	runtimeProviders, err := environmentRuntimeProviders(config, runtimeStores)
+func newEnvironmentTenantMaterializer(options environmentTenantRuntimeOptions) (runtime.TenantRuntimeMaterializer, error) {
+	runtimeProviders, err := environmentRuntimeProviders(options.config, options.runtimeStores)
 	if err != nil {
 		return nil, err
 	}
-	if secretRegistry == nil || modelRegistry == nil || backendRegistry == nil {
+	if options.secretRegistry == nil || options.modelRegistry == nil || options.backendRegistry == nil {
 		return nil, ErrInvalidConfig
 	}
+	if options.controlPlane != nil {
+		return controlPlaneTenantRuntimeMaterializer(options, runtimeProviders)
+	}
+	config := options.config
 	return func(ctx context.Context, tenantID string) error {
 		if ctx == nil || tenantID == "" {
 			return ErrInvalidConfig
@@ -250,10 +293,10 @@ func newEnvironmentTenantMaterializer(
 			return err
 		}
 		if config.demoMode {
-			if err := modelRegistry.Register(tenantID, demoModelProvider, environmentModelFactory{}); err != nil {
+			if err := options.modelRegistry.Register(tenantID, demoModelProvider, environmentModelFactory{}); err != nil {
 				return err
 			}
-			return registerEnvironmentRuntimeProviders(backendRegistry, tenantID, delegateSessions, config, runtimeProviders)
+			return registerEnvironmentRuntimeProviders(options.backendRegistry, tenantID, options.delegateSessions, config, runtimeProviders)
 		}
 		modelAPIKey := config.modelAPIKey
 		if mapped, ok := config.modelAPIKeys[tenantID]; ok {
@@ -262,32 +305,232 @@ func newEnvironmentTenantMaterializer(
 		if modelAPIKey == "" {
 			return ErrInvalidConfig
 		}
-		if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: tenantID, SecretRef: config.secretRef}, modelAPIKey); err != nil {
+		if err := options.secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: tenantID, SecretRef: config.secretRef}, modelAPIKey); err != nil {
 			return err
 		}
-		if err := modelRegistry.Register(tenantID, config.modelProvider, environmentModelFactory{}); err != nil {
+		if err := options.modelRegistry.Register(tenantID, config.modelProvider, environmentModelFactory{}); err != nil {
 			return err
 		}
 		if config.runtimeStorage == "redis" && config.redis.Password != "" {
-			if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: tenantID, SecretRef: config.redisSecretRef}, config.redis.Password); err != nil {
+			if err := options.secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: tenantID, SecretRef: config.redisSecretRef}, config.redis.Password); err != nil {
 				return err
 			}
 		}
 		if config.s3AccessKeyID != "" {
-			if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: tenantID, SecretRef: config.s3SecretRef}, config.s3AccessKeyID+":"+config.s3SecretKey); err != nil {
+			if err := options.secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: tenantID, SecretRef: config.s3SecretRef}, config.s3AccessKeyID+":"+config.s3SecretKey); err != nil {
 				return err
 			}
 		}
-		return registerEnvironmentRuntimeProviders(backendRegistry, tenantID, delegateSessions, config, runtimeProviders)
+		return registerEnvironmentRuntimeProviders(options.backendRegistry, tenantID, options.delegateSessions, config, runtimeProviders)
 	}, nil
 }
 
-func environmentTenantRuntimeForStores(config environmentConfig, delegateSessions session.Service, runtimeStores environmentRuntimeStores, secretRegistry *modelruntime.SecretRegistry, modelRegistry *modelruntime.ModelProviderRegistry, backendRegistry *storagefactory.ProviderRegistry) (*runtime.TenantRuntimeRegistry, error) {
-	materializer, err := newEnvironmentTenantMaterializer(config, delegateSessions, runtimeStores, secretRegistry, modelRegistry, backendRegistry)
+func environmentTenantRuntimeForStores(options environmentTenantRuntimeOptions) (*runtime.TenantRuntimeRegistry, error) {
+	materializer, err := newEnvironmentTenantMaterializer(options)
 	if err != nil {
 		return nil, err
 	}
 	return runtime.NewTenantRuntimeRegistry(materializer)
+}
+
+func controlPlaneTenantRuntimeMaterializer(options environmentTenantRuntimeOptions, runtimeProviders []environmentRuntimeProviderSpec) (runtime.TenantRuntimeMaterializer, error) {
+	if options.controlPlane == nil || options.controlPlane.invalid() {
+		return nil, ErrInvalidConfig
+	}
+	config := options.config
+	dependencies := options.controlPlane
+	return func(ctx context.Context, tenantID string) error {
+		modelInput, storageInput, err := dependencies.resolve(ctx, tenantID)
+		if err != nil {
+			return err
+		}
+		provider := strings.ToLower(strings.TrimSpace(modelInput.Provider))
+		if config.demoMode {
+			if provider != demoModelProvider || modelInput.SecretRef != "" {
+				return ErrInvalidConfig
+			}
+		} else {
+			expectedProvider := strings.ToLower(strings.TrimSpace(config.modelProvider))
+			if expectedProvider == "" {
+				expectedProvider = defaultModelProvider
+			}
+			if provider != expectedProvider {
+				return ErrInvalidConfig
+			}
+			fallback := config.modelAPIKeys[tenantID]
+			if fallback == "" {
+				fallback = config.modelAPIKey
+			}
+			if modelInput.SecretRef != config.secretRef {
+				fallback = ""
+			}
+			if err := ensureEnvironmentSecret(ctx, options.secretRegistry, dependencies.secrets, tenantID, modelInput.SecretRef, fallback); err != nil {
+				return err
+			}
+		}
+		if err := options.modelRegistry.Register(tenantID, provider, environmentModelFactory{}); err != nil {
+			return err
+		}
+		return options.registerControlPlaneRuntimeProviders(ctx, tenantID, runtimeProviders, storageInput)
+	}, nil
+}
+
+func (dependencies environmentTenantRuntimeDependencies) invalid() bool {
+	return dependencies.tenants == nil || dependencies.apps == nil || dependencies.models == nil || dependencies.backends == nil || dependencies.modelCatalog == nil || dependencies.backendCatalog == nil || dependencies.secrets == nil
+}
+
+//nolint:gocyclo // Control-plane resolution validates each scope before any runtime registration.
+func (dependencies environmentTenantRuntimeDependencies) resolve(ctx context.Context, tenantID string) (modelprofile.ModelFactoryInput, backend.StorageFactoryInput, error) {
+	if ctx == nil || tenantID == "" {
+		return modelprofile.ModelFactoryInput{}, backend.StorageFactoryInput{}, ErrInvalidConfig
+	}
+	if err := ctx.Err(); err != nil {
+		return modelprofile.ModelFactoryInput{}, backend.StorageFactoryInput{}, err
+	}
+	root, err := dependencies.tenants.Get(ctx, tenantID)
+	if err != nil || root == nil || root.TenantID != tenantID || root.DefaultAgentAppID == nil || root.DefaultBackendProfileID == nil {
+		return modelprofile.ModelFactoryInput{}, backend.StorageFactoryInput{}, controlPlaneDependencyError(ctx, err)
+	}
+	app, err := dependencies.apps.Get(ctx, tenantID, *root.DefaultAgentAppID)
+	if err != nil || app == nil || app.TenantID != tenantID || app.AppID != *root.DefaultAgentAppID || !app.CanAcceptExecution() || app.CurrentRevision == nil {
+		return modelprofile.ModelFactoryInput{}, backend.StorageFactoryInput{}, controlPlaneDependencyError(ctx, err)
+	}
+	revisionNumber := *app.CurrentRevision
+	if app.CanaryRevision != nil {
+		revisionNumber = *app.CanaryRevision
+	}
+	revision, err := dependencies.apps.GetRevision(ctx, tenantID, app.AppID, revisionNumber)
+	if err != nil || revision == nil {
+		return modelprofile.ModelFactoryInput{}, backend.StorageFactoryInput{}, controlPlaneDependencyError(ctx, err)
+	}
+	modelValue, err := dependencies.models.Get(ctx, tenantID, revision.ModelProfileID)
+	if err != nil || modelValue == nil {
+		return modelprofile.ModelFactoryInput{}, backend.StorageFactoryInput{}, controlPlaneDependencyError(ctx, err)
+	}
+	backendValue, err := dependencies.backends.Get(ctx, tenantID, *root.DefaultBackendProfileID)
+	if err != nil || backendValue == nil {
+		return modelprofile.ModelFactoryInput{}, backend.StorageFactoryInput{}, controlPlaneDependencyError(ctx, err)
+	}
+	tenantSnapshot, err := tenant.NewConfigurationSnapshot(root)
+	if err != nil {
+		return modelprofile.ModelFactoryInput{}, backend.StorageFactoryInput{}, ErrInvalidConfig
+	}
+	modelSnapshot, err := modelprofile.NewModelExecutionSnapshot(tenantSnapshot, modelValue, dependencies.modelCatalog)
+	if err != nil {
+		return modelprofile.ModelFactoryInput{}, backend.StorageFactoryInput{}, ErrInvalidConfig
+	}
+	backendSnapshot, err := backend.NewBackendExecutionSnapshot(tenantSnapshot, backendValue, dependencies.backendCatalog)
+	if err != nil {
+		return modelprofile.ModelFactoryInput{}, backend.StorageFactoryInput{}, ErrInvalidConfig
+	}
+	modelInput, err := modelSnapshot.FactoryInput()
+	if err != nil {
+		return modelprofile.ModelFactoryInput{}, backend.StorageFactoryInput{}, ErrInvalidConfig
+	}
+	storageInput, err := backendSnapshot.FactoryInput()
+	if err != nil {
+		return modelprofile.ModelFactoryInput{}, backend.StorageFactoryInput{}, ErrInvalidConfig
+	}
+	return modelInput, storageInput, nil
+}
+
+func controlPlaneDependencyError(ctx context.Context, cause error) error {
+	if cause != nil && ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	return ErrInvalidConfig
+}
+
+func ensureEnvironmentSecret(ctx context.Context, registry *modelruntime.SecretRegistry, resolver modelprofile.SecretResolver, tenantID, secretRef, fallback string) error {
+	if ctx == nil || registry == nil || tenantID == "" || secretRef == "" {
+		return ErrInvalidConfig
+	}
+	scope := modelprofile.SecretScope{TenantID: tenantID, SecretRef: secretRef}
+	if resolver != nil {
+		value, err := resolver.Resolve(ctx, scope)
+		if err == nil && value.Value() != "" {
+			return registry.Register(scope, value)
+		}
+		if ctx != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	if fallback == "" {
+		return ErrInvalidConfig
+	}
+	return registry.RegisterValue(scope, fallback)
+}
+
+func (options environmentTenantRuntimeOptions) registerControlPlaneRuntimeProviders(ctx context.Context, tenantID string, runtimeProviders []environmentRuntimeProviderSpec, input backend.StorageFactoryInput) error {
+	config := options.config
+	secrets := options.controlPlane.secrets
+	for _, binding := range input.Bindings {
+		providerName := strings.ToLower(strings.TrimSpace(binding.Provider))
+		if providerName == "s3" {
+			fallback := ""
+			if binding.SecretRef == config.s3SecretRef && config.s3AccessKeyID != "" && config.s3SecretKey != "" {
+				fallback = config.s3AccessKeyID + ":" + config.s3SecretKey
+			}
+			if err := ensureEnvironmentSecret(ctx, options.secretRegistry, secrets, tenantID, binding.SecretRef, fallback); err != nil {
+				return err
+			}
+			if err := options.backendRegistry.Register(tenantID, binding.Capability, providerName, environmentS3CapabilityProvider{tenantID: tenantID, secretRef: binding.SecretRef, allowSecretRef: true}); err != nil {
+				return err
+			}
+			continue
+		}
+		runtimeProvider, ok := environmentRuntimeProvider(runtimeProviders, providerName)
+		if !ok || !environmentRuntimeProviderSupports(runtimeProvider, binding.Capability) {
+			return ErrInvalidConfig
+		}
+		if providerName == "redis" {
+			if config.redis.Password != "" && binding.SecretRef != config.redisSecretRef {
+				return ErrInvalidConfig
+			}
+			if config.redis.Password == "" && binding.SecretRef != "" {
+				return ErrInvalidConfig
+			}
+		}
+		if binding.SecretRef != "" {
+			fallback := ""
+			if providerName == "redis" {
+				fallback = config.redis.Password
+			}
+			if err := ensureEnvironmentSecret(ctx, options.secretRegistry, secrets, tenantID, binding.SecretRef, fallback); err != nil {
+				return err
+			}
+		}
+		provider := environmentRuntimeCapabilityProvider{capability: binding.Capability, delegate: options.delegateSessions, store: runtimeProvider.store, telemetry: config.telemetry, backend: providerName}
+		if providerName == "redis" {
+			provider.redisEndpoint = config.redisEndpoint
+			provider.redisSecretRef = config.redisSecretRef
+			provider.redisPasswordRequired = config.redis.Password != ""
+		}
+		if err := options.backendRegistry.Register(tenantID, binding.Capability, providerName, provider); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func environmentRuntimeProvider(providers []environmentRuntimeProviderSpec, name string) (environmentRuntimeProviderSpec, bool) {
+	for _, provider := range providers {
+		if provider.name == name {
+			return provider, true
+		}
+	}
+	return environmentRuntimeProviderSpec{}, false
+}
+
+func environmentRuntimeProviderSupports(provider environmentRuntimeProviderSpec, capability backend.Capability) bool {
+	for _, supported := range provider.capabilities {
+		if supported == capability {
+			return true
+		}
+	}
+	return false
 }
 
 func environmentRuntimeProviders(config environmentConfig, stores environmentRuntimeStores) ([]environmentRuntimeProviderSpec, error) {

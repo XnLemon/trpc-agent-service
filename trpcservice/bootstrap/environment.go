@@ -316,7 +316,16 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: environment registries: %v", ErrInvalidConfig, err)
 	}
-	tenantRuntime, err := environmentTenantRuntimeForStores(config, delegateSessions, runtimeStores, secretRegistry, modelRegistry, backendRegistry)
+	modelRepo := environmentModelRepository(config, db, modelCatalog)
+	backendRepo := environmentBackendRepository(config, db, backendCatalog)
+	tenantRuntime, err := environmentTenantRuntimeForStores(environmentTenantRuntimeOptions{
+		config: config, delegateSessions: delegateSessions, runtimeStores: runtimeStores,
+		secretRegistry: secretRegistry, modelRegistry: modelRegistry, backendRegistry: backendRegistry,
+		controlPlane: &environmentTenantRuntimeDependencies{
+			tenants: tenantRepo, apps: appRepo, models: modelRepo, backends: backendRepo,
+			modelCatalog: modelCatalog, backendCatalog: backendCatalog, secrets: secretRegistry,
+		},
+	})
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = runtimeStores.Close()
@@ -362,6 +371,8 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		Observability:       config.telemetry,
 		Tenants:             tenantRepo,
 		Apps:                appRepo,
+		Models:              modelRepo,
+		Backends:            backendRepo,
 		Channels:            channelRepo,
 		TenantRuntime:       tenantRuntime,
 		ExecutionQueueStore: executionQueueStore,

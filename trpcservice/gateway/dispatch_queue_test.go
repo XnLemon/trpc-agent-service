@@ -117,8 +117,14 @@ func TestDispatcherEnqueueRunsThroughIndependentWorkerAndMaterializesReply(t *te
 		t.Fatalf("reply outbox = %+v, err=%v", replies, err)
 	}
 
-	if _, err := dispatcher.Enqueue(context.Background(), request); !errors.Is(err, ErrDuplicateMessage) {
+	retry := request
+	retry.RequestID = "queue-request-retry"
+	retry.TraceID = "queue-trace-retry"
+	if _, err := dispatcher.Enqueue(context.Background(), retry); !errors.Is(err, ErrDuplicateMessage) {
 		t.Fatalf("duplicate enqueue error = %v", err)
+	}
+	if processed, err := worker.RunOnce(context.Background()); processed || err != nil {
+		t.Fatalf("duplicate enqueue left an extra durable task: processed:%v err:%v", processed, err)
 	}
 }
 

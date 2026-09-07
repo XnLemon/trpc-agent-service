@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"time"
 
@@ -95,7 +96,7 @@ func (dispatcher *Dispatcher) Enqueue(ctx context.Context, request DispatchReque
 	}
 	if duplicate || event.EventID != admission.input.EventID {
 		// A retry can race with a task whose event was materialized first. The
-		// extra queue row remains durable and the Worker will no-op it after
+		// existing task remains durable and the Worker will no-op it after
 		// observing the existing idempotent event.
 		return EnqueueResult{}, ErrDuplicateMessage
 	}
@@ -124,10 +125,19 @@ func (dispatcher *Dispatcher) prepareQueuedAdmission(ctx context.Context, princi
 		return queuedAdmission{}, err
 	}
 	return queuedAdmission{input: runtimestorage.MessageEventInput{
-		TenantID: principal.TenantID(), EventID: uuid.NewString(), SessionID: identity.SessionID,
+		TenantID: principal.TenantID(), EventID: durableExecutionID(principal.TenantID(), target.BindingID, message.ExternalMessageID), SessionID: identity.SessionID,
 		BindingID: target.BindingID, ExternalMessageID: message.ExternalMessageID,
 		IdempotencyKey: message.ExternalMessageID, ReplyTarget: reply,
 	}}, nil
+}
+
+func durableExecutionID(tenantID, bindingID, externalMessageID string) string {
+	identity, _ := json.Marshal(struct {
+		TenantID          string `json:"tenant_id"`
+		BindingID         string `json:"binding_id"`
+		ExternalMessageID string `json:"external_message_id"`
+	}{TenantID: tenantID, BindingID: bindingID, ExternalMessageID: externalMessageID})
+	return uuid.NewSHA1(uuid.NameSpaceURL, identity).String()
 }
 
 func (dispatcher *Dispatcher) prepareQueuedEvent(ctx context.Context, principal Principal, target channels.RoutingTarget, message InboundMessage) (runtimestorage.MessageEvent, error) {
@@ -199,10 +209,26 @@ func (dispatcher *Dispatcher) enqueueExecutionTask(ctx context.Context, event ru
 	// This handles a client retry whose HTTP correlation ID differs from
 	// the first enqueue without replacing the original payload.
 	existing, lookupErr := dispatcher.executionQueue.Get(context.Background(), event.TenantID, event.EventID)
-	if lookupErr != nil || existing.Kind != ExecutionTaskKind || string(existing.Payload) != string(payload) {
+	if lookupErr != nil || existing.Kind != ExecutionTaskKind || (string(existing.Payload) != string(payload) && !sameExecutionTaskIdentity(existing, payload)) {
 		return runtimequeue.Task{}, ErrExecution
 	}
 	return existing, nil
+}
+
+func sameExecutionTaskIdentity(existing runtimequeue.Task, candidate []byte) bool {
+	existingPayload, err := decodeExecutionTask(existing)
+	if err != nil {
+		return false
+	}
+	candidatePayload, err := decodeExecutionTask(runtimequeue.Task{
+		TenantID: existing.TenantID, TaskID: existing.TaskID, Kind: ExecutionTaskKind, Payload: candidate,
+	})
+	if err != nil {
+		return false
+	}
+	existingPayload.RequestID, existingPayload.TraceID = "", ""
+	candidatePayload.RequestID, candidatePayload.TraceID = "", ""
+	return reflect.DeepEqual(existingPayload, candidatePayload)
 }
 
 func notifyAccepted(accepted chan<- struct{}) {
