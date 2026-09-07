@@ -39,7 +39,7 @@ func TestStoreReserveCreatesAndReusesReservations(t *testing.T) {
 	tokenLimit, spendLimit := int64(100), int64(50)
 	input := budget.ReserveInput{
 		TenantID: budgetTestTenantID, ReservationID: "request-1", PeriodStart: budgetTestPeriod,
-		Limits: budget.Limits{TokenBudget: &tokenLimit, SpendLimitMinor: &spendLimit, Currency: "USD"},
+		Limits:   budget.Limits{TokenBudget: &tokenLimit, SpendLimitMinor: &spendLimit, Currency: "USD"},
 		Estimate: budget.Estimate{InputTokens: 10, OutputTokens: 20, SpendMinor: 5},
 	}
 	periodStart := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
@@ -253,7 +253,7 @@ func validReserveInput() budget.ReserveInput {
 	tokenLimit, spendLimit := int64(100), int64(50)
 	return budget.ReserveInput{
 		TenantID: budgetTestTenantID, ReservationID: "request-1", PeriodStart: budgetTestPeriod,
-		Limits: budget.Limits{TokenBudget: &tokenLimit, SpendLimitMinor: &spendLimit, Currency: "USD"},
+		Limits:   budget.Limits{TokenBudget: &tokenLimit, SpendLimitMinor: &spendLimit, Currency: "USD"},
 		Estimate: budget.Estimate{InputTokens: 10, OutputTokens: 20, SpendMinor: 5},
 	}
 }
