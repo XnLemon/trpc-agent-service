@@ -7,6 +7,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -15,7 +16,11 @@ import (
 func TestTelemetryModelClosesStreamingOperationOnce(t *testing.T) {
 	provider := &runtimeTelemetryProvider{}
 	options := applyTelemetryOptions(t, provider)
-	before, err := options.ModelCallbacks.RunBeforeModel(context.Background(), &trpcmodel.BeforeModelArgs{})
+	var samples []budget.Usage
+	ctx := WithUsageObserver(context.Background(), func(_ context.Context, usage budget.Usage) {
+		samples = append(samples, usage)
+	})
+	before, err := options.ModelCallbacks.RunBeforeModel(ctx, &trpcmodel.BeforeModelArgs{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,6 +42,9 @@ func TestTelemetryModelClosesStreamingOperationOnce(t *testing.T) {
 	}
 	assertTelemetryMetric(t, provider, metrics.TokensTotal, 5, map[string]string{"component": "model", "provider": "openai", "model_family": "gpt"})
 	assertTelemetryMetric(t, provider, metrics.TokensTotal, 7, map[string]string{"component": "model", "provider": "openai", "model_family": "gpt"})
+	if len(samples) != 1 || samples[0] != (budget.Usage{InputTokens: 5, OutputTokens: 7}) {
+		t.Fatalf("usage observer samples = %+v; want one terminal sample", samples)
+	}
 	if countTelemetryMetrics(provider, metrics.OperationDuration) != 1 || countTelemetryMetrics(provider, metrics.RequestsTotal) != 2 {
 		t.Fatalf("terminal model metrics = %#v", provider.metrics)
 	}
