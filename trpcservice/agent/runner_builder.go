@@ -171,6 +171,93 @@ func authorizedKnowledge(authorizations []appmodel.ToolAuthorization, service kn
 	return nil
 }
 
+type authorizedMemoryService struct {
+	base        memory.Service
+	permissions map[string]bool
+	autoExtract bool
+}
+
+func newAuthorizedMemoryService(base memory.Service, authorizations []appmodel.ToolAuthorization) memory.Service {
+	permissions := make(map[string]bool, len(authorizations))
+	for _, authorization := range authorizations {
+		permissions[authorization.ToolID] = true
+	}
+	return authorizedMemoryService{base: base, permissions: permissions, autoExtract: permissions["memory_auto_extract"]}
+}
+
+func (service authorizedMemoryService) allows(name string) bool {
+	return service.permissions[name]
+}
+
+func (service authorizedMemoryService) AddMemory(ctx context.Context, key memory.UserKey, value string, topics []string, opts ...memory.AddOption) error {
+	if !service.allows(memory.AddToolName) {
+		return storagefactory.ErrCapabilityUnavailable
+	}
+	return service.base.AddMemory(ctx, key, value, topics, opts...)
+}
+
+func (service authorizedMemoryService) UpdateMemory(ctx context.Context, key memory.Key, value string, topics []string, opts ...memory.UpdateOption) error {
+	if !service.allows(memory.UpdateToolName) {
+		return storagefactory.ErrCapabilityUnavailable
+	}
+	return service.base.UpdateMemory(ctx, key, value, topics, opts...)
+}
+
+func (service authorizedMemoryService) DeleteMemory(ctx context.Context, key memory.Key) error {
+	if !service.allows(memory.DeleteToolName) {
+		return storagefactory.ErrCapabilityUnavailable
+	}
+	return service.base.DeleteMemory(ctx, key)
+}
+
+func (service authorizedMemoryService) ClearMemories(ctx context.Context, key memory.UserKey) error {
+	if !service.allows(memory.ClearToolName) {
+		return storagefactory.ErrCapabilityUnavailable
+	}
+	return service.base.ClearMemories(ctx, key)
+}
+
+func (service authorizedMemoryService) ReadMemories(ctx context.Context, key memory.UserKey, limit int) ([]*memory.Entry, error) {
+	if !service.allows(memory.LoadToolName) && !service.allows(memory.SearchToolName) {
+		return nil, storagefactory.ErrCapabilityUnavailable
+	}
+	return service.base.ReadMemories(ctx, key, limit)
+}
+
+func (service authorizedMemoryService) SearchMemories(ctx context.Context, key memory.UserKey, query string, opts ...memory.SearchOption) ([]*memory.Entry, error) {
+	if !service.allows(memory.SearchToolName) {
+		return nil, storagefactory.ErrCapabilityUnavailable
+	}
+	return service.base.SearchMemories(ctx, key, query, opts...)
+}
+
+func (service authorizedMemoryService) Tools() []trpctool.Tool {
+	tools := service.base.Tools()
+	filtered := make([]trpctool.Tool, 0, len(tools))
+	for _, candidate := range tools {
+		if candidate == nil || candidate.Declaration() == nil || service.allows(candidate.Declaration().Name) {
+			if candidate != nil && candidate.Declaration() != nil {
+				filtered = append(filtered, candidate)
+			}
+		}
+	}
+	return filtered
+}
+
+func (service authorizedMemoryService) EnqueueAutoMemoryJob(ctx context.Context, sess *session.Session) error {
+	if !service.autoExtract {
+		return nil
+	}
+	return service.base.EnqueueAutoMemoryJob(ctx, sess)
+}
+
+func (service authorizedMemoryService) Close() error {
+	if service.base == nil {
+		return nil
+	}
+	return service.base.Close()
+}
+
 func assembleRunner(ctx context.Context, config RunnerConfig, resources runnerResources) (trpcrunner.Runner, error) {
 	agentInput := config.Input.Agent.Clone()
 	scopedSessions, err := NewTenantSessionService(config.Input.Tenant, resources.sessions)
@@ -180,6 +267,9 @@ func assembleRunner(ctx context.Context, config RunnerConfig, resources runnerRe
 	model, err := modelruntime.ResolveAndBuild(ctx, config.Input.Model, config.SecretResolver, config.ModelFactory)
 	if err != nil {
 		return nil, fmt.Errorf("build runner: model: %w", err)
+	}
+	if resources.memory != nil {
+		resources.memory = newAuthorizedMemoryService(resources.memory, agentInput.Tools)
 	}
 	telemetryProvider := config.Observability
 	if telemetryProvider == nil && config.EnableUsageCallbacks {

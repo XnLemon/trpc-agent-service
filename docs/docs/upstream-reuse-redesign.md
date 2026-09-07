@@ -26,12 +26,12 @@
 
 | 位置 | 已核对事实 | 重构结论 |
 | --- | --- | --- |
-| `trpcservice/agent/factory.go` | 使用 `llmagent.New`、`chainagent.New`；默认仅 llm/chain | 扩展上游编排工厂，不自研执行器 |
-| `trpcservice/agent/runner_builder.go` | `NewRunner` 仅配置 `WithSessionService` | 原生注入 Memory/Artifact，LLMAgent 注入 Knowledge |
-| `trpcservice/runtime/storage/factory/runtime_factory.go` | Session 是上游接口，其余主要是自研接口；Knowledge 强制同时实现 VectorStore，Artifact 强制同时实现 ObjectStore | 移除错误的能力捆绑，改用原生服务和显式生命周期 |
+| `trpcservice/agent/factory.go` | 使用 `llmagent.New`、`chainagent.New`、`parallelagent.New`、`cycleagent.New`、`graphagent.New` | 默认注册上游 LLM/Chain/Parallel/Cycle/Graph；Graph 当前是线性 StateGraph 映射，尚未实现声明式条件路由 |
+| `trpcservice/agent/runner_builder.go` | Runner 使用 `WithSessionService`，并可注入 Memory/Artifact；LLMAgent 可注入 Knowledge | 已实际装配上游 Memory/Artifact/Knowledge；Memory tools 和自动提取受 Revision allowlist/`memory_auto_extract` 控制；Artifact request-scoped 用户/会话授权仍待补齐 |
+| `trpcservice/runtime/storage/factory/runtime_factory.go` | Session、Summary、Audit 使用平台合同；Memory/Knowledge/Artifact 使用上游接口 | 已移除 Vector/Object 等旧平台能力捆绑，能力集合只保留平台职责和上游原生服务 |
 | `trpcservice/runtime/storage/capabilities.go` | 自研记录、CRUD、向量与对象接口 | 不再作为 Agent 能力的主合同 |
-| `trpcservice/bootstrap/environment_providers.go` | 按租户装配上游 Session/Memory/Artifact/Knowledge 服务，以及平台审计和投递存储 | 默认运行链必须使用这些服务，不能只在测试中替换 |
-| `trpcservice/skill/skill.go` | 只有 package 声明与说明 | 不计为 Skill 实现 |
+| `trpcservice/bootstrap/environment_providers.go` | 按租户装配上游 Session/Memory/Artifact/Knowledge 服务，以及平台审计和投递存储 | demo 使用上游 InMemory；生产 Memory 使用上游 ChromaDB，Artifact 使用上游 COS；尚无真实服务重启/双 Worker 验收 |
+| `trpcservice/skill/skill.go` | 只有 package 声明与说明 | 未接入上游 Skill Repository/`WithSkills`，不计为 Skill 实现 |
 | `trpcservice/gateway/dispatch_durable.go` | durable claim 针对 Channel principal；平台保有 message/outbox 状态 | 新协议不可绕过可信主体、执行和可靠交付边界 |
 
 已核对的上游入口：`runner.WithMemoryService`、`runner.WithArtifactService`、`runner.WithPlugins`、`llmagent.WithKnowledge`（自动注入搜索工具）；`server/openai.WithRunner` 与 `Server.Handler()`。Memory 服务含工具及自动提取任务；Artifact 支持指定历史版本读取；Knowledge 有 source/chunking/embedder/vectorstore/retriever 等配套模块。
