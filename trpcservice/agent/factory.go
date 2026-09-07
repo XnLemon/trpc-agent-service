@@ -13,6 +13,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/agent/graphagent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/parallelagent"
+	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/graph"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -159,7 +160,8 @@ func buildChainAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent,
 	if err != nil {
 		return nil, err
 	}
-	return chainagent.New(input.Definition.Name, chainagent.WithSubAgents(children)), nil
+	built := chainagent.New(input.Definition.Name, chainagent.WithSubAgents(children))
+	return isolateCompositeInvocation(built), nil
 }
 
 func buildParallelAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
@@ -167,7 +169,8 @@ func buildParallelAgent(_ context.Context, input AgentBuildInput) (trpcagent.Age
 	if err != nil {
 		return nil, err
 	}
-	return parallelagent.New(input.Definition.Name, parallelagent.WithSubAgents(children)), nil
+	built := parallelagent.New(input.Definition.Name, parallelagent.WithSubAgents(children))
+	return isolateCompositeInvocation(built), nil
 }
 
 func buildCycleAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
@@ -179,7 +182,8 @@ func buildCycleAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent,
 	if iterations < 1 {
 		iterations = 1
 	}
-	return cycleagent.New(input.Definition.Name, cycleagent.WithSubAgents(children), cycleagent.WithMaxIterations(iterations)), nil
+	built := cycleagent.New(input.Definition.Name, cycleagent.WithSubAgents(children), cycleagent.WithMaxIterations(iterations))
+	return isolateCompositeInvocation(built), nil
 }
 
 func buildGraphAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
@@ -202,7 +206,34 @@ func buildGraphAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent,
 	if err != nil {
 		return nil, fmt.Errorf("%w: compile graph: %v", ErrAgentFactory, err)
 	}
-	return graphagent.New(input.Definition.Name, compiled, graphagent.WithSubAgents(children))
+	built, err := graphagent.New(input.Definition.Name, compiled, graphagent.WithSubAgents(children))
+	if err != nil {
+		return nil, err
+	}
+	return isolateCompositeInvocation(built), nil
+}
+
+// compositeInvocationAgent prevents upstream composite agents from mutating
+// the root Invocation while Runner diagnostics read it concurrently. View
+// preserves the invocation identity and services while isolating mutable
+// Agent/AgentName fields.
+type compositeInvocationAgent struct{ delegate trpcagent.Agent }
+
+func isolateCompositeInvocation(delegate trpcagent.Agent) trpcagent.Agent {
+	return compositeInvocationAgent{delegate: delegate}
+}
+
+func (agent compositeInvocationAgent) Run(ctx context.Context, invocation *trpcagent.Invocation) (<-chan *trpcevent.Event, error) {
+	return agent.delegate.Run(ctx, invocation.View())
+}
+
+func (agent compositeInvocationAgent) Tools() []trpctool.Tool { return agent.delegate.Tools() }
+func (agent compositeInvocationAgent) Info() trpcagent.Info   { return agent.delegate.Info() }
+func (agent compositeInvocationAgent) SubAgents() []trpcagent.Agent {
+	return agent.delegate.SubAgents()
+}
+func (agent compositeInvocationAgent) FindSubAgent(name string) trpcagent.Agent {
+	return agent.delegate.FindSubAgent(name)
 }
 
 func buildCompositeChildren(input AgentBuildInput) ([]trpcagent.Agent, error) {

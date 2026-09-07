@@ -14,6 +14,7 @@ import (
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
@@ -78,6 +79,64 @@ func TestNewRuntimeRunnerRegistryBuildsWithStorageFactory(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRuntimeRunnerRegistryMaterializesPluginsFromPlan(t *testing.T) {
+	plan := newRunnerFactoryTestPlan(t)
+	sessions := inmemory.NewSessionService()
+	defer sessions.Close()
+	created := 0
+	registry, err := NewRuntimeRunnerRegistry(Config{
+		ModelFactory: runnerFactoryModelFactory{}, Sessions: sessions,
+		PluginFactory: func(_ context.Context, received runtime.ExecutionPlan) ([]plugin.Plugin, error) {
+			receivedKey, receivedErr := received.CacheKey()
+			planKey, planErr := plan.CacheKey()
+			if receivedErr != nil || planErr != nil || receivedKey != planKey {
+				t.Fatalf("plugin factory execution plan: received=%v/%v want=%v/%v", receivedKey, receivedErr, planKey, planErr)
+			}
+			created++
+			return []plugin.Plugin{runnerFactoryPlugin{}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := registry.Acquire(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created != 1 {
+		t.Fatalf("plugin factory calls = %d", created)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeRunnerRegistryRejectsPluginFactoryFailure(t *testing.T) {
+	plan := newRunnerFactoryTestPlan(t)
+	sessions := inmemory.NewSessionService()
+	defer sessions.Close()
+	registry, err := NewRuntimeRunnerRegistry(Config{
+		ModelFactory: runnerFactoryModelFactory{}, Sessions: sessions,
+		PluginFactory: func(context.Context, runtime.ExecutionPlan) ([]plugin.Plugin, error) {
+			return nil, errors.New("plugin configuration failed")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Acquire(context.Background(), plan); !errors.Is(err, runtimerunner.ErrRunnerUnavailable) {
+		t.Fatalf("plugin factory failure = %v", err)
+	}
+}
+
+type runnerFactoryPlugin struct{}
+
+func (runnerFactoryPlugin) Name() string              { return "runner-factory-plugin" }
+func (runnerFactoryPlugin) Register(*plugin.Registry) {}
 
 func TestRunnerInputFromPlanRejectsInvalidPlan(t *testing.T) {
 	if _, err := runnerInputFromPlan(runtime.ExecutionPlan{}); err == nil {

@@ -18,6 +18,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge"
 	"trpc.group/trpc-go/trpc-agent-go/memory"
+	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	trpcrunner "trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -26,7 +27,8 @@ import (
 // RunnerConfig groups the dependencies used to materialize one external-agent
 // Runner. Session, registries, factories, and Observability are borrowed by
 // the returned Runner; the optional StorageFactory produces capabilities owned
-// by that Runner.
+// by that Runner. Plugin ownership transfers to the returned Runner and plugins
+// are closed with it.
 type RunnerConfig struct {
 	Input                RunnerInput
 	SecretResolver       modelprofile.SecretResolver
@@ -36,6 +38,7 @@ type RunnerConfig struct {
 	Observability        observability.Provider
 	ToolRegistry         *servicetool.Registry
 	AgentFactories       *AgentFactoryRegistry
+	Plugins              []plugin.Plugin
 	EnableUsageCallbacks bool
 }
 
@@ -306,6 +309,9 @@ func assembleRunner(ctx context.Context, config RunnerConfig, resources runnerRe
 		return nil, fmt.Errorf("build runner: Agent Factory: %w", err)
 	}
 	runnerOptions := []trpcrunner.Option{trpcrunner.WithSessionService(scopedSessions)}
+	if len(config.Plugins) > 0 {
+		runnerOptions = append(runnerOptions, trpcrunner.WithPlugins(config.Plugins...))
+	}
 	if resources.memory != nil {
 		runnerOptions = append(runnerOptions, trpcrunner.WithMemoryService(resources.memory))
 	}

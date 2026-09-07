@@ -15,8 +15,14 @@ import (
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
+	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 )
+
+// PluginFactory materializes runner-owned upstream plugins from a sealed plan.
+// A factory must return fresh instances because the upstream Runner closes its
+// plugins when the runner lease ends.
+type PluginFactory func(context.Context, runtime.ExecutionPlan) ([]plugin.Plugin, error)
 
 // Config wires the concrete external-agent assembly into a generic Runner
 // registry. Session, Secret Resolver, Model Factory, and Storage Factory are
@@ -30,6 +36,7 @@ type Config struct {
 	Observability        observability.Provider
 	ToolRegistry         *servicetool.Registry
 	AgentFactories       *serviceagent.AgentFactoryRegistry
+	PluginFactory        PluginFactory
 	EnableUsageCallbacks bool
 }
 
@@ -45,21 +52,41 @@ func NewRuntimeRunnerRegistry(config Config) (*runtimerunner.RunnerRegistry, err
 		if err != nil {
 			return nil, err
 		}
+		plugins, err := materializePlugins(ctx, config.PluginFactory, plan)
+		if err != nil {
+			return nil, err
+		}
 		if config.StorageFactory != nil {
 			return serviceagent.NewRunnerWithConfig(ctx, serviceagent.RunnerConfig{
 				Input: input, SecretResolver: config.SecretResolver, ModelFactory: config.ModelFactory,
 				Sessions: config.Sessions, StorageFactory: config.StorageFactory,
 				Observability: config.Observability, ToolRegistry: config.ToolRegistry, AgentFactories: config.AgentFactories,
-				EnableUsageCallbacks: config.EnableUsageCallbacks,
+				Plugins: plugins, EnableUsageCallbacks: config.EnableUsageCallbacks,
 			})
 		}
 		return serviceagent.NewRunnerWithConfig(ctx, serviceagent.RunnerConfig{
 			Input: input, SecretResolver: config.SecretResolver, ModelFactory: config.ModelFactory,
 			Sessions: config.Sessions, Observability: config.Observability, ToolRegistry: config.ToolRegistry, AgentFactories: config.AgentFactories,
-			EnableUsageCallbacks: config.EnableUsageCallbacks,
+			Plugins: plugins, EnableUsageCallbacks: config.EnableUsageCallbacks,
 		})
 	}
 	return runtimerunner.NewRunnerRegistry(config.Registry)
+}
+
+func materializePlugins(ctx context.Context, factory PluginFactory, plan runtime.ExecutionPlan) ([]plugin.Plugin, error) {
+	if factory == nil {
+		return nil, nil
+	}
+	plugins, err := factory(ctx, plan)
+	if err != nil {
+		return nil, fmt.Errorf("%w: materialize plugins", runtimerunner.ErrInvalid)
+	}
+	for _, candidate := range plugins {
+		if candidate == nil || candidate.Name() == "" {
+			return nil, fmt.Errorf("%w: invalid plugin", runtimerunner.ErrInvalid)
+		}
+	}
+	return plugins, nil
 }
 
 func runnerInputFromPlan(plan runtime.ExecutionPlan) (serviceagent.RunnerInput, error) {
