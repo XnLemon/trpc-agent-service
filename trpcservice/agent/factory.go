@@ -39,6 +39,7 @@ type AgentBuildInput struct {
 	Definition   LLMAgentFactoryInput
 	Model        trpcmodel.Model
 	Tools        []trpctool.Tool
+	ToolSets     []trpctool.ToolSet
 	Knowledge    knowledge.Knowledge
 	ModelOptions []llmagent.Option
 }
@@ -148,6 +149,9 @@ func DefaultAgentFactoryRegistry() *AgentFactoryRegistry {
 
 func buildLLMAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
 	options := llmAgentOptions(input.Definition, input.Model, input.Tools)
+	if len(input.ToolSets) > 0 {
+		options = append(options, llmagent.WithToolSets(input.ToolSets))
+	}
 	if input.Knowledge != nil {
 		options = append(options, llmagent.WithKnowledge(input.Knowledge))
 	}
@@ -257,6 +261,9 @@ func buildCompositeChildren(input AgentBuildInput) ([]trpcagent.Agent, error) {
 		stepDefinition.GlobalInstruction = step.GlobalInstruction
 		stepDefinition.Chain = nil
 		options := llmAgentOptions(stepDefinition, input.Model, input.Tools)
+		if len(input.ToolSets) > 0 {
+			options = append(options, llmagent.WithToolSets(input.ToolSets))
+		}
 		if input.Knowledge != nil {
 			options = append(options, llmagent.WithKnowledge(input.Knowledge))
 		}

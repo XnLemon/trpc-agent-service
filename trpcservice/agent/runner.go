@@ -335,6 +335,7 @@ func telemetryOptions(provider observability.Provider, providerName, modelFamily
 type policyRunner struct {
 	delegate     trpcrunner.Runner
 	capabilities *storagefactory.CapabilitySet
+	toolSets     []trpctool.ToolSet
 	runOptions   []trpcagent.RunOption
 }
 
@@ -349,7 +350,7 @@ func (runner *policyRunner) Close() error {
 	if runner == nil {
 		return nil
 	}
-	return errors.Join(runner.delegate.Close(), runner.capabilities.Close())
+	return errors.Join(runner.delegate.Close(), runner.capabilities.Close(), closeToolSets(runner.toolSets))
 }
 
 func toTRPCGenerationConfig(configuration appmodel.GenerationConfig) trpcmodel.GenerationConfig {

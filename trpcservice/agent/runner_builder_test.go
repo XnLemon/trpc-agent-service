@@ -20,6 +20,62 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
+func TestNewRunnerWithConfigOwnsAndClosesToolSets(t *testing.T) {
+	input := runnerBuilderInputForTest(t)
+	input.Agent.Tools = nil
+	toolSet := &trackingToolSet{name: "test-set"}
+	runner, err := NewRunnerWithConfig(context.Background(), RunnerConfig{
+		Input: input, Sessions: sessioninmemory.NewSessionService(), ModelFactory: runnerBuilderModelFactory{}, ToolSets: []tool.ToolSet{toolSet},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if toolSet.initCalls != 1 || toolSet.closeCalls != 0 {
+		t.Fatalf("tool set lifecycle after build = init:%d close:%d", toolSet.initCalls, toolSet.closeCalls)
+	}
+	if err := runner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if toolSet.closeCalls != 1 {
+		t.Fatalf("tool set close calls = %d, want 1", toolSet.closeCalls)
+	}
+}
+
+func TestNewRunnerWithConfigClosesInitializedToolSetsOnLaterFailure(t *testing.T) {
+	input := runnerBuilderInputForTest(t)
+	input.Agent.Tools = nil
+	first := &trackingToolSet{name: "first"}
+	second := &trackingToolSet{name: "second", initErr: errors.New("mcp unavailable")}
+	_, err := NewRunnerWithConfig(context.Background(), RunnerConfig{
+		Input: input, Sessions: sessioninmemory.NewSessionService(), ModelFactory: runnerBuilderModelFactory{}, ToolSets: []tool.ToolSet{first, second},
+	})
+	if err == nil || !errors.Is(err, second.initErr) {
+		t.Fatalf("tool set initialization error = %v", err)
+	}
+	if first.closeCalls != 1 || second.closeCalls != 1 {
+		t.Fatalf("tool set cleanup = first:%d second:%d", first.closeCalls, second.closeCalls)
+	}
+}
+
+type trackingToolSet struct {
+	name       string
+	initErr    error
+	initCalls  int
+	closeCalls int
+}
+
+func (set *trackingToolSet) Init(context.Context) error {
+	set.initCalls++
+	return set.initErr
+}
+
+func (set *trackingToolSet) Tools(context.Context) []tool.Tool { return nil }
+func (set *trackingToolSet) Close() error {
+	set.closeCalls++
+	return nil
+}
+func (set *trackingToolSet) Name() string { return set.name }
+
 func TestNewRunnerWithConfigRejectsInvalidDependencies(t *testing.T) {
 	var nilContext context.Context
 	for _, test := range []struct {

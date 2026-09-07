@@ -16,6 +16,7 @@ import (
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 func TestNewRuntimeRunnerRegistryValidatesDependencies(t *testing.T) {
@@ -78,6 +79,78 @@ func TestNewRuntimeRunnerRegistryBuildsWithStorageFactory(t *testing.T) {
 	if err := registry.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestRuntimeRunnerRegistryMaterializesAndOwnsToolSets(t *testing.T) {
+	plan := newRunnerFactoryTestPlan(t)
+	sessions := inmemory.NewSessionService()
+	defer sessions.Close()
+	created := &runnerFactoryToolSet{name: "tenant-mcp"}
+	registry, err := NewRuntimeRunnerRegistry(Config{
+		ModelFactory: runnerFactoryModelFactory{}, Sessions: sessions,
+		ToolSetFactory: func(_ context.Context, received runtime.ExecutionPlan) ([]tool.ToolSet, error) {
+			receivedKey, receivedErr := received.CacheKey()
+			planKey, planErr := plan.CacheKey()
+			if receivedErr != nil || planErr != nil || receivedKey != planKey {
+				t.Fatalf("tool set factory execution plan: received=%v/%v want=%v/%v", receivedKey, receivedErr, planKey, planErr)
+			}
+			return []tool.ToolSet{created}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := registry.Acquire(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if created.closeCalls != 0 {
+		t.Fatalf("tool set closed while cached: %d", created.closeCalls)
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if created.closeCalls != 1 {
+		t.Fatalf("tool set close calls = %d", created.closeCalls)
+	}
+}
+
+func TestRuntimeRunnerRegistryRejectsDuplicateToolSetNames(t *testing.T) {
+	plan := newRunnerFactoryTestPlan(t)
+	sessions := inmemory.NewSessionService()
+	defer sessions.Close()
+	first := &runnerFactoryToolSet{name: "duplicate"}
+	second := &runnerFactoryToolSet{name: "duplicate"}
+	registry, err := NewRuntimeRunnerRegistry(Config{
+		ModelFactory: runnerFactoryModelFactory{}, Sessions: sessions,
+		ToolSetFactory: func(context.Context, runtime.ExecutionPlan) ([]tool.ToolSet, error) {
+			return []tool.ToolSet{first, second}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Acquire(context.Background(), plan); !errors.Is(err, runtimerunner.ErrRunnerUnavailable) {
+		t.Fatalf("duplicate tool set failure = %v", err)
+	}
+	if first.closeCalls != 1 || second.closeCalls != 1 {
+		t.Fatalf("duplicate tool set cleanup = first:%d second:%d", first.closeCalls, second.closeCalls)
+	}
+}
+
+type runnerFactoryToolSet struct {
+	name       string
+	closeCalls int
+}
+
+func (set *runnerFactoryToolSet) Tools(context.Context) []tool.Tool { return nil }
+func (set *runnerFactoryToolSet) Name() string                      { return set.name }
+func (set *runnerFactoryToolSet) Close() error {
+	set.closeCalls++
+	return nil
 }
 
 func TestRuntimeRunnerRegistryMaterializesPluginsFromPlan(t *testing.T) {

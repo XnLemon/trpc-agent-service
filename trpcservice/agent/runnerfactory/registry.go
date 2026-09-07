@@ -6,6 +6,7 @@ package runnerfactory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	serviceagent "github.com/XnLemon/trpc-agent-service/trpcservice/agent"
@@ -17,12 +18,17 @@ import (
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/session"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // PluginFactory materializes runner-owned upstream plugins from a sealed plan.
 // A factory must return fresh instances because the upstream Runner closes its
 // plugins when the runner lease ends.
 type PluginFactory func(context.Context, runtime.ExecutionPlan) ([]plugin.Plugin, error)
+
+// ToolSetFactory materializes runner-owned upstream tool sets from a sealed
+// plan. MCP implementations must fail closed before entering the Runner cache.
+type ToolSetFactory func(context.Context, runtime.ExecutionPlan) ([]tool.ToolSet, error)
 
 // Config wires the concrete external-agent assembly into a generic Runner
 // registry. Session, Secret Resolver, Model Factory, and Storage Factory are
@@ -37,6 +43,7 @@ type Config struct {
 	ToolRegistry         *servicetool.Registry
 	AgentFactories       *serviceagent.AgentFactoryRegistry
 	PluginFactory        PluginFactory
+	ToolSetFactory       ToolSetFactory
 	EnableUsageCallbacks bool
 }
 
@@ -52,8 +59,13 @@ func NewRuntimeRunnerRegistry(config Config) (*runtimerunner.RunnerRegistry, err
 		if err != nil {
 			return nil, err
 		}
+		toolSets, err := materializeToolSets(ctx, config.ToolSetFactory, plan)
+		if err != nil {
+			return nil, err
+		}
 		plugins, err := materializePlugins(ctx, config.PluginFactory, plan)
 		if err != nil {
+			_ = closeToolSets(toolSets)
 			return nil, err
 		}
 		if config.StorageFactory != nil {
@@ -61,16 +73,50 @@ func NewRuntimeRunnerRegistry(config Config) (*runtimerunner.RunnerRegistry, err
 				Input: input, SecretResolver: config.SecretResolver, ModelFactory: config.ModelFactory,
 				Sessions: config.Sessions, StorageFactory: config.StorageFactory,
 				Observability: config.Observability, ToolRegistry: config.ToolRegistry, AgentFactories: config.AgentFactories,
-				Plugins: plugins, EnableUsageCallbacks: config.EnableUsageCallbacks,
+				Plugins: plugins, ToolSets: toolSets, EnableUsageCallbacks: config.EnableUsageCallbacks,
 			})
 		}
 		return serviceagent.NewRunnerWithConfig(ctx, serviceagent.RunnerConfig{
 			Input: input, SecretResolver: config.SecretResolver, ModelFactory: config.ModelFactory,
 			Sessions: config.Sessions, Observability: config.Observability, ToolRegistry: config.ToolRegistry, AgentFactories: config.AgentFactories,
-			Plugins: plugins, EnableUsageCallbacks: config.EnableUsageCallbacks,
+			Plugins: plugins, ToolSets: toolSets, EnableUsageCallbacks: config.EnableUsageCallbacks,
 		})
 	}
 	return runtimerunner.NewRunnerRegistry(config.Registry)
+}
+
+func materializeToolSets(ctx context.Context, factory ToolSetFactory, plan runtime.ExecutionPlan) ([]tool.ToolSet, error) {
+	if factory == nil {
+		return nil, nil
+	}
+	toolSets, err := factory(ctx, plan)
+	if err != nil {
+		_ = closeToolSets(toolSets)
+		return nil, fmt.Errorf("%w: materialize tool sets", runtimerunner.ErrInvalid)
+	}
+	seen := make(map[string]struct{}, len(toolSets))
+	for _, candidate := range toolSets {
+		if candidate == nil || candidate.Name() == "" {
+			_ = closeToolSets(toolSets)
+			return nil, fmt.Errorf("%w: invalid tool set", runtimerunner.ErrInvalid)
+		}
+		if _, duplicate := seen[candidate.Name()]; duplicate {
+			_ = closeToolSets(toolSets)
+			return nil, fmt.Errorf("%w: duplicate tool set", runtimerunner.ErrInvalid)
+		}
+		seen[candidate.Name()] = struct{}{}
+	}
+	return toolSets, nil
+}
+
+func closeToolSets(toolSets []tool.ToolSet) error {
+	var errs []error
+	for index := len(toolSets) - 1; index >= 0; index-- {
+		if toolSets[index] != nil {
+			errs = append(errs, toolSets[index].Close())
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func materializePlugins(ctx context.Context, factory PluginFactory, plan runtime.ExecutionPlan) ([]plugin.Plugin, error) {

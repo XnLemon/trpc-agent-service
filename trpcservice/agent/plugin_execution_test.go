@@ -51,6 +51,22 @@ func TestRunnerExecutesAndClosesUpstreamPlugin(t *testing.T) {
 	}
 }
 
+func TestRunnerClosesUpstreamPluginWhenAssemblyFails(t *testing.T) {
+	input := runnerBuilderInputForTest(t)
+	input.Agent.Tools = nil
+	probe := &lifecycleProbePlugin{}
+	_, err := NewRunnerWithConfig(context.Background(), RunnerConfig{
+		Input: input, Sessions: sessioninmemory.NewSessionService(),
+		ModelFactory: runnerBuilderModelFactory{err: context.DeadlineExceeded}, Plugins: []plugin.Plugin{probe},
+	})
+	if err == nil {
+		t.Fatal("assembly failure unexpectedly succeeded")
+	}
+	if probe.closes.Load() != 1 {
+		t.Fatalf("plugin close calls after assembly failure = %d", probe.closes.Load())
+	}
+}
+
 type lifecycleProbePlugin struct {
 	events    atomic.Int64
 	afterRuns atomic.Int64

@@ -27,8 +27,8 @@ import (
 // RunnerConfig groups the dependencies used to materialize one external-agent
 // Runner. Session, registries, factories, and Observability are borrowed by
 // the returned Runner; the optional StorageFactory produces capabilities owned
-// by that Runner. Plugin ownership transfers to the returned Runner and plugins
-// are closed with it.
+// by that Runner. Plugin and ToolSet ownership transfers to the returned Runner;
+// both are closed with it.
 type RunnerConfig struct {
 	Input                RunnerInput
 	SecretResolver       modelprofile.SecretResolver
@@ -39,6 +39,7 @@ type RunnerConfig struct {
 	ToolRegistry         *servicetool.Registry
 	AgentFactories       *AgentFactoryRegistry
 	Plugins              []plugin.Plugin
+	ToolSets             []trpctool.ToolSet
 	EnableUsageCallbacks bool
 }
 
@@ -46,6 +47,21 @@ type RunnerConfig struct {
 // group.
 func NewRunnerWithConfig(ctx context.Context, config RunnerConfig) (trpcrunner.Runner, error) {
 	if err := validateRunnerConfig(ctx, config); err != nil {
+		return nil, err
+	}
+	pluginsOwned := true
+	defer func() {
+		if pluginsOwned {
+			_ = closePlugins(config.Plugins)
+		}
+	}()
+	toolSetsOwned := true
+	defer func() {
+		if toolSetsOwned {
+			_ = closeToolSets(config.ToolSets)
+		}
+	}()
+	if err := initializeToolSets(ctx, config.ToolSets); err != nil {
 		return nil, err
 	}
 	resources, err := materializeRunnerResources(ctx, config)
@@ -63,7 +79,47 @@ func NewRunnerWithConfig(ctx context.Context, config RunnerConfig) (trpcrunner.R
 		return nil, err
 	}
 	owned = false
+	pluginsOwned = false
+	toolSetsOwned = false
 	return runner, nil
+}
+
+type initializableToolSet interface {
+	Init(context.Context) error
+}
+
+func initializeToolSets(ctx context.Context, toolSets []trpctool.ToolSet) error {
+	for _, toolSet := range toolSets {
+		if toolSet == nil || toolSet.Name() == "" {
+			return errors.New("build runner: invalid tool set")
+		}
+		if initializable, ok := toolSet.(initializableToolSet); ok {
+			if err := initializable.Init(ctx); err != nil {
+				return fmt.Errorf("build runner: initialize tool set: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func closePlugins(plugins []plugin.Plugin) error {
+	errs := make([]error, 0, len(plugins))
+	for index := len(plugins) - 1; index >= 0; index-- {
+		if closer, ok := plugins[index].(plugin.Closer); ok {
+			errs = append(errs, closer.Close(context.Background()))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func closeToolSets(toolSets []trpctool.ToolSet) error {
+	errs := make([]error, 0, len(toolSets))
+	for index := len(toolSets) - 1; index >= 0; index-- {
+		if toolSets[index] != nil {
+			errs = append(errs, toolSets[index].Close())
+		}
+	}
+	return errors.Join(errs...)
 }
 
 type runnerResources struct {
@@ -303,7 +359,7 @@ func assembleRunner(ctx context.Context, config RunnerConfig, resources runnerRe
 		factories = DefaultAgentFactoryRegistry()
 	}
 	builtAgent, err := factories.Build(ctx, AgentBuildInput{
-		Definition: agentInput, Model: model, Tools: tools, Knowledge: knowledgeService, ModelOptions: modelOptions,
+		Definition: agentInput, Model: model, Tools: tools, ToolSets: config.ToolSets, Knowledge: knowledgeService, ModelOptions: modelOptions,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build runner: Agent Factory: %w", err)
@@ -322,6 +378,7 @@ func assembleRunner(ctx context.Context, config RunnerConfig, resources runnerRe
 	return &policyRunner{
 		delegate:     delegate,
 		capabilities: resources.capabilities,
+		toolSets:     config.ToolSets,
 		runOptions: []trpcagent.RunOption{
 			trpcagent.WithMaxRunDuration(time.Duration(agentInput.Runtime.ExecutionTimeoutSeconds) * time.Second),
 		},
