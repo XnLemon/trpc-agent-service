@@ -3,6 +3,8 @@ package budget_test
 import (
 	"context"
 	"errors"
+	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +36,93 @@ func TestPricingAndEstimateUseProviderNeutralRates(t *testing.T) {
 	}
 	if _, err := budget.ParsePricing(map[string]string{budget.InputCostOption: "2"}, "USD"); !errors.Is(err, budget.ErrCostUnavailable) {
 		t.Fatalf("partial pricing error = %v", err)
+	}
+}
+
+func TestBudgetLimitsPricingAndArithmeticBoundaries(t *testing.T) {
+	negative := int64(-1)
+	positive := int64(10)
+	for _, test := range []struct {
+		name   string
+		limits budget.Limits
+		valid  bool
+	}{
+		{name: "token limit cannot be negative", limits: budget.Limits{TokenBudget: &negative}, valid: false},
+		{name: "spend limit cannot be negative", limits: budget.Limits{SpendLimitMinor: &negative, Currency: "USD"}, valid: false},
+		{name: "spend limit requires ISO currency", limits: budget.Limits{SpendLimitMinor: &positive, Currency: "usd"}, valid: false},
+		{name: "token limit does not require currency", limits: budget.Limits{TokenBudget: &positive}, valid: true},
+		{name: "complete limits", limits: budget.Limits{TokenBudget: &positive, SpendLimitMinor: &positive, Currency: "USD"}, valid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.limits.Validate()
+			if test.valid && err != nil {
+				t.Fatalf("limits validation error = %v", err)
+			}
+			if !test.valid && !errors.Is(err, budget.ErrInvalid) {
+				t.Fatalf("limits validation error = %v, want ErrInvalid", err)
+			}
+		})
+	}
+
+	if pricing, err := budget.ParsePricing(nil, "USD"); err != nil || pricing.Configured {
+		t.Fatalf("empty pricing = %+v, err = %v", pricing, err)
+	}
+	if err := (budget.Pricing{}).RequirePricing(); !errors.Is(err, budget.ErrCostUnavailable) {
+		t.Fatalf("missing pricing requirement error = %v", err)
+	}
+	for _, test := range []struct {
+		name     string
+		options  map[string]string
+		currency string
+		wantErr  error
+	}{
+		{name: "invalid input rate", options: map[string]string{budget.InputCostOption: "wat", budget.OutputCostOption: "1"}, wantErr: budget.ErrInvalid},
+		{name: "negative output rate", options: map[string]string{budget.InputCostOption: "1", budget.OutputCostOption: "-1"}, wantErr: budget.ErrInvalid},
+		{name: "invalid configured currency", options: map[string]string{budget.InputCostOption: "1", budget.OutputCostOption: "1"}, currency: "usd", wantErr: budget.ErrInvalid},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := budget.ParsePricing(test.options, test.currency); !errors.Is(err, test.wantErr) {
+				t.Fatalf("ParsePricing() error = %v, want %v", err, test.wantErr)
+			}
+		})
+	}
+
+	pricing := budget.Pricing{InputMinorPerMillion: 2, OutputMinorPerMillion: 3, Currency: "USD", Configured: true}
+	if cost, err := pricing.Cost(budget.Usage{}); err != nil || cost != 0 {
+		t.Fatalf("zero usage cost = %d, err = %v", cost, err)
+	}
+	if _, err := pricing.Cost(budget.Usage{InputTokens: -1}); !errors.Is(err, budget.ErrInvalid) {
+		t.Fatalf("negative usage cost error = %v", err)
+	}
+	if _, err := (budget.Pricing{InputMinorPerMillion: -1}).Cost(budget.Usage{InputTokens: 1}); !errors.Is(err, budget.ErrInvalid) {
+		t.Fatalf("negative pricing cost error = %v", err)
+	}
+	if _, err := (budget.Pricing{InputMinorPerMillion: math.MaxInt64}).Cost(budget.Usage{InputTokens: 2}); !errors.Is(err, budget.ErrInvalid) {
+		t.Fatalf("partial cost overflow error = %v", err)
+	}
+	if _, err := (budget.Pricing{InputMinorPerMillion: math.MaxInt64}).Cost(budget.Usage{InputTokens: 2_000_000}); !errors.Is(err, budget.ErrInvalid) {
+		t.Fatalf("whole cost overflow error = %v", err)
+	}
+	if (budget.Usage{InputTokens: math.MaxInt64, OutputTokens: 1}).Tokens() != math.MaxInt64 {
+		t.Fatal("usage token overflow did not saturate")
+	}
+	if (budget.Estimate{InputTokens: math.MaxInt64, OutputTokens: 1}).Tokens() != math.MaxInt64 {
+		t.Fatal("estimate token overflow did not saturate")
+	}
+	for _, test := range []struct {
+		name   string
+		calls  int
+		output int
+	}{
+		{name: "zero calls", calls: 0, output: 1},
+		{name: "zero output", calls: 1, output: 0},
+		{name: "call multiplication overflow", calls: int(^uint(0) >> 1), output: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := budget.EstimateExecution(test.calls, test.output, pricing); !errors.Is(err, budget.ErrInvalid) {
+				t.Fatalf("EstimateExecution() error = %v, want ErrInvalid", err)
+			}
+		})
 	}
 }
 
@@ -108,6 +197,54 @@ func TestControllerDisablesTenantsWithoutLimits(t *testing.T) {
 	reservation, err := budget.NewController(nil).Reserve(context.Background(), root, "request-1", budget.Estimate{InputTokens: 1})
 	if err != nil || reservation.State != budget.ReservationStateDisabled {
 		t.Fatalf("disabled budget = %+v, err = %v", reservation, err)
+	}
+}
+
+func TestControllerRejectsInvalidContextsAndReservationInputs(t *testing.T) {
+	root := budgetTenant(t, 100, 100)
+	controller := budget.NewController(budgetmemory.New())
+	var nilContext context.Context
+	if _, err := controller.Reserve(nilContext, root, "request", budget.Estimate{InputTokens: 1}); !errors.Is(err, budget.ErrInvalid) {
+		t.Fatalf("nil context error = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := controller.Reserve(canceled, root, "request", budget.Estimate{InputTokens: 1}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled context error = %v", err)
+	}
+	for _, id := range []string{"", " leading", "trailing ", "line\nbreak", strings.Repeat("x", 257)} {
+		if _, err := controller.Reserve(context.Background(), root, id, budget.Estimate{InputTokens: 1}); !errors.Is(err, budget.ErrInvalid) {
+			t.Fatalf("reservation ID %q error = %v", id, err)
+		}
+	}
+	if _, err := controller.Reserve(context.Background(), root, "negative", budget.Estimate{InputTokens: -1}); !errors.Is(err, budget.ErrInvalid) {
+		t.Fatalf("negative estimate error = %v", err)
+	}
+	if _, err := budget.NewController(nil).Settle(context.Background(), budget.Reservation{State: budget.ReservationStateReserved}, budget.Usage{}); !errors.Is(err, budget.ErrUnavailable) {
+		t.Fatalf("nil store settlement error = %v", err)
+	}
+	if _, err := controller.Settle(context.Background(), budget.Reservation{State: budget.ReservationStateReserved}, budget.Usage{InputTokens: -1}); !errors.Is(err, budget.ErrInvalid) {
+		t.Fatalf("invalid usage error = %v", err)
+	}
+	if _, err := controller.Release(nil, budget.Reservation{State: budget.ReservationStateReserved}); !errors.Is(err, budget.ErrInvalid) {
+		t.Fatalf("nil release context error = %v", err)
+	}
+	var nilController *budget.Controller
+	if _, err := nilController.Reserve(context.Background(), root, "limited", budget.Estimate{InputTokens: 1}); !errors.Is(err, budget.ErrUnavailable) {
+		t.Fatalf("nil controller error = %v", err)
+	}
+	noLimit := root.Clone()
+	noLimit.MonthlyTokenBudget = nil
+	noLimit.MonthlySpendLimitMinor = nil
+	disabled, err := nilController.Reserve(context.Background(), noLimit, "unlimited", budget.Estimate{InputTokens: 1})
+	if err != nil || disabled.State != budget.ReservationStateDisabled {
+		t.Fatalf("nil controller disabled result = %+v, err = %v", disabled, err)
+	}
+
+	limits := budget.LimitsForTenant(root)
+	*limits.TokenBudget = 1
+	if *root.MonthlyTokenBudget == 1 {
+		t.Fatal("LimitsForTenant returned aliased token budget")
 	}
 }
 
