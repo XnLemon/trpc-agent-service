@@ -147,34 +147,41 @@ func TestEnvironmentControlPlaneRuntimeMaterializerBoundaries(t *testing.T) {
 		modelRegistry:    modelRegistry,
 		backendRegistry:  backendRegistry,
 	}
+	testEnvironmentMaterializerConstructionBoundaries(t, baseOptions)
+	testEnvironmentSecretResolutionBoundaries(t, secretRegistry)
+	testEnvironmentS3ProviderBoundaries(t, baseOptions, store, secretRegistry, backendRegistry)
+	testEnvironmentGenericProviderBoundaries(t, baseOptions, store, secretRegistry)
+	testEnvironmentRedisProviderBoundaries(t, baseOptions, store, secretRegistry)
+	testEnvironmentProviderLookupBoundaries(t, store)
+}
+
+func testEnvironmentMaterializerConstructionBoundaries(t *testing.T, options environmentTenantRuntimeOptions) {
+	t.Helper()
 	if _, err := newEnvironmentTenantMaterializer(environmentTenantRuntimeOptions{
-		config:          baseOptions.config,
-		runtimeStores:   baseOptions.runtimeStores,
-		modelRegistry:   modelRegistry,
-		backendRegistry: backendRegistry,
+		config:          options.config,
+		runtimeStores:   options.runtimeStores,
+		modelRegistry:   options.modelRegistry,
+		backendRegistry: options.backendRegistry,
 	}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("missing secret registry error = %v", err)
 	}
 	if _, err := newEnvironmentTenantMaterializer(environmentTenantRuntimeOptions{
-		config:          baseOptions.config,
-		runtimeStores:   baseOptions.runtimeStores,
-		secretRegistry:  secretRegistry,
-		modelRegistry:   modelRegistry,
-		backendRegistry: backendRegistry,
+		config:          options.config,
+		runtimeStores:   options.runtimeStores,
+		secretRegistry:  options.secretRegistry,
+		modelRegistry:   options.modelRegistry,
+		backendRegistry: options.backendRegistry,
 		controlPlane:    &environmentTenantRuntimeDependencies{},
 	}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("invalid control-plane dependencies error = %v", err)
 	}
-	if _, err := environmentTenantRuntimeForStores(environmentTenantRuntimeOptions{
-		config:          baseOptions.config,
-		runtimeStores:   baseOptions.runtimeStores,
-		secretRegistry:  secretRegistry,
-		modelRegistry:   modelRegistry,
-		backendRegistry: backendRegistry,
-	}); err != nil {
+	if _, err := environmentTenantRuntimeForStores(options); err != nil {
 		t.Fatalf("static tenant runtime construction = %v", err)
 	}
+}
 
+func testEnvironmentSecretResolutionBoundaries(t *testing.T, secretRegistry *modelruntime.SecretRegistry) {
+	t.Helper()
 	const tenantID = "t_00000000000000000000000000"
 	const secretRef = "env/model"
 	if err := ensureEnvironmentSecret(nil, secretRegistry, secretRegistry, tenantID, secretRef, "fallback"); !errors.Is(err, ErrInvalidConfig) {
@@ -195,7 +202,11 @@ func TestEnvironmentControlPlaneRuntimeMaterializerBoundaries(t *testing.T) {
 	if err := ensureEnvironmentSecret(context.Background(), secretRegistry, secretRegistry, tenantID, "env/dynamic", ""); err != nil {
 		t.Fatalf("dynamic secret resolver = %v", err)
 	}
+}
 
+func testEnvironmentS3ProviderBoundaries(t *testing.T, baseOptions environmentTenantRuntimeOptions, store environmentStorage, secretRegistry *modelruntime.SecretRegistry, backendRegistry *storagefactory.ProviderRegistry) {
+	t.Helper()
+	const tenantID = "t_00000000000000000000000000"
 	options := baseOptions
 	options.config = environmentConfig{s3AccessKeyID: "access", s3SecretKey: "secret", s3SecretRef: "env/s3"}
 	options.controlPlane = &environmentTenantRuntimeDependencies{secrets: secretRegistry}
@@ -220,6 +231,15 @@ func TestEnvironmentControlPlaneRuntimeMaterializerBoundaries(t *testing.T) {
 	if err := options.registerControlPlaneRuntimeProviders(context.Background(), tenantID, providers, backend.StorageFactoryInput{TenantID: tenantID, Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilityArtifact, Provider: "s3", SecretRef: "env/s3"}}}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("S3 static secret mismatch = %v", err)
 	}
+}
+
+func testEnvironmentGenericProviderBoundaries(t *testing.T, baseOptions environmentTenantRuntimeOptions, store environmentStorage, secretRegistry *modelruntime.SecretRegistry) {
+	t.Helper()
+	const tenantID = "t_00000000000000000000000000"
+	options := baseOptions
+	options.config = environmentConfig{runtimeStorage: "inmemory"}
+	options.controlPlane = &environmentTenantRuntimeDependencies{secrets: secretRegistry}
+	providers := []environmentRuntimeProviderSpec{{name: "inmemory", capabilities: []backend.Capability{backend.CapabilitySession}, store: store}}
 	if err := options.registerControlPlaneRuntimeProviders(context.Background(), tenantID, providers, backend.StorageFactoryInput{TenantID: tenantID, Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "unknown"}}}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("unknown runtime provider = %v", err)
 	}
@@ -227,7 +247,6 @@ func TestEnvironmentControlPlaneRuntimeMaterializerBoundaries(t *testing.T) {
 		t.Fatalf("unsupported runtime capability = %v", err)
 	}
 	missingSecret := options
-	missingSecret.config = environmentConfig{runtimeStorage: "inmemory"}
 	missingSecret.controlPlane = &environmentTenantRuntimeDependencies{secrets: modelruntime.NewSecretRegistry()}
 	if err := missingSecret.registerControlPlaneRuntimeProviders(context.Background(), tenantID, providers, backend.StorageFactoryInput{TenantID: tenantID, Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory", SecretRef: "env/missing"}}}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("unresolved runtime provider secret = %v", err)
@@ -243,14 +262,19 @@ func TestEnvironmentControlPlaneRuntimeMaterializerBoundaries(t *testing.T) {
 	if err := closedGeneric.registerControlPlaneRuntimeProviders(context.Background(), tenantID, providers, backend.StorageFactoryInput{TenantID: tenantID, Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory"}}}); !errors.Is(err, storagefactory.ErrRegistryClosed) {
 		t.Fatalf("closed runtime provider registry = %v", err)
 	}
+}
 
+func testEnvironmentRedisProviderBoundaries(t *testing.T, baseOptions environmentTenantRuntimeOptions, store environmentStorage, secretRegistry *modelruntime.SecretRegistry) {
+	t.Helper()
+	const tenantID = "t_00000000000000000000000000"
+	options := baseOptions
 	redisSecretRef := "env/redis"
 	if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: tenantID, SecretRef: redisSecretRef}, "redis-password"); err != nil {
 		t.Fatal(err)
 	}
 	options.controlPlane = &environmentTenantRuntimeDependencies{secrets: secretRegistry}
 	options.config = environmentConfig{runtimeStorage: "redis", redisEndpoint: "redis://configured", redisSecretRef: redisSecretRef, redis: runtimestorageredis.Config{Password: "redis-password"}}
-	providers = []environmentRuntimeProviderSpec{{name: "redis", capabilities: []backend.Capability{backend.CapabilitySession}, store: store}}
+	providers := []environmentRuntimeProviderSpec{{name: "redis", capabilities: []backend.Capability{backend.CapabilitySession}, store: store}}
 	if err := options.registerControlPlaneRuntimeProviders(context.Background(), tenantID, providers, backend.StorageFactoryInput{TenantID: tenantID, Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: "redis://configured", SecretRef: "env/other"}}}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("Redis static secret mismatch = %v", err)
 	}
@@ -261,6 +285,11 @@ func TestEnvironmentControlPlaneRuntimeMaterializerBoundaries(t *testing.T) {
 	if err := options.registerControlPlaneRuntimeProviders(context.Background(), tenantID, providers, backend.StorageFactoryInput{TenantID: tenantID, Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: "redis://configured", SecretRef: redisSecretRef}}}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("Redis dynamic secret mismatch = %v", err)
 	}
+}
+
+func testEnvironmentProviderLookupBoundaries(t *testing.T, store environmentStorage) {
+	t.Helper()
+	providers := []environmentRuntimeProviderSpec{{name: "inmemory", capabilities: []backend.Capability{backend.CapabilitySession}, store: store}}
 	if _, ok := environmentRuntimeProvider(providers, "missing"); ok {
 		t.Fatal("missing runtime provider was found")
 	}
@@ -345,9 +374,16 @@ func TestEnvironmentTenantMaterializerRegistersStaticRuntime(t *testing.T) {
 		modelRegistry:   modelRegistry,
 		backendRegistry: backendRegistry,
 	}
+	materializer := newEnvironmentStaticMaterializer(t, options)
+	testEnvironmentStaticMaterializerRuntime(t, materializer, options, secretRegistry, backendRegistry, tenantID)
+	testEnvironmentStaticMaterializerRegistryBoundaries(t, options, tenantID)
+}
+
+func newEnvironmentStaticMaterializer(t *testing.T, options environmentTenantRuntimeOptions) func(context.Context, string) error {
+	t.Helper()
 	if _, err := newEnvironmentTenantMaterializer(environmentTenantRuntimeOptions{
-		config: options.config, runtimeStores: environmentRuntimeStores{}, secretRegistry: secretRegistry,
-		modelRegistry: modelRegistry, backendRegistry: backendRegistry,
+		config: options.config, runtimeStores: environmentRuntimeStores{}, secretRegistry: options.secretRegistry,
+		modelRegistry: options.modelRegistry, backendRegistry: options.backendRegistry,
 	}); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("missing runtime provider error = %v", err)
 	}
@@ -355,6 +391,11 @@ func TestEnvironmentTenantMaterializerRegistersStaticRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return materializer
+}
+
+func testEnvironmentStaticMaterializerRuntime(t *testing.T, materializer func(context.Context, string) error, options environmentTenantRuntimeOptions, secretRegistry *modelruntime.SecretRegistry, backendRegistry *storagefactory.ProviderRegistry, tenantID string) {
+	t.Helper()
 	if err := materializer(nil, tenantID); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("nil materializer context error = %v", err)
 	}
@@ -374,7 +415,10 @@ func TestEnvironmentTenantMaterializerRegistersStaticRuntime(t *testing.T) {
 	if _, err := backendRegistry.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: tenantID}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "inmemory"}); err != nil {
 		t.Fatalf("static runtime provider registration = %v", err)
 	}
+}
 
+func testEnvironmentStaticMaterializerRegistryBoundaries(t *testing.T, options environmentTenantRuntimeOptions, tenantID string) {
+	t.Helper()
 	demoOptions := options
 	demoOptions.config = environmentConfig{runtimeStorage: "inmemory", demoMode: true}
 	demoMaterializer, err := newEnvironmentTenantMaterializer(demoOptions)
@@ -415,7 +459,7 @@ func TestEnvironmentTenantMaterializerRegistersStaticRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	options.backendRegistry = closedBackend
-	materializer, err = newEnvironmentTenantMaterializer(options)
+	materializer, err := newEnvironmentTenantMaterializer(options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,14 +470,7 @@ func TestEnvironmentTenantMaterializerRegistersStaticRuntime(t *testing.T) {
 
 func TestEnvironmentControlPlaneRuntimeResolutionAndMaterialization(t *testing.T) {
 	fixture := newEnvironmentControlPlaneFixture(t)
-	modelInput, storageInput, err := fixture.dependencies.resolve(context.Background(), fixture.root.TenantID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if modelInput.Provider != "fake" || storageInput.Bindings[0].Provider != "inmemory" {
-		t.Fatalf("resolved runtime inputs = model:%+v storage:%+v", modelInput, storageInput)
-	}
-
+	modelInput := environmentControlPlaneRuntimeInputs(t, fixture)
 	store := runtimestorageinmemory.New()
 	t.Cleanup(func() { _ = store.Close() })
 	options := environmentTenantRuntimeOptions{
@@ -444,6 +481,25 @@ func TestEnvironmentControlPlaneRuntimeResolutionAndMaterialization(t *testing.T
 		backendRegistry: storagefactory.NewProviderRegistry(),
 		controlPlane:    &fixture.dependencies,
 	}
+	testEnvironmentControlPlaneMaterializer(t, fixture, options)
+	testEnvironmentControlPlaneMaterializerBoundaries(t, fixture, options)
+	testEnvironmentControlPlaneSnapshotBoundaries(t, fixture)
+}
+
+func environmentControlPlaneRuntimeInputs(t *testing.T, fixture environmentControlPlaneFixture) modelprofile.ModelFactoryInput {
+	t.Helper()
+	modelInput, storageInput, err := fixture.dependencies.resolve(context.Background(), fixture.root.TenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if modelInput.Provider != "fake" || storageInput.Bindings[0].Provider != "inmemory" {
+		t.Fatalf("resolved runtime inputs = model:%+v storage:%+v", modelInput, storageInput)
+	}
+	return modelInput
+}
+
+func testEnvironmentControlPlaneMaterializer(t *testing.T, fixture environmentControlPlaneFixture, options environmentTenantRuntimeOptions) {
+	t.Helper()
 	materializer, err := newEnvironmentTenantMaterializer(options)
 	if err != nil {
 		t.Fatal(err)
@@ -454,7 +510,10 @@ func TestEnvironmentControlPlaneRuntimeResolutionAndMaterialization(t *testing.T
 	if _, err := options.backendRegistry.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: fixture.root.TenantID}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "inmemory"}); err != nil {
 		t.Fatalf("control-plane backend registration = %v", err)
 	}
+}
 
+func testEnvironmentControlPlaneMaterializerBoundaries(t *testing.T, fixture environmentControlPlaneFixture, options environmentTenantRuntimeOptions) {
+	t.Helper()
 	providerMismatch := options
 	providerMismatch.config.modelProvider = "openai"
 	mismatchMaterializer, err := newEnvironmentTenantMaterializer(providerMismatch)
@@ -514,7 +573,10 @@ func TestEnvironmentControlPlaneRuntimeResolutionAndMaterialization(t *testing.T
 	if err := demoMaterializer(context.Background(), fixture.root.TenantID); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("demo model with secret reference = %v", err)
 	}
+}
 
+func testEnvironmentControlPlaneSnapshotBoundaries(t *testing.T, fixture environmentControlPlaneFixture) {
+	t.Helper()
 	invalidTenant := fixture.dependencies
 	invalidTenant.tenants = environmentTenantRepositoryStub{get: func(context.Context, string) (*tenant.Tenant, error) {
 		value := fixture.root.Clone()
