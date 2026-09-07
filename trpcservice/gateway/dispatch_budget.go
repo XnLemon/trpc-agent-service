@@ -138,7 +138,7 @@ func budgetAdmissionAudit(ctx context.Context, writer audit.Writer, tenantID, re
 	if writer == nil {
 		return nil
 	}
-	return (audit.Recorder{Writer: writer, TenantID: tenantID}).BudgetRejected(ctx, requestID, traceID)
+	return audit.NewRecorder(writer, tenantID).BudgetRejected(ctx, requestID, traceID)
 }
 
 func isBudgetRejection(err error) bool {

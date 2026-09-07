@@ -435,7 +435,7 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		runnerCtx = servicetool.WithExecutionContext(runnerCtx, servicetool.ExecutionContext{
 			TenantID: request.Principal.TenantID(), EventID: durable.eventID, RequestID: requestID, TraceID: traceID,
 			Attachments: dispatcher.attachmentStore, Replies: mediaReplies,
-			Audit: audit.Recorder{Writer: dispatcher.auditWriter, TenantID: request.Principal.TenantID()},
+			Audit: audit.NewRecorder(dispatcher.auditWriter, request.Principal.TenantID()),
 		})
 	}
 	if usageAccumulator != nil {
