@@ -458,6 +458,8 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 // by synchronous API dispatch and the durable execution Worker. The caller
 // owns the request acceptance decision; accepted is signaled only after the
 // execution handoff has been reserved.
+//
+//nolint:gocyclo // This boundary coordinates canary audit, budget admission, durable handoff, cancellation, and Runner startup.
 func (dispatcher *Dispatcher) startExecution(ctx context.Context, metadata dispatchMetadata, plan runtime.ExecutionPlan, identity tenant.RunnerIdentity, userMessage trpcmodel.Message, durable *durableExecution, span observability.Span, started time.Time, accepted chan<- struct{}) (<-chan DispatchEvent, error) {
 	if cause := runtimequeue.WorkerCancellationCause(ctx); cause != nil {
 		return nil, cause

@@ -163,6 +163,7 @@ func (run *dispatchExecution) finishForwardOutput(ctx context.Context, terminalE
 	trySendDispatchEvent(run.output, DispatchEvent{Type: DispatchEventDone, RequestID: run.metadata.requestID, TraceID: run.metadata.traceID, Status: "complete", Done: true})
 }
 
+//nolint:gocyclo // Finalization must preserve ordering across cancellation, budget settlement, handoff, audit, and durable completion.
 func (dispatcher *Dispatcher) finalizeForward(ctx context.Context, run *dispatchExecution, state *executionForwardState, mediaReplies []servicetool.ReplyIntent) error {
 	if cause := runtimequeue.WorkerCancellationCause(ctx); cause != nil && (!state.terminalSeen || IsContextCancellation(state.terminalErr)) {
 		return cause
