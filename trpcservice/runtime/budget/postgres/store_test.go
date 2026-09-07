@@ -33,6 +33,135 @@ func TestNewValidatesDatabase(t *testing.T) {
 	}
 }
 
+func TestStoreValidationAndArithmeticHelpers(t *testing.T) {
+	if err := validateContext(nil); !errors.Is(err, budget.ErrInvalid) {
+		t.Fatalf("nil context error = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := validateContext(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled context error = %v", err)
+	}
+	if nullableInt(nil) != nil || nullableInt(int64Pointer(3)) != int64(3) {
+		t.Fatal("nullableInt conversion failed")
+	}
+	storageErr := errors.New("storage")
+	if wrapStorage(nil) != nil || !errors.Is(wrapStorage(storageErr), ErrStorage) || !errors.Is(wrapStorage(storageErr), storageErr) {
+		t.Fatal("storage wrapping failed")
+	}
+	if !exceeds(int64Pointer(10), 5, 5, 1) || exceeds(nil, 5, 5, 1) {
+		t.Fatal("token limit arithmetic failed")
+	}
+	reservation := budget.Reservation{EstimatedTokens: 10, EstimatedSpendMinor: 5, Limits: budget.Limits{TokenBudget: int64Pointer(10), SpendLimitMinor: int64Pointer(5)}}
+	ledger := ledgerValue{usedTokens: 1, reservedTokens: 10, usedMinor: 1, reservedMinor: 5}
+	if !exceedsAfterRelease(reservation, budget.Usage{InputTokens: 20}, ledger) {
+		t.Fatal("post-settlement limit arithmetic failed")
+	}
+}
+
+func TestStoreReserveCoversTransactionalDatabaseFailures(t *testing.T) {
+	store, db, mock := newMockBudgetStore(t)
+	defer func() { _ = db.Close() }()
+	input := validReserveInput()
+	periodStart := normalizePeriod(input.PeriodStart)
+	storageErr := errors.New("database failure")
+
+	mock.ExpectBegin()
+	expectReservationQuery(mock, budgetTestTenantID, input.ReservationID, periodStart, int64(100), int64(50), "USD", int64(30), int64(5), nil, nil, budget.ReservationStateReserved)
+	mock.ExpectCommit().WillReturnError(storageErr)
+	if _, err := store.Reserve(context.Background(), input); !errors.Is(err, ErrStorage) {
+		t.Fatalf("existing commit error = %v", err)
+	}
+
+	input.ReservationID = "insert-error"
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT period_start, token_limit, spend_limit_minor, currency").WithArgs(budgetTestTenantID, input.ReservationID).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec("INSERT INTO public\\.runtime_budget_ledger").WithArgs(budgetTestTenantID, periodStart).WillReturnError(storageErr)
+	mock.ExpectRollback()
+	if _, err := store.Reserve(context.Background(), input); !errors.Is(err, ErrStorage) {
+		t.Fatalf("ledger insert error = %v", err)
+	}
+
+	input.ReservationID = "lock-error"
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT period_start, token_limit, spend_limit_minor, currency").WithArgs(budgetTestTenantID, input.ReservationID).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec("INSERT INTO public\\.runtime_budget_ledger").WithArgs(budgetTestTenantID, periodStart).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT used_tokens, reserved_tokens, used_minor, reserved_minor").WithArgs(budgetTestTenantID, periodStart).WillReturnError(storageErr)
+	mock.ExpectRollback()
+	if _, err := store.Reserve(context.Background(), input); !errors.Is(err, ErrStorage) {
+		t.Fatalf("ledger lock error = %v", err)
+	}
+
+	input.ReservationID = "reservation-insert-error"
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT period_start, token_limit, spend_limit_minor, currency").WithArgs(budgetTestTenantID, input.ReservationID).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec("INSERT INTO public\\.runtime_budget_ledger").WithArgs(budgetTestTenantID, periodStart).WillReturnResult(sqlmock.NewResult(0, 1))
+	expectLedgerQuery(mock, budgetTestTenantID, periodStart, 0, 0, 0, 0)
+	mock.ExpectExec("INSERT INTO public\\.runtime_budget_reservation").WillReturnError(storageErr)
+	mock.ExpectRollback()
+	if _, err := store.Reserve(context.Background(), input); !errors.Is(err, ErrStorage) {
+		t.Fatalf("reservation insert error = %v", err)
+	}
+
+	input.ReservationID = "ledger-update-error"
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT period_start, token_limit, spend_limit_minor, currency").WithArgs(budgetTestTenantID, input.ReservationID).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec("INSERT INTO public\\.runtime_budget_ledger").WithArgs(budgetTestTenantID, periodStart).WillReturnResult(sqlmock.NewResult(0, 1))
+	expectLedgerQuery(mock, budgetTestTenantID, periodStart, 0, 0, 0, 0)
+	mock.ExpectExec("INSERT INTO public\\.runtime_budget_reservation").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE public\\.runtime_budget_ledger").WillReturnError(storageErr)
+	mock.ExpectRollback()
+	if _, err := store.Reserve(context.Background(), input); !errors.Is(err, ErrStorage) {
+		t.Fatalf("ledger update error = %v", err)
+	}
+
+	input.ReservationID = "commit-error"
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT period_start, token_limit, spend_limit_minor, currency").WithArgs(budgetTestTenantID, input.ReservationID).WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec("INSERT INTO public\\.runtime_budget_ledger").WithArgs(budgetTestTenantID, periodStart).WillReturnResult(sqlmock.NewResult(0, 1))
+	expectLedgerQuery(mock, budgetTestTenantID, periodStart, 0, 0, 0, 0)
+	mock.ExpectExec("INSERT INTO public\\.runtime_budget_reservation").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE public\\.runtime_budget_ledger").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit().WillReturnError(storageErr)
+	if _, err := store.Reserve(context.Background(), input); !errors.Is(err, ErrStorage) {
+		t.Fatalf("reserve commit error = %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLockLedgerMapsMissingAndStorageErrors(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	for _, queryErr := range []error{sql.ErrNoRows, errors.New("query failed")} {
+		mock.ExpectBegin()
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		mock.ExpectQuery("SELECT used_tokens, reserved_tokens, used_minor, reserved_minor").WithArgs(budgetTestTenantID, budgetTestPeriod).WillReturnError(queryErr)
+		_, gotErr := lockLedger(context.Background(), tx, budgetTestTenantID, budgetTestPeriod)
+		if queryErr == sql.ErrNoRows {
+			if !errors.Is(gotErr, budget.ErrConflict) {
+				t.Fatalf("missing ledger error = %v", gotErr)
+			}
+		} else if !errors.Is(gotErr, ErrStorage) {
+			t.Fatalf("storage ledger error = %v", gotErr)
+		}
+		mock.ExpectRollback()
+		if err := tx.Rollback(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStoreReserveCreatesAndReusesReservations(t *testing.T) {
 	store, db, mock := newMockBudgetStore(t)
 	defer func() { _ = db.Close() }()

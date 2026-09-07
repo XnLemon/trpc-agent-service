@@ -131,6 +131,50 @@ func TestExecutionAuditResultMapsTerminalEvents(t *testing.T) {
 	}
 }
 
+func TestFinishForwardOutputMapsTerminalFailures(t *testing.T) {
+	cases := []struct {
+		name       string
+		err        error
+		cancel     bool
+		emitted    bool
+		wantError  string
+		wantStatus string
+	}{
+		{name: "canceled", err: context.Canceled, cancel: true, wantError: ErrExecutionCanceled.Error(), wantStatus: "canceled"},
+		{name: "audit", err: ErrAuditWriteFailed, wantError: ErrAuditWriteFailed.Error(), wantStatus: "error"},
+		{name: "budget", err: budget.ErrExceeded, wantError: budget.ErrExceeded.Error(), wantStatus: "error"},
+		{name: "pricing", err: budget.ErrCostUnavailable, wantError: budget.ErrCostUnavailable.Error(), wantStatus: "error"},
+		{name: "generic", err: errors.New("provider"), wantError: ErrExecution.Error(), wantStatus: "error"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			output := make(chan DispatchEvent, 4)
+			run := &dispatchExecution{metadata: dispatchMetadata{requestID: "request", traceID: "trace"}, output: output}
+			ctx := context.Background()
+			if test.cancel {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			run.finishForwardOutput(ctx, test.err, test.emitted)
+			close(output)
+			var events []DispatchEvent
+			for event := range output {
+				events = append(events, event)
+			}
+			if len(events) != 2 || events[0].Error != test.wantError || events[1].Status != test.wantStatus || !events[1].Done {
+				t.Fatalf("events = %+v", events)
+			}
+		})
+	}
+	output := make(chan DispatchEvent, 2)
+	run := &dispatchExecution{metadata: dispatchMetadata{requestID: "request"}, output: output}
+	run.finishForwardOutput(context.Background(), context.Canceled, true)
+	if len(output) != 1 {
+		t.Fatalf("already emitted cancellation produced %d events", len(output))
+	}
+}
+
 func TestReserveBudgetRequiresPricingForSpendLimits(t *testing.T) {
 	fixture := newGatewayFixture(t)
 	spendLimit := int64(100)

@@ -209,6 +209,114 @@ func TestRevisionCloneAndConfigurationAreDeepCopies(t *testing.T) {
 	}
 }
 
+func TestRevisionValidateRejectsUnnormalizedAndInvalidPublicationState(t *testing.T) {
+	revision, err := NewRevision(validRevisionInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []func(*Revision){
+		func(value *Revision) { value.TenantID = "bad" },
+		func(value *Revision) { value.AppID = "bad" },
+		func(value *Revision) { value.DraftVersion = 0 },
+		func(value *Revision) { value.Description = " unnormalized " },
+		func(value *Revision) { value.State = RevisionState("unknown") },
+		func(value *Revision) { value.ContentDigest = "draft-digest" },
+		func(value *Revision) { value.CreatedAt = time.Time{} },
+	}
+	for _, mutate := range cases {
+		candidate := revision.Clone()
+		mutate(&candidate)
+		if err := candidate.Validate(); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid revision error = %v", err)
+		}
+	}
+	published, err := revision.Publish(revision.UpdatedAt.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*Revision){
+		func(value *Revision) { value.ContentDigest = "wrong" },
+		func(value *Revision) { value.PublishedAt = nil },
+		func(value *Revision) { value.UpdatedAt = value.CreatedAt.Add(-time.Second) },
+	} {
+		candidate := published.Clone()
+		mutate(&candidate)
+		if err := candidate.Validate(); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid published revision error = %v", err)
+		}
+	}
+}
+
+func TestRevisionChainAndConfigurationComparisons(t *testing.T) {
+	left := &ChainConfiguration{Steps: []ChainStep{{Name: "a", Instruction: "one"}, {Name: "b", Instruction: "two"}}}
+	right := left.Clone()
+	if !sameChainConfiguration(left, right) || sameChainConfiguration(left, nil) || sameChainConfiguration(nil, right) {
+		t.Fatal("chain equality did not distinguish equivalent and nil configurations")
+	}
+	right.Steps[1].Instruction = "changed"
+	if sameChainConfiguration(left, right) {
+		t.Fatal("chain equality ignored step changes")
+	}
+	base := validDraftConfiguration()
+	changed := base
+	changed.Description = "different"
+	if sameDraftConfiguration(base, changed) {
+		t.Fatal("draft equality ignored description change")
+	}
+	changed = base
+	changed.Tools = append(changed.Tools, ToolAuthorization{ToolID: "extra"})
+	if sameDraftConfiguration(base, changed) {
+		t.Fatal("draft equality ignored tool length change")
+	}
+}
+
+func TestRevisionValidationAndDigestRejectMalformedMutations(t *testing.T) {
+	revision, err := NewRevision(validRevisionInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*Revision){
+		func(value *Revision) { value.Tools = []ToolAuthorization{{ToolID: " "}} },
+		func(value *Revision) { value.Kind = Kind("unknown") },
+		func(value *Revision) {
+			value.State = RevisionStatePublished
+			publishedAt := time.Now().UTC()
+			value.PublishedAt = &publishedAt
+			value.ContentDigest = ""
+		},
+	} {
+		candidate := revision.Clone()
+		mutate(&candidate)
+		if err := candidate.Validate(); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("Validate() error = %v", err)
+		}
+	}
+	malformed := revision.Clone()
+	malformed.Tools = []ToolAuthorization{{ToolID: " "}}
+	if _, err := malformed.ComputeContentDigest(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("malformed digest error = %v", err)
+	}
+	unknownKind := revision.Clone()
+	unknownKind.Kind = Kind("unknown")
+	if _, err := unknownKind.ComputeContentDigest(); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unknown kind digest error = %v", err)
+	}
+	chainCases := []*ChainConfiguration{
+		{Steps: []ChainStep{{Name: strings.Repeat("n", maxReferenceRunes+1), Instruction: "run"}, {Name: "two", Instruction: "run"}}},
+		{Steps: []ChainStep{{Name: "one", Instruction: strings.Repeat("i", maxInstructionRunes+1)}, {Name: "two", Instruction: "run"}}},
+		{Steps: []ChainStep{{Name: "one", Instruction: "run", GlobalInstruction: strings.Repeat("g", maxInstructionRunes+1)}, {Name: "two", Instruction: "run"}}},
+		{Steps: []ChainStep{{Name: "one\tname", Instruction: "run"}, {Name: "two", Instruction: "run"}}},
+	}
+	for index, chain := range chainCases {
+		input := validRevisionInput()
+		input.Kind = KindChain
+		input.Configuration.Chain = chain
+		if _, err := NewRevision(input); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid chain %d error = %v", index, err)
+		}
+	}
+}
+
 func TestContentDigestIsDeterministicAndSensitiveToBehavior(t *testing.T) {
 	first, err := NewRevision(validRevisionInput())
 	if err != nil {
