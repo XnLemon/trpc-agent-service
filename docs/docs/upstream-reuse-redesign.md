@@ -13,7 +13,7 @@
 
 ### 对前序方案的修正
 
-- `CapabilitySet` 有 Memory/Knowledge/Artifact accessor，不代表 Runner 已使用这些能力。当前 `agent/runner_builder.go` 的 Runner 构造只注入 Session，不能宣称已经有完整长期记忆/RAG/Artifact 执行闭环。
+- `CapabilitySet` 有 Memory/Knowledge/Artifact accessor 不代表 Runner 已使用这些能力；当前默认构造链已经通过 `WithMemoryService`、`WithArtifactService` 和 `WithKnowledge` 实际注入，并以执行测试固定，不再以 accessor 或 import 作为完成证据。
 - 上游 `AddMemory` 不返回平台任意指定的 MemoryID；不能调用后伪造 ID、Version、时间戳或持久化成功语义。
 - 上游 Artifact 以 app/user/session/filename/version 寻址，版本从 0 开始；不能用 SessionID 冒充 UserID，也不能把旧表版本计数当成历史版本集合。
 - 上游 Knowledge 接收文本查询与上下文；不能用空 Query 适配平台 vector-only 查询。
@@ -27,7 +27,8 @@
 | 位置 | 已核对事实 | 重构结论 |
 | --- | --- | --- |
 | `trpcservice/agent/factory.go` | 使用 `llmagent.New`、`chainagent.New`、`parallelagent.New`、`cycleagent.New`、`graphagent.New` | 默认注册上游 LLM/Chain/Parallel/Cycle/Graph；Graph 当前是线性 StateGraph 映射，尚未实现声明式条件路由 |
-| `trpcservice/agent/runner_builder.go` | Runner 使用 `WithSessionService`，并可注入 Memory/Artifact；LLMAgent 可注入 Knowledge | 已实际装配上游 Memory/Artifact/Knowledge；Memory tools 和自动提取受 Revision allowlist/`memory_auto_extract` 控制；Artifact request-scoped 用户/会话授权仍待补齐 |
+| `trpcservice/agent/runner_builder.go` | Runner 使用 `WithSessionService`、`WithMemoryService`、`WithArtifactService` 和 `WithPlugins`；LLMAgent 使用 `WithKnowledge` | Memory tools 和自动提取受 Revision allowlist/`memory_auto_extract` 控制；Artifact 通过显式 `export_artifact` 工具按可信 app/user/session/version 导出到平台 Attachment，不暴露上游 URL |
+| `trpcservice/bootstrap/bootstrap.go` | 每个封存 ExecutionPlan 创建独立上游插件实例 | 默认装配 Identity Plugin，只传播 Runner 已确认的 UserID；审批、PromptInjection 和 UnsafeIntent 在 reviewer 与预算合同完成前不虚假启用 |
 | `trpcservice/runtime/storage/factory/runtime_factory.go` | Session、Summary、Audit 使用平台合同；Memory/Knowledge/Artifact 使用上游接口 | 已移除 Vector/Object 等旧平台能力捆绑，能力集合只保留平台职责和上游原生服务 |
 | `trpcservice/runtime/storage/capabilities.go` | 自研记录、CRUD、向量与对象接口 | 不再作为 Agent 能力的主合同 |
 | `trpcservice/bootstrap/environment_providers.go` | 按租户装配上游 Session/Memory/Artifact/Knowledge 服务，以及平台审计和投递存储 | demo 使用上游 InMemory；生产 Memory 使用上游 ChromaDB，Artifact 使用上游 COS；尚无真实服务重启/双 Worker 验收 |
@@ -102,7 +103,7 @@ Session 目前只是复用了接口，持久化仍有平台实现。评估并优
 
 直接注入 `runner.WithArtifactService`。保留上游完整 app/user/session/filename/version 语义及全部版本读写，不用旧 ArtifactID 强行模拟。
 
-IM attachment 继续负责来源验签、下载大小限制、媒体校验与投递授权。如果业务需要把 Agent Artifact 发到 IM，通过显式受权导出步骤产生附件引用，验证归属、MIME、大小和版本；不直接暴露私有对象 URL。
+IM attachment 继续负责来源验签、下载大小限制、媒体校验与投递授权。当前显式受权的 `export_artifact` 工具从可信 Gateway ExecutionContext 取得 AppID、UserID、SessionID，只允许模型选择 filename/version；工具读取上游 Artifact bytes 后写入并绑定平台 AttachmentStore，再产生协议无关 ReplyIntent。工具结果不包含 Attachment ID、provider ID 或上游私有 URL，跨用户未命中按不可用失败。
 
 ### Knowledge
 

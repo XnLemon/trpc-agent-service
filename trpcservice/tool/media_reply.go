@@ -14,11 +14,16 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	"trpc.group/trpc-go/trpc-agent-go/agent"
+	"trpc.group/trpc-go/trpc-agent-go/artifact"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 )
 
 const (
+	// ExportArtifactID authorizes explicit export from an Agent artifact into a
+	// platform-owned attachment and reply.
+	ExportArtifactID = "export_artifact"
 	// SendTestImageID is the revision allowlist ID for the controlled media
 	// reply smoke-test tool.
 	SendTestImageID = "send_test_image"
@@ -41,6 +46,9 @@ var (
 // executing. It is deliberately absent from model-visible tool results.
 type ExecutionContext struct {
 	TenantID    string
+	AppID       string
+	UserID      string
+	SessionID   string
 	EventID     string
 	RequestID   string
 	TraceID     string
@@ -175,7 +183,7 @@ func NewRegistry(factories ...Factory) (*Registry, error) {
 // DefaultRegistry contains the built-in platform tools. Future special-agent
 // services can add a Factory without widening the Runner or channel contracts.
 func DefaultRegistry() *Registry {
-	registry, err := NewRegistry(sendTestImageFactory{})
+	registry, err := NewRegistry(sendTestImageFactory{}, exportArtifactFactory{})
 	if err != nil {
 		panic(err)
 	}
@@ -228,6 +236,102 @@ func (registry *Registry) ResolveWith(authorizations []appmodel.ToolAuthorizatio
 // Resolve retains the platform-only convenience API.
 func (registry *Registry) Resolve(authorizations []appmodel.ToolAuthorization) ([]trpctool.Tool, error) {
 	return registry.ResolveWith(authorizations)
+}
+
+type exportArtifactFactory struct{}
+
+func (exportArtifactFactory) ID() string { return ExportArtifactID }
+
+func (exportArtifactFactory) New() trpctool.Tool {
+	return function.NewFunctionTool(
+		exportArtifact,
+		function.WithName(ExportArtifactID),
+		function.WithDescription("Export a named Agent artifact version as a native media or document reply."),
+		function.WithConcurrencySafe(true),
+	)
+}
+
+type exportArtifactInput struct {
+	Filename string `json:"filename" jsonschema:"description=Artifact filename to export"`
+	Version  *int   `json:"version,omitempty" jsonschema:"description=Optional artifact version; omit for latest"`
+}
+
+type exportArtifactResult struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
+func exportArtifact(ctx context.Context, input exportArtifactInput) (exportArtifactResult, error) {
+	execution, err := executionContextFromContext(ctx)
+	if err != nil || strings.TrimSpace(execution.AppID) == "" || strings.TrimSpace(execution.UserID) == "" || strings.TrimSpace(execution.SessionID) == "" || strings.TrimSpace(input.Filename) == "" || input.Version != nil && *input.Version < 0 {
+		return exportArtifactResult{}, ErrUnavailable
+	}
+	invocation, ok := agent.InvocationFromContext(ctx)
+	if !ok || invocation == nil || invocation.ArtifactService == nil {
+		return exportArtifactResult{}, ErrUnavailable
+	}
+	recorder := execution.Replies.stableAuditRecorder(execution.Audit)
+	policy := Policy{Recorder: recorder, Allowed: map[string]Decision{ExportArtifactID: Allow}}
+	if _, err := policy.Decide(ctx, execution.RequestID, execution.TraceID, ExportArtifactID); err != nil {
+		return exportArtifactResult{}, redactedToolError(err)
+	}
+	filename := strings.TrimSpace(input.Filename)
+	value, err := invocation.ArtifactService.LoadArtifact(ctx, artifact.SessionInfo{
+		AppName: execution.AppID, UserID: execution.UserID, SessionID: execution.SessionID,
+	}, filename, input.Version)
+	if err != nil {
+		return exportArtifactResult{}, redactedToolError(err)
+	}
+	if value == nil || len(value.Data) == 0 {
+		return exportArtifactResult{}, ErrUnavailable
+	}
+	name := strings.TrimSpace(value.Name)
+	if name == "" {
+		name = filename
+	}
+	kind, replyKind := attachmentKinds(value.MimeType)
+	reference, err := execution.Attachments.PutAttachment(ctx, execution.TenantID, attachment.Upload{
+		ID:   exportArtifactAttachmentID(execution.EventID, filename, input.Version, value.Data),
+		Kind: kind, MIMEType: strings.ToLower(strings.TrimSpace(value.MimeType)), Name: name,
+		Size: int64(len(value.Data)), Provider: "artifact", ProviderID: ExportArtifactID,
+	}, bytes.NewReader(value.Data))
+	if err != nil {
+		return exportArtifactResult{}, redactedToolError(err)
+	}
+	if err := execution.Attachments.BindAttachments(ctx, execution.TenantID, execution.EventID, []attachment.Reference{reference}); err != nil {
+		return exportArtifactResult{}, redactedToolError(err)
+	}
+	if err := execution.Replies.Add(ReplyIntent{Kind: replyKind, Attachment: reference, Fallback: "[artifact attachment: " + name + "]"}); err != nil {
+		return exportArtifactResult{}, redactedToolError(err)
+	}
+	if err := recorder.ToolExecuted(ctx, execution.RequestID, execution.TraceID, ExportArtifactID); err != nil {
+		return exportArtifactResult{}, redactedToolError(err)
+	}
+	return exportArtifactResult{Status: "queued", Message: "The artifact is queued for native delivery."}, nil
+}
+
+func attachmentKinds(mimeType string) (attachment.Kind, runtimestorage.ReplyKind) {
+	value := strings.ToLower(strings.TrimSpace(mimeType))
+	switch {
+	case strings.HasPrefix(value, "image/"):
+		return attachment.KindImage, runtimestorage.ReplyKindImage
+	case strings.HasPrefix(value, "video/"):
+		return attachment.KindVideo, runtimestorage.ReplyKindVideo
+	case strings.HasPrefix(value, "audio/"):
+		return attachment.KindAudio, runtimestorage.ReplyKindAudio
+	default:
+		return attachment.KindDocument, runtimestorage.ReplyKindDocument
+	}
+}
+
+func exportArtifactAttachmentID(eventID, filename string, version *int, data []byte) string {
+	versionValue := "latest"
+	if version != nil {
+		versionValue = fmt.Sprintf("%d", *version)
+	}
+	digest := sha256.Sum256(data)
+	sum := sha256.Sum256([]byte(eventID + "\x00" + filename + "\x00" + versionValue + "\x00" + hex.EncodeToString(digest[:])))
+	return "artifact_" + hex.EncodeToString(sum[:16])
 }
 
 type sendTestImageFactory struct{}

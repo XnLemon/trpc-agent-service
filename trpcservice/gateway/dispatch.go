@@ -433,7 +433,8 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	mediaReplies := servicetool.NewReplyCollector()
 	if durable != nil {
 		runnerCtx = servicetool.WithExecutionContext(runnerCtx, servicetool.ExecutionContext{
-			TenantID: request.Principal.TenantID(), EventID: durable.eventID, RequestID: requestID, TraceID: traceID,
+			TenantID: request.Principal.TenantID(), AppID: request.Principal.AppID(), UserID: identity.UserID, SessionID: identity.SessionID,
+			EventID: durable.eventID, RequestID: requestID, TraceID: traceID,
 			Attachments: dispatcher.attachmentStore, Replies: mediaReplies,
 			Audit: audit.NewRecorder(dispatcher.auditWriter, request.Principal.TenantID()),
 		})
