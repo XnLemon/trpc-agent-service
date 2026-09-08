@@ -173,6 +173,94 @@ func restrictedMCPIP(ip net.IP) bool {
 	return ip == nil || !ip.IsGlobalUnicast() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast()
 }
 
+// NamespaceMCPToolSet wraps a runner-owned MCP ToolSet with stable
+// revision-scoped tool names. The server's tool names remain the allowlist
+// source; only the model-visible declaration is namespaced.
+func NamespaceMCPToolSet(set trpctool.ToolSet, bindingName string) (trpctool.ToolSet, error) {
+	if set == nil || strings.TrimSpace(bindingName) == "" {
+		return nil, fmt.Errorf("%w: MCP ToolSet and binding name are required", ErrInvalidMCPBinding)
+	}
+	bindingName = strings.TrimSpace(bindingName)
+	if strings.ContainsAny(bindingName, "\r\n") {
+		return nil, fmt.Errorf("%w: MCP binding name is invalid", ErrInvalidMCPBinding)
+	}
+	return namespacedMCPToolSet{delegate: set, name: "mcp_" + bindingName, prefix: "mcp_" + bindingName + "__"}, nil
+}
+
+type namespacedMCPToolSet struct {
+	delegate trpctool.ToolSet
+	name     string
+	prefix   string
+}
+
+func (set namespacedMCPToolSet) Name() string { return set.name }
+func (set namespacedMCPToolSet) Close() error { return set.delegate.Close() }
+
+func (set namespacedMCPToolSet) Tools(ctx context.Context) []trpctool.Tool {
+	candidates := set.delegate.Tools(ctx)
+	tools := make([]trpctool.Tool, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == nil || candidate.Declaration() == nil {
+			continue
+		}
+		declaration := *candidate.Declaration()
+		declaration.Name = set.prefix + declaration.Name
+		base := namespacedMCPTool{declaration: &declaration}
+		if callable, ok := candidate.(trpctool.CallableTool); ok {
+			if streamable, streamableOK := candidate.(trpctool.StreamableTool); streamableOK {
+				tools = append(tools, namespacedMCPStreamableTool{namespacedMCPTool: base, callable: callable, streamable: streamable})
+			} else {
+				tools = append(tools, namespacedMCPCallableTool{namespacedMCPTool: base, callable: callable})
+			}
+			continue
+		}
+		if streamable, ok := candidate.(trpctool.StreamableTool); ok {
+			tools = append(tools, namespacedMCPStreamableOnlyTool{namespacedMCPTool: base, streamable: streamable})
+			continue
+		}
+		tools = append(tools, base)
+	}
+	return tools
+}
+
+type namespacedMCPTool struct {
+	declaration *trpctool.Declaration
+}
+
+func (tool namespacedMCPTool) Declaration() *trpctool.Declaration { return tool.declaration }
+
+type namespacedMCPCallableTool struct {
+	namespacedMCPTool
+	callable trpctool.CallableTool
+}
+
+func (tool namespacedMCPCallableTool) Call(ctx context.Context, args []byte) (any, error) {
+	return tool.callable.Call(ctx, args)
+}
+
+type namespacedMCPStreamableTool struct {
+	namespacedMCPTool
+	callable   trpctool.CallableTool
+	streamable trpctool.StreamableTool
+}
+
+func (tool namespacedMCPStreamableTool) Call(ctx context.Context, args []byte) (any, error) {
+	return tool.callable.Call(ctx, args)
+}
+
+func (tool namespacedMCPStreamableTool) StreamableCall(ctx context.Context, args []byte) (*trpctool.StreamReader, error) {
+	return tool.streamable.StreamableCall(ctx, args)
+}
+
+type namespacedMCPStreamableOnlyTool struct {
+	namespacedMCPTool
+	streamable trpctool.StreamableTool
+}
+
+func (tool namespacedMCPStreamableOnlyTool) StreamableCall(ctx context.Context, args []byte) (*trpctool.StreamReader, error) {
+	return tool.streamable.StreamableCall(ctx, args)
+}
+
 func mcpIncludeFilter(allowed []string) trpctool.FilterFunc {
 	allow := make(map[string]struct{}, len(allowed))
 	for _, name := range allowed {

@@ -874,7 +874,7 @@ func toExported(key string) string {
 		"monthly_spend_limit_minor": "MonthlySpendLimitMinor", "billing_currency": "BillingCurrency",
 		"default_agent_app_id": "DefaultAgentAppID", "default_backend_profile_id": "DefaultBackendProfileID",
 		"configuration": "Configuration", "provider": "Provider", "model": "Model",
-		"endpoint": "Endpoint", "options": "Options", "generation": "Generation",
+		"endpoint": "Endpoint", "server_url": "ServerURL", "transport": "Transport", "command": "Command", "args": "Args", "name": "Name", "tool_allow": "ToolAllow", "mcp_bindings": "MCPBindings", "options": "Options", "generation": "Generation",
 		"temperature": "Temperature", "top_p": "TopP", "max_output_tokens": "MaxOutputTokens",
 		"binding_key": "BindingKey", "channel": "Channel", "protocol": "Protocol",
 	}

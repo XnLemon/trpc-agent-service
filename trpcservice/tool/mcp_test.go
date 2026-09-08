@@ -1,8 +1,11 @@
 package tool
 
 import (
+	"context"
 	"errors"
 	"testing"
+
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 func TestMCPBindingNormalize(t *testing.T) {
@@ -38,4 +41,53 @@ func TestNewMCPToolSetRequiresTenantScopedSecretResolver(t *testing.T) {
 	if _, err := NewMCPToolSet(nil, "tenant", binding, nil); !errors.Is(err, ErrInvalidMCPBinding) {
 		t.Fatalf("nil resolver error = %v", err)
 	}
+}
+
+func TestNamespaceMCPToolSetPrefixesDeclarationsAndForwardsCalls(t *testing.T) {
+	delegateTool := &namespaceProbeTool{declaration: &trpctool.Declaration{Name: "search"}}
+	delegate := &namespaceProbeSet{tools: []trpctool.Tool{delegateTool}}
+	set, err := NamespaceMCPToolSet(delegate, " github ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := set.Tools(context.Background())
+	if len(tools) != 1 || tools[0].Declaration().Name != "mcp_github__search" {
+		t.Fatalf("namespaced tools = %#v", tools)
+	}
+	callable, ok := tools[0].(trpctool.CallableTool)
+	if !ok {
+		t.Fatalf("namespaced tool does not preserve callable capability: %T", tools[0])
+	}
+	if _, err := callable.Call(context.Background(), []byte(`{"query":"hello"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !delegateTool.called {
+		t.Fatal("namespaced call did not reach delegate")
+	}
+	if err := set.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !delegate.closed {
+		t.Fatal("namespaced close did not reach delegate")
+	}
+}
+
+type namespaceProbeSet struct {
+	tools  []trpctool.Tool
+	closed bool
+}
+
+func (set *namespaceProbeSet) Name() string                          { return "probe" }
+func (set *namespaceProbeSet) Tools(context.Context) []trpctool.Tool { return set.tools }
+func (set *namespaceProbeSet) Close() error                          { set.closed = true; return nil }
+
+type namespaceProbeTool struct {
+	declaration *trpctool.Declaration
+	called      bool
+}
+
+func (tool *namespaceProbeTool) Declaration() *trpctool.Declaration { return tool.declaration }
+func (tool *namespaceProbeTool) Call(context.Context, []byte) (any, error) {
+	tool.called = true
+	return "ok", nil
 }

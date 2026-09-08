@@ -81,6 +81,43 @@ func TestNewRuntimeRunnerRegistryBuildsWithStorageFactory(t *testing.T) {
 	}
 }
 
+func TestRuntimeRunnerRegistryToolSetFactoryReceivesSealedMCPBindings(t *testing.T) {
+	plan := newRunnerFactoryMCPPlan(t)
+	sessions := inmemory.NewSessionService()
+	defer sessions.Close()
+	called := false
+	registry, err := NewRuntimeRunnerRegistry(Config{
+		ModelFactory: runnerFactoryModelFactory{}, Sessions: sessions,
+		ToolSetFactory: func(_ context.Context, received runtime.ExecutionPlan) ([]tool.ToolSet, error) {
+			called = true
+			input, inputErr := received.AgentFactoryInput()
+			if inputErr != nil {
+				t.Fatal(inputErr)
+			}
+			if input.TenantID != plan.Tenant().TenantID || len(input.MCPBindings) != 1 || input.MCPBindings[0].Name != "files" {
+				t.Fatalf("sealed MCP input = %+v", input)
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := registry.Acquire(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("tool set factory was not called")
+	}
+	if err := registry.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimeRunnerRegistryMaterializesAndOwnsToolSets(t *testing.T) {
 	plan := newRunnerFactoryTestPlan(t)
 	sessions := inmemory.NewSessionService()
@@ -234,6 +271,16 @@ func (runnerFactoryModel) GenerateContent(context.Context, *trpcmodel.Request) (
 func (runnerFactoryModel) Info() trpcmodel.Info { return trpcmodel.Info{Name: "deterministic"} }
 
 func newRunnerFactoryTestPlan(t *testing.T) runtime.ExecutionPlan {
+	return newRunnerFactoryPlan(t, nil)
+}
+
+func newRunnerFactoryMCPPlan(t *testing.T) runtime.ExecutionPlan {
+	return newRunnerFactoryPlan(t, []appmodel.MCPBinding{{
+		Name: "files", Transport: "stdio", Command: "/usr/bin/mcp-files", ToolAllow: []string{"read"},
+	}})
+}
+
+func newRunnerFactoryPlan(t *testing.T, mcpBindings []appmodel.MCPBinding) runtime.ExecutionPlan {
 	t.Helper()
 	modelCatalog, err := modelprofile.NewProviderCatalog(modelprofile.ProviderSpec{
 		Provider: "fake", Models: []string{"deterministic"}, EndpointPolicy: modelprofile.FieldForbidden, SecretRefPolicy: modelprofile.FieldForbidden,
@@ -274,7 +321,7 @@ func newRunnerFactoryTestPlan(t *testing.T) runtime.ExecutionPlan {
 	}
 	draft, err := appmodel.NewRevision(appmodel.CreateRevisionInput{
 		TenantID: tenantValue.TenantID, AppID: appRoot.AppID, Revision: 1,
-		Configuration: appmodel.DraftConfiguration{Description: "runner factory test", Instruction: "Answer clearly.", ModelProfileID: modelValue.ProfileID, Runtime: appmodel.DefaultRuntimePolicy()},
+		Configuration: appmodel.DraftConfiguration{Description: "runner factory test", Instruction: "Answer clearly.", ModelProfileID: modelValue.ProfileID, Runtime: appmodel.DefaultRuntimePolicy(), MCPBindings: mcpBindings},
 	})
 	if err != nil {
 		t.Fatal(err)

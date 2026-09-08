@@ -109,6 +109,9 @@ type Config struct {
 	// ToolRegistry resolves published revision authorizations to installed,
 	// context-bound platform tools. A nil value uses the built-in registry.
 	ToolRegistry *servicetool.Registry
+	// ToolSetFactory materializes runner-owned ToolSets from sealed revisions.
+	// A nil value uses the built-in sealed MCP factory.
+	ToolSetFactory agentrunnerfactory.ToolSetFactory
 	// SessionStore is the session-state capability used by durable dispatch.
 	SessionStore sessionstorage.SessionStateStore
 	// EventHistoryStore is the immutable upstream event history capability used
@@ -439,10 +442,14 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, ErrInvalidConfig
 	}
+	toolSetFactory := config.ToolSetFactory
+	if toolSetFactory == nil {
+		toolSetFactory = agentrunnerfactory.NewMCPToolSetFactory(config.SecretResolver)
+	}
 	registry, err := agentrunnerfactory.NewRuntimeRunnerRegistry(agentrunnerfactory.Config{
 		Registry: config.Registry, SecretResolver: config.SecretResolver,
 		ModelFactory: config.ModelFactory, Sessions: config.Sessions, StorageFactory: config.StorageFactory,
-		Observability: config.Observability, ToolRegistry: config.ToolRegistry, EnableUsageCallbacks: config.BudgetStore != nil,
+		Observability: config.Observability, ToolRegistry: config.ToolRegistry, ToolSetFactory: toolSetFactory, EnableUsageCallbacks: config.BudgetStore != nil,
 		PluginFactory: func(_ context.Context, _ runtime.ExecutionPlan) ([]plugin.Plugin, error) {
 			return []plugin.Plugin{identity.NewPlugin(identity.ProviderFunc(func(_ context.Context, userID, _ string) (*identity.Identity, error) {
 				return &identity.Identity{UserID: userID}, nil

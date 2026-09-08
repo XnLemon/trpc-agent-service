@@ -218,6 +218,36 @@ func withoutKnowledgeAuthorization(authorizations []appmodel.ToolAuthorization) 
 	return filtered
 }
 
+func validateToolSetDeclarations(ctx context.Context, tools []trpctool.Tool, toolSets []trpctool.ToolSet) error {
+	seen := make(map[string]struct{}, len(tools))
+	for _, candidate := range tools {
+		if candidate == nil || candidate.Declaration() == nil || candidate.Declaration().Name == "" {
+			return errors.New("build runner: invalid tool declaration")
+		}
+		name := candidate.Declaration().Name
+		if _, exists := seen[name]; exists {
+			return fmt.Errorf("build runner: duplicate tool declaration %q", name)
+		}
+		seen[name] = struct{}{}
+	}
+	for _, set := range toolSets {
+		if set == nil || set.Name() == "" {
+			return errors.New("build runner: invalid tool set")
+		}
+		for _, candidate := range set.Tools(ctx) {
+			if candidate == nil || candidate.Declaration() == nil || candidate.Declaration().Name == "" {
+				return fmt.Errorf("build runner: invalid tool declaration in %q", set.Name())
+			}
+			name := candidate.Declaration().Name
+			if _, exists := seen[name]; exists {
+				return fmt.Errorf("build runner: duplicate tool declaration %q", name)
+			}
+			seen[name] = struct{}{}
+		}
+	}
+	return nil
+}
+
 func authorizedKnowledge(authorizations []appmodel.ToolAuthorization, service knowledge.Knowledge) knowledge.Knowledge {
 	if service == nil {
 		return nil
@@ -348,6 +378,9 @@ func assembleRunner(ctx context.Context, config RunnerConfig, resources runnerRe
 	tools, err := toolRegistry.ResolveWith(withoutKnowledgeAuthorization(agentInput.Tools), nativeMemoryTools...)
 	if err != nil {
 		return nil, fmt.Errorf("build runner: tools: %w", err)
+	}
+	if err := validateToolSetDeclarations(ctx, tools, config.ToolSets); err != nil {
+		return nil, err
 	}
 	knowledgeService := authorizedKnowledge(agentInput.Tools, resources.knowledge)
 	modelOptions := []llmagent.Option(nil)
