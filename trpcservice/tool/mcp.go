@@ -3,6 +3,8 @@ package tool
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 	toolmcp "trpc.group/trpc-go/trpc-agent-go/tool/mcp"
 	trpcmcp "trpc.group/trpc-go/trpc-mcp-go"
@@ -212,7 +215,7 @@ func (set namespacedMCPToolSet) Tools(ctx context.Context) []trpctool.Tool {
 		}
 		declaration := *candidate.Declaration()
 		declaration.Name = set.prefix + declaration.Name
-		base := namespacedMCPTool{declaration: &declaration}
+		base := namespacedMCPTool{delegate: candidate, declaration: &declaration}
 		if callable, ok := candidate.(trpctool.CallableTool); ok {
 			if streamable, streamableOK := candidate.(trpctool.StreamableTool); streamableOK {
 				tools = append(tools, namespacedMCPStreamableTool{namespacedMCPTool: base, callable: callable, streamable: streamable})
@@ -231,10 +234,14 @@ func (set namespacedMCPToolSet) Tools(ctx context.Context) []trpctool.Tool {
 }
 
 type namespacedMCPTool struct {
+	delegate    trpctool.Tool
 	declaration *trpctool.Declaration
 }
 
 func (tool namespacedMCPTool) Declaration() *trpctool.Declaration { return tool.declaration }
+func (tool namespacedMCPTool) ToolMetadata() trpctool.ToolMetadata {
+	return trpctool.MetadataOf(tool.delegate)
+}
 
 type namespacedMCPCallableTool struct {
 	namespacedMCPTool
@@ -313,6 +320,9 @@ type resilientMCPTool struct {
 }
 
 func (tool resilientMCPTool) Declaration() *trpctool.Declaration { return tool.delegate.Declaration() }
+func (tool resilientMCPTool) ToolMetadata() trpctool.ToolMetadata {
+	return trpctool.MetadataOf(tool.delegate)
+}
 
 func (tool resilientMCPTool) Call(ctx context.Context, args []byte) (any, error) {
 	result, err := tool.delegate.Call(ctx, args)
@@ -329,6 +339,149 @@ func mcpBenignLifecycleError(err error) bool {
 	}
 	value := strings.ToLower(err.Error())
 	return strings.Contains(value, "file already closed") || strings.Contains(value, "process already finished") || strings.Contains(value, "os: process already finished")
+}
+
+// GovernMCPToolSet applies execution-time authorization to every MCP tool.
+// Binding allowlists decide which tools can be advertised; this boundary also
+// checks the tenant execution context, per-tool approval policy, reviewer, and
+// request-local budget immediately before the remote call.
+func GovernMCPToolSet(ctx context.Context, set trpctool.ToolSet, tenantID string, binding MCPBinding, reviewer review.Reviewer) (trpctool.ToolSet, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return nil, fmt.Errorf("%w: active context is required", ErrInvalidMCPBinding)
+	}
+	if set == nil || strings.TrimSpace(tenantID) == "" {
+		return nil, fmt.Errorf("%w: MCP ToolSet and tenant are required", ErrInvalidMCPBinding)
+	}
+	value, err := binding.Normalize()
+	if err != nil {
+		return nil, err
+	}
+	governed := governedMCPToolSet{delegate: set, tenantID: strings.TrimSpace(tenantID), binding: value, reviewer: reviewer}
+	for _, candidate := range governed.Tools(ctx) {
+		if candidate == nil || candidate.Declaration() == nil {
+			return nil, fmt.Errorf("%w: MCP tool declaration is invalid", ErrInvalidMCPBinding)
+		}
+		if mcpToolDecision(value, candidate.Declaration().Name, trpctool.MetadataOf(candidate)) == ApprovalRequired && reviewer == nil {
+			return nil, fmt.Errorf("%w: reviewer is required for MCP tool %q", ErrApprovalRequired, candidate.Declaration().Name)
+		}
+	}
+	return governed, nil
+}
+
+type governedMCPToolSet struct {
+	delegate trpctool.ToolSet
+	tenantID string
+	binding  MCPBinding
+	reviewer review.Reviewer
+}
+
+func (set governedMCPToolSet) Name() string { return set.delegate.Name() }
+func (set governedMCPToolSet) Close() error { return set.delegate.Close() }
+
+func (set governedMCPToolSet) Tools(ctx context.Context) []trpctool.Tool {
+	candidates := set.delegate.Tools(ctx)
+	tools := make([]trpctool.Tool, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		callable, ok := candidate.(trpctool.CallableTool)
+		if !ok {
+			tools = append(tools, candidate)
+			continue
+		}
+		tools = append(tools, governedMCPTool{delegate: callable, owner: set})
+	}
+	return tools
+}
+
+type governedMCPTool struct {
+	delegate trpctool.CallableTool
+	owner    governedMCPToolSet
+}
+
+func (tool governedMCPTool) Declaration() *trpctool.Declaration { return tool.delegate.Declaration() }
+func (tool governedMCPTool) ToolMetadata() trpctool.ToolMetadata {
+	return trpctool.MetadataOf(tool.delegate)
+}
+
+func (tool governedMCPTool) Call(ctx context.Context, args []byte) (any, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return nil, contextError(ctx)
+	}
+	execution, err := mcpExecutionContextFromContext(ctx)
+	if err != nil || execution.TenantID != tool.owner.tenantID || execution.AppID == "" || execution.UserID == "" || execution.SessionID == "" {
+		return nil, ErrMCPExecutionUnavailable
+	}
+	if len(args) > 1<<20 || !json.Valid(args) && len(strings.TrimSpace(string(args))) > 0 {
+		return nil, ErrMCPInvalidArguments
+	}
+	name := tool.Declaration().Name
+	decision := mcpToolDecision(tool.owner.binding, name, trpctool.MetadataOf(tool.delegate))
+	policy := Policy{Recorder: execution.Audit, Allowed: map[string]Decision{name: decision}}
+	if _, err := policy.Decide(ctx, execution.RequestID, execution.TraceID, name); err != nil {
+		if !errors.Is(err, ErrApprovalRequired) {
+			return nil, err
+		}
+		if tool.owner.reviewer == nil {
+			return nil, ErrApprovalRequired
+		}
+		reviewDecision, reviewErr := tool.owner.reviewer.Review(ctx, &review.Request{Action: review.Action{
+			ToolName: name, ToolDescription: tool.Declaration().Description, Arguments: append(json.RawMessage(nil), args...),
+		}})
+		if reviewErr != nil || reviewDecision == nil || !reviewDecision.Approved {
+			return nil, ErrApprovalDenied
+		}
+		allowPolicy := Policy{Recorder: execution.Audit, Allowed: map[string]Decision{name: Allow}}
+		if _, err := allowPolicy.Decide(ctx, execution.RequestID, execution.TraceID, name); err != nil {
+			return nil, err
+		}
+	}
+	if execution.ToolBudget != nil {
+		if err := execution.ToolBudget.Consume(); err != nil {
+			_ = execution.Audit.BudgetRejected(ctx, execution.RequestID, execution.TraceID)
+			return nil, err
+		}
+	}
+	result, callErr := tool.delegate.Call(ctx, args)
+	if callErr != nil {
+		return nil, redactedToolError(callErr)
+	}
+	if err := execution.Audit.ToolExecuted(ctx, execution.RequestID, execution.TraceID, name); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func mcpExecutionContextFromContext(ctx context.Context) (ExecutionContext, error) {
+	if ctx == nil {
+		return ExecutionContext{}, ErrMCPExecutionUnavailable
+	}
+	execution, ok := ctx.Value(executionContextKey{}).(ExecutionContext)
+	if !ok || execution.TenantID == "" || execution.EventID == "" || execution.RequestID == "" || execution.TraceID == "" {
+		return ExecutionContext{}, ErrMCPExecutionUnavailable
+	}
+	return execution, nil
+}
+
+func mcpToolDecision(binding MCPBinding, publicName string, metadata trpctool.ToolMetadata) Decision {
+	remoteName := publicName
+	prefix := "mcp_" + binding.Name + "__"
+	if strings.HasPrefix(remoteName, prefix) {
+		remoteName = strings.TrimPrefix(remoteName, prefix)
+	}
+	switch binding.ToolPolicies[remoteName] {
+	case appmodel.MCPToolPolicyDenied:
+		return Deny
+	case appmodel.MCPToolPolicyRequireApproval:
+		return ApprovalRequired
+	case appmodel.MCPToolPolicySkipApproval:
+		return Allow
+	}
+	if metadata.ReadOnly && !metadata.Destructive {
+		return Allow
+	}
+	return ApprovalRequired
 }
 
 func mcpConnectionFailure(err error) bool {

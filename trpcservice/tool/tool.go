@@ -14,6 +14,14 @@ var (
 	ErrDenied = errors.New("tool denied")
 	// ErrApprovalRequired reports a tool request requiring approval.
 	ErrApprovalRequired = errors.New("tool approval required")
+	// ErrApprovalDenied reports a reviewer rejection or unavailable review.
+	ErrApprovalDenied = errors.New("tool approval denied")
+	// ErrToolBudgetExceeded reports a per-execution tool-call budget denial.
+	ErrToolBudgetExceeded = errors.New("tool call budget exceeded")
+	// ErrMCPExecutionUnavailable reports an unscoped MCP call.
+	ErrMCPExecutionUnavailable = errors.New("MCP execution context unavailable")
+	// ErrMCPInvalidArguments reports oversized or malformed MCP arguments.
+	ErrMCPInvalidArguments = errors.New("invalid MCP tool arguments")
 )
 
 // Decision records the tool admission result.

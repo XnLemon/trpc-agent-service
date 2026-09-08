@@ -130,7 +130,7 @@ func (set *stdioMCPToolSet) cachedTools() []trpctool.Tool {
 		declaration := definition.declaration
 		result = append(result, &stdioMCPTool{
 			owner: set, remoteName: name,
-			declaration: cloneToolDeclaration(declaration),
+			declaration: cloneToolDeclaration(declaration), metadata: definition.metadata,
 		})
 	}
 	return result
@@ -138,12 +138,14 @@ func (set *stdioMCPToolSet) cachedTools() []trpctool.Tool {
 
 type stdioMCPToolDefinition struct {
 	declaration *trpctool.Declaration
+	metadata    trpctool.ToolMetadata
 }
 
 type stdioMCPTool struct {
 	owner       *stdioMCPToolSet
 	remoteName  string
 	declaration *trpctool.Declaration
+	metadata    trpctool.ToolMetadata
 }
 
 func (tool *stdioMCPTool) Declaration() *trpctool.Declaration {
@@ -151,6 +153,13 @@ func (tool *stdioMCPTool) Declaration() *trpctool.Declaration {
 		return nil
 	}
 	return tool.declaration
+}
+
+func (tool *stdioMCPTool) ToolMetadata() trpctool.ToolMetadata {
+	if tool == nil {
+		return trpctool.ToolMetadata{}
+	}
+	return tool.metadata
 }
 
 func (tool *stdioMCPTool) Call(ctx context.Context, args []byte) (any, error) {
@@ -239,6 +248,11 @@ func parseStdioMCPTools(raw json.RawMessage, allowed map[string]struct{}) (map[s
 			Description  string          `json:"description"`
 			InputSchema  json.RawMessage `json:"inputSchema"`
 			OutputSchema json.RawMessage `json:"outputSchema"`
+			Annotations  struct {
+				ReadOnlyHint    *bool `json:"readOnlyHint"`
+				DestructiveHint *bool `json:"destructiveHint"`
+				OpenWorldHint   *bool `json:"openWorldHint"`
+			} `json:"annotations"`
 		} `json:"tools"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
@@ -255,10 +269,22 @@ func parseStdioMCPTools(raw json.RawMessage, allowed map[string]struct{}) (map[s
 		if _, duplicate := definitions[remote.Name]; duplicate {
 			return nil, fmt.Errorf("MCP tools/list returned duplicate tool %q", remote.Name)
 		}
-		definitions[remote.Name] = stdioMCPToolDefinition{declaration: &trpctool.Declaration{
-			Name: remote.Name, Description: remote.Description,
-			InputSchema: decodeStdioSchema(remote.InputSchema), OutputSchema: decodeStdioSchema(remote.OutputSchema),
-		}}
+		metadata := trpctool.ToolMetadata{}
+		if remote.Annotations.ReadOnlyHint != nil {
+			metadata.ReadOnly = *remote.Annotations.ReadOnlyHint
+		}
+		if remote.Annotations.DestructiveHint != nil {
+			metadata.Destructive = *remote.Annotations.DestructiveHint
+		}
+		if remote.Annotations.OpenWorldHint != nil {
+			metadata.OpenWorld = *remote.Annotations.OpenWorldHint
+		}
+		definitions[remote.Name] = stdioMCPToolDefinition{
+			declaration: &trpctool.Declaration{
+				Name: remote.Name, Description: remote.Description,
+				InputSchema: decodeStdioSchema(remote.InputSchema), OutputSchema: decodeStdioSchema(remote.OutputSchema),
+			}, metadata: metadata,
+		}
 	}
 	for name := range allowed {
 		if _, ok := definitions[name]; !ok {

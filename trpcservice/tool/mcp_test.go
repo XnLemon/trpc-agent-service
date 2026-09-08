@@ -5,6 +5,10 @@ import (
 	"errors"
 	"testing"
 
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
+	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -128,11 +132,90 @@ func (set *namespaceProbeSet) Close() error                          { set.close
 
 type namespaceProbeTool struct {
 	declaration *trpctool.Declaration
+	metadata    trpctool.ToolMetadata
 	called      bool
 }
 
-func (tool *namespaceProbeTool) Declaration() *trpctool.Declaration { return tool.declaration }
+func (tool *namespaceProbeTool) Declaration() *trpctool.Declaration  { return tool.declaration }
+func (tool *namespaceProbeTool) ToolMetadata() trpctool.ToolMetadata { return tool.metadata }
 func (tool *namespaceProbeTool) Call(context.Context, []byte) (any, error) {
 	tool.called = true
 	return "ok", nil
+}
+
+func TestToolCallBudgetIsRequestLocalAndBounded(t *testing.T) {
+	budget, err := NewToolCallBudget(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := budget.Consume(); err != nil {
+		t.Fatal(err)
+	}
+	if err := budget.Consume(); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(budget.Consume(), ErrToolBudgetExceeded) {
+		t.Fatal("third tool call unexpectedly admitted")
+	}
+	if _, err := NewToolCallBudget(0); err == nil {
+		t.Fatal("zero tool budget accepted")
+	}
+}
+
+func TestGovernMCPToolSetRequiresReviewAndAuditsExecution(t *testing.T) {
+	writer := &mcpGovernanceWriter{}
+	attachments := runtimestorageinmemory.New()
+	defer attachments.Close()
+	binding := MCPBinding{
+		Name: "files", Transport: "stdio", Command: "/usr/bin/files", ToolAllow: []string{"read", "delete"},
+		ToolPolicies: map[string]appmodel.MCPToolPolicy{"read": appmodel.MCPToolPolicySkipApproval, "delete": appmodel.MCPToolPolicyRequireApproval},
+	}
+	readTool := &namespaceProbeTool{declaration: &trpctool.Declaration{Name: "mcp_files__read"}, metadata: trpctool.ToolMetadata{ReadOnly: true}}
+	deleteTool := &namespaceProbeTool{declaration: &trpctool.Declaration{Name: "mcp_files__delete", Description: "delete a file"}, metadata: trpctool.ToolMetadata{Destructive: true}}
+	delegate := &namespaceProbeSet{tools: []trpctool.Tool{readTool, deleteTool}}
+	reviewer := &mcpGovernanceReviewer{approved: true}
+	governed, err := GovernMCPToolSet(context.Background(), delegate, "tenant-a", binding, reviewer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution := WithExecutionContext(context.Background(), ExecutionContext{
+		TenantID: "tenant-a", AppID: "app-a", UserID: "user-a", SessionID: "session-a", EventID: "event-a", RequestID: "request-a", TraceID: "trace-a",
+		Attachments: attachments, Replies: NewReplyCollector(), Audit: audit.NewRecorder(writer, "tenant-a"),
+	})
+	tools := governed.Tools(execution)
+	for _, candidate := range tools {
+		callable := candidate.(trpctool.CallableTool)
+		if _, err := callable.Call(execution, []byte(`{"path":"/tmp/file"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if reviewer.calls != 1 || !deleteTool.called || !readTool.called {
+		t.Fatalf("review/execution calls = reviewer:%d read:%v delete:%v", reviewer.calls, readTool.called, deleteTool.called)
+	}
+	if len(writer.events) != 5 || writer.events[0].EventType != audit.EventToolAllowed || writer.events[1].EventType != audit.EventToolExecuted || writer.events[2].EventType != audit.EventToolApprovalRequired || writer.events[3].EventType != audit.EventToolAllowed || writer.events[4].EventType != audit.EventToolExecuted {
+		t.Fatalf("MCP governance audit events = %#v", writer.events)
+	}
+
+	if _, err := GovernMCPToolSet(context.Background(), delegate, "tenant-a", binding, nil); !errors.Is(err, ErrApprovalRequired) {
+		t.Fatalf("missing reviewer error = %v", err)
+	}
+}
+
+type mcpGovernanceReviewer struct {
+	approved bool
+	calls    int
+}
+
+func (reviewer *mcpGovernanceReviewer) Review(context.Context, *review.Request) (*review.Decision, error) {
+	reviewer.calls++
+	return &review.Decision{Approved: reviewer.approved, RiskLevel: "low", Reason: "test"}, nil
+}
+
+type mcpGovernanceWriter struct {
+	events []audit.Event
+}
+
+func (writer *mcpGovernanceWriter) Append(_ context.Context, event audit.Event) (audit.AppendResult, error) {
+	writer.events = append(writer.events, event)
+	return audit.AppendResult{Event: event}, nil
 }

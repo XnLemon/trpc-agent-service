@@ -19,6 +19,13 @@ func TestMCPBindingNormalizesPublishedConfiguration(t *testing.T) {
 	if len(binding.ToolAllow) != 2 || binding.ToolAllow[0] != "read" || binding.ToolAllow[1] != "write" {
 		t.Fatalf("normalized tool allowlist = %#v", binding.ToolAllow)
 	}
+	withPolicy, err := (MCPBinding{
+		Name: "files", Transport: "stdio", Command: "/usr/bin/files", ToolAllow: []string{"read", "delete"},
+		ToolPolicies: map[string]MCPToolPolicy{" delete ": MCPToolPolicyRequireApproval, "read": ""},
+	}).Normalize()
+	if err != nil || withPolicy.ToolPolicies["delete"] != MCPToolPolicyRequireApproval || withPolicy.ToolPolicies["read"] != MCPToolPolicyAuto {
+		t.Fatalf("normalized tool policies = %#v err=%v", withPolicy.ToolPolicies, err)
+	}
 }
 
 func TestMCPBindingRejectsUnsafeOrIncompleteDeclarations(t *testing.T) {
@@ -31,6 +38,8 @@ func TestMCPBindingRejectsUnsafeOrIncompleteDeclarations(t *testing.T) {
 		{Name: "mcp", Transport: "stdio", Command: "/usr/bin/mcp", ToolAllow: nil},
 		{Name: "mcp", Transport: "sse", ServerURL: "https://example.test", SecretRef: "secret://mcp", ToolAllow: []string{"bad name"}},
 		{Name: "mcp", Transport: "stdio", Command: "/usr/bin/mcp", ToolAllow: []string{"read"}, TimeoutSeconds: maxMCPTimeoutSeconds + 1},
+		{Name: "mcp", Transport: "stdio", Command: "/usr/bin/mcp", ToolAllow: []string{"read"}, ToolPolicies: map[string]MCPToolPolicy{"other": MCPToolPolicyDenied}},
+		{Name: "mcp", Transport: "stdio", Command: "/usr/bin/mcp", ToolAllow: []string{"read"}, ToolPolicies: map[string]MCPToolPolicy{"read": "unknown"}},
 	}
 	for _, value := range cases {
 		if _, err := value.Normalize(); !errors.Is(err, ErrInvalidMCPBinding) || !errors.Is(err, ErrInvalid) {

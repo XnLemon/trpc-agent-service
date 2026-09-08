@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
@@ -55,6 +56,40 @@ type ExecutionContext struct {
 	Attachments runtimestorage.AttachmentStore
 	Replies     *ReplyCollector
 	Audit       audit.Recorder
+	ToolBudget  *ToolCallBudget
+}
+
+// ToolCallBudget is request-local admission state for tool calls. It is never
+// stored on a cached Runner, so concurrent tenants and executions cannot share
+// a counter.
+type ToolCallBudget struct {
+	limit int64
+	used  atomic.Int64
+}
+
+// NewToolCallBudget returns a bounded tool-call budget. A non-positive limit
+// is rejected so an omitted budget remains distinguishable from a zero budget.
+func NewToolCallBudget(limit int) (*ToolCallBudget, error) {
+	if limit < 1 {
+		return nil, errors.New("tool call budget must be positive")
+	}
+	return &ToolCallBudget{limit: int64(limit)}, nil
+}
+
+// Consume admits one call or returns ErrToolBudgetExceeded.
+func (budget *ToolCallBudget) Consume() error {
+	if budget == nil {
+		return nil
+	}
+	for {
+		used := budget.used.Load()
+		if used >= budget.limit {
+			return ErrToolBudgetExceeded
+		}
+		if budget.used.CompareAndSwap(used, used+1) {
+			return nil
+		}
+	}
 }
 
 type executionContextKey struct{}

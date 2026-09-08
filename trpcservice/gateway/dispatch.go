@@ -432,11 +432,17 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 	runnerCtx := ctx
 	mediaReplies := servicetool.NewReplyCollector()
 	if durable != nil {
+		toolBudget, budgetErr := servicetool.NewToolCallBudget(plan.AgentSnapshot().Revision().Runtime.MaxToolCalls)
+		if budgetErr != nil {
+			releaseBudget()
+			finishWithError(budgetErr)
+			return nil, budgetErr
+		}
 		runnerCtx = servicetool.WithExecutionContext(runnerCtx, servicetool.ExecutionContext{
 			TenantID: request.Principal.TenantID(), AppID: request.Principal.AppID(), UserID: identity.UserID, SessionID: identity.SessionID,
 			EventID: durable.eventID, RequestID: requestID, TraceID: traceID,
 			Attachments: dispatcher.attachmentStore, Replies: mediaReplies,
-			Audit: audit.NewRecorder(dispatcher.auditWriter, request.Principal.TenantID()),
+			Audit: audit.NewRecorder(dispatcher.auditWriter, request.Principal.TenantID()), ToolBudget: toolBudget,
 		})
 	}
 	if usageAccumulator != nil {

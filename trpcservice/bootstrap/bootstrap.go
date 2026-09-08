@@ -56,6 +56,7 @@ import (
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
+	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/identity"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
@@ -112,6 +113,9 @@ type Config struct {
 	// ToolSetFactory materializes runner-owned ToolSets from sealed revisions.
 	// A nil value uses the built-in sealed MCP factory.
 	ToolSetFactory agentrunnerfactory.ToolSetFactory
+	// ApprovalReviewer authorizes MCP calls whose published policy or remote
+	// metadata requires review. A nil reviewer keeps those calls fail-closed.
+	ApprovalReviewer review.Reviewer
 	// SessionStore is the session-state capability used by durable dispatch.
 	SessionStore sessionstorage.SessionStateStore
 	// EventHistoryStore is the immutable upstream event history capability used
@@ -444,7 +448,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	}
 	toolSetFactory := config.ToolSetFactory
 	if toolSetFactory == nil {
-		toolSetFactory = agentrunnerfactory.NewMCPToolSetFactory(config.SecretResolver)
+		toolSetFactory = agentrunnerfactory.NewMCPToolSetFactory(config.SecretResolver, config.ApprovalReviewer)
 	}
 	registry, err := agentrunnerfactory.NewRuntimeRunnerRegistry(agentrunnerfactory.Config{
 		Registry: config.Registry, SecretResolver: config.SecretResolver,

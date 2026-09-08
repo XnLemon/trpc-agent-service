@@ -23,19 +23,35 @@ func invalidMCP(format string, args ...any) error {
 	return fmt.Errorf("%w: %w: %s", ErrInvalid, ErrInvalidMCPBinding, fmt.Sprintf(format, args...))
 }
 
+// MCPToolPolicy controls approval for one allowlisted MCP tool.
+type MCPToolPolicy string
+
+const (
+	// MCPToolPolicyAuto uses the tool's MCP metadata: destructive tools require
+	// approval while explicitly read-only tools may run without a review.
+	MCPToolPolicyAuto MCPToolPolicy = "auto"
+	// MCPToolPolicyRequireApproval always sends the call to a Reviewer.
+	MCPToolPolicyRequireApproval MCPToolPolicy = "require_approval"
+	// MCPToolPolicySkipApproval explicitly permits the call without a Reviewer.
+	MCPToolPolicySkipApproval MCPToolPolicy = "skip_approval"
+	// MCPToolPolicyDenied blocks the call even when it is allowlisted.
+	MCPToolPolicyDenied MCPToolPolicy = "denied"
+)
+
 // MCPBinding is the secret-free, revision-scoped declaration of one MCP
 // server. It is embedded in the immutable Revision rather than stored as a
 // mutable process-level connection. SecretRef is resolved only while a
 // runner-owned ToolSet is materialized.
 type MCPBinding struct {
-	Name           string   `json:"name"`
-	Transport      string   `json:"transport"`
-	ServerURL      string   `json:"server_url,omitempty"`
-	SecretRef      string   `json:"secret_ref,omitempty"`
-	Command        string   `json:"command,omitempty"`
-	Args           []string `json:"args,omitempty"`
-	ToolAllow      []string `json:"tool_allow"`
-	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
+	Name           string                   `json:"name"`
+	Transport      string                   `json:"transport"`
+	ServerURL      string                   `json:"server_url,omitempty"`
+	SecretRef      string                   `json:"secret_ref,omitempty"`
+	Command        string                   `json:"command,omitempty"`
+	Args           []string                 `json:"args,omitempty"`
+	ToolAllow      []string                 `json:"tool_allow"`
+	ToolPolicies   map[string]MCPToolPolicy `json:"tool_policies,omitempty"`
+	TimeoutSeconds int                      `json:"timeout_seconds,omitempty"`
 }
 
 // Normalize validates and canonicalizes a revision MCP declaration. It does
@@ -60,6 +76,11 @@ func (binding MCPBinding) Normalize() (MCPBinding, error) {
 		return MCPBinding{}, err
 	}
 	value.ToolAllow = allow
+	policies, err := normalizeMCPToolPolicies(value.ToolPolicies, allow)
+	if err != nil {
+		return MCPBinding{}, err
+	}
+	value.ToolPolicies = policies
 	if !validMCPName(value.Name) {
 		return MCPBinding{}, invalidMCP("MCP binding name is invalid")
 	}
@@ -123,6 +144,12 @@ func cloneMCPBindings(bindings []MCPBinding) []MCPBinding {
 		clone[index] = binding
 		clone[index].Args = append([]string(nil), binding.Args...)
 		clone[index].ToolAllow = append([]string(nil), binding.ToolAllow...)
+		if binding.ToolPolicies != nil {
+			clone[index].ToolPolicies = make(map[string]MCPToolPolicy, len(binding.ToolPolicies))
+			for name, policy := range binding.ToolPolicies {
+				clone[index].ToolPolicies[name] = policy
+			}
+		}
 	}
 	return clone
 }
@@ -132,7 +159,51 @@ func sameMCPBindings(left, right []MCPBinding) bool {
 		return false
 	}
 	for index := range left {
-		if left[index].Name != right[index].Name || left[index].Transport != right[index].Transport || left[index].ServerURL != right[index].ServerURL || left[index].SecretRef != right[index].SecretRef || left[index].Command != right[index].Command || left[index].TimeoutSeconds != right[index].TimeoutSeconds || !sameStrings(left[index].Args, right[index].Args) || !sameStrings(left[index].ToolAllow, right[index].ToolAllow) {
+		if left[index].Name != right[index].Name || left[index].Transport != right[index].Transport || left[index].ServerURL != right[index].ServerURL || left[index].SecretRef != right[index].SecretRef || left[index].Command != right[index].Command || left[index].TimeoutSeconds != right[index].TimeoutSeconds || !sameStrings(left[index].Args, right[index].Args) || !sameStrings(left[index].ToolAllow, right[index].ToolAllow) || !sameMCPToolPolicies(left[index].ToolPolicies, right[index].ToolPolicies) {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeMCPToolPolicies(input map[string]MCPToolPolicy, allowed []string) (map[string]MCPToolPolicy, error) {
+	if len(input) == 0 {
+		return nil, nil
+	}
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		allowedSet[name] = struct{}{}
+	}
+	policies := make(map[string]MCPToolPolicy, len(input))
+	for name, policy := range input {
+		name = strings.TrimSpace(name)
+		if _, ok := allowedSet[name]; !ok || !validMCPName(name) {
+			return nil, invalidMCP("MCP tool policy names must be allowlisted")
+		}
+		if _, duplicate := policies[name]; duplicate {
+			return nil, invalidMCP("duplicate MCP tool policy %q", name)
+		}
+		policy = MCPToolPolicy(strings.ToLower(strings.TrimSpace(string(policy))))
+		if policy == "" {
+			policy = MCPToolPolicyAuto
+		}
+		switch policy {
+		case MCPToolPolicyAuto, MCPToolPolicyRequireApproval, MCPToolPolicySkipApproval, MCPToolPolicyDenied:
+		default:
+			return nil, invalidMCP("unsupported MCP tool policy %q", policy)
+		}
+		policies[name] = policy
+	}
+	return policies, nil
+}
+
+func sameMCPToolPolicies(left, right map[string]MCPToolPolicy) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for name, policy := range left {
+		other, ok := right[name]
+		if !ok || other != policy {
 			return false
 		}
 	}
