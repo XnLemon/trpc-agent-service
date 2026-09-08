@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -32,6 +33,9 @@ func TestProductionAgentProviderCatalog(t *testing.T) {
 	_, err = catalog.NormalizeBindings([]backend.CapabilityBinding{{Capability: backend.CapabilityArtifact, Provider: "s3", Endpoint: "https://s3.example.test", SecretRef: "vault/s3"}})
 	if !errors.Is(err, backend.ErrInvalid) {
 		t.Fatalf("obsolete S3 Agent Artifact binding error = %v", err)
+	}
+	if _, err := catalog.NormalizeBindings([]backend.CapabilityBinding{{Capability: backend.CapabilityKnowledge, Provider: "postgres_vector", SecretRef: "vault/embeddings", Options: map[string]string{"dimension": "1536"}}}); err != nil {
+		t.Fatalf("PostgreSQL Knowledge binding error = %v", err)
 	}
 }
 
@@ -100,6 +104,41 @@ func TestDemoRegistriesMaterializeNativeCapabilitiesWithoutSecrets(t *testing.T)
 		if err != nil || !accepts(value) {
 			t.Fatalf("materialize demo %s = %T, %v", capability, value, err)
 		}
+	}
+}
+
+func TestPostgresVectorKnowledgeProviderUsesUpstreamKnowledgeService(t *testing.T) {
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	secret, err := modelprofile.NewSecretValue("embedding-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := (environmentPostgresVectorKnowledgeProvider{db: db}).New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000"}, backend.CapabilityBinding{
+		Capability: backend.CapabilityKnowledge,
+		Provider:   "postgres_vector",
+		Options:    map[string]string{"dimension": "32"},
+	}, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, ok := value.(knowledge.Knowledge)
+	if !ok || service == nil {
+		t.Fatalf("Postgres vector provider returned %T", value)
+	}
+	if closer, ok := service.(interface{ Close() error }); ok {
+		if err := closer.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := (environmentPostgresVectorKnowledgeProvider{db: db}).New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000"}, backend.CapabilityBinding{
+		Capability: backend.CapabilityKnowledge,
+		Provider:   "postgres_vector",
+	}, modelprofile.SecretValue{}); !errors.Is(err, storagefactory.ErrStorageFactory) {
+		t.Fatalf("missing embedding secret error = %v", err)
 	}
 }
 

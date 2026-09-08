@@ -68,6 +68,25 @@ func TestRuntimeEventHistoryMigrationIsTenantScopedAndCascades(t *testing.T) {
 	}
 }
 
+func TestRuntimeKnowledgeMigrationDefinesDurableTenantScopedDocuments(t *testing.T) {
+	contents, err := os.ReadFile("0018_runtime_knowledge.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(contents)
+	for _, fragment := range []string{
+		"CREATE TABLE public.runtime_knowledge_document",
+		"REFERENCES public.tenant(tenant_id) ON DELETE CASCADE",
+		"metadata        JSONB NOT NULL",
+		"embedding       JSONB NOT NULL",
+		"PRIMARY KEY (tenant_id, document_id)",
+	} {
+		if !strings.Contains(sql, fragment) {
+			t.Fatalf("knowledge migration missing %q", fragment)
+		}
+	}
+}
+
 func TestRuntimeCapabilityMigrationContainsOnlyPlatformStorage(t *testing.T) {
 	contents, err := os.ReadFile("0012_runtime_capabilities.up.sql")
 	if err != nil {

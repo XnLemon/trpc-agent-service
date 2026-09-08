@@ -435,6 +435,7 @@ func newEnvironmentRuntimeStoresForConfig(ctx context.Context, config environmen
 		primary:   primary,
 		providers: map[string]environmentStorage{providerName: primary},
 		owned:     []environmentStorage{primary},
+		database:  db,
 	}
 	if config.runtimeStorage != "redis" {
 		return stores, nil
@@ -492,7 +493,7 @@ func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalo
 		if err != nil {
 			return nil, nil, fmt.Errorf("%w: demo model catalog is invalid", ErrInvalidConfig)
 		}
-		backendCatalog, err := newEnvironmentBackendCatalog(config.runtimeStorage)
+		backendCatalog, err := newEnvironmentBackendCatalogForDriver(config.runtimeStorage, config.driver)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -513,7 +514,7 @@ func environmentCatalogs(config environmentConfig) (*modelprofile.ProviderCatalo
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: model catalog is invalid", ErrInvalidConfig)
 	}
-	backendCatalog, err := newEnvironmentBackendCatalog(config.runtimeStorage)
+	backendCatalog, err := newEnvironmentBackendCatalogForDriver(config.runtimeStorage, config.driver)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -529,7 +530,14 @@ func environmentModelPricingOptions() map[string]modelprofile.OptionSpec {
 }
 
 func newEnvironmentBackendCatalog(runtimeStorage string) (*backend.ProviderCatalog, error) {
+	return newEnvironmentBackendCatalogForDriver(runtimeStorage, ControlPlaneDriverPostgres)
+}
+
+func newEnvironmentBackendCatalogForDriver(runtimeStorage string, driver ControlPlaneDriver) (*backend.ProviderCatalog, error) {
 	providers := []backend.ProviderSpec{chromaMemoryProviderSpec(), cosBackendProviderSpec()}
+	if driver != ControlPlaneDriverMySQL {
+		providers = append(providers, postgresVectorKnowledgeProviderSpec())
+	}
 	inMemory := backend.ProviderSpec{
 		Provider:        "inmemory",
 		Capabilities:    []backend.Capability{backend.CapabilitySession, backend.CapabilityMemory, backend.CapabilitySummary, backend.CapabilityKnowledge, backend.CapabilityArtifact, backend.CapabilityAudit},
@@ -572,6 +580,19 @@ func chromaMemoryProviderSpec() backend.ProviderSpec {
 			"database":   {Kind: backend.OptionString, DefaultValue: stringOption("default_database")},
 			"collection": {Kind: backend.OptionString, DefaultValue: stringOption("memories")},
 			"dimension":  {Kind: backend.OptionInteger, MinInteger: &minDimension, MaxInteger: &maxDimension},
+		},
+	}
+}
+
+func postgresVectorKnowledgeProviderSpec() backend.ProviderSpec {
+	minDimension, maxDimension := int64(1), int64(65536)
+	return backend.ProviderSpec{
+		Provider:        "postgres_vector",
+		Capabilities:    []backend.Capability{backend.CapabilityKnowledge},
+		EndpointPolicy:  backend.FieldForbidden,
+		SecretRefPolicy: backend.FieldRequired,
+		Options: map[string]backend.OptionSpec{
+			"dimension": {Kind: backend.OptionInteger, MinInteger: &minDimension, MaxInteger: &maxDimension},
 		},
 	}
 }

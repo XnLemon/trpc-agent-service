@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom_aibot"
+	knowledgepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/knowledge/postgres"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -219,6 +221,27 @@ func optionInt(options map[string]string, key string) int {
 		return 0
 	}
 	return value
+}
+
+type environmentPostgresVectorKnowledgeProvider struct {
+	db *sql.DB
+}
+
+func (provider environmentPostgresVectorKnowledgeProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
+	if ctx == nil || ctx.Err() != nil || provider.db == nil || input.TenantID == "" || binding.Capability != backend.CapabilityKnowledge || strings.ToLower(strings.TrimSpace(binding.Provider)) != "postgres_vector" || secret.Value() == "" {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	dimension := optionInt(binding.Options, "dimension")
+	if dimension == 0 {
+		dimension = embedderopenai.DefaultDimensions
+	}
+	store, err := knowledgepostgres.New(provider.db, input.TenantID, knowledgepostgres.WithDimension(dimension))
+	if err != nil {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	embedder := embedderopenai.New(embedderopenai.WithAPIKey(secret.Value()), embedderopenai.WithDimensions(dimension))
+	service := knowledge.New(knowledge.WithVectorStore(store), knowledge.WithEmbedder(embedder))
+	return service, nil
 }
 
 type environmentCOSCapabilityProvider struct{}

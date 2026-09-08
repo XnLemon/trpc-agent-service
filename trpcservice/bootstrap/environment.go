@@ -158,6 +158,10 @@ type environmentRuntimeStores struct {
 	primary   environmentStorage
 	providers map[string]environmentStorage
 	owned     []environmentStorage
+	// database is borrowed by optional PostgreSQL-backed upstream capabilities
+	// such as the durable Knowledge vector store. Runtime stores remain the
+	// owner of their own lifecycle.
+	database *sql.DB
 }
 
 // environmentStorage is the private composition shape used while Bootstrap

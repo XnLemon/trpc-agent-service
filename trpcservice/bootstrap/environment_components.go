@@ -211,6 +211,7 @@ type environmentRuntimeProviderSpec struct {
 	name         string
 	capabilities []backend.Capability
 	store        environmentStorage
+	database     *sql.DB
 }
 
 func environmentRegistriesForStores(config environmentConfig, delegateSessions session.Service, runtimeStores environmentRuntimeStores) (*modelruntime.SecretRegistry, *modelruntime.ModelProviderRegistry, *storagefactory.ProviderRegistry, error) {
@@ -262,7 +263,7 @@ func environmentRuntimeProviders(config environmentConfig, stores environmentRun
 	if primary == nil {
 		return nil, fmt.Errorf("%w: primary runtime provider is unavailable", ErrInvalidConfig)
 	}
-	providers := []environmentRuntimeProviderSpec{{name: providerName, capabilities: environmentRuntimeCapabilities(config.runtimeStorage), store: primary}}
+	providers := []environmentRuntimeProviderSpec{{name: providerName, capabilities: environmentRuntimeCapabilities(config.runtimeStorage), store: primary, database: stores.database}}
 	if config.runtimeStorage != "redis" {
 		return providers, nil
 	}
@@ -270,7 +271,7 @@ func environmentRuntimeProviders(config environmentConfig, stores environmentRun
 	if fallback == nil {
 		return nil, fmt.Errorf("%w: in-memory runtime provider is unavailable", ErrInvalidConfig)
 	}
-	return append(providers, environmentRuntimeProviderSpec{name: "inmemory", capabilities: environmentRuntimeCapabilities("inmemory"), store: fallback}), nil
+	return append(providers, environmentRuntimeProviderSpec{name: "inmemory", capabilities: environmentRuntimeCapabilities("inmemory"), store: fallback, database: stores.database}), nil
 }
 
 func registerEnvironmentRuntimeProviders(registry *storagefactory.ProviderRegistry, tenantID string, delegateSessions session.Service, config environmentConfig, runtimeProviders []environmentRuntimeProviderSpec) error {
@@ -299,6 +300,11 @@ func registerEnvironmentRuntimeProviders(registry *storagefactory.ProviderRegist
 	}
 	if err := registry.Register(tenantID, backend.CapabilityArtifact, "cos", environmentCOSCapabilityProvider{}); err != nil {
 		return err
+	}
+	if config.driver != ControlPlaneDriverMySQL && len(runtimeProviders) > 0 && runtimeProviders[0].database != nil {
+		if err := registry.Register(tenantID, backend.CapabilityKnowledge, "postgres_vector", environmentPostgresVectorKnowledgeProvider{db: runtimeProviders[0].database}); err != nil {
+			return err
+		}
 	}
 	return nil
 }

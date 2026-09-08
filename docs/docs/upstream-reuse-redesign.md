@@ -31,7 +31,7 @@
 | `trpcservice/bootstrap/bootstrap.go` | 每个封存 ExecutionPlan 创建独立上游插件实例 | 默认装配 Identity Plugin，只传播 Runner 已确认的 UserID；审批、PromptInjection 和 UnsafeIntent 在 reviewer 与预算合同完成前不虚假启用 |
 | `trpcservice/runtime/storage/factory/runtime_factory.go` | Session、Summary、Audit 使用平台合同；Memory/Knowledge/Artifact 使用上游接口 | 已移除 Vector/Object 等旧平台能力捆绑，能力集合只保留平台职责和上游原生服务 |
 | `trpcservice/runtime/storage/capabilities.go` | 自研记录、CRUD、向量与对象接口 | 不再作为 Agent 能力的主合同 |
-| `trpcservice/bootstrap/environment_providers.go` | 按租户装配上游 Session/Memory/Artifact/Knowledge 服务，以及平台审计和投递存储 | demo 使用上游 InMemory；生产 Memory 使用上游 ChromaDB，Artifact 使用上游 COS；MCP 安全 Binding、审批/预算边界和本地 HTTP 探针已完成，真实外部服务双 Worker 并发/重启验收由受保护 live suite 覆盖 |
+| `trpcservice/bootstrap/environment_providers.go` | 按租户装配上游 Session/Memory/Artifact/Knowledge 服务，以及平台审计和投递存储 | demo 使用上游 InMemory；生产 Memory 使用上游 ChromaDB，Knowledge 可使用同租户 PostgreSQL VectorStore，Artifact 使用上游 COS；MCP 安全 Binding、审批/预算边界和本地 HTTP 探针已完成，真实外部服务双 Worker 并发/重启验收由受保护 live suite 覆盖 |
 | `trpcservice/skill/skill.go` | 只有 package 声明与说明 | 未接入上游 Skill Repository/`WithSkills`，不计为 Skill 实现 |
 | `trpcservice/gateway/dispatch_durable.go` | durable claim 针对 Channel principal；平台保有 message/outbox 状态 | 新协议不可绕过可信主体、执行和可靠交付边界 |
 
@@ -61,7 +61,7 @@ flowchart TD
 | 影响级别 | 包或目录 | 边界 |
 | --- | --- | --- |
 | 高 | `agent`、`agent/runnerfactory`、`runtime/storage/factory`、新增 `runtime/services`、`bootstrap` | 原生接口、装配、缓存与关闭所有权 |
-| 高 | `runtime/storage/{inmemory,postgres,redis}` | 仅保留平台 Session/Message/Reply/Summary/Audit/Attachment 职责；Agent Memory/Knowledge/Artifact 已改用上游合同 |
+| 高 | `runtime/storage/{inmemory,postgres,redis}` | 仅保留平台 Session/Message/Reply/Summary/Audit/Attachment 职责；Agent Memory/Knowledge/Artifact 已改用上游合同；PostgreSQL Knowledge adapter 位于 `trpcservice/knowledge/postgres` |
 | 高 | `app`、`backend`、`tool`、`skill` | 编排配置、provider schema、自动工具授权 |
 | 条件性高 | `gateway`、`channels` | 上游 server/OpenClaw 接入后协议层替换，安全和投递语义不能丢失 |
 | 中 | `runtime/plan*`、`runtime/runner`、`runtime/execution`、`runtime/model` | 新配置摘要、服务租约、事件与取消适配 |
@@ -107,9 +107,9 @@ IM attachment 继续负责来源验签、下载大小限制、媒体校验与投
 
 ### Knowledge
 
-使用上游知识加载、切块、embedding、vectorstore、retrieval/rerank 与 `knowledge.Knowledge`，通过 `llmagent.WithKnowledge` 或上游搜索工具接入，二者不重复注册。
+使用上游知识加载、切块、embedding、vectorstore、retrieval/rerank 与 `knowledge.Knowledge`，通过 `llmagent.WithKnowledge` 或上游搜索工具接入，二者不重复注册。当前 `trpcservice/knowledge/postgres` 实现 `vectorstore.VectorStore`，按显式 tenant 持久化文档、metadata 和 embedding；它使用 JSONB 向量保存以兼容没有 pgvector 扩展的托管 PostgreSQL，检索在适配器内计算 cosine，后续可在同一合同下替换为 pgvector SQL。
 
-发布配置必须包含知识库引用和访问范围、数据版本策略、embedding profile（模型、维度）及检索策略，而非只配置存储地址。导入任务复用上游 pipeline；平台负责上传鉴权、导入任务状态与发布/重建控制。
+发布配置必须包含知识库引用和访问范围、数据版本策略、embedding profile（模型、维度）及检索策略，而非只配置存储地址。当前 Backend Profile 的 `postgres_vector` binding 固定同租户 PostgreSQL 表和 embedding SecretRef；导入任务复用上游 pipeline。平台负责上传鉴权、导入任务状态与发布/重建控制，Revision/ExecutionPlan 只携带不可变 provider 选择，不携带 client 或 secret。
 
 默认优先使用租户/知识库独立 collection 或等效强隔离能力。使用共享 collection 时，授权条件必须与用户过滤条件作不可移除的 AND；包装所有按 ID 操作、批量操作与导入写入，并验证 provider 真正执行过滤。仅在 SearchRequest.Metadata 填 tenant_id 不足以验收。
 
@@ -156,7 +156,7 @@ server/OpenClaw 探针必须跑真实上游 handler/channel 到平台执行边�
 - 从空库经初始化/Admin UI或API配置、发布到 HTTP/SSE 对话；测试模型可确定性地产生工具调用，但 Memory/Artifact/Knowledge 必须使用真实上游实现。
 - Memory：一次对话写入，后续对话检索；授权关闭时写工具及自动提取均被拒绝；生产 profile 重启后仍可读。
 - Artifact：工具保存两个不同版本并读取各版本；经授权导出到 IM；伪造用户/会话/文件引用失败。
-- Knowledge：真实 source -> chunk -> embed -> index -> 上游搜索工具 -> 模型回复；不同租户、知识库和恶意过滤条件无越权。
+- Knowledge：真实 source -> chunk -> embed -> `vectorstore.VectorStore` -> 上游搜索工具 -> 模型回复；`postgres_vector` 重启后保留文档，且不同租户、知识库和恶意过滤条件无越权。
 - 编排/MCP/Skill：真实调用路径、取消、并行状态和循环终止；测试端点可本地提供，不用注册成功代替运行。
 - IM：企业微信与 Telegram 的验签/身份、重复消息、异步回复、媒体和投递恢复；凭据可用时运行 live E2E，否则明确报告未验证。
 - 两节点/重启、过期 lease、旧 worker 写入、模型/工具超时、上游后台任务关闭；测试不能依赖 sticky session。
@@ -191,7 +191,7 @@ git diff --check
 
 1. **Runner appName 与租户 namespace 对齐**：当前 Runner 使用 `agentInput.AppID` 作为 app name。若上游 Session、Memory、Artifact 都以 appName 参与寻址，必须统一决定是由 Runner appName 直接使用租户化稳定值，还是由各服务包装器重写 appName。不能出现 Session 使用 `app_id`、Memory 使用 `tenant_id:app_id`、Artifact 又使用另一套 key 的分裂。
 2. **自动工具授权粒度**：`llmagent.WithKnowledge` 会自动注入搜索工具，`memory.Service.Tools()` 也可能暴露多个读写工具。实现时必须验证上游是否支持按工具选择注入；若不支持，平台只能在能力级别启停或包装工具集合，不能声称已有单工具粒度治理。
-3. **Knowledge 管理面与运行时检索的边界**：`knowledge.Knowledge` 主要服务搜索；上传、导入、重建、删除、版本发布可能需要复用上游 source/chunking/vectorstore 组合，而不是只暴露 `Knowledge.Search`。管理面 API、任务状态和迁移脚本要单独设计。
+3. **Knowledge 管理面与运行时检索的边界**：`knowledge.Knowledge` 主要服务搜索；当前 PostgreSQL adapter 已覆盖上游 `vectorstore.VectorStore` 的文档 CRUD、filter 和 durable reload，但上传、导入、重建、删除、版本发布的管理任务/API 仍需单独设计，不能只暴露 `Knowledge.Search`。
 4. **server/OpenClaw 多租户调度能力**：上游 server 若只绑定单个 Runner，平台必须使用动态 Runner/handler 包装或保留可信 Gateway；OpenClaw 若自带回包路径，必须证明可交给平台 Outbox 管理，否则不能切主路径。
 5. **关闭与后台任务所有权**：上游 Runner.Close、Memory 自动提取 worker、Knowledge 加载/索引 worker、Artifact client 的关闭顺序必须以测试固定。共享服务不得被单个 Runner 提前关闭。
 
