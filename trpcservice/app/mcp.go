@@ -14,6 +14,11 @@ import (
 
 var ErrInvalidMCPBinding = errors.New("invalid MCP binding")
 
+const (
+	defaultMCPTimeoutSeconds = 30
+	maxMCPTimeoutSeconds     = 300
+)
+
 func invalidMCP(format string, args ...any) error {
 	return fmt.Errorf("%w: %w: %s", ErrInvalid, ErrInvalidMCPBinding, fmt.Sprintf(format, args...))
 }
@@ -23,13 +28,14 @@ func invalidMCP(format string, args ...any) error {
 // mutable process-level connection. SecretRef is resolved only while a
 // runner-owned ToolSet is materialized.
 type MCPBinding struct {
-	Name      string   `json:"name"`
-	Transport string   `json:"transport"`
-	ServerURL string   `json:"server_url,omitempty"`
-	SecretRef string   `json:"secret_ref,omitempty"`
-	Command   string   `json:"command,omitempty"`
-	Args      []string `json:"args,omitempty"`
-	ToolAllow []string `json:"tool_allow"`
+	Name           string   `json:"name"`
+	Transport      string   `json:"transport"`
+	ServerURL      string   `json:"server_url,omitempty"`
+	SecretRef      string   `json:"secret_ref,omitempty"`
+	Command        string   `json:"command,omitempty"`
+	Args           []string `json:"args,omitempty"`
+	ToolAllow      []string `json:"tool_allow"`
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
 }
 
 // Normalize validates and canonicalizes a revision MCP declaration. It does
@@ -43,6 +49,12 @@ func (binding MCPBinding) Normalize() (MCPBinding, error) {
 	value.SecretRef = strings.TrimSpace(value.SecretRef)
 	value.Command = strings.TrimSpace(value.Command)
 	value.Args = append([]string(nil), value.Args...)
+	if value.TimeoutSeconds == 0 {
+		value.TimeoutSeconds = defaultMCPTimeoutSeconds
+	}
+	if value.TimeoutSeconds < 1 || value.TimeoutSeconds > maxMCPTimeoutSeconds {
+		return MCPBinding{}, invalidMCP("MCP timeout must be between 1 and %d seconds", maxMCPTimeoutSeconds)
+	}
 	allow, err := normalizeMCPNames(value.ToolAllow)
 	if err != nil {
 		return MCPBinding{}, err
@@ -120,7 +132,7 @@ func sameMCPBindings(left, right []MCPBinding) bool {
 		return false
 	}
 	for index := range left {
-		if left[index].Name != right[index].Name || left[index].Transport != right[index].Transport || left[index].ServerURL != right[index].ServerURL || left[index].SecretRef != right[index].SecretRef || left[index].Command != right[index].Command || !sameStrings(left[index].Args, right[index].Args) || !sameStrings(left[index].ToolAllow, right[index].ToolAllow) {
+		if left[index].Name != right[index].Name || left[index].Transport != right[index].Transport || left[index].ServerURL != right[index].ServerURL || left[index].SecretRef != right[index].SecretRef || left[index].Command != right[index].Command || left[index].TimeoutSeconds != right[index].TimeoutSeconds || !sameStrings(left[index].Args, right[index].Args) || !sameStrings(left[index].ToolAllow, right[index].ToolAllow) {
 			return false
 		}
 	}

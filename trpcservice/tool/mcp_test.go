@@ -43,6 +43,51 @@ func TestNewMCPToolSetRequiresTenantScopedSecretResolver(t *testing.T) {
 	}
 }
 
+func TestWrapMCPToolSetLifecycleRetriesDisconnectedCalls(t *testing.T) {
+	delegateTool := &lifecycleProbeTool{declaration: &trpctool.Declaration{Name: "echo"}}
+	delegate := &lifecycleProbeSet{tool: delegateTool}
+	wrapped, err := WrapMCPToolSetLifecycle(delegate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := wrapped.Tools(context.Background())
+	callable, ok := tools[0].(trpctool.CallableTool)
+	if !ok {
+		t.Fatalf("lifecycle tool is not callable: %T", tools[0])
+	}
+	if _, err := callable.Call(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if delegateTool.calls != 2 || delegate.closeCalls != 1 {
+		t.Fatalf("lifecycle retry = calls:%d closes:%d", delegateTool.calls, delegate.closeCalls)
+	}
+}
+
+type lifecycleProbeSet struct {
+	tool       *lifecycleProbeTool
+	closeCalls int
+}
+
+func (set *lifecycleProbeSet) Name() string { return "lifecycle" }
+func (set *lifecycleProbeSet) Tools(context.Context) []trpctool.Tool {
+	return []trpctool.Tool{set.tool}
+}
+func (set *lifecycleProbeSet) Close() error { set.closeCalls++; return nil }
+
+type lifecycleProbeTool struct {
+	declaration *trpctool.Declaration
+	calls       int
+}
+
+func (tool *lifecycleProbeTool) Declaration() *trpctool.Declaration { return tool.declaration }
+func (tool *lifecycleProbeTool) Call(context.Context, []byte) (any, error) {
+	tool.calls++
+	if tool.calls == 1 {
+		return nil, errors.New("transport closed")
+	}
+	return "ok", nil
+}
+
 func TestNamespaceMCPToolSetPrefixesDeclarationsAndForwardsCalls(t *testing.T) {
 	delegateTool := &namespaceProbeTool{declaration: &trpctool.Declaration{Name: "search"}}
 	delegate := &namespaceProbeSet{tools: []trpctool.Tool{delegateTool}}

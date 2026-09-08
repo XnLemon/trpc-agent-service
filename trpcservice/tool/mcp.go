@@ -23,10 +23,11 @@ type MCPBinding = appmodel.MCPBinding
 
 var ErrInvalidMCPBinding = appmodel.ErrInvalidMCPBinding
 
-// NewMCPToolSet materializes one upstream ToolSet. It is intentionally
-// separate from the factory: callers must still apply Revision allowlists to
-// the returned, prefixed tool names before passing it to a Runner.
-func NewMCPToolSet(ctx context.Context, tenantID string, binding MCPBinding, resolver modelprofile.SecretResolver) (*toolmcp.ToolSet, error) {
+// NewMCPToolSet materializes one ToolSet from a secret-free binding. HTTP
+// transports use the upstream MCP client; stdio uses the platform process
+// lifecycle boundary. The binding allowlist is enforced before the ToolSet is
+// returned; callers still apply the stable binding namespace before a Runner.
+func NewMCPToolSet(ctx context.Context, tenantID string, binding MCPBinding, resolver modelprofile.SecretResolver) (trpctool.ToolSet, error) {
 	return newMCPToolSet(ctx, tenantID, binding, resolver, mcpNetworkOptions{resolver: net.DefaultResolver})
 }
 
@@ -40,13 +41,16 @@ type mcpNetworkOptions struct {
 	clientOptions  []trpcmcp.ClientOption
 }
 
-func newMCPToolSet(ctx context.Context, tenantID string, binding MCPBinding, resolver modelprofile.SecretResolver, network mcpNetworkOptions) (*toolmcp.ToolSet, error) {
+func newMCPToolSet(ctx context.Context, tenantID string, binding MCPBinding, resolver modelprofile.SecretResolver, network mcpNetworkOptions) (trpctool.ToolSet, error) {
 	if ctx == nil || ctx.Err() != nil {
 		return nil, fmt.Errorf("%w: active context is required", ErrInvalidMCPBinding)
 	}
 	value, err := binding.Normalize()
 	if err != nil {
 		return nil, err
+	}
+	if value.Transport == "stdio" {
+		return newStdioMCPToolSet(ctx, value)
 	}
 	clientOptions := append([]trpcmcp.ClientOption(nil), network.clientOptions...)
 	if value.ServerURL != "" {
@@ -59,8 +63,11 @@ func newMCPToolSet(ctx context.Context, tenantID string, binding MCPBinding, res
 		}
 		clientOptions = append(clientOptions, trpcmcp.WithHTTPReqHandler(handler))
 	}
-	config := toolmcp.ConnectionConfig{Transport: value.Transport, ServerURL: value.ServerURL, Command: value.Command, Args: value.Args}
-	options := []toolmcp.ToolSetOption{toolmcp.WithName(value.Name)}
+	config := toolmcp.ConnectionConfig{
+		Transport: value.Transport, ServerURL: value.ServerURL, Command: value.Command, Args: value.Args,
+		Timeout: time.Duration(value.TimeoutSeconds) * time.Second,
+	}
+	options := []toolmcp.ToolSetOption{toolmcp.WithName(value.Name), toolmcp.WithSessionReconnect(3)}
 	if len(value.ToolAllow) > 0 {
 		options = append(options, toolmcp.WithToolFilterFunc(mcpIncludeFilter(value.ToolAllow)))
 	}
@@ -259,6 +266,82 @@ type namespacedMCPStreamableOnlyTool struct {
 
 func (tool namespacedMCPStreamableOnlyTool) StreamableCall(ctx context.Context, args []byte) (*trpctool.StreamReader, error) {
 	return tool.streamable.StreamableCall(ctx, args)
+}
+
+// WrapMCPToolSetLifecycle adds one bounded reconnect trigger around the
+// upstream ToolSet. The upstream stdio transport can observe a child process
+// exit as "transport closed" while its session manager still retains the old
+// client; closing that client first makes the upstream reconnect path
+// deterministic on the retry. Context cancellation and deadlines are never
+// retried.
+func WrapMCPToolSetLifecycle(set trpctool.ToolSet) (trpctool.ToolSet, error) {
+	if set == nil || strings.TrimSpace(set.Name()) == "" {
+		return nil, fmt.Errorf("%w: MCP ToolSet is required", ErrInvalidMCPBinding)
+	}
+	return resilientMCPToolSet{delegate: set}, nil
+}
+
+type resilientMCPToolSet struct {
+	delegate trpctool.ToolSet
+}
+
+func (set resilientMCPToolSet) Name() string { return set.delegate.Name() }
+func (set resilientMCPToolSet) Close() error {
+	if err := set.delegate.Close(); err != nil && !mcpBenignLifecycleError(err) {
+		return err
+	}
+	return nil
+}
+
+func (set resilientMCPToolSet) Tools(ctx context.Context) []trpctool.Tool {
+	candidates := set.delegate.Tools(ctx)
+	tools := make([]trpctool.Tool, 0, len(candidates))
+	for _, candidate := range candidates {
+		callable, ok := candidate.(trpctool.CallableTool)
+		if !ok {
+			tools = append(tools, candidate)
+			continue
+		}
+		tools = append(tools, resilientMCPTool{delegate: callable, owner: set.delegate})
+	}
+	return tools
+}
+
+type resilientMCPTool struct {
+	delegate trpctool.CallableTool
+	owner    trpctool.ToolSet
+}
+
+func (tool resilientMCPTool) Declaration() *trpctool.Declaration { return tool.delegate.Declaration() }
+
+func (tool resilientMCPTool) Call(ctx context.Context, args []byte) (any, error) {
+	result, err := tool.delegate.Call(ctx, args)
+	if err == nil || ctx == nil || ctx.Err() != nil || !mcpConnectionFailure(err) {
+		return result, err
+	}
+	_ = tool.owner.Close()
+	return tool.delegate.Call(ctx, args)
+}
+
+func mcpBenignLifecycleError(err error) bool {
+	if err == nil {
+		return true
+	}
+	value := strings.ToLower(err.Error())
+	return strings.Contains(value, "file already closed") || strings.Contains(value, "process already finished") || strings.Contains(value, "os: process already finished")
+}
+
+func mcpConnectionFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	value := strings.ToLower(err.Error())
+	for _, marker := range []string{"transport closed", "transport is closed", "broken pipe", "connection reset", "file already closed", "eof", "process already finished", "client not initialized", "session not found"} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func mcpIncludeFilter(allowed []string) trpctool.FilterFunc {

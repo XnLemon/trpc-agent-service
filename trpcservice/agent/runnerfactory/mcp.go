@@ -38,9 +38,15 @@ func NewMCPToolSetFactory(secrets modelprofile.SecretResolver) ToolSetFactory {
 				_ = closeToolSets(sets)
 				return nil, fmt.Errorf("%w: MCP binding %q: %v", runtimerunner.ErrInvalid, binding.Name, materializeErr)
 			}
-			namespaced, namespaceErr := servicetool.NamespaceMCPToolSet(set, binding.Name)
-			if namespaceErr != nil {
+			lifecycle, lifecycleErr := servicetool.WrapMCPToolSetLifecycle(set)
+			if lifecycleErr != nil {
 				_ = set.Close()
+				_ = closeToolSets(sets)
+				return nil, fmt.Errorf("%w: MCP binding %q lifecycle: %v", runtimerunner.ErrInvalid, binding.Name, lifecycleErr)
+			}
+			namespaced, namespaceErr := servicetool.NamespaceMCPToolSet(lifecycle, binding.Name)
+			if namespaceErr != nil {
+				_ = lifecycle.Close()
 				_ = closeToolSets(sets)
 				return nil, fmt.Errorf("%w: namespace MCP binding %q", runtimerunner.ErrInvalid, binding.Name)
 			}

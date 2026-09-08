@@ -13,7 +13,7 @@ func TestMCPBindingNormalizesPublishedConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if binding.Name != "files" || binding.Transport != "streamable" || binding.SecretRef != "secret://tenant/mcp" {
+	if binding.Name != "files" || binding.Transport != "streamable" || binding.SecretRef != "secret://tenant/mcp" || binding.TimeoutSeconds != defaultMCPTimeoutSeconds {
 		t.Fatalf("normalized binding = %+v", binding)
 	}
 	if len(binding.ToolAllow) != 2 || binding.ToolAllow[0] != "read" || binding.ToolAllow[1] != "write" {
@@ -30,6 +30,7 @@ func TestMCPBindingRejectsUnsafeOrIncompleteDeclarations(t *testing.T) {
 		{Name: "mcp", Transport: "stdio", Command: "/usr/bin/mcp", Args: []string{"bad\narg"}, ToolAllow: []string{"read"}},
 		{Name: "mcp", Transport: "stdio", Command: "/usr/bin/mcp", ToolAllow: nil},
 		{Name: "mcp", Transport: "sse", ServerURL: "https://example.test", SecretRef: "secret://mcp", ToolAllow: []string{"bad name"}},
+		{Name: "mcp", Transport: "stdio", Command: "/usr/bin/mcp", ToolAllow: []string{"read"}, TimeoutSeconds: maxMCPTimeoutSeconds + 1},
 	}
 	for _, value := range cases {
 		if _, err := value.Normalize(); !errors.Is(err, ErrInvalidMCPBinding) || !errors.Is(err, ErrInvalid) {
