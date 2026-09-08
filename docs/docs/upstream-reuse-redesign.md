@@ -31,7 +31,7 @@
 | `trpcservice/bootstrap/bootstrap.go` | 每个封存 ExecutionPlan 创建独立上游插件实例 | 默认装配 Identity Plugin，只传播 Runner 已确认的 UserID；审批、PromptInjection 和 UnsafeIntent 在 reviewer 与预算合同完成前不虚假启用 |
 | `trpcservice/runtime/storage/factory/runtime_factory.go` | Session、Summary、Audit 使用平台合同；Memory/Knowledge/Artifact 使用上游接口 | 已移除 Vector/Object 等旧平台能力捆绑，能力集合只保留平台职责和上游原生服务 |
 | `trpcservice/runtime/storage/capabilities.go` | 自研记录、CRUD、向量与对象接口 | 不再作为 Agent 能力的主合同 |
-| `trpcservice/bootstrap/environment_providers.go` | 按租户装配上游 Session/Memory/Artifact/Knowledge 服务，以及平台审计和投递存储 | demo 使用上游 InMemory；生产 Memory 使用上游 ChromaDB，Artifact 使用上游 COS；MCP 安全 Binding 和本地 HTTP 探针已完成，真实外部服务重启/双 Worker 验收仍待补充 |
+| `trpcservice/bootstrap/environment_providers.go` | 按租户装配上游 Session/Memory/Artifact/Knowledge 服务，以及平台审计和投递存储 | demo 使用上游 InMemory；生产 Memory 使用上游 ChromaDB，Artifact 使用上游 COS；MCP 安全 Binding、审批/预算边界和本地 HTTP 探针已完成，真实外部服务双 Worker 并发/重启验收由受保护 live suite 覆盖 |
 | `trpcservice/skill/skill.go` | 只有 package 声明与说明 | 未接入上游 Skill Repository/`WithSkills`，不计为 Skill 实现 |
 | `trpcservice/gateway/dispatch_durable.go` | durable claim 针对 Channel principal；平台保有 message/outbox 状态 | 新协议不可绕过可信主体、执行和可靠交付边界 |
 
@@ -119,7 +119,7 @@ IM attachment 继续负责来源验签、下载大小限制、媒体校验与投
 | --- | --- |
 | LLM/Chain/Graph/Parallel/Cycle | 复用具体上游 Agent；平台只保存声明式配置并校验。Graph 必须有节点、边、路由/终止条件与执行测试，不能仅加 kind；并行与循环须验证共享状态、取消和预算 |
 | Model | 普通模型路径优先上游 provider；自研 Responses 等实现先对照上游协议能力，只有明确缺口才保留 |
-| MCP | 上游 MCP Tool/client；平台管理端点授权、SSRF 防护、凭据、工具发现与白名单、连接生命周期及危险调用审批 | 已实现 `MCPBinding` 的 HTTPS/stdio 校验、租户 SecretRef、工具 allowlist、DNS 全地址校验与固定拨号、禁代理/重定向，以及上游 ToolSet 初始化/调用/关闭探针；控制面持久化和危险调用审批仍未接入 |
+| MCP | 上游 MCP Tool/client；平台管理端点授权、SSRF 防护、凭据、工具发现与白名单、连接生命周期及危险调用审批 | 已实现 `MCPBinding` 的 HTTPS/stdio 校验、租户 SecretRef、工具 allowlist、DNS 全地址校验与固定拨号、禁代理/重定向、超时/重连，以及上游 ToolSet 初始化/调用/关闭探针；Revision JSON 持久化、执行期 Reviewer、Audit、请求预算和 fail-closed 危险调用已接入 |
 | Skill | 上游加载/执行能力；平台管理可信工作目录、发布版本、工具授权与沙箱。不把 package 占位或读到 SKILL.md 算作执行闭环 |
 | Plugin/Guardrail/Callbacks | 复用上游扩展生命周期挂载平台策略；预算账本与审批事实仍在平台。自动注入工具、子 Agent、MCP 和 Skill 均不可绕过执行期授权 |
 | OpenTelemetry | 复用框架原生 span 和官方 OTel SDK；平台补 IM、队列、审计关联，避免 callbacks 与原生链路重复记录或导出敏感内容 |
@@ -130,7 +130,7 @@ server/OpenClaw 探针必须跑真实上游 handler/channel 到平台执行边�
 
 ## 6. 一致性、安全与发布
 
-不承诺 Session、Memory、向量库、Artifact、Outbox 的跨后端原子提交。区分：执行受理持久化、Runner 事件、工具外部副作用、回复可投递事实。对不确定结果记录待协调状态，不能靠重新执行所有工具恢复，也不能声称外部 exactly-once。
+不承诺 Session、Memory、向量库、Artifact、Outbox 的跨后端原子提交。区分：执行受理持久化、Runner 事件、工具外部副作用、回复可投递事实。Memory/Artifact 的 provider 由已封存 Backend Profile 选择，Worker 重启只依赖上游 provider 的 durable 事实，不把向量索引或对象 URL 当作平台审计真相。对不确定结果记录待协调状态，不能靠重新执行所有工具恢复，也不能声称外部 exactly-once。
 
 允许直接重写 schema、配置和 API。旧数据不承担兼容义务；当旧模型与上游语义冲突时，删除旧表和旧接口，使用新的最终 schema 重新初始化环境。旧配置、旧 provider 和旧测试 fixture 同样删除，不做双轨运行或隐式转换。
 

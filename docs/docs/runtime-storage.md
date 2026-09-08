@@ -1,7 +1,9 @@
 # Tenant 运行时持久化契约（Issue #48）
 
 > 本页记录 Issue #48 的通用运行时存储能力契约，以及 Issue #108 的 Redis 实现边界。
-> 代码、测试和部署示例只把已经验证的能力标为已实现；未覆盖的外部后端仍属于后续工作。
+> Agent Memory/Artifact 已迁移到上游 `memory.Service`/`artifact.Service`；本页的平台 RuntimeStore
+> 不把这些 provider 的内部数据复制成第二份事实。代码、测试和部署示例只把已经验证的能力标为已实现；
+> 未覆盖的外部后端仍属于后续工作。
 
 > 状态补充：预算账本现由 `trpcservice/runtime/budget` 独立持有，PostgreSQL 实现支持执行前
 > 原子预占、执行后结算、失败释放和幂等重试；它不属于 Session/Reply RuntimeStore 的事务接口。
@@ -16,7 +18,8 @@ Session/Runner 使用的命名空间只用于防碰撞，不能替代数据库�
 - `reply_outbox` 分段回复、租约/fencing、重试和供应商回执。
 
 Issue #48 不实现 Memory/Knowledge/Artifact 的其他生产适配、AuditEvent/usage/cost 的通用存储（预算账本另由
-`runtime/budget` 提供）、
+`runtime/budget` 提供）；生产 Memory/Artifact provider 由 Backend Profile 选择，平台只负责同租户
+SecretRef 解析、Revision/ExecutionPlan 绑定和生命周期，不在 RuntimeStore 内重实现上游存储。
 完整 IM webhook/media、分布式调度、KMS/Vault 或告警平台。API principal 继续由
 Gateway HTTP 层的进程内幂等存储保护；跨进程 durable inbound claim 只在已验证
 Channel principal 上启用，因为 `message_event.binding_id` 必须引用真实的控制面 Binding。
@@ -216,7 +219,9 @@ IM 入站附件继续使用平台 `AttachmentStore`，与 Agent Artifact 的 app
 
 本地 Compose 已包含带 AOF 的 Redis 7 服务；生产/Kubernetes 仍应使用外部 Redis，并通过 Secret
 Manager 注入密码。可选 live conformance/reconnect 测试读取 `REDIS_RUNTIME_TEST_ADDR`；未设置
-时显式 skip，不把本地 miniredis 测试冒充生产 Redis 证据。
+时显式 skip，不把本地 miniredis 测试冒充生产 Redis 证据。ChromaDB Memory 和 COS Artifact 的
+双 Worker 并发/重启测试由 `TRPC_LIVE_INTEGRATION=1` 保护，分别读取 `TRPC_CHROMA_LIVE_*` 与
+`TRPC_COS_LIVE_*`；未配置外部服务时显式 skip，deterministic CI 不把 skip 计作 live 证据。
 真实验收测试使用可选的 `POSTGRES_RUNTIME_TEST_DSN`，并要求该 DSN 已有可写的
 `POSTGRES_RUNTIME_TEST_TENANT_ID` 与 `POSTGRES_RUNTIME_TEST_BINDING_ID`；测试会执行
 完整运行时存储能力操作、关闭连接、重新打开连接并验证 Session/Event/History/Outbox
@@ -236,6 +241,7 @@ Manager 注入密码。可选 live conformance/reconnect 测试读取 `REDIS_RUN
 | Redis Session/Memory capability 与 tenant-scoped bootstrap | Issue #108 | `runtime/storage/redis` miniredis conformance、配置/Catalog 边界、Compose 服务与可选 live reconnect 测试 | ✅* |
 | 上游 Artifact provider 与 tenant-scoped bootstrap | 本次重构 | 上游 InMemory/COS `artifact.Service`、Runner 注入和租户 SecretRef 边界 | ✅ |
 | 真实 PostgreSQL/InMemory conformance 与 fresh-process restart | 6 | `POSTGRES_RUNTIME_TEST_DSN` 可选 live suite 与 reopen 证据 | ✅* |
+| 上游 ChromaDB Memory/COS Artifact 双 Worker 并发与重启 | 6 | `bootstrap/environment_live_integration_test.go` 受保护 live suite | ✅* |
 | verified Channel duplicate Runner suppression | 6 | MessageStore claim + 并发 Gateway Runner invocation-count 测试 | ✅ |
 | 租户越权、取消、脱敏和防御性返回 | 1–6 | 双租户 conformance 与错误边界测试 | ✅ |
 | `go test`、race、vet、build、MkDocs strict | 最终 | PR 验证记录与 CI | ✅ |
