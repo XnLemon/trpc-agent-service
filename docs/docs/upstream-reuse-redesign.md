@@ -119,7 +119,7 @@ IM attachment 继续负责来源验签、下载大小限制、媒体校验与投
 | --- | --- |
 | LLM/Chain/Graph/Parallel/Cycle | 复用具体上游 Agent；平台只保存声明式配置并校验。Graph 必须有节点、边、路由/终止条件与执行测试，不能仅加 kind；并行与循环须验证共享状态、取消和预算 |
 | Model | 普通模型路径优先上游 provider；自研 Responses 等实现先对照上游协议能力，只有明确缺口才保留 |
-| MCP | 上游 MCP Tool/client；平台管理端点授权、SSRF 防护、凭据、工具发现与白名单、连接生命周期及危险调用审批 | 已实现 `MCPBinding` 的 HTTPS/stdio 基础校验、租户 SecretRef、工具 allowlist、上游 ToolSet 初始化/调用/关闭探针；DNS 解析级 SSRF 防护、控制面持久化和危险调用审批仍未接入 |
+| MCP | 上游 MCP Tool/client；平台管理端点授权、SSRF 防护、凭据、工具发现与白名单、连接生命周期及危险调用审批 | 已实现 `MCPBinding` 的 HTTPS/stdio 校验、租户 SecretRef、工具 allowlist、DNS 全地址校验与固定拨号、禁代理/重定向，以及上游 ToolSet 初始化/调用/关闭探针；控制面持久化和危险调用审批仍未接入 |
 | Skill | 上游加载/执行能力；平台管理可信工作目录、发布版本、工具授权与沙箱。不把 package 占位或读到 SKILL.md 算作执行闭环 |
 | Plugin/Guardrail/Callbacks | 复用上游扩展生命周期挂载平台策略；预算账本与审批事实仍在平台。自动注入工具、子 Agent、MCP 和 Skill 均不可绕过执行期授权 |
 | OpenTelemetry | 复用框架原生 span 和官方 OTel SDK；平台补 IM、队列、审计关联，避免 callbacks 与原生链路重复记录或导出敏感内容 |

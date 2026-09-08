@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -20,7 +21,11 @@ func TestNewMCPToolSetInitializesFiltersAndCallsUpstreamServer(t *testing.T) {
 		Name: "files", Transport: "streamable", ServerURL: "https://mcp.example.test/tools",
 		SecretRef: "secret://tenant/mcp", ToolAllow: []string{"read_file"},
 	}
-	set, err := newMCPToolSet(context.Background(), "tenant-a", binding, mcpProbeSecrets{}, trpcmcp.WithClientGetSSEEnabled(false), trpcmcp.WithHTTPReqHandler(handler))
+	set, err := newMCPToolSet(context.Background(), "tenant-a", binding, mcpProbeSecrets{}, mcpNetworkOptions{
+		resolver:       mcpProbeResolver{addresses: []net.IPAddr{{IP: net.ParseIP("192.0.2.10")}}},
+		requestHandler: handler,
+		clientOptions:  []trpcmcp.ClientOption{trpcmcp.WithClientGetSSEEnabled(false)},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,6 +51,33 @@ func TestNewMCPToolSetInitializesFiltersAndCallsUpstreamServer(t *testing.T) {
 	if handler.authorization() != "Bearer mcp-secret" {
 		t.Fatalf("MCP authorization header = %q", handler.authorization())
 	}
+}
+
+func TestNewMCPToolSetRejectsPrivateDNSBeforeConnecting(t *testing.T) {
+	binding := MCPBinding{
+		Name: "private", Transport: "streamable", ServerURL: "https://mcp.example.test/tools",
+		SecretRef: "secret://tenant/mcp", ToolAllow: []string{"read_file"},
+	}
+	for _, addresses := range [][]net.IPAddr{
+		{{IP: net.ParseIP("10.0.0.8")}},
+		{{IP: net.ParseIP("192.0.2.10")}, {IP: net.ParseIP("fd00::8")}},
+	} {
+		_, err := newMCPToolSet(context.Background(), "tenant-a", binding, mcpProbeSecrets{}, mcpNetworkOptions{
+			resolver: mcpProbeResolver{addresses: addresses},
+		})
+		if err == nil {
+			t.Fatalf("restricted DNS addresses accepted: %v", addresses)
+		}
+	}
+}
+
+type mcpProbeResolver struct {
+	addresses []net.IPAddr
+	err       error
+}
+
+func (resolver mcpProbeResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return resolver.addresses, resolver.err
 }
 
 type mcpProbeSecrets struct{}
