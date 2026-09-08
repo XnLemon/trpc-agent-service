@@ -59,6 +59,7 @@ type LLMAgentFactoryInput struct {
 	Generation        appmodel.GenerationConfig
 	Runtime           appmodel.RuntimePolicy
 	Tools             []appmodel.ToolAuthorization
+	MCPBindings       []appmodel.MCPBinding
 	Chain             *appmodel.ChainConfiguration
 }
 
@@ -67,6 +68,7 @@ func (input LLMAgentFactoryInput) Clone() LLMAgentFactoryInput {
 	clone := input
 	clone.Generation = cloneGenerationConfig(input.Generation)
 	clone.Tools = cloneTools(input.Tools)
+	clone.MCPBindings = cloneMCPBindings(input.MCPBindings)
 	clone.Chain = input.Chain.Clone()
 	return clone
 }
@@ -170,7 +172,7 @@ func (snapshot AgentExecutionSnapshot) FactoryInput() (LLMAgentFactoryInput, err
 		SchemaVersion: snapshot.revision.SchemaVersion, Instruction: snapshot.revision.Instruction,
 		GlobalInstruction: snapshot.revision.GlobalInstruction, ModelProfileID: snapshot.revision.ModelProfileID,
 		Generation: cloneGenerationConfig(snapshot.revision.Generation), Runtime: snapshot.revision.Runtime,
-		Tools: cloneTools(snapshot.revision.Tools), Chain: snapshot.revision.Chain.Clone(),
+		Tools: cloneTools(snapshot.revision.Tools), MCPBindings: cloneMCPBindings(snapshot.revision.MCPBindings), Chain: snapshot.revision.Chain.Clone(),
 	}, nil
 }
 
@@ -219,6 +221,19 @@ func cloneGenerationConfig(configuration appmodel.GenerationConfig) appmodel.Gen
 	if configuration.MaxOutputTokens != nil {
 		value := *configuration.MaxOutputTokens
 		clone.MaxOutputTokens = &value
+	}
+	return clone
+}
+
+func cloneMCPBindings(bindings []appmodel.MCPBinding) []appmodel.MCPBinding {
+	if bindings == nil {
+		return nil
+	}
+	clone := make([]appmodel.MCPBinding, len(bindings))
+	for index, binding := range bindings {
+		clone[index] = binding
+		clone[index].Args = append([]string(nil), binding.Args...)
+		clone[index].ToolAllow = append([]string(nil), binding.ToolAllow...)
 	}
 	return clone
 }

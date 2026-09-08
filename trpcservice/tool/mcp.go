@@ -3,72 +3,25 @@ package tool
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"time"
-	"unicode/utf8"
 
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 	toolmcp "trpc.group/trpc-go/trpc-agent-go/tool/mcp"
 	trpcmcp "trpc.group/trpc-go/trpc-mcp-go"
 )
 
-var ErrInvalidMCPBinding = errors.New("invalid MCP binding")
+// MCPBinding is the revision-scoped control-plane declaration shared with
+// the runtime MCP adapter. It contains no resolved credential or connection.
+type MCPBinding = appmodel.MCPBinding
 
-// MCPBinding is a tenant-scoped, published MCP connection contract. The
-// secret is used only as an Authorization bearer token and never enters the
-// model-visible tool schema.
-type MCPBinding struct {
-	Name      string
-	Transport string
-	ServerURL string
-	SecretRef string
-	Command   string
-	Args      []string
-	ToolAllow []string
-}
-
-func (binding MCPBinding) Normalize() (MCPBinding, error) {
-	value := binding
-	value.Name = strings.TrimSpace(value.Name)
-	value.Transport = strings.ToLower(strings.TrimSpace(value.Transport))
-	value.ServerURL = strings.TrimSpace(value.ServerURL)
-	value.SecretRef = strings.TrimSpace(value.SecretRef)
-	value.Command = strings.TrimSpace(value.Command)
-	value.Args = append([]string(nil), value.Args...)
-	value.ToolAllow = normalizeMCPNames(value.ToolAllow)
-	if !validMCPName(value.Name) || len(value.ToolAllow) == 0 {
-		return MCPBinding{}, fmt.Errorf("%w: name or tool allowlist is invalid", ErrInvalidMCPBinding)
-	}
-	switch value.Transport {
-	case "sse", "streamable", "streamable_http":
-		if value.SecretRef == "" {
-			return MCPBinding{}, fmt.Errorf("%w: HTTP secret reference is required", ErrInvalidMCPBinding)
-		}
-		if err := validateMCPHTTPURL(value.ServerURL); err != nil {
-			return MCPBinding{}, err
-		}
-		value.Transport = strings.TrimSuffix(value.Transport, "_http")
-	case "stdio":
-		if value.SecretRef != "" || value.ServerURL != "" || !filepath.IsAbs(value.Command) || !validMCPText(value.Command) {
-			return MCPBinding{}, fmt.Errorf("%w: stdio command binding is invalid", ErrInvalidMCPBinding)
-		}
-		for _, arg := range value.Args {
-			if !validMCPText(arg) {
-				return MCPBinding{}, fmt.Errorf("%w: stdio argument is invalid", ErrInvalidMCPBinding)
-			}
-		}
-	default:
-		return MCPBinding{}, fmt.Errorf("%w: unsupported transport", ErrInvalidMCPBinding)
-	}
-	return value, nil
-}
+var ErrInvalidMCPBinding = appmodel.ErrInvalidMCPBinding
 
 // NewMCPToolSet materializes one upstream ToolSet. It is intentionally
 // separate from the factory: callers must still apply Revision allowlists to
@@ -232,58 +185,4 @@ func mcpIncludeFilter(allowed []string) trpctool.FilterFunc {
 		_, ok := allow[candidate.Declaration().Name]
 		return ok
 	}
-}
-
-func validateMCPHTTPURL(raw string) error {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return fmt.Errorf("%w: HTTP endpoint must be an HTTPS URL without credentials, query, or fragment", ErrInvalidMCPBinding)
-	}
-	host := strings.ToLower(parsed.Hostname())
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") || host == "local" || host == "0.0.0.0" || host == "::" {
-		return fmt.Errorf("%w: HTTP endpoint targets a local host", ErrInvalidMCPBinding)
-	}
-	if ip := net.ParseIP(host); ip != nil && restrictedMCPIP(ip) {
-		return fmt.Errorf("%w: HTTP endpoint targets a restricted address", ErrInvalidMCPBinding)
-	}
-	return nil
-}
-
-func normalizeMCPNames(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if validMCPName(value) {
-			if _, ok := seen[value]; !ok {
-				seen[value] = struct{}{}
-				result = append(result, value)
-			}
-		}
-	}
-	return result
-}
-
-func validMCPName(value string) bool {
-	if value == "" || len([]rune(value)) > 128 || !utf8.ValidString(value) {
-		return false
-	}
-	for _, char := range value {
-		if !(char == '-' || char == '_' || char == '.' || char >= '0' && char <= '9' || char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z') {
-			return false
-		}
-	}
-	return true
-}
-
-func validMCPText(value string) bool {
-	if !utf8.ValidString(value) || len([]rune(value)) > 2048 {
-		return false
-	}
-	for _, char := range value {
-		if char < 0x20 || char == 0x7f {
-			return false
-		}
-	}
-	return true
 }

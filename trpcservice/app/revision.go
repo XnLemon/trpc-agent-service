@@ -115,6 +115,7 @@ type DraftConfiguration struct {
 	Generation        GenerationConfig
 	Runtime           RuntimePolicy
 	Tools             []ToolAuthorization
+	MCPBindings       []MCPBinding
 	Chain             *ChainConfiguration
 }
 
@@ -135,6 +136,7 @@ type Revision struct {
 	Generation        GenerationConfig
 	Runtime           RuntimePolicy
 	Tools             []ToolAuthorization
+	MCPBindings       []MCPBinding
 	Chain             *ChainConfiguration
 	ContentDigest     string
 	PublishedAt       *time.Time
@@ -195,6 +197,7 @@ func NewRevision(input CreateRevisionInput) (*Revision, error) {
 		Generation:        cloneGenerationConfig(configuration.Generation),
 		Runtime:           configuration.Runtime,
 		Tools:             cloneTools(configuration.Tools),
+		MCPBindings:       cloneMCPBindings(configuration.MCPBindings),
 		Chain:             configuration.Chain.Clone(),
 		CreatedAt:         now,
 		UpdatedAt:         now,
@@ -207,6 +210,7 @@ func (r Revision) Clone() Revision {
 	clone := r
 	clone.Generation = cloneGenerationConfig(r.Generation)
 	clone.Tools = cloneTools(r.Tools)
+	clone.MCPBindings = cloneMCPBindings(r.MCPBindings)
 	clone.Chain = r.Chain.Clone()
 	clone.PublishedAt = cloneTime(r.PublishedAt)
 	return clone
@@ -222,6 +226,7 @@ func (r Revision) Configuration() DraftConfiguration {
 		Generation:        cloneGenerationConfig(r.Generation),
 		Runtime:           r.Runtime,
 		Tools:             cloneTools(r.Tools),
+		MCPBindings:       cloneMCPBindings(r.MCPBindings),
 		Chain:             r.Chain.Clone(),
 	}
 }
@@ -320,6 +325,7 @@ func (r Revision) ComputeContentDigest() (string, error) {
 		Generation        GenerationConfig    `json:"generation"`
 		Runtime           RuntimePolicy       `json:"runtime"`
 		Tools             []ToolAuthorization `json:"tools"`
+		MCPBindings       []MCPBinding        `json:"mcp_bindings,omitempty"`
 		Chain             *ChainConfiguration `json:"chain,omitempty"`
 	}{
 		Kind:              r.Kind,
@@ -331,6 +337,7 @@ func (r Revision) ComputeContentDigest() (string, error) {
 		Generation:        cloneGenerationConfig(configuration.Generation),
 		Runtime:           configuration.Runtime,
 		Tools:             cloneTools(configuration.Tools),
+		MCPBindings:       cloneMCPBindings(configuration.MCPBindings),
 		Chain:             configuration.Chain.Clone(),
 	}
 	encoded, err := json.Marshal(payload)
@@ -381,6 +388,11 @@ func normalizeDraftConfiguration(configuration DraftConfiguration) (DraftConfigu
 		return DraftConfiguration{}, err
 	}
 	normalized.Tools = tools
+	mcpBindings, err := normalizeMCPBindings(configuration.MCPBindings)
+	if err != nil {
+		return DraftConfiguration{}, err
+	}
+	normalized.MCPBindings = mcpBindings
 	chain, err := normalizeChainConfiguration(configuration.Chain)
 	if err != nil {
 		return DraftConfiguration{}, err
@@ -424,6 +436,9 @@ func validateRevisionDefinition(kind Kind, schemaVersion int, configuration Draf
 		return err
 	}
 	if _, err := normalizeTools(configuration.Tools); err != nil {
+		return err
+	}
+	if _, err := normalizeMCPBindings(configuration.MCPBindings); err != nil {
 		return err
 	}
 	return nil
@@ -543,7 +558,7 @@ func sameDraftConfiguration(left, right DraftConfiguration) bool {
 	if left.Description != right.Description || left.Instruction != right.Instruction || left.GlobalInstruction != right.GlobalInstruction || left.ModelProfileID != right.ModelProfileID || left.Runtime != right.Runtime {
 		return false
 	}
-	if !sameGenerationConfig(left.Generation, right.Generation) || len(left.Tools) != len(right.Tools) {
+	if !sameGenerationConfig(left.Generation, right.Generation) || len(left.Tools) != len(right.Tools) || !sameMCPBindings(left.MCPBindings, right.MCPBindings) {
 		return false
 	}
 	if !sameChainConfiguration(left.Chain, right.Chain) {

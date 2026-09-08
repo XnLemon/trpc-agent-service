@@ -11,7 +11,7 @@ func TestMCPBindingNormalize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Transport != "streamable" || len(got.ToolAllow) != 2 || got.ToolAllow[0] != "search" {
+	if got.Transport != "streamable" || len(got.ToolAllow) != 2 || got.ToolAllow[0] != "read" {
 		t.Fatalf("normalized MCP binding = %+v", got)
 	}
 
