@@ -55,7 +55,11 @@ func executionMetadataValue(ctx context.Context) (ExecutionMetadata, bool) {
 	if nilvalue.Is(ctx) {
 		return ExecutionMetadata{}, false
 	}
-	metadata, present := ctx.Value(executionMetadataContextKey{}).(ExecutionMetadata)
+	raw, err := nilvalue.ContextValue(ctx, executionMetadataContextKey{})
+	if err != nil {
+		return ExecutionMetadata{}, false
+	}
+	metadata, present := raw.(ExecutionMetadata)
 	return metadata, present
 }
 

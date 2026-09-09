@@ -73,7 +73,7 @@ func (p *Provider) Deliver(ctx context.Context, value runtimestorage.ReplyOutbox
 			receipt, err = "", &outbox.DeliveryError{Class: "provider_invalid_receipt", Retryable: false}
 		}
 	}()
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return "", telegramDeliveryError(ctx, err)
 	}
 	key := deliveryKey(value)
@@ -156,10 +156,10 @@ func (p *Provider) sendDocument(ctx context.Context, value runtimestorage.ReplyO
 func (p *Provider) attachmentUpload(ctx context.Context, value runtimestorage.ReplyOutbox) (*models.InputFileUpload, bool, error) {
 	content, err := p.attachments.Load(ctx, value.TenantID, value.EventID, value.Attachment)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || (!nilvalue.Is(ctx) && errors.Is(ctx.Err(), context.Canceled)) {
+		if errors.Is(err, context.Canceled) || (!nilvalue.Is(ctx) && errors.Is(nilvalue.ContextErr(ctx), context.Canceled)) {
 			return nil, false, &outbox.DeliveryError{Class: "canceled", Retryable: true}
 		}
-		if errors.Is(err, context.DeadlineExceeded) || (!nilvalue.Is(ctx) && errors.Is(ctx.Err(), context.DeadlineExceeded)) {
+		if errors.Is(err, context.DeadlineExceeded) || (!nilvalue.Is(ctx) && errors.Is(nilvalue.ContextErr(ctx), context.DeadlineExceeded)) {
 			return nil, false, &outbox.DeliveryError{Class: "timeout", Retryable: true}
 		}
 		return nil, false, nil
@@ -183,10 +183,10 @@ func (p *Provider) sendText(ctx context.Context, text string) (*models.Message, 
 }
 
 func telegramDeliveryError(ctx context.Context, err error) error {
-	if errors.Is(err, context.Canceled) || (!nilvalue.Is(ctx) && errors.Is(ctx.Err(), context.Canceled)) {
+	if errors.Is(err, context.Canceled) || (!nilvalue.Is(ctx) && errors.Is(nilvalue.ContextErr(ctx), context.Canceled)) {
 		return &outbox.DeliveryError{Class: "canceled", Retryable: true}
 	}
-	if errors.Is(err, context.DeadlineExceeded) || (!nilvalue.Is(ctx) && errors.Is(ctx.Err(), context.DeadlineExceeded)) {
+	if errors.Is(err, context.DeadlineExceeded) || (!nilvalue.Is(ctx) && errors.Is(nilvalue.ContextErr(ctx), context.DeadlineExceeded)) {
 		return &outbox.DeliveryError{Class: "timeout", Retryable: true}
 	}
 	return &outbox.DeliveryError{Class: "provider_error", Retryable: true}
@@ -197,7 +197,7 @@ func (p *Provider) Reconcile(ctx context.Context, value runtimestorage.ReplyOutb
 	if p == nil || nilvalue.Is(ctx) {
 		return outbox.DeliveryUnknown, "", nil
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return outbox.DeliveryUnknown, "", err
 	}
 	p.mu.Lock()

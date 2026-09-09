@@ -17,7 +17,7 @@ var (
 
 func mapInitCommandError(ctx context.Context, err error, message string) error {
 	if !nilvalue.Is(ctx) {
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr := nilvalue.ContextErr(ctx); ctxErr != nil {
 			return ctxErr
 		}
 	}

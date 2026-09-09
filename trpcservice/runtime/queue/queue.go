@@ -170,7 +170,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	if closed {
 		return false, ErrClosed
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return false, err
 	}
 	tenantID := w.tenantID
@@ -184,7 +184,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		}
 		return false, err
 	}
-	err = w.handler(ctx, cloneTask(task))
+	err = callHandlerSafely(w.handler, ctx, cloneTask(task))
 	if err == nil {
 		_, completeErr := w.store.Complete(ctx, task.TenantID, task.TaskID, w.owner, task.FencingToken)
 		return true, completeErr
@@ -211,7 +211,13 @@ func (w *Worker) Start(ctx context.Context) error {
 	if w.closed || w.started {
 		return ErrClosed
 	}
-	workerCtx, cancel := context.WithCancel(ctx)
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		return err
+	}
+	workerCtx, cancel, contextErr := withCancelSafely(ctx)
+	if contextErr != nil {
+		return contextErr
+	}
 	w.cancel = cancel
 	w.started = true
 	go func() {
@@ -222,8 +228,44 @@ func (w *Worker) Start(ctx context.Context) error {
 	return nil
 }
 
+func callHandlerSafely(handler Handler, ctx context.Context, task Task) (err error) {
+	if handler == nil || nilvalue.Is(ctx) {
+		return ErrInvalid
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrInvalid
+		} else if nilvalue.Is(err) {
+			err = nil
+		}
+	}()
+	return handler(ctx, task)
+}
+
+func withCancelSafely(parent context.Context) (ctx context.Context, cancel context.CancelFunc, err error) {
+	if nilvalue.Is(parent) {
+		return nil, func() {}, nilvalue.ErrInvalidContext
+	}
+	if _, err := nilvalue.ContextDone(parent); err != nil {
+		return nil, func() {}, err
+	}
+	defer func() {
+		if recover() != nil {
+			ctx = nil
+			cancel = func() {}
+			err = nilvalue.ErrInvalidContext
+		}
+	}()
+	ctx, cancel = context.WithCancel(parent)
+	return ctx, cancel, nil
+}
+
 func (w *Worker) loop(ctx context.Context) error {
 	defer close(w.done)
+	done, doneErr := nilvalue.ContextDone(ctx)
+	if doneErr != nil {
+		return doneErr
+	}
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 	for {
@@ -231,8 +273,8 @@ func (w *Worker) loop(ctx context.Context) error {
 			return err
 		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-done:
+			return nilvalue.ContextErr(ctx)
 		case <-ticker.C:
 		}
 	}
@@ -310,7 +352,11 @@ func taskTenantHint(ctx context.Context) string {
 	if nilvalue.Is(ctx) {
 		return ""
 	}
-	value, _ := ctx.Value(tenantContextKey{}).(string)
+	raw, err := nilvalue.ContextValue(ctx, tenantContextKey{})
+	if err != nil {
+		return ""
+	}
+	value, _ := raw.(string)
 	return value
 }
 
@@ -511,7 +557,7 @@ func contextErr(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return ErrInvalid
 	}
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
 }
 
 var _ Store = (*MemoryStore)(nil)

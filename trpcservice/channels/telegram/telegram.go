@@ -129,7 +129,7 @@ func (downloader telegramMediaDownloader) Download(ctx context.Context, fileID s
 	if nilvalue.Is(ctx) || nilvalue.Is(downloader.client) || nilvalue.Is(downloader.httpClient) || fileID == "" || downloader.maximum < 1 {
 		return nil, ErrAttachment
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	file, err := downloader.client.GetFile(ctx, &bot.GetFileParams{FileID: fileID})
@@ -186,7 +186,7 @@ func readTelegramMediaResponse(ctx context.Context, response *http.Response, max
 
 func telegramAttachmentError(ctx context.Context) error {
 	if !nilvalue.Is(ctx) {
-		if err := ctx.Err(); err != nil {
+		if err := nilvalue.ContextErr(ctx); err != nil {
 			return err
 		}
 	}
@@ -403,7 +403,7 @@ func normalizeConfig(ctx context.Context, config Config) (normalizedConfig, erro
 	if nilvalue.Is(ctx) {
 		return normalizedConfig{}, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return normalizedConfig{}, err
 	}
 	token, err := normalizeToken(config.BotToken)
@@ -452,7 +452,7 @@ func (adapter *Adapter) verifyIdentity(ctx context.Context, providerAccountID st
 	}
 	me, err := callBotGetMe(adapter.client, ctx)
 	if err != nil {
-		if contextErr := ctx.Err(); contextErr != nil {
+		if contextErr := nilvalue.ContextErr(ctx); contextErr != nil {
 			return contextErr
 		}
 		adapter.report(ErrorOperationInitialization, ErrInitialization)
@@ -471,7 +471,7 @@ func (adapter *Adapter) Run(ctx context.Context) (err error) {
 	if nilvalue.Is(ctx) {
 		return fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	if adapter == nil {
@@ -549,7 +549,7 @@ func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update)
 		_ = adapter.metrics.Operation(operationCtx, started, map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "telegram"}, err)
 	}()
 	ctx = operationCtx
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	adapter.mu.RLock()
@@ -689,10 +689,14 @@ func (adapter *Adapter) dispatch(ctx context.Context, message gateway.InboundMes
 	events = make([]gateway.DispatchEvent, 0, 4)
 	done := false
 	failed := false
+	contextDone, contextDoneErr := nilvalue.ContextDone(ctx)
+	if contextDoneErr != nil {
+		return nil, contextDoneErr
+	}
 	for {
 		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		case <-contextDone:
+			return nil, nilvalue.ContextErr(ctx)
 		case event, ok := <-stream:
 			if !ok {
 				if !done || failed {
@@ -735,7 +739,7 @@ func (adapter *Adapter) sendText(ctx context.Context, message *models.Message, t
 	ctx = operationCtx
 	chunks := splitText(text, maximumReplyRunes)
 	for _, chunk := range chunks {
-		if err := ctx.Err(); err != nil {
+		if err := nilvalue.ContextErr(ctx); err != nil {
 			return err
 		}
 		_, err := adapter.client.SendMessage(ctx, &bot.SendMessageParams{
@@ -838,7 +842,7 @@ func (adapter *Adapter) ingestAttachments(ctx context.Context, externalMessageID
 	}
 	references = make([]attachment.Reference, 0, len(descriptors))
 	for index, descriptor := range descriptors {
-		if err := ctx.Err(); err != nil {
+		if err := nilvalue.ContextErr(ctx); err != nil {
 			return nil, err
 		}
 		reader, err := adapter.mediaDownloader.Download(ctx, descriptor.fileID)
@@ -854,7 +858,7 @@ func (adapter *Adapter) ingestAttachments(ctx context.Context, externalMessageID
 		data, readErr := io.ReadAll(io.LimitReader(reader, adapter.maxAttachmentBytes+1))
 		closeErr := reader.Close()
 		if readErr != nil || closeErr != nil {
-			if contextErr := ctx.Err(); contextErr != nil {
+			if contextErr := nilvalue.ContextErr(ctx); contextErr != nil {
 				return nil, contextErr
 			}
 			return nil, ErrAttachment

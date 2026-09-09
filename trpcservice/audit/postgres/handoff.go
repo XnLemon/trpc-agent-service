@@ -33,7 +33,7 @@ func (s *HandoffStore) check(ctx context.Context, tenantID string) error {
 	if nilvalue.Is(ctx) {
 		return audit.ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	if s == nil || s.db == nil {

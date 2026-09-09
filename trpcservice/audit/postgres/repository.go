@@ -42,7 +42,7 @@ func (s *Store) check(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return audit.ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	if s == nil || s.tenantID == "" || s.db == nil {

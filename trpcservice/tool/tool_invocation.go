@@ -18,6 +18,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/jsonstrict"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 )
 
@@ -215,7 +216,7 @@ func (toolInvocationDispatchPlugin) Register(registry *plugin.Registry) {
 		if err != nil {
 			return nil, redactedToolError(err)
 		}
-		if !validToolInvocationValue(value, input) || value.Status != runtimestorage.ToolInvocationDispatching {
+		if !validToolInvocationValue(value, input) || value.Status != runtimestorage.ToolInvocationDispatching || value.FencingToken != state.fence+1 {
 			return nil, errToolInvocationState
 		}
 		// accepted is the durable hand-off point. A crash after this transition
@@ -229,7 +230,7 @@ func (toolInvocationDispatchPlugin) Register(registry *plugin.Registry) {
 		if err != nil {
 			return nil, redactedToolError(err)
 		}
-		if !validToolInvocationValue(value, input) || value.Status != runtimestorage.ToolInvocationAccepted {
+		if !validToolInvocationValue(value, input) || value.Status != runtimestorage.ToolInvocationAccepted || value.FencingToken != state.fence+2 {
 			return nil, errToolInvocationState
 		}
 		state.status, state.fence, state.store = value.Status, value.FencingToken, store
@@ -302,6 +303,7 @@ func (toolInvocationDispatchPlugin) Register(registry *plugin.Registry) {
 			// A previous BeforeTool guardrail short-circuited the actual call.
 			to, errorClass = runtimestorage.ToolInvocationDenied, "denied"
 		}
+		previousFence := state.fence
 		value, err := callTransitionToolInvocation(ctx, store, runtimestorage.ToolInvocationTransition{
 			TenantID: state.tenantID, AppID: state.appID, InvocationID: state.invocationID,
 			From: state.status, To: to, Owner: ownerFromExecutionContext(ctx),
@@ -310,7 +312,7 @@ func (toolInvocationDispatchPlugin) Register(registry *plugin.Registry) {
 		if err != nil {
 			return nil, redactedToolError(err)
 		}
-		if !validToolInvocationValue(value, input) || value.Status != to {
+		if !validToolInvocationValue(value, input) || value.Status != to || value.FencingToken != previousFence+1 {
 			return nil, errToolInvocationState
 		}
 		// Audit is a value type with an intentionally private writer; its
@@ -381,7 +383,7 @@ func reconcileShortCircuitedToolEvent(ctx context.Context, current *event.Event)
 			}
 			return current, redactedToolError(transitionErr)
 		}
-		if !validToolInvocationValue(updated, input) || updated.Status != to {
+		if !validToolInvocationValue(updated, input) || updated.Status != to || updated.FencingToken != value.FencingToken+1 {
 			return current, errToolInvocationState
 		}
 		if auditErr := RecordToolInvocationAudit(ctx, execution.Audit, updated); auditErr != nil {
@@ -545,7 +547,11 @@ func toolInvocationStateFromContext(ctx context.Context) (toolInvocationState, b
 	if isNilMCPValue(ctx) {
 		return toolInvocationState{}, false
 	}
-	state, ok := ctx.Value(toolInvocationStateKey{}).(toolInvocationState)
+	raw, valueErr := nilvalue.ContextValue(ctx, toolInvocationStateKey{})
+	if valueErr != nil {
+		return toolInvocationState{}, false
+	}
+	state, ok := raw.(toolInvocationState)
 	return state, ok && !isNilMCPValue(state.store) && validMCPExecutionID(state.tenantID, true) && validMCPExecutionID(state.appID, true) && validMCPExecutionID(state.invocationID, true) && validMCPExecutionID(state.eventID, true) && validMCPExecutionID(state.requestID, true) && validMCPExecutionID(state.traceID, false) && validMCPExecutionID(state.toolCallID, true) && validMCPExecutionID(state.toolName, true) && state.fence > 0 && len(state.argsSHA256) == sha256.Size*2 && strings.ToLower(state.argsSHA256) == state.argsSHA256
 }
 

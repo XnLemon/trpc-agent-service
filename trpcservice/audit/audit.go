@@ -431,7 +431,7 @@ func check(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return ErrInvalid
 	}
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
 }
 
 // Append validates and stores an event with idempotent deduplication.

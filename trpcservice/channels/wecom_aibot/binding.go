@@ -51,7 +51,7 @@ func NewForBinding(ctx context.Context, config BindingConfig) (*Manager, error) 
 	if nilvalue.Is(ctx) || nilvalue.Is(config.Bindings) || nilvalue.Is(config.Credentials) || nilvalue.Is(config.Dispatcher) {
 		return nil, ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	if err := config.Target.Validate(); err != nil || config.Target.Channel != channels.ChannelWeComAIBot {

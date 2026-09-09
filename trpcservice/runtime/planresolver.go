@@ -92,7 +92,17 @@ func (resolver *PlanResolver) Ready() bool {
 // Resolve constructs one immutable plan. All non-cancellation failures are
 // reduced to ErrPlanUnavailable so repository existence and provider details do
 // not escape this internal scheduling boundary.
-func (resolver *PlanResolver) Resolve(ctx context.Context, request PlanRequest) (ExecutionPlan, error) {
+func (resolver *PlanResolver) Resolve(ctx context.Context, request PlanRequest) (plan ExecutionPlan, err error) {
+	defer func() {
+		if recover() != nil {
+			plan = ExecutionPlan{}
+			if contextErr := planContextErr(ctx); contextErr != nil {
+				err = contextErr
+			} else {
+				err = ErrPlanUnavailable
+			}
+		}
+	}()
 	if nilvalue.Is(ctx) {
 		return ExecutionPlan{}, fmt.Errorf("%w: context is required", ErrInvalidPlanRequest)
 	}
@@ -109,7 +119,7 @@ func (resolver *PlanResolver) Resolve(ctx context.Context, request PlanRequest) 
 	if err != nil {
 		return ExecutionPlan{}, err
 	}
-	plan, err := NewExecutionPlanFromInput(ExecutionPlanInput{
+	plan, err = NewExecutionPlanFromInput(ExecutionPlanInput{
 		TenantSnapshot: inputs.tenantSnapshot,
 		AppRoot:        inputs.app,
 		Revision:       inputs.revision,
@@ -202,5 +212,5 @@ func planContextErr(ctx context.Context) (err error) {
 			err = ErrInvalidPlanRequest
 		}
 	}()
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
 }

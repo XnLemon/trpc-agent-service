@@ -525,10 +525,14 @@ func (m *responsesModel) emitError(out chan<- *trpcmodel.Response, err error) {
 	out <- &trpcmodel.Response{Done: true, Error: &trpcmodel.ResponseError{Message: err.Error(), Type: trpcmodel.ErrorTypeAPIError}}
 }
 func sendResponse(ctx context.Context, out chan<- *trpcmodel.Response, response *trpcmodel.Response) bool {
+	done, doneErr := nilvalue.ContextDone(ctx)
+	if doneErr != nil {
+		return false
+	}
 	select {
 	case out <- response:
 		return true
-	case <-ctx.Done():
+	case <-done:
 		return false
 	}
 }

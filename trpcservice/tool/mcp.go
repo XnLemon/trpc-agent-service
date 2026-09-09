@@ -48,10 +48,11 @@ var (
 func isNilMCPValue(value any) bool { return nilvalue.Is(value) }
 
 func mcpContextErr(ctx context.Context) error {
-	if isNilMCPValue(ctx) {
+	err := nilvalue.ContextErr(ctx)
+	if errors.Is(err, nilvalue.ErrInvalidContext) {
 		return ErrInvalidMCPBinding
 	}
-	return ctx.Err()
+	return err
 }
 
 // NewMCPToolSet materializes one ToolSet from a secret-free binding. HTTP
@@ -80,6 +81,8 @@ func lookupMCPHTTPAddresses(ctx context.Context, resolver mcpHostResolver, host 
 		if recover() != nil {
 			addresses = nil
 			err = ErrInvalidMCPBinding
+		} else if nilvalue.Is(err) {
+			err = nil
 		}
 	}()
 	return resolver.LookupIPAddr(ctx, host)
@@ -93,6 +96,8 @@ func resolveMCPSecret(ctx context.Context, resolver modelprofile.SecretResolver,
 		if recover() != nil {
 			secret = modelprofile.SecretValue{}
 			err = ErrInvalidMCPBinding
+		} else if nilvalue.Is(err) {
+			err = nil
 		}
 	}()
 	return resolver.Resolve(ctx, scope)
@@ -110,12 +115,23 @@ func newMCPToolSet(ctx context.Context, tenantID string, binding MCPBinding, res
 		return nil, err
 	}
 	if value.Transport == "stdio" {
-		return newStdioMCPToolSet(ctx, value)
+		set, err := newStdioMCPToolSet(ctx, value)
+		if err != nil {
+			return nil, err
+		}
+		if err := mcpContextErr(ctx); err != nil {
+			_ = set.Close()
+			return nil, err
+		}
+		return set, nil
 	}
 	clientOptions := append([]trpcmcp.ClientOption(nil), network.clientOptions...)
 	if value.ServerURL != "" {
 		handler := network.requestHandler
-		resolveCtx, cancelResolve := context.WithTimeout(ctx, time.Duration(value.TimeoutSeconds)*time.Second)
+		resolveCtx, cancelResolve, resolveContextErr := withMCPTimeout(ctx, time.Duration(value.TimeoutSeconds)*time.Second)
+		if resolveContextErr != nil {
+			return nil, fmt.Errorf("%w: resolve context is unavailable", ErrInvalidMCPBinding)
+		}
 		endpoint, endpointErr := newPinnedMCPHTTPHandler(resolveCtx, value.ServerURL, network.resolver)
 		cancelResolve()
 		if endpointErr != nil {
@@ -169,6 +185,10 @@ func newMCPToolSet(ctx context.Context, tenantID string, binding MCPBinding, res
 	if err := initUpstreamMCPToolSet(ctx, set); err != nil {
 		_ = safeCloseMCPToolSet(set)
 		return nil, fmt.Errorf("%w: initialize MCP tool set", ErrInvalidMCPBinding)
+	}
+	if err := mcpContextErr(ctx); err != nil {
+		_ = safeCloseMCPToolSet(set)
+		return nil, fmt.Errorf("%w: MCP context was canceled", ErrInvalidMCPBinding)
 	}
 	return set, nil
 }
@@ -237,7 +257,7 @@ func validateMCPHTTPURL(raw string) error {
 }
 
 func newPinnedMCPHTTPHandler(ctx context.Context, rawURL string, resolver mcpHostResolver) (*pinnedMCPHTTPHandler, error) {
-	if isNilMCPValue(ctx) || ctx.Err() != nil {
+	if err := mcpContextErr(ctx); err != nil {
 		return nil, fmt.Errorf("%w: active context is required", ErrInvalidMCPBinding)
 	}
 	if isNilMCPValue(resolver) {
@@ -257,6 +277,9 @@ func newPinnedMCPHTTPHandler(ctx context.Context, rawURL string, resolver mcpHos
 	addresses, err := lookupMCPHTTPAddresses(ctx, resolver, host)
 	if err != nil || len(addresses) == 0 {
 		return nil, fmt.Errorf("%w: resolve HTTP endpoint", ErrInvalidMCPBinding)
+	}
+	if err := mcpContextErr(ctx); err != nil {
+		return nil, err
 	}
 	ips := make([]net.IP, 0, len(addresses))
 	for _, address := range addresses {
@@ -386,7 +409,7 @@ func validMCPHTTPQuery(value string) bool {
 }
 
 func (handler *pinnedMCPHTTPHandler) validateRequest(ctx context.Context, request *http.Request) error {
-	if isNilMCPValue(ctx) || ctx.Err() != nil {
+	if err := mcpContextErr(ctx); err != nil {
 		return fmt.Errorf("%w: active context is required", ErrInvalidMCPBinding)
 	}
 	if handler == nil || request == nil || request.URL == nil || request.URL.Scheme != "https" || strings.ToLower(request.URL.Hostname()) != handler.host || request.URL.User != nil || request.URL.ForceQuery || request.URL.Fragment != "" || request.URL.Opaque != "" {
@@ -395,7 +418,7 @@ func (handler *pinnedMCPHTTPHandler) validateRequest(ctx context.Context, reques
 	if request.Host != "" && !strings.EqualFold(request.Host, request.URL.Host) {
 		return fmt.Errorf("%w: MCP request host header escaped pinned endpoint", ErrInvalidMCPBinding)
 	}
-	if !validMCPHTTPQuery(request.URL.RawQuery) {
+	if request.URL.RawQuery != handler.baseQuery() || !validMCPHTTPQuery(request.URL.RawQuery) {
 		return fmt.Errorf("%w: MCP request query is invalid", ErrInvalidMCPBinding)
 	}
 	path, ok := mcpEscapedPath(request.URL)
@@ -437,6 +460,45 @@ func limitMCPHTTPRequest(request *http.Request) error {
 	return nil
 }
 
+// prepareMCPHTTPRequest applies the wire limit and then restores a complete,
+// strictly validated JSON document. The upstream MCP client uses the request
+// body after this hook returns; validating it here prevents encoding/json in a
+// third-party transport from accepting duplicate keys, invalid Unicode, or a
+// trailing second value.
+func prepareMCPHTTPRequest(request *http.Request) error {
+	if err := limitMCPHTTPRequest(request); err != nil {
+		return err
+	}
+	if request.Body == nil {
+		return nil
+	}
+	payload, err := readMCPJSONBody(request.Body)
+	request.Body = io.NopCloser(bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	request.ContentLength = int64(len(payload))
+	return nil
+}
+
+func readMCPJSONBody(body io.ReadCloser) ([]byte, error) {
+	if body == nil {
+		return nil, fmt.Errorf("%w: MCP JSON body is required", ErrInvalidMCPBinding)
+	}
+	payload, readErr := io.ReadAll(io.LimitReader(body, maxMCPWireBytes+1))
+	_ = closeMCPCloser(body)
+	if readErr != nil {
+		return payload, readErr
+	}
+	if int64(len(payload)) > maxMCPWireBytes {
+		return payload, errMCPWireTooLarge
+	}
+	if err := jsonstrict.Validate(payload, true); err != nil {
+		return payload, fmt.Errorf("%w: invalid MCP JSON document", ErrInvalidMCPBinding)
+	}
+	return payload, nil
+}
+
 func (handler *pinnedMCPHTTPHandler) Handle(ctx context.Context, client *http.Client, request *http.Request) (response *http.Response, err error) {
 	defer func() {
 		if recover() != nil {
@@ -453,7 +515,7 @@ func (handler *pinnedMCPHTTPHandler) Handle(ctx context.Context, client *http.Cl
 	if err := handler.validateRequest(ctx, request); err != nil {
 		return nil, err
 	}
-	if err := limitMCPHTTPRequest(request); err != nil {
+	if err := prepareMCPHTTPRequest(request); err != nil {
 		return nil, err
 	}
 	timeout := time.Duration(0)
@@ -475,7 +537,7 @@ func (handler *pinnedMCPHTTPHandler) Handle(ctx context.Context, client *http.Cl
 		if response != nil && response.Body != nil {
 			_ = closeMCPCloser(response.Body)
 		}
-		return nil, errMCPWireTooLarge
+		return nil, fmt.Errorf("%w: MCP response origin is unavailable", ErrInvalidMCPBinding)
 	}
 	if err := handler.validateRequest(ctx, response.Request); err != nil {
 		if response.Body != nil {
@@ -487,6 +549,13 @@ func (handler *pinnedMCPHTTPHandler) Handle(ctx context.Context, client *http.Cl
 		return nil, err
 	}
 	return response, nil
+}
+
+func (handler *pinnedMCPHTTPHandler) baseQuery() string {
+	if handler == nil || handler.baseURL == nil {
+		return ""
+	}
+	return handler.baseURL.RawQuery
 }
 
 func (handler *pinnedMCPHTTPHandler) ssePathAllowed(method, path string) bool {
@@ -506,8 +575,8 @@ func (handler *pinnedMCPHTTPHandler) observeSSEEndpoint(value string) {
 	if !utf8.ValidString(value) || strings.IndexFunc(value, unicode.IsControl) >= 0 {
 		return
 	}
-	parsed, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || parsed.User != nil || parsed.ForceQuery || parsed.Fragment != "" || parsed.Opaque != "" || !validMCPHTTPQuery(parsed.RawQuery) {
+	parsed, err := url.Parse(trimMCPASCIIWhitespace(value))
+	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Opaque != "" || !validMCPHTTPQuery(parsed.RawQuery) {
 		return
 	}
 	if !parsed.IsAbs() {
@@ -563,17 +632,30 @@ func callMCPHTTPHandler(ctx context.Context, client *http.Client, handler trpcmc
 	return handler.Handle(ctx, client, request)
 }
 
-func (handler *validatedMCPHTTPHandler) Handle(ctx context.Context, client *http.Client, request *http.Request) (*http.Response, error) {
+func (handler *validatedMCPHTTPHandler) Handle(ctx context.Context, client *http.Client, request *http.Request) (response *http.Response, err error) {
+	defer func() {
+		if recover() != nil {
+			if response != nil && response.Body != nil {
+				_ = closeMCPCloser(response.Body)
+			}
+			response = nil
+			err = fmt.Errorf("%w: MCP HTTP handler failed", ErrInvalidMCPBinding)
+		}
+		if err != nil && response != nil && response.Body != nil {
+			_ = closeMCPCloser(response.Body)
+			response = nil
+		}
+	}()
 	if handler == nil || handler.endpoint == nil || isNilMCPValue(handler.delegate) {
 		return nil, fmt.Errorf("%w: MCP HTTP handler is unavailable", ErrInvalidMCPBinding)
 	}
 	if err := handler.endpoint.validateRequest(ctx, request); err != nil {
 		return nil, err
 	}
-	if err := limitMCPHTTPRequest(request); err != nil {
+	if err := prepareMCPHTTPRequest(request); err != nil {
 		return nil, err
 	}
-	response, err := callMCPHTTPHandler(ctx, client, handler.delegate, request)
+	response, err = callMCPHTTPHandler(ctx, client, handler.delegate, request)
 	if err != nil {
 		if response != nil && response.Body != nil {
 			_ = closeMCPCloser(response.Body)
@@ -782,9 +864,23 @@ func limitMCPHTTPResponseWithEndpoint(response *http.Response, endpointCallback 
 	contentType := strings.ToLower(response.Header.Get("Content-Type"))
 	if strings.Contains(contentType, "text/event-stream") {
 		response.Body = &limitedMCPSSEBody{reader: response.Body, endpointCallback: endpointCallback}
-	} else {
-		response.Body = &limitedMCPBody{reader: &io.LimitedReader{R: response.Body, N: maxMCPWireBytes}, closer: response.Body}
+		return nil
 	}
+	// A successful non-SSE MCP response is a JSON-RPC object. Read and restore
+	// it once so the permissive upstream decoder cannot bypass strict-document
+	// validation. Non-200 responses are left to the upstream status handling;
+	// some servers legitimately return an empty body with an error status.
+	if response.StatusCode == http.StatusOK {
+		payload, err := readMCPJSONBody(&limitedMCPBody{reader: &io.LimitedReader{R: response.Body, N: maxMCPWireBytes}, closer: response.Body})
+		response.Body = io.NopCloser(bytes.NewReader(payload))
+		if err != nil {
+			closeResponse()
+			return err
+		}
+		response.ContentLength = int64(len(payload))
+		return nil
+	}
+	response.Body = &limitedMCPBody{reader: &io.LimitedReader{R: response.Body, N: maxMCPWireBytes}, closer: response.Body}
 	return nil
 }
 
@@ -796,6 +892,7 @@ type limitedMCPSSEBody struct {
 	line             []byte
 	eventType        string
 	eventData        string
+	eventErr         error
 	endpointCallback func(string)
 	validator        mcpUTF8Validator
 	finished         bool
@@ -830,6 +927,9 @@ func (body *limitedMCPSSEBody) Read(p []byte) (n int, err error) {
 			}
 			body.processLine()
 			body.finishEvent()
+			if body.eventErr != nil {
+				return 0, body.eventErr
+			}
 			body.finished = true
 			return 0, io.EOF
 		}
@@ -855,6 +955,9 @@ func (body *limitedMCPSSEBody) Read(p []byte) (n int, err error) {
 			// data line.
 			if blank {
 				body.finishEvent()
+				if body.eventErr != nil {
+					return n, body.eventErr
+				}
 				body.eventBytes = 0
 			}
 			continue
@@ -877,6 +980,9 @@ func (body *limitedMCPSSEBody) Read(p []byte) (n int, err error) {
 		}
 		body.processLine()
 		body.finishEvent()
+		if body.eventErr != nil {
+			return n, body.eventErr
+		}
 		body.finished = true
 	}
 	return n, err
@@ -892,9 +998,13 @@ func (body *limitedMCPSSEBody) processLine() {
 		return
 	}
 	if strings.HasPrefix(line, "event:") {
-		body.eventType = strings.TrimSpace(line[6:])
+		body.eventType = trimMCPASCIIWhitespace(line[6:])
 	} else if strings.HasPrefix(line, "data:") {
-		body.eventData = strings.TrimSpace(line[5:])
+		value := trimMCPASCIIWhitespace(line[5:])
+		if body.eventData != "" {
+			body.eventData += "\n"
+		}
+		body.eventData += value
 	}
 }
 
@@ -907,8 +1017,14 @@ func (body *limitedMCPSSEBody) finishEvent() {
 			defer func() { _ = recover() }()
 			body.endpointCallback(body.eventData)
 		}()
+	} else if body.eventData != "" && jsonstrict.Validate([]byte(body.eventData), true) != nil {
+		body.eventErr = fmt.Errorf("%w: invalid MCP SSE JSON document", ErrInvalidMCPBinding)
 	}
 	body.eventType, body.eventData = "", ""
+}
+
+func trimMCPASCIIWhitespace(value string) string {
+	return strings.Trim(value, " \t\r\n")
 }
 
 func (body *limitedMCPSSEBody) Close() error {
@@ -992,7 +1108,7 @@ func (set namespacedMCPToolSet) Close() error {
 }
 
 func callMCPCallable(ctx context.Context, callable trpctool.CallableTool, args []byte) (result any, err error) {
-	if isNilMCPValue(ctx) || ctx.Err() != nil {
+	if contextErr := mcpContextErr(ctx); contextErr != nil {
 		return nil, contextError(ctx)
 	}
 	if isNilMCPValue(callable) {
@@ -1011,11 +1127,15 @@ func callMCPCallable(ctx context.Context, callable trpctool.CallableTool, args [
 			err = errMCPWireTooLarge
 		}
 	}()
-	return callable.Call(ctx, args)
+	result, callErr := callable.Call(ctx, args)
+	if nilvalue.Is(callErr) {
+		callErr = nil
+	}
+	return result, callErr
 }
 
 func callMCPStreamable(ctx context.Context, streamable trpctool.StreamableTool, args []byte) (reader *trpctool.StreamReader, err error) {
-	if isNilMCPValue(ctx) || ctx.Err() != nil {
+	if contextErr := mcpContextErr(ctx); contextErr != nil {
 		return nil, contextError(ctx)
 	}
 	if isNilMCPValue(streamable) || !validMCPArguments(args) {
@@ -1034,7 +1154,11 @@ func callMCPStreamable(ctx context.Context, streamable trpctool.StreamableTool, 
 			reader = nil
 		}
 	}()
-	return streamable.StreamableCall(ctx, args)
+	reader, callErr := streamable.StreamableCall(ctx, args)
+	if nilvalue.Is(callErr) {
+		callErr = nil
+	}
+	return reader, callErr
 }
 
 func mcpToolCapabilities(candidate trpctool.Tool) (trpctool.CallableTool, bool, trpctool.StreamableTool, bool) {
@@ -1053,7 +1177,7 @@ func mcpToolCapabilities(candidate trpctool.Tool) (trpctool.CallableTool, bool, 
 }
 
 func (set namespacedMCPToolSet) Tools(ctx context.Context) []trpctool.Tool {
-	if isNilMCPValue(ctx) || ctx.Err() != nil {
+	if mcpContextErr(ctx) != nil {
 		return nil
 	}
 	candidates, ok := safeMCPToolSetTools(ctx, set.delegate)
@@ -1162,7 +1286,7 @@ func (set resilientMCPToolSet) Close() error {
 }
 
 func (set resilientMCPToolSet) Tools(ctx context.Context) []trpctool.Tool {
-	if isNilMCPValue(ctx) || ctx.Err() != nil {
+	if mcpContextErr(ctx) != nil {
 		return nil
 	}
 	candidates, ok := safeMCPToolSetTools(ctx, set.delegate)
@@ -1219,7 +1343,7 @@ func (state *resilientMCPToolState) metadata() trpctool.ToolMetadata {
 }
 
 func (state *resilientMCPToolState) reconnectIfNeeded(ctx context.Context, owner trpctool.ToolSet, name string) error {
-	if state == nil || isNilMCPValue(owner) || isNilMCPValue(ctx) || ctx.Err() != nil {
+	if state == nil || isNilMCPValue(owner) || mcpContextErr(ctx) != nil {
 		return fmt.Errorf("%w: MCP tool reconnect context is unavailable", ErrInvalidMCPBinding)
 	}
 	state.refreshMu.Lock()
@@ -1355,7 +1479,7 @@ func safeMCPToolSetName(set trpctool.ToolSet) (name string, ok bool) {
 }
 
 func safeMCPToolSetTools(ctx context.Context, set trpctool.ToolSet) (tools []trpctool.Tool, ok bool) {
-	if isNilMCPValue(ctx) || ctx.Err() != nil || isNilMCPValue(set) {
+	if mcpContextErr(ctx) != nil || isNilMCPValue(set) {
 		return nil, false
 	}
 	defer func() {
@@ -1404,7 +1528,7 @@ func (tool resilientMCPTool) ToolMetadata() trpctool.ToolMetadata {
 }
 
 func (tool resilientMCPTool) Call(ctx context.Context, args []byte) (any, error) {
-	if isNilMCPValue(ctx) || ctx.Err() != nil {
+	if mcpContextErr(ctx) != nil {
 		return nil, contextError(ctx)
 	}
 	if tool.state == nil || isNilMCPValue(tool.owner) {
@@ -1415,7 +1539,7 @@ func (tool resilientMCPTool) Call(ctx context.Context, args []byte) (any, error)
 		return nil, err
 	}
 	result, callErr := callMCPCallable(ctx, delegate, args)
-	if callErr != nil && ctx.Err() == nil && mcpConnectionFailure(callErr) {
+	if callErr != nil && mcpContextErr(ctx) == nil && mcpConnectionFailure(callErr) {
 		tool.state.markReconnect()
 		resetMCPConnection(tool.owner)
 	}
@@ -1435,7 +1559,7 @@ func (tool resilientMCPCallableStreamableTool) StreamableCall(ctx context.Contex
 }
 
 func (tool resilientMCPTool) streamableCall(ctx context.Context, args []byte) (*trpctool.StreamReader, error) {
-	if isNilMCPValue(ctx) || ctx.Err() != nil {
+	if mcpContextErr(ctx) != nil {
 		return nil, contextError(ctx)
 	}
 	if tool.state == nil || isNilMCPValue(tool.owner) {
@@ -1446,7 +1570,7 @@ func (tool resilientMCPTool) streamableCall(ctx context.Context, args []byte) (*
 		return nil, err
 	}
 	reader, callErr := callMCPStreamable(ctx, delegate, args)
-	if callErr != nil && ctx.Err() == nil && mcpConnectionFailure(callErr) {
+	if callErr != nil && mcpContextErr(ctx) == nil && mcpConnectionFailure(callErr) {
 		tool.state.markReconnect()
 		resetMCPConnection(tool.owner)
 	}
@@ -1529,7 +1653,7 @@ func mcpBenignLifecycleError(err error) bool {
 // audit recorder, and request-local budget immediately before the remote call.
 // The input set must already use the stable mcp_<binding>__<tool> namespace.
 func GovernMCPToolSet(ctx context.Context, set trpctool.ToolSet, tenantID, appID string, binding MCPBinding, reviewer review.Reviewer) (trpctool.ToolSet, error) {
-	if isNilMCPValue(ctx) || ctx.Err() != nil {
+	if err := mcpContextErr(ctx); err != nil {
 		return nil, fmt.Errorf("%w: active context is required", ErrInvalidMCPBinding)
 	}
 	if isNilMCPValue(set) || !validMCPTenantID(tenantID) || appmodel.ValidateAppID(appID) != nil {
@@ -1607,7 +1731,7 @@ func (set governedMCPToolSet) Close() error {
 }
 
 func (set governedMCPToolSet) Tools(ctx context.Context) []trpctool.Tool {
-	if isNilMCPValue(ctx) || ctx.Err() != nil {
+	if mcpContextErr(ctx) != nil {
 		return nil
 	}
 	candidates, ok := safeMCPToolSetTools(ctx, set.delegate)
@@ -1650,7 +1774,7 @@ func (tool governedMCPToolBase) ToolMetadata() trpctool.ToolMetadata {
 }
 
 func (tool governedMCPToolBase) admit(ctx context.Context, args []byte) (ExecutionContext, string, error) {
-	if isNilMCPValue(ctx) || ctx.Err() != nil {
+	if mcpContextErr(ctx) != nil {
 		return ExecutionContext{}, "", contextError(ctx)
 	}
 	execution, err := mcpExecutionContextFromContext(ctx)
@@ -1815,7 +1939,7 @@ func auditMCPStream(ctx context.Context, reader *trpctool.StreamReader, executio
 		for {
 			chunk, err := reader.Recv()
 			if errors.Is(err, io.EOF) {
-				if !isNilMCPValue(ctx) && ctx.Err() == nil {
+				if mcpContextErr(ctx) == nil {
 					if auditErr := execution.Audit.ToolExecuted(ctx, execution.RequestID, execution.TraceID, name); auditErr != nil {
 						sendTerminal(redactedToolError(auditErr))
 					}
@@ -1857,7 +1981,11 @@ func mcpExecutionContextFromContext(ctx context.Context) (ExecutionContext, erro
 	if isNilMCPValue(ctx) {
 		return ExecutionContext{}, ErrMCPExecutionUnavailable
 	}
-	execution, ok := ctx.Value(executionContextKey{}).(ExecutionContext)
+	raw, valueErr := nilvalue.ContextValue(ctx, executionContextKey{})
+	if valueErr != nil {
+		return ExecutionContext{}, ErrMCPExecutionUnavailable
+	}
+	execution, ok := raw.(ExecutionContext)
 	if !ok || isNilMCPValue(execution.ToolInvocations) || !validMCPTenantID(execution.TenantID) || appmodel.ValidateAppID(execution.AppID) != nil || !validMCPExecutionID(execution.UserID, true) || !validMCPExecutionID(execution.SessionID, true) || !validMCPExecutionID(execution.EventID, true) || !validMCPExecutionID(execution.RequestID, true) || !validMCPExecutionID(execution.TraceID, false) {
 		return ExecutionContext{}, ErrMCPExecutionUnavailable
 	}
@@ -1914,7 +2042,7 @@ func validMCPArguments(args []byte) bool {
 }
 
 func decoderInputIsObject(value []byte) bool {
-	value = bytes.TrimSpace(value)
+	value = bytes.Trim(value, " \t\r\n")
 	return len(value) > 1 && value[0] == '{' && value[len(value)-1] == '}'
 }
 

@@ -84,11 +84,16 @@ func (runnerAdapter *trpcAgentPlatformRunner) Run(ctx context.Context, _ string,
 	if message.Role != model.RoleUser || strings.TrimSpace(message.Content) == "" || len(message.ContentParts) != 0 || len(message.ToolCalls) != 0 {
 		return nil, ErrInvalid
 	}
-	principal, ok := ctx.Value(trpcAgentPrincipalContextKey{}).(Principal)
+	rawPrincipal, valueErr := nilvalue.ContextValue(ctx, trpcAgentPrincipalContextKey{})
+	if valueErr != nil {
+		return nil, ErrUnauthenticated
+	}
+	principal, ok := rawPrincipal.(Principal)
 	if !ok || principal.Validate() != nil {
 		return nil, ErrUnauthenticated
 	}
-	correlation, _ := ctx.Value(trpcAgentCorrelationContextKey{}).(trpcAgentCorrelation)
+	rawCorrelation, _ := nilvalue.ContextValue(ctx, trpcAgentCorrelationContextKey{})
+	correlation, _ := rawCorrelation.(trpcAgentCorrelation)
 	// The upstream server validates returned event IDs against its wire-level
 	// RunOptions.RequestID. Keep that protocol correlation separate from the
 	// platform request ID used by Dispatcher, audit, idempotency, and budgets;
@@ -96,8 +101,8 @@ func (runnerAdapter *trpcAgentPlatformRunner) Run(ctx context.Context, _ string,
 	protocolRequestID := correlation.requestID
 	options := agent.RunOptions{}
 	for _, option := range runOpts {
-		if option != nil {
-			option(&options)
+		if option != nil && !callRunOption(option, &options) {
+			return nil, ErrInvalid
 		}
 	}
 	if strings.TrimSpace(options.RequestID) != "" {
@@ -120,7 +125,11 @@ func (runnerAdapter *trpcAgentPlatformRunner) Run(ctx context.Context, _ string,
 	runCtx := ctx
 	var cancel context.CancelFunc
 	if runnerAdapter.requestTimeout > 0 {
-		runCtx, cancel = context.WithTimeout(ctx, runnerAdapter.requestTimeout)
+		var timeoutErr error
+		runCtx, cancel, timeoutErr = withGatewayTimeout(ctx, runnerAdapter.requestTimeout)
+		if timeoutErr != nil {
+			return nil, timeoutErr
+		}
 	}
 	dispatchEvents, err := callDispatch(runCtx, runnerAdapter.dispatcher, DispatchRequest{
 		Principal: principal, Message: input, RequestID: platformRequestID, TraceID: traceID,
@@ -137,6 +146,13 @@ func (runnerAdapter *trpcAgentPlatformRunner) Run(ctx context.Context, _ string,
 		}
 		return nil, ErrNotReady
 	}
+	runDone, runDoneErr := nilvalue.ContextDone(runCtx)
+	if runDoneErr != nil {
+		if cancel != nil {
+			cancel()
+		}
+		return nil, runDoneErr
+	}
 	output := make(chan *event.Event)
 	go func() {
 		defer close(output)
@@ -151,7 +167,7 @@ func (runnerAdapter *trpcAgentPlatformRunner) Run(ctx context.Context, _ string,
 					if !completed {
 						select {
 						case output <- trpcAgentCompletionEvent(protocolRequestID):
-						case <-runCtx.Done():
+						case <-runDone:
 						}
 					}
 					return
@@ -168,18 +184,31 @@ func (runnerAdapter *trpcAgentPlatformRunner) Run(ctx context.Context, _ string,
 				}
 				select {
 				case output <- converted:
-				case <-runCtx.Done():
+				case <-runDone:
 					return
 				}
 				if terminal {
 					completed = true
 				}
-			case <-runCtx.Done():
+			case <-runDone:
 				return
 			}
 		}
 	}()
 	return output, nil
+}
+
+func callRunOption(option agent.RunOption, options *agent.RunOptions) (ok bool) {
+	if option == nil || options == nil {
+		return option == nil
+	}
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	option(options)
+	return true
 }
 
 func (runnerAdapter *trpcAgentPlatformRunner) Close() error { return nil }

@@ -138,5 +138,5 @@ func handoffContext(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return ErrInvalid
 	}
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
 }

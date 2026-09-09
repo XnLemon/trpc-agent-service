@@ -152,7 +152,7 @@ func (coordinator *Coordinator) Execute(ctx context.Context, request Request) (<
 	if nilvalue.Is(ctx) {
 		return nil, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	if request.RequestID == "" {
@@ -210,6 +210,7 @@ func (coordinator *Coordinator) Execute(ctx context.Context, request Request) (<
 
 func (coordinator *Coordinator) forward(ctx context.Context, stream executionStream) {
 	defer close(stream.output)
+	done, contextErr := executionDone(ctx)
 
 	var terminalState atomic.Uint32
 	terminalState.Store(terminalPending)
@@ -217,7 +218,7 @@ func (coordinator *Coordinator) forward(ctx context.Context, stream executionStr
 	defer close(cancelWatchDone)
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-done:
 			terminalState.CompareAndSwap(terminalPending, terminalCanceled)
 		case <-cancelWatchDone:
 		}
@@ -245,6 +246,13 @@ func (coordinator *Coordinator) forward(ctx context.Context, stream executionStr
 		_ = coordinator.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
 		_ = coordinator.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
 	}()
+
+	if contextErr != nil {
+		terminalErr = contextErr
+		coordinator.emitCancellation(stream.output, stream.request, contextErr)
+		terminalCommitted = true
+		return
+	}
 
 	for {
 		if coordinator.canceled(ctx, &terminalState) {
@@ -309,7 +317,7 @@ func (coordinator *Coordinator) forward(ctx context.Context, stream executionStr
 				terminalCommitted = true
 				return
 			}
-		case <-ctx.Done():
+		case <-done:
 			terminalErr = cancellationError(ctx)
 			coordinator.emitCancellation(stream.output, stream.request, terminalErr)
 			terminalCommitted = true
@@ -366,6 +374,19 @@ func cancellationError(ctx context.Context) error {
 	return context.Canceled
 }
 
+func executionDone(ctx context.Context) (done <-chan struct{}, err error) {
+	if nilvalue.Is(ctx) {
+		return nil, ErrInvalid
+	}
+	defer func() {
+		if recover() != nil {
+			done = nil
+			err = ErrInvalid
+		}
+	}()
+	return nilvalue.ContextDoneChannel(ctx)
+}
+
 func executionContextErr(ctx context.Context) (err error) {
 	if nilvalue.Is(ctx) {
 		return ErrInvalid
@@ -375,7 +396,7 @@ func executionContextErr(ctx context.Context) (err error) {
 			err = ErrInvalid
 		}
 	}()
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
 }
 
 func acquireExecutionLease(registry Registry, ctx context.Context, plan runtime.ExecutionPlan) (lease *runtimerunner.RunnerLease, err error) {
@@ -422,18 +443,22 @@ func mapRunnerEvent(event serviceagent.RunnerEvent, requestID, traceID string) (
 }
 
 func sendEvent(ctx context.Context, output chan<- Event, event Event) bool {
-	if nilvalue.Is(ctx) || ctx.Err() != nil {
+	if nilvalue.Is(ctx) || nilvalue.ContextErr(ctx) != nil {
+		return false
+	}
+	done, err := executionDone(ctx)
+	if err != nil {
 		return false
 	}
 	select {
-	case <-ctx.Done():
+	case <-done:
 		return false
 	default:
 	}
 	select {
 	case output <- event:
 		return true
-	case <-ctx.Done():
+	case <-done:
 		return false
 	}
 }

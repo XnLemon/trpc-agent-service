@@ -91,6 +91,12 @@ func (r Recorder) Record(ctx context.Context, event Event) error {
 	if nilvalue.Is(ctx) {
 		return ErrWriteFailed
 	}
+	if contextErr := nilvalue.ContextErr(ctx); contextErr != nil {
+		if errors.Is(contextErr, nilvalue.ErrInvalidContext) {
+			return ErrWriteFailed
+		}
+		return contextErr
+	}
 	if event.TenantID == "" {
 		event.TenantID = r.tenantID
 	}
@@ -109,6 +115,12 @@ func (r Recorder) Record(ctx context.Context, event Event) error {
 	if err := event.Validate(); err != nil {
 		return err
 	}
+	if contextErr := nilvalue.ContextErr(ctx); contextErr != nil {
+		if errors.Is(contextErr, nilvalue.ErrInvalidContext) {
+			return ErrWriteFailed
+		}
+		return contextErr
+	}
 	if _, err := appendAuditEvent(r.writer, ctx, event); err != nil {
 		return errors.Join(ErrWriteFailed, err)
 	}
@@ -123,6 +135,8 @@ func appendAuditEvent(writer Writer, ctx context.Context, event Event) (result A
 		if recover() != nil {
 			result = AppendResult{}
 			err = ErrWriteFailed
+		} else if nilvalue.Is(err) {
+			err = nil
 		}
 	}()
 	return writer.Append(ctx, event)

@@ -110,9 +110,13 @@ func waitContext(ctx context.Context, wait <-chan struct{}) error {
 	if nilvalue.Is(ctx) {
 		return context.Canceled
 	}
+	done, err := nilvalue.ContextDone(ctx)
+	if err != nil {
+		return err
+	}
 	select {
-	case <-ctx.Done():
-		return checkContext(ctx)
+	case <-done:
+		return nilvalue.ContextErr(ctx)
 	case <-wait:
 		return nil
 	}

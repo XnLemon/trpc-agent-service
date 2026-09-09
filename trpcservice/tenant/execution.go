@@ -63,7 +63,11 @@ func ConfigurationSnapshotFromContext(ctx context.Context) (ConfigurationSnapsho
 	if nilvalue.Is(ctx) {
 		return ConfigurationSnapshot{}, false
 	}
-	snapshot, ok := ctx.Value(contextKey{}).(ConfigurationSnapshot)
+	raw, valueErr := nilvalue.ContextValue(ctx, contextKey{})
+	if valueErr != nil {
+		return ConfigurationSnapshot{}, false
+	}
+	snapshot, ok := raw.(ConfigurationSnapshot)
 	if !ok || snapshot.tenant == nil {
 		return ConfigurationSnapshot{}, false
 	}

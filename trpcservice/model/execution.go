@@ -157,7 +157,11 @@ func ModelExecutionSnapshotFromContext(ctx context.Context) (ModelExecutionSnaps
 	if nilvalue.Is(ctx) {
 		return ModelExecutionSnapshot{}, false
 	}
-	snapshot, ok := ctx.Value(executionSnapshotContextKey{}).(ModelExecutionSnapshot)
+	raw, valueErr := nilvalue.ContextValue(ctx, executionSnapshotContextKey{})
+	if valueErr != nil {
+		return ModelExecutionSnapshot{}, false
+	}
+	snapshot, ok := raw.(ModelExecutionSnapshot)
 	if !ok || snapshot.validate() != nil {
 		return ModelExecutionSnapshot{}, false
 	}

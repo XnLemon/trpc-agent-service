@@ -86,7 +86,7 @@ func InitializeDemo(ctx context.Context, db *sql.DB, input DemoConfig) (DemoResu
 	if nilvalue.Is(ctx) {
 		return DemoResult{}, ErrInvalidConfig
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return DemoResult{}, err
 	}
 	if db == nil {

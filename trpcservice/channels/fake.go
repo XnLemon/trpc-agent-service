@@ -299,9 +299,13 @@ func checkFakeContext(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return ErrVerificationFailed
 	}
+	done, doneErr := nilvalue.ContextDone(ctx)
+	if doneErr != nil {
+		return doneErr
+	}
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-done:
+		return nilvalue.ContextErr(ctx)
 	default:
 		return nil
 	}

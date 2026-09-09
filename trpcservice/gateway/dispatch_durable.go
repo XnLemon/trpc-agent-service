@@ -60,7 +60,7 @@ func normalizeDispatchRequest(ctx context.Context, request DispatchRequest) (Inb
 	if nilvalue.Is(ctx) {
 		return InboundMessage{}, "", "", fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return InboundMessage{}, "", "", err
 	}
 	if err := request.Principal.Validate(); err != nil {

@@ -184,7 +184,11 @@ func ExecutionPlanFromContext(ctx context.Context) (ExecutionPlan, bool) {
 	if nilvalue.Is(ctx) {
 		return ExecutionPlan{}, false
 	}
-	plan, ok := ctx.Value(executionPlanContextKey{}).(ExecutionPlan)
+	raw, valueErr := nilvalue.ContextValue(ctx, executionPlanContextKey{})
+	if valueErr != nil {
+		return ExecutionPlan{}, false
+	}
+	plan, ok := raw.(ExecutionPlan)
 	if !ok || plan.validate() != nil {
 		return ExecutionPlan{}, false
 	}

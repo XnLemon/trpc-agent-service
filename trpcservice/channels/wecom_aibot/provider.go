@@ -71,7 +71,7 @@ func (p *Provider) Reconcile(ctx context.Context, value storage.ReplyOutbox) (ou
 	if p == nil || nilvalue.Is(p.store) || nilvalue.Is(ctx) {
 		return outbox.DeliveryUnknown, "", nil
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return outbox.DeliveryUnknown, "", err
 	}
 	if receipt := strings.TrimSpace(value.ProviderMessageID); receipt != "" {

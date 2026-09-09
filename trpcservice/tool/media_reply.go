@@ -16,6 +16,7 @@ import (
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
@@ -113,7 +114,11 @@ func RawExecutionContextFromContext(ctx context.Context) (ExecutionContext, bool
 	if isNilMCPValue(ctx) {
 		return ExecutionContext{}, false
 	}
-	execution, ok := ctx.Value(executionContextKey{}).(ExecutionContext)
+	raw, valueErr := nilvalue.ContextValue(ctx, executionContextKey{})
+	if valueErr != nil {
+		return ExecutionContext{}, false
+	}
+	execution, ok := raw.(ExecutionContext)
 	return execution, ok
 }
 
@@ -145,7 +150,11 @@ func executionContextFromContext(ctx context.Context) (ExecutionContext, error) 
 	if isNilMCPValue(ctx) {
 		return ExecutionContext{}, ErrUnavailable
 	}
-	execution, ok := ctx.Value(executionContextKey{}).(ExecutionContext)
+	raw, valueErr := nilvalue.ContextValue(ctx, executionContextKey{})
+	if valueErr != nil {
+		return ExecutionContext{}, ErrUnavailable
+	}
+	execution, ok := raw.(ExecutionContext)
 	if !ok || isNilMCPValue(execution.Attachments) || isNilMCPValue(execution.Replies) || !ValidExecutionContextIdentity(execution) || runtimestorage.ValidateTenant(execution.TenantID) != nil || execution.EventID == "" || execution.Attachments == nil || execution.Replies == nil {
 		return ExecutionContext{}, ErrUnavailable
 	}

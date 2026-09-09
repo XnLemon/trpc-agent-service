@@ -237,7 +237,7 @@ func (store *Store) Search(ctx context.Context, query *vectorstore.SearchQuery) 
 	minScore := query.MinScore
 	results := make([]*vectorstore.ScoredDocument, 0, len(rows))
 	for _, row := range rows {
-		if err := ctx.Err(); err != nil {
+		if err := nilvalue.ContextErr(ctx); err != nil {
 			return nil, err
 		}
 		matches, matchErr := matchesFilter(row.doc, query.Filter)
@@ -331,7 +331,7 @@ func (store *Store) UpdateByFilter(ctx context.Context, opts ...vectorstore.Upda
 	}
 	var updated int64
 	for _, row := range rows {
-		if err := ctx.Err(); err != nil {
+		if err := nilvalue.ContextErr(ctx); err != nil {
 			return updated, err
 		}
 		if len(config.DocumentIDs) > 0 && !contains(config.DocumentIDs, row.doc.ID) {
@@ -518,7 +518,7 @@ func (store *Store) check(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	if store == nil || store.db == nil || !validScopeID(store.tenantID) || !validScopeID(store.appID) {
@@ -606,7 +606,7 @@ func mapError(ctx context.Context, err error) error {
 		return nil
 	}
 	if !nilvalue.Is(ctx) {
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr := nilvalue.ContextErr(ctx); ctxErr != nil {
 			return ctxErr
 		}
 	}

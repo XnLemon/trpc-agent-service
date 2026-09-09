@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
@@ -68,6 +69,91 @@ func (set *CapabilitySet) Capability(kind Capability) (any, bool) {
 }
 
 func isNilCapability(value any) bool { return nilvalue.Is(value) }
+
+func validateStorageFactoryInput(input StorageFactoryInput) error {
+	if backendprofile.ValidateTenantID(input.TenantID) != nil || appmodel.ValidateAppID(input.AppID) != nil {
+		return ErrStorageFactory
+	}
+	// The profile fields are optional for legacy/direct test fixtures, but a
+	// populated field is still an identity claim and must be canonical. This
+	// prevents a provider from receiving a syntactically valid tenant/app pair
+	// combined with a padded or ambiguous control-plane reference.
+	if input.TenantVersion < 0 || input.ProfileVersion < 0 {
+		return ErrStorageFactory
+	}
+	if input.ProfileID != "" && backendprofile.ValidateProfileID(input.ProfileID) != nil {
+		return ErrStorageFactory
+	}
+	if input.ProfileKey != "" && !validProfileKey(input.ProfileKey) {
+		return ErrStorageFactory
+	}
+	if input.ContentDigest != "" && !validDigest(input.ContentDigest) {
+		return ErrStorageFactory
+	}
+	if input.SchemaVersion < 0 || input.SchemaVersion > 1 {
+		return ErrStorageFactory
+	}
+	previousRank := -1
+	for _, binding := range input.Bindings {
+		if !validCapabilityBinding(binding) {
+			return ErrStorageFactory
+		}
+		rank := capabilityOrder(binding.Capability)
+		if rank < previousRank {
+			return ErrStorageFactory
+		}
+		previousRank = rank
+	}
+	return nil
+}
+
+func capabilityOrder(capability Capability) int {
+	switch capability {
+	case CapabilitySession:
+		return 0
+	case CapabilityMemory:
+		return 1
+	case CapabilitySummary:
+		return 2
+	case CapabilityKnowledge:
+		return 3
+	case CapabilityArtifact:
+		return 4
+	case CapabilityAudit:
+		return 5
+	default:
+		return -1
+	}
+}
+
+func validProfileKey(value string) bool {
+	if len(value) < 2 || len(value) > 64 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, character := range value[1:] {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validDigest(value string) bool {
+	if len(value) != 64 || strings.ToLower(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validStorageSecretValue(value string) bool {
+	_, err := modelprofile.NewSecretValue(value)
+	return err == nil
+}
 
 // Session returns the tenant-scoped session.Service capability.
 func (set *CapabilitySet) Session() (session.Service, error) {
@@ -191,7 +277,11 @@ func closeCapability(closer interface{ Close() error }) (err error) {
 			err = ErrStorageFactory
 		}
 	}()
-	return closer.Close()
+	err = closer.Close()
+	if nilvalue.Is(err) {
+		err = nil
+	}
+	return err
 }
 
 func alreadyClosed(closer interface{ Close() error }, values []any) bool {
@@ -234,6 +324,9 @@ func (factory StorageFactoryFunc) New(ctx context.Context, input StorageFactoryI
 	if err := storageContextErr(ctx); err != nil {
 		return nil, err
 	}
+	if err := validateStorageFactoryInput(input); err != nil {
+		return nil, ErrStorageFactory
+	}
 	defer func() {
 		if recover() != nil {
 			if set != nil {
@@ -244,6 +337,9 @@ func (factory StorageFactoryFunc) New(ctx context.Context, input StorageFactoryI
 		}
 	}()
 	set, err = factory(ctx, input)
+	if nilvalue.Is(err) {
+		err = nil
+	}
 	if err != nil || set == nil {
 		if set != nil {
 			_ = set.Close()
@@ -294,7 +390,7 @@ func (factory *RegistryStorageFactory) New(ctx context.Context, input StorageFac
 	if err := storageContextErr(ctx); err != nil {
 		return nil, err
 	}
-	if factory == nil || factory.providers == nil || isNilCapability(factory.secrets) || backendprofile.ValidateTenantID(input.TenantID) != nil || appmodel.ValidateAppID(input.AppID) != nil || len(input.Bindings) == 0 {
+	if factory == nil || factory.providers == nil || isNilCapability(factory.secrets) || len(input.Bindings) == 0 || validateStorageFactoryInput(input) != nil {
 		return nil, ErrStorageFactory
 	}
 	set = &CapabilitySet{tenantID: input.TenantID, capabilities: make(map[Capability]any, len(input.Bindings))}
@@ -321,6 +417,10 @@ func (factory *RegistryStorageFactory) New(ctx context.Context, input StorageFac
 	if _, err := set.Session(); err != nil {
 		_ = set.Close()
 		return nil, ErrCapabilityUnavailable
+	}
+	if err := storageContextErr(ctx); err != nil {
+		_ = set.Close()
+		return nil, err
 	}
 	return set, nil
 }
@@ -349,7 +449,7 @@ func (factory *RegistryStorageFactory) materializeBinding(ctx context.Context, i
 			return nil, ErrStorageFactory
 		}
 		secret, err = callStorageSecretResolver(ctx, factory.secrets, scope)
-		if err != nil || secret.Value() == "" {
+		if err != nil || !validStorageSecretValue(secret.Value()) {
 			if contextErr := storageContextErr(ctx); contextErr != nil {
 				return nil, contextErr
 			}
@@ -385,10 +485,13 @@ func (factory *RegistryStorageFactory) materializeBinding(ctx context.Context, i
 }
 
 func storageContextErr(ctx context.Context) error {
-	if nilvalue.Is(ctx) {
-		return ErrStorageFactory
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		if errors.Is(err, nilvalue.ErrInvalidContext) {
+			return ErrStorageFactory
+		}
+		return err
 	}
-	return ctx.Err()
+	return nil
 }
 
 func callStorageSecretResolver(ctx context.Context, resolver modelprofile.SecretResolver, scope modelprofile.SecretScope) (secret modelprofile.SecretValue, err error) {
@@ -401,7 +504,11 @@ func callStorageSecretResolver(ctx context.Context, resolver modelprofile.Secret
 			err = ErrStorageFactory
 		}
 	}()
-	return resolver.Resolve(ctx, scope)
+	secret, resolveErr := resolver.Resolve(ctx, scope)
+	if nilvalue.Is(resolveErr) {
+		resolveErr = nil
+	}
+	return secret, resolveErr
 }
 
 func callCapabilityProvider(ctx context.Context, provider CapabilityProvider, input StorageFactoryInput, binding CapabilityBinding, secret modelprofile.SecretValue) (value any, err error) {
@@ -414,7 +521,11 @@ func callCapabilityProvider(ctx context.Context, provider CapabilityProvider, in
 			err = ErrStorageFactory
 		}
 	}()
-	return provider.New(ctx, input, binding, secret)
+	value, providerErr := provider.New(ctx, input, binding, secret)
+	if nilvalue.Is(providerErr) {
+		providerErr = nil
+	}
+	return value, providerErr
 }
 
 func matchesCapability(kind Capability, value any) bool {

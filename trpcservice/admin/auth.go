@@ -136,7 +136,7 @@ func (a *SessionAuthenticator) Authenticate(ctx context.Context, request *http.R
 	if a == nil || request == nil || nilvalue.Is(ctx) {
 		return Principal{}, ErrUnauthenticated
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return Principal{}, err
 	}
 	if cookie, err := request.Cookie(AdminSessionCookie); err == nil && cookie.Value != "" {
@@ -433,7 +433,7 @@ func (a *StaticAuthenticator) Authenticate(ctx context.Context, request *http.Re
 	if a == nil || request == nil || nilvalue.Is(ctx) {
 		return Principal{}, ErrUnauthenticated
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return Principal{}, err
 	}
 	header := request.Header.Get("Authorization")

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 
 // List returns a stable page of Backend Profiles in one tenant.
 func (r *InMemoryRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*backend.Profile, string, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, "", err
 	}
 	if limit <= 0 {
@@ -31,10 +32,23 @@ func (r *InMemoryRepository) List(ctx context.Context, tenantID, query, status, 
 		return nil, "", err
 	}
 	defer r.rUnlock()
-	query, status = strings.ToLower(strings.TrimSpace(query)), strings.TrimSpace(status)
+	if err := backend.ValidateTenantID(tenantID); err != nil {
+		return nil, "", err
+	}
+	status = strings.TrimSpace(status)
+	if !validProfileStatus(status) {
+		return nil, "", backend.ErrInvalid
+	}
+	query = strings.ToLower(strings.TrimSpace(query))
 	items := make([]*backend.Profile, 0)
 	for scope, value := range r.byID {
-		if scope.tenantID != tenantID || (status != "" && string(value.Status) != status) {
+		if scope.tenantID != tenantID {
+			continue
+		}
+		if value == nil || value.TenantID != scope.tenantID || value.ProfileID != scope.profileID || value.Validate(r.catalog) != nil {
+			return nil, "", fmt.Errorf("%w: stored profile is invalid", backend.ErrInvalid)
+		}
+		if status != "" && string(value.Status) != status {
 			continue
 		}
 		if query != "" && !strings.Contains(strings.ToLower(value.ProfileID+" "+value.ProfileKey+" "+value.DisplayName), query) {
@@ -61,8 +75,11 @@ func decodeCursor(cursor string) (int, error) {
 	if cursor == "" {
 		return 0, nil
 	}
-	var offset int
-	if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+	if cursor != strings.TrimSpace(cursor) {
+		return 0, fmt.Errorf("invalid cursor")
+	}
+	offset, err := strconv.Atoi(cursor)
+	if err != nil || offset < 0 {
 		return 0, fmt.Errorf("invalid cursor")
 	}
 	return offset, nil
@@ -106,7 +123,7 @@ var _ backend.Repository = (*InMemoryRepository)(nil)
 
 // Create validates and atomically stores a Profile and its created event.
 func (r *InMemoryRepository) Create(ctx context.Context, input backend.CreateInput) (*backend.Profile, backend.ChangeEvent, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, backend.ChangeEvent{}, err
 	}
 	profile, err := backend.NewProfile(input, r.catalog)
@@ -143,7 +160,7 @@ func (r *InMemoryRepository) Create(ctx context.Context, input backend.CreateInp
 
 // Get returns a defensive copy scoped by tenant and Profile identity.
 func (r *InMemoryRepository) Get(ctx context.Context, tenantID, profileID string) (*backend.Profile, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, err
 	}
 	if err := r.rLock(ctx); err != nil {
@@ -153,16 +170,25 @@ func (r *InMemoryRepository) Get(ctx context.Context, tenantID, profileID string
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
+	if err := backend.ValidateTenantID(tenantID); err != nil {
+		return nil, err
+	}
+	if err := backend.ValidateProfileID(profileID); err != nil {
+		return nil, err
+	}
 	profile, exists := r.byID[profileScope{tenantID: tenantID, profileID: profileID}]
 	if !exists {
 		return nil, backend.ErrNotFound
+	}
+	if profile == nil || profile.Validate(r.catalog) != nil {
+		return nil, backend.ErrInvalid
 	}
 	return cloneProfile(profile), nil
 }
 
 // UpdateConfiguration atomically replaces mutable configuration and emits an event.
 func (r *InMemoryRepository) UpdateConfiguration(ctx context.Context, input backend.UpdateConfigurationInput) (*backend.Profile, backend.ChangeEvent, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, backend.ChangeEvent{}, err
 	}
 	if err := r.lock(ctx); err != nil {
@@ -191,7 +217,7 @@ func (r *InMemoryRepository) UpdateConfiguration(ctx context.Context, input back
 
 // TransitionStatus atomically applies a lifecycle transition and emits an event.
 func (r *InMemoryRepository) TransitionStatus(ctx context.Context, input backend.TransitionStatusInput) (*backend.Profile, backend.ChangeEvent, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, backend.ChangeEvent{}, err
 	}
 	if err := r.lock(ctx); err != nil {
@@ -226,13 +252,39 @@ func cloneProfile(profile *backend.Profile) *backend.Profile {
 	return &clone
 }
 
+func (r *InMemoryRepository) check(ctx context.Context) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	if r == nil || r.catalog == nil || r.byID == nil || r.byKey == nil {
+		return fmt.Errorf("%w: repository is unavailable", backend.ErrInvalid)
+	}
+	return nil
+}
+
+func validProfileStatus(value string) bool {
+	switch value {
+	case "", string(backend.StatusActive), string(backend.StatusSuspended), string(backend.StatusDisabled):
+		return true
+	default:
+		return false
+	}
+}
+
 func checkContext(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return fmt.Errorf("%w: context is required", backend.ErrInvalid)
 	}
+	done, err := nilvalue.ContextDone(ctx)
+	if err != nil {
+		if err == nilvalue.ErrInvalidContext {
+			return fmt.Errorf("%w: context is unavailable", backend.ErrInvalid)
+		}
+		return err
+	}
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-done:
+		return nilvalue.ContextErr(ctx)
 	default:
 		return nil
 	}

@@ -57,7 +57,7 @@ func (p *BindingProvider) provider(ctx context.Context, value storage.ReplyOutbo
 	if p == nil || nilvalue.Is(ctx) || nilvalue.Is(p.Bindings) || nilvalue.Is(p.Credentials) || value.TenantID == "" || value.ReplyTarget.BindingID == "" {
 		return nil, invalidDelivery()
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	binding, err := p.Bindings.Get(ctx, value.TenantID, value.ReplyTarget.BindingID)

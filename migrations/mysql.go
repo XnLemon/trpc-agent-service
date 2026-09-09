@@ -46,7 +46,7 @@ func ApplyMySQL(ctx context.Context, db *sql.DB) error {
 	if nilvalue.Is(ctx) || db == nil {
 		return ErrMigration
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	files, err := orderedMySQLFiles()

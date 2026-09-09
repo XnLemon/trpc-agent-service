@@ -560,6 +560,7 @@ func (manager *Manager) open(ctx context.Context, scope Scope) (Backend, error) 
 		}
 		return Backend{}, ErrUnavailable
 	}
+	backend.Store = &protectedVectorStore{delegate: backend.Store}
 	return backend, nil
 }
 
@@ -620,7 +621,7 @@ func check(ctx context.Context, scope Scope) error {
 	if nilvalue.Is(ctx) {
 		return ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	return scope.Validate()
@@ -807,6 +808,134 @@ func callProviderOpen(provider Provider, ctx context.Context, scope Scope) (back
 	return provider.Open(ctx, scope)
 }
 
+// protectedVectorStore keeps provider panics behind the management boundary.
+// The upstream interface is intentionally broad; even methods not currently
+// used by administration must not provide an escape hatch when a backend is
+// reused by future management operations.
+type protectedVectorStore struct {
+	delegate vectorstore.VectorStore
+}
+
+func (store *protectedVectorStore) Add(ctx context.Context, doc *document.Document, embedding []float64) (err error) {
+	if store == nil || nilvalue.Is(store.delegate) || nilvalue.Is(ctx) {
+		return ErrUnavailable
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrUnavailable
+		}
+	}()
+	return store.delegate.Add(ctx, doc, embedding)
+}
+
+func (store *protectedVectorStore) Get(ctx context.Context, id string) (value *document.Document, embedding []float64, err error) {
+	if store == nil || nilvalue.Is(store.delegate) || nilvalue.Is(ctx) {
+		return nil, nil, ErrUnavailable
+	}
+	defer func() {
+		if recover() != nil {
+			value, embedding, err = nil, nil, ErrUnavailable
+		}
+	}()
+	return store.delegate.Get(ctx, id)
+}
+
+func (store *protectedVectorStore) Update(ctx context.Context, doc *document.Document, embedding []float64) (err error) {
+	if store == nil || nilvalue.Is(store.delegate) || nilvalue.Is(ctx) {
+		return ErrUnavailable
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrUnavailable
+		}
+	}()
+	return store.delegate.Update(ctx, doc, embedding)
+}
+
+func (store *protectedVectorStore) Delete(ctx context.Context, id string) (err error) {
+	if store == nil || nilvalue.Is(store.delegate) || nilvalue.Is(ctx) {
+		return ErrUnavailable
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrUnavailable
+		}
+	}()
+	return store.delegate.Delete(ctx, id)
+}
+
+func (store *protectedVectorStore) Search(ctx context.Context, query *vectorstore.SearchQuery) (result *vectorstore.SearchResult, err error) {
+	if store == nil || nilvalue.Is(store.delegate) || nilvalue.Is(ctx) {
+		return nil, ErrUnavailable
+	}
+	defer func() {
+		if recover() != nil {
+			result, err = nil, ErrUnavailable
+		}
+	}()
+	return store.delegate.Search(ctx, query)
+}
+
+func (store *protectedVectorStore) DeleteByFilter(ctx context.Context, opts ...vectorstore.DeleteOption) (err error) {
+	if store == nil || nilvalue.Is(store.delegate) || nilvalue.Is(ctx) {
+		return ErrUnavailable
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrUnavailable
+		}
+	}()
+	return store.delegate.DeleteByFilter(ctx, opts...)
+}
+
+func (store *protectedVectorStore) UpdateByFilter(ctx context.Context, opts ...vectorstore.UpdateByFilterOption) (count int64, err error) {
+	if store == nil || nilvalue.Is(store.delegate) || nilvalue.Is(ctx) {
+		return 0, ErrUnavailable
+	}
+	defer func() {
+		if recover() != nil {
+			count, err = 0, ErrUnavailable
+		}
+	}()
+	return store.delegate.UpdateByFilter(ctx, opts...)
+}
+
+func (store *protectedVectorStore) Count(ctx context.Context, opts ...vectorstore.CountOption) (count int, err error) {
+	if store == nil || nilvalue.Is(store.delegate) || nilvalue.Is(ctx) {
+		return 0, ErrUnavailable
+	}
+	defer func() {
+		if recover() != nil {
+			count, err = 0, ErrUnavailable
+		}
+	}()
+	return store.delegate.Count(ctx, opts...)
+}
+
+func (store *protectedVectorStore) GetMetadata(ctx context.Context, opts ...vectorstore.GetMetadataOption) (metadata map[string]vectorstore.DocumentMetadata, err error) {
+	if store == nil || nilvalue.Is(store.delegate) || nilvalue.Is(ctx) {
+		return nil, ErrUnavailable
+	}
+	defer func() {
+		if recover() != nil {
+			metadata, err = nil, ErrUnavailable
+		}
+	}()
+	return store.delegate.GetMetadata(ctx, opts...)
+}
+
+func (store *protectedVectorStore) Close() (err error) {
+	if store == nil || nilvalue.Is(store.delegate) {
+		return ErrUnavailable
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrUnavailable
+		}
+	}()
+	return store.delegate.Close()
+}
+
 func callEmbedder(embedderValue embedder.Embedder, ctx context.Context, text string) (values []float64, err error) {
 	if nilvalue.Is(embedderValue) || nilvalue.Is(ctx) {
 		return nil, ErrUnavailable
@@ -875,7 +1004,7 @@ func (store *memoryVersionStore) ListVersions(ctx context.Context, scope Scope) 
 	if nilvalue.Is(ctx) {
 		return nil, ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	if err := scope.Validate(); err != nil {
@@ -894,7 +1023,7 @@ func validateVersionInput(ctx context.Context, value Version) error {
 	if nilvalue.Is(ctx) {
 		return ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	if !validScopeID(value.TenantID) || !validScopeID(value.AppID) || value.Version != 0 || value.DocumentCount < 0 || len(value.ContentDigest) != sha256.Size*2 || strings.ToLower(value.ContentDigest) != value.ContentDigest || value.PublishedAt.IsZero() || value.PublishedAt.Location() != time.UTC || value.ActorID != strings.TrimSpace(value.ActorID) || !validText(value.ActorID, 256, true) {

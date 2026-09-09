@@ -124,8 +124,12 @@ func (snapshot BackendExecutionSnapshot) FactoryInput() (StorageFactoryInput, er
 	if err := snapshot.validate(); err != nil {
 		return StorageFactoryInput{}, err
 	}
+	appID := ""
+	if snapshot.tenant.DefaultAgentAppID != nil {
+		appID = *snapshot.tenant.DefaultAgentAppID
+	}
 	return StorageFactoryInput{
-		TenantID: snapshot.tenant.TenantID, TenantVersion: snapshot.tenant.Version,
+		TenantID: snapshot.tenant.TenantID, AppID: appID, TenantVersion: snapshot.tenant.Version,
 		ProfileID: snapshot.profile.ProfileID, ProfileKey: snapshot.profile.ProfileKey,
 		ProfileVersion: snapshot.profile.Version, ContentDigest: snapshot.profile.ContentDigest,
 		SchemaVersion: snapshot.profile.SchemaVersion, Bindings: cloneBindings(snapshot.profile.Bindings),
@@ -149,7 +153,11 @@ func BackendExecutionSnapshotFromContext(ctx context.Context) (BackendExecutionS
 	if nilvalue.Is(ctx) {
 		return BackendExecutionSnapshot{}, false
 	}
-	snapshot, ok := ctx.Value(executionSnapshotContextKey{}).(BackendExecutionSnapshot)
+	raw, valueErr := nilvalue.ContextValue(ctx, executionSnapshotContextKey{})
+	if valueErr != nil {
+		return BackendExecutionSnapshot{}, false
+	}
+	snapshot, ok := raw.(BackendExecutionSnapshot)
 	if !ok || snapshot.validate() != nil {
 		return BackendExecutionSnapshot{}, false
 	}

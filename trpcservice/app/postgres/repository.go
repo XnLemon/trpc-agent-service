@@ -175,7 +175,7 @@ func checkContext(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return ErrStorage
 	}
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
 }
 
 // Create persists a new agent application.
@@ -706,7 +706,7 @@ func (r *AppRepository) SetCanary(ctx context.Context, input appmodel.SetCanaryI
 	if err := commit(ctx, tx); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
 	}
 	return stored, committed, nil

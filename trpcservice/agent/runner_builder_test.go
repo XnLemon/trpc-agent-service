@@ -294,7 +294,7 @@ func runnerBuilderInputForTest(t *testing.T) RunnerInput {
 		Storage: backend.StorageFactoryInput{
 			TenantID: tenantRoot.TenantID, TenantVersion: tenantRoot.Version,
 			ProfileID: "bp_01ARZ3NDEKTSV4RRFFQ69G5FAV", ProfileVersion: 1,
-			ContentDigest: "backend-digest", SchemaVersion: 1,
+			ContentDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SchemaVersion: 1,
 		},
 	}
 }

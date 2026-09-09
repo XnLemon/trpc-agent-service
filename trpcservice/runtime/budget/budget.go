@@ -176,8 +176,11 @@ func (controller *Controller) Reserve(ctx context.Context, value tenant.Tenant, 
 	if nilvalue.Is(ctx) {
 		return Reservation{}, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return Reservation{}, err
+	}
+	if err := value.Validate(); err != nil {
+		return Reservation{}, ErrInvalid
 	}
 	if err := validateReservationID(reservationID); err != nil {
 		return Reservation{}, err
@@ -195,11 +198,14 @@ func (controller *Controller) Reserve(ctx context.Context, value tenant.Tenant, 
 	if err := limits.Validate(); err != nil {
 		return Reservation{}, err
 	}
-	reservation, err := controller.store.Reserve(ctx, ReserveInput{
+	reservation, err := callReserve(controller.store, ctx, ReserveInput{
 		TenantID: value.TenantID, ReservationID: reservationID, PeriodStart: monthStart(controller.clock()), Limits: limits, Estimate: estimate,
 	})
 	if err != nil {
 		return Reservation{}, err
+	}
+	if !validReservationResult(reservation, value.TenantID, reservationID) {
+		return Reservation{}, ErrUnavailable
 	}
 	return reservation, nil
 }
@@ -211,7 +217,7 @@ func (controller *Controller) Settle(ctx context.Context, reservation Reservatio
 	if nilvalue.Is(ctx) {
 		return Reservation{}, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return Reservation{}, err
 	}
 	if reservation.State == ReservationStateDisabled {
@@ -220,10 +226,20 @@ func (controller *Controller) Settle(ctx context.Context, reservation Reservatio
 	if controller == nil || nilvalue.Is(controller.store) {
 		return Reservation{}, ErrUnavailable
 	}
+	if !validReservationRequest(reservation, ReservationStateReserved) {
+		return Reservation{}, ErrInvalid
+	}
 	if err := usage.validate(); err != nil {
 		return Reservation{}, err
 	}
-	return controller.store.Settle(ctx, reservation.TenantID, reservation.ReservationID, usage)
+	settled, err := callSettle(controller.store, ctx, reservation.TenantID, reservation.ReservationID, usage)
+	if !validReservationResult(settled, reservation.TenantID, reservation.ReservationID) {
+		return Reservation{}, ErrUnavailable
+	}
+	if err != nil {
+		return settled, err
+	}
+	return settled, nil
 }
 
 // Release returns an unused reservation to the monthly available capacity.
@@ -231,23 +247,98 @@ func (controller *Controller) Release(ctx context.Context, reservation Reservati
 	if nilvalue.Is(ctx) {
 		return Reservation{}, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return Reservation{}, err
 	}
-	if reservation.State == ReservationStateDisabled {
+	if reservation.State == ReservationStateDisabled || reservation.State == ReservationStateReleased || reservation.State == ReservationStateSettled {
 		return reservation, nil
 	}
 	if controller == nil || nilvalue.Is(controller.store) {
 		return Reservation{}, ErrUnavailable
 	}
-	return controller.store.Release(ctx, reservation.TenantID, reservation.ReservationID)
+	if !validReservationRequest(reservation, ReservationStateReserved) {
+		return Reservation{}, ErrInvalid
+	}
+	released, err := callRelease(controller.store, ctx, reservation.TenantID, reservation.ReservationID)
+	if err != nil {
+		return Reservation{}, err
+	}
+	if !validReservationResult(released, reservation.TenantID, reservation.ReservationID) {
+		return Reservation{}, ErrUnavailable
+	}
+	return released, nil
 }
 
-func (controller *Controller) clock() time.Time {
+func (controller *Controller) clock() (value time.Time) {
+	value = time.Now().UTC()
 	if controller == nil || controller.now == nil {
-		return time.Now().UTC()
+		return value
 	}
-	return controller.now().UTC()
+	defer func() {
+		if recover() != nil || value.IsZero() {
+			value = time.Now().UTC()
+		}
+	}()
+	value = controller.now().UTC()
+	return value
+}
+
+func callReserve(store Store, ctx context.Context, input ReserveInput) (value Reservation, err error) {
+	if nilvalue.Is(store) || nilvalue.Is(ctx) {
+		return Reservation{}, ErrUnavailable
+	}
+	defer func() {
+		if recover() != nil {
+			value, err = Reservation{}, ErrUnavailable
+		} else if nilvalue.Is(err) {
+			err = nil
+		}
+	}()
+	return store.Reserve(ctx, input)
+}
+
+func callSettle(store Store, ctx context.Context, tenantID, reservationID string, usage Usage) (value Reservation, err error) {
+	if nilvalue.Is(store) || nilvalue.Is(ctx) {
+		return Reservation{}, ErrUnavailable
+	}
+	defer func() {
+		if recover() != nil {
+			value, err = Reservation{}, ErrUnavailable
+		} else if nilvalue.Is(err) {
+			err = nil
+		}
+	}()
+	return store.Settle(ctx, tenantID, reservationID, usage)
+}
+
+func callRelease(store Store, ctx context.Context, tenantID, reservationID string) (value Reservation, err error) {
+	if nilvalue.Is(store) || nilvalue.Is(ctx) {
+		return Reservation{}, ErrUnavailable
+	}
+	defer func() {
+		if recover() != nil {
+			value, err = Reservation{}, ErrUnavailable
+		} else if nilvalue.Is(err) {
+			err = nil
+		}
+	}()
+	return store.Release(ctx, tenantID, reservationID)
+}
+
+func validReservationRequest(value Reservation, state ReservationState) bool {
+	return value.TenantID != "" && !strings.Contains(value.TenantID, "://") && validateReservationID(value.ReservationID) == nil && !value.PeriodStart.IsZero() && value.PeriodStart.Location() == time.UTC && value.State == state && value.EstimatedTokens >= 0 && value.EstimatedSpendMinor >= 0 && value.ActualTokens >= 0 && value.ActualSpendMinor >= 0 && value.Limits.Validate() == nil
+}
+
+func validReservationResult(value Reservation, tenantID, reservationID string) bool {
+	if value.TenantID != tenantID || value.ReservationID != reservationID || value.PeriodStart.IsZero() || value.PeriodStart.Location() != time.UTC || value.EstimatedTokens < 0 || value.EstimatedSpendMinor < 0 || value.ActualTokens < 0 || value.ActualSpendMinor < 0 || value.Limits.Validate() != nil {
+		return false
+	}
+	switch value.State {
+	case ReservationStateReserved, ReservationStateSettled, ReservationStateReleased:
+		return true
+	default:
+		return false
+	}
 }
 
 // Validate checks the monetary/token limit snapshot before a store uses it.

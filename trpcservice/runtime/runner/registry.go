@@ -118,6 +118,16 @@ func NewRunnerRegistry(config RunnerRegistryConfig) (*RunnerRegistry, error) {
 	if config.Now == nil {
 		config.Now = time.Now
 	}
+	now := config.Now
+	config.Now = func() (value time.Time) {
+		value = time.Now()
+		defer func() {
+			if recover() != nil || value.IsZero() {
+				value = time.Now()
+			}
+		}()
+		return now()
+	}
 	return &RunnerRegistry{
 		factory: config.Factory, maxEntries: config.MaxEntries, idleTTL: config.IdleTTL,
 		closeTimeout: config.CloseTimeout, now: config.Now,
@@ -132,7 +142,7 @@ func (registry *RunnerRegistry) Ready() bool {
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	return !registry.closed
+	return !registry.closed && registry.factory != nil
 }
 
 // Acquire returns a reference-counted lease for plan. Concurrent construction
@@ -202,13 +212,17 @@ func waitForRunnerBuild(ctx context.Context, done <-chan struct{}) (bool, error)
 	if nilvalue.Is(ctx) || done == nil {
 		return false, ErrInvalid
 	}
+	cancelDone, err := nilvalue.ContextDoneChannel(ctx)
+	if err != nil {
+		return false, runnerContextErr(ctx)
+	}
 	select {
 	case <-done:
 		if err := runnerContextErr(ctx); err != nil {
 			return false, err
 		}
 		return true, nil
-	case <-ctx.Done():
+	case <-cancelDone:
 		return false, runnerContextErr(ctx)
 	}
 }
@@ -229,8 +243,10 @@ func (registry *RunnerRegistry) finishRunnerBuild(ctx context.Context, plan runt
 	closed := registry.closed
 	var entry *runnerEntry
 	if factoryErr == nil {
-		if err := runnerContextErr(ctx); err != nil {
+		if canceled, err := runnerContextCanceled(ctx); err != nil {
 			factoryErr = err
+		} else if canceled {
+			factoryErr = runnerContextErr(ctx)
 		}
 	}
 	if factoryErr == nil && (closed || invalidated) {
@@ -307,12 +323,22 @@ func (registry *RunnerRegistry) InvalidateMatching(predicate func(runtime.CacheK
 	}
 	toClose := make([]*runnerEntry, 0)
 	for key, build := range registry.pending {
-		if predicate(key) {
+		matched, err := safeRunnerPredicate(predicate, key)
+		if err != nil {
+			registry.mu.Unlock()
+			return err
+		}
+		if matched {
 			build.invalidated = true
 		}
 	}
 	for key, entry := range registry.entries {
-		if !predicate(key) {
+		matched, err := safeRunnerPredicate(predicate, key)
+		if err != nil {
+			registry.mu.Unlock()
+			return err
+		}
+		if !matched {
 			continue
 		}
 		delete(registry.entries, key)
@@ -478,11 +504,46 @@ func (registry *RunnerRegistry) evictCapacityLocked() []*runnerEntry {
 
 func isNilRunner(value Runner) bool { return nilvalue.Is(value) }
 
+func safeRunnerPredicate(predicate func(runtime.CacheKey) bool, key runtime.CacheKey) (matched bool, err error) {
+	if predicate == nil {
+		return false, fmt.Errorf("%w: invalidation predicate is required", ErrInvalid)
+	}
+	defer func() {
+		if recover() != nil {
+			matched = false
+			err = ErrInvalid
+		}
+	}()
+	return predicate(key), nil
+}
+
 func runnerContextErr(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return ErrInvalid
 	}
-	return ctx.Err()
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		if err == nilvalue.ErrInvalidContext {
+			return ErrInvalid
+		}
+		return err
+	}
+	return nil
+}
+
+func runnerContextCanceled(ctx context.Context) (canceled bool, err error) {
+	if nilvalue.Is(ctx) {
+		return false, ErrInvalid
+	}
+	done, err := nilvalue.ContextDoneChannel(ctx)
+	if err != nil {
+		return false, ErrInvalid
+	}
+	select {
+	case <-done:
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 func callRunnerFactory(ctx context.Context, factory RunnerFactory, plan runtime.ExecutionPlan) (runner Runner, err error) {

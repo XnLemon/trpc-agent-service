@@ -135,7 +135,7 @@ func checkContext(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return ErrStorage
 	}
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
 }
 
 // Create persists a tenant root after validating its configuration.
@@ -272,7 +272,7 @@ func (r *TenantRepository) Count(ctx context.Context) (int, error) {
 	if nilvalue.Is(ctx) {
 		return 0, ErrStorage
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return 0, err
 	}
 	if r == nil || r.db == nil {

@@ -322,7 +322,10 @@ func (provider protectedProvider) Shutdown(ctx context.Context) (err error) {
 			err = ErrProviderFailure
 		}
 	}()
-	return provider.delegate.Shutdown(ctx)
+	if providerErr := provider.delegate.Shutdown(ctx); providerErr != nil {
+		return ErrProviderFailure
+	}
+	return nil
 }
 
 type noopSpan struct{}
@@ -575,7 +578,9 @@ func (p *provider) Shutdown(ctx context.Context) (err error) {
 		if p.shutdown == nil {
 			return
 		}
-		p.closeErr = p.shutdown(ctx)
+		if err := p.shutdown(ctx); err != nil {
+			p.closeErr = ErrProviderFailure
+		}
 	})
 	return p.closeErr
 }
@@ -804,7 +809,11 @@ func RequestID(ctx context.Context) string {
 	if nilvalue.Is(ctx) {
 		return ""
 	}
-	value, _ := ctx.Value(requestIDKey).(string)
+	raw, err := nilvalue.ContextValue(ctx, requestIDKey)
+	if err != nil {
+		return ""
+	}
+	value, _ := raw.(string)
 	return value
 }
 
@@ -813,7 +822,11 @@ func TraceID(ctx context.Context) string {
 	if nilvalue.Is(ctx) {
 		return ""
 	}
-	value, _ := ctx.Value(traceIDKey).(string)
+	raw, err := nilvalue.ContextValue(ctx, traceIDKey)
+	if err != nil {
+		return ""
+	}
+	value, _ := raw.(string)
 	return value
 }
 

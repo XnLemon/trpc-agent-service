@@ -42,27 +42,28 @@ type FactoryCacheKey struct {
 // Agent definitions. References remain IDs; secrets and live clients are
 // intentionally absent.
 type LLMAgentFactoryInput struct {
-	TenantID          string
-	TenantVersion     int64
-	AppID             string
-	AppKey            string
-	AppVersion        int64
-	DisplayName       string
-	Name              string
-	Description       string
-	Revision          int64
-	ContentDigest     string
-	Kind              appmodel.Kind
-	SchemaVersion     int
-	Instruction       string
-	GlobalInstruction string
-	ModelProfileID    string
-	Generation        appmodel.GenerationConfig
-	Runtime           appmodel.RuntimePolicy
-	Tools             []appmodel.ToolAuthorization
-	MCPBindings       []appmodel.MCPBinding
-	Skills            []string
-	Chain             *appmodel.ChainConfiguration
+	TenantID            string
+	TenantVersion       int64
+	AppID               string
+	AppKey              string
+	AppVersion          int64
+	DisplayName         string
+	Name                string
+	Description         string
+	Revision            int64
+	ContentDigest       string
+	Kind                appmodel.Kind
+	SchemaVersion       int
+	Instruction         string
+	GlobalInstruction   string
+	ModelProfileID      string
+	Generation          appmodel.GenerationConfig
+	Runtime             appmodel.RuntimePolicy
+	Tools               []appmodel.ToolAuthorization
+	MCPBindings         []appmodel.MCPBinding
+	Skills              []string
+	SkillAuthorizations []appmodel.SkillAuthorization
+	Chain               *appmodel.ChainConfiguration
 }
 
 // Clone returns a defensive copy of Factory input pointer and slice fields.
@@ -73,6 +74,7 @@ func (input LLMAgentFactoryInput) Clone() LLMAgentFactoryInput {
 	clone.Tools = cloneTools(input.Tools)
 	clone.MCPBindings = cloneMCPBindings(input.MCPBindings)
 	clone.Skills = append([]string(nil), input.Skills...)
+	clone.SkillAuthorizations = cloneSkillAuthorizations(input.SkillAuthorizations)
 	clone.Chain = input.Chain.Clone()
 	return clone
 }
@@ -176,7 +178,7 @@ func (snapshot AgentExecutionSnapshot) FactoryInput() (LLMAgentFactoryInput, err
 		SchemaVersion: snapshot.revision.SchemaVersion, Instruction: snapshot.revision.Instruction,
 		GlobalInstruction: snapshot.revision.GlobalInstruction, ModelProfileID: snapshot.revision.ModelProfileID,
 		Generation: cloneGenerationConfig(snapshot.revision.Generation), Runtime: cloneRuntimePolicy(snapshot.revision.Runtime),
-		Tools: cloneTools(snapshot.revision.Tools), MCPBindings: cloneMCPBindings(snapshot.revision.MCPBindings), Skills: append([]string(nil), snapshot.revision.Skills...), Chain: snapshot.revision.Chain.Clone(),
+		Tools: cloneTools(snapshot.revision.Tools), MCPBindings: cloneMCPBindings(snapshot.revision.MCPBindings), Skills: append([]string(nil), snapshot.revision.Skills...), SkillAuthorizations: cloneSkillAuthorizations(snapshot.revision.SkillAuthorizations), Chain: snapshot.revision.Chain.Clone(),
 	}, nil
 }
 
@@ -197,7 +199,11 @@ func AgentExecutionSnapshotFromContext(ctx context.Context) (AgentExecutionSnaps
 	if nilvalue.Is(ctx) {
 		return AgentExecutionSnapshot{}, false
 	}
-	snapshot, ok := ctx.Value(executionSnapshotContextKey{}).(AgentExecutionSnapshot)
+	raw, valueErr := nilvalue.ContextValue(ctx, executionSnapshotContextKey{})
+	if valueErr != nil {
+		return AgentExecutionSnapshot{}, false
+	}
+	snapshot, ok := raw.(AgentExecutionSnapshot)
 	if !ok || snapshot.validate() != nil {
 		return AgentExecutionSnapshot{}, false
 	}
@@ -231,6 +237,17 @@ func cloneGenerationConfig(configuration appmodel.GenerationConfig) appmodel.Gen
 	if configuration.MaxOutputTokens != nil {
 		value := *configuration.MaxOutputTokens
 		clone.MaxOutputTokens = &value
+	}
+	return clone
+}
+
+func cloneSkillAuthorizations(values []appmodel.SkillAuthorization) []appmodel.SkillAuthorization {
+	if values == nil {
+		return nil
+	}
+	clone := make([]appmodel.SkillAuthorization, len(values))
+	for index, value := range values {
+		clone[index] = value.Clone()
 	}
 	return clone
 }

@@ -137,7 +137,7 @@ func check(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return queue.ErrInvalid
 	}
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
 }
 
 func args(value *queue.Task) []any {

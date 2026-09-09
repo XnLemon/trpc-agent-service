@@ -16,6 +16,7 @@ import (
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
+	skillsecurity "github.com/XnLemon/trpc-agent-service/trpcservice/skill"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail"
@@ -53,6 +54,7 @@ type Config struct {
 	ToolRegistry            *servicetool.Registry
 	AgentFactories          *serviceagent.AgentFactoryRegistry
 	SkillRepositoryProvider skill.RepositoryProvider
+	SkillTrustPolicy        skillsecurity.TrustPolicy
 	ToolInvocationStore     runtimestorage.ToolInvocationStore
 	PluginFactory           PluginFactory
 	ToolSetFactory          ToolSetFactory
@@ -68,9 +70,11 @@ type Config struct {
 // NewRuntimeRunnerRegistry creates a generic Runner registry backed by the
 // concrete Agent adapter. The concrete assembly deliberately lives in this
 // package so runtime/runner stays independent of Agent implementations.
-// NewDefaultPluginFactory returns a fresh identity plugin and the enabled
-// upstream guardrails for each sealed execution plan. Every returned plugin is
-// runner-owned and must not be shared between cached Runners.
+// NewDefaultPluginFactory returns only the platform's always-on identity and
+// durable tool-invocation plugins. Guardrail materialization is intentionally
+// exposed through NewGuardrailPlugins but is not part of the default Runner
+// graph in this release. Every returned plugin is runner-owned and must not be
+// shared between cached Runners.
 func NewDefaultPluginFactory(config Config) PluginFactory {
 	return func(ctx context.Context, plan runtime.ExecutionPlan) (plugins []plugin.Plugin, err error) {
 		defer func() {
@@ -92,13 +96,9 @@ func NewDefaultPluginFactory(config Config) PluginFactory {
 		if !isNilFactoryValue(config.ToolInvocationStore) {
 			plugins = append(plugins, servicetool.NewToolInvocationPreparePlugin())
 		}
-		guardrailPlugins, guardrailErr := NewGuardrailPlugins(ctx, plan, config)
-		if guardrailErr != nil {
-			_ = closePlugins(plugins)
-			plugins = nil
-			return nil, guardrailErr
-		}
-		plugins = append(plugins, guardrailPlugins...)
+		// Guardrail is intentionally isolated from the default execution path;
+		// callers that opt in must use NewGuardrailPlugins from an explicit
+		// PluginFactory and own its review configuration.
 		if !isNilFactoryValue(config.ToolInvocationStore) {
 			plugins = append(plugins, servicetool.NewToolInvocationDispatchPlugin())
 		}
@@ -286,14 +286,14 @@ func NewRuntimeRunnerRegistry(config Config) (*runtimerunner.RunnerRegistry, err
 				Input: input, SecretResolver: config.SecretResolver, ModelFactory: config.ModelFactory,
 				Sessions: config.Sessions, StorageFactory: config.StorageFactory,
 				Observability: config.Observability, ToolRegistry: config.ToolRegistry, AgentFactories: config.AgentFactories,
-				SkillRepositoryProvider: config.SkillRepositoryProvider, ToolInvocationStore: config.ToolInvocationStore,
+				SkillRepositoryProvider: config.SkillRepositoryProvider, SkillTrustPolicy: config.SkillTrustPolicy, ToolInvocationStore: config.ToolInvocationStore,
 				Plugins: plugins, ToolSets: toolSets, EnableUsageCallbacks: config.EnableUsageCallbacks,
 			})
 		}
 		return serviceagent.NewRunnerWithConfig(ctx, serviceagent.RunnerConfig{
 			Input: input, SecretResolver: config.SecretResolver, ModelFactory: config.ModelFactory,
 			Sessions: config.Sessions, Observability: config.Observability, ToolRegistry: config.ToolRegistry, AgentFactories: config.AgentFactories,
-			SkillRepositoryProvider: config.SkillRepositoryProvider, ToolInvocationStore: config.ToolInvocationStore,
+			SkillRepositoryProvider: config.SkillRepositoryProvider, SkillTrustPolicy: config.SkillTrustPolicy, ToolInvocationStore: config.ToolInvocationStore,
 			Plugins: plugins, ToolSets: toolSets, EnableUsageCallbacks: config.EnableUsageCallbacks,
 		})
 	}
@@ -474,7 +474,7 @@ func factoryContextErr(ctx context.Context) error {
 	if isNilFactoryValue(ctx) {
 		return runtimerunner.ErrInvalid
 	}
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
 }
 
 func runnerInputFromPlan(plan runtime.ExecutionPlan) (serviceagent.RunnerInput, error) {

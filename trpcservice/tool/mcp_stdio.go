@@ -65,7 +65,7 @@ type stdioMCPToolSet struct {
 }
 
 func newStdioMCPToolSet(ctx context.Context, binding MCPBinding) (*stdioMCPToolSet, error) {
-	if nilvalue.Is(ctx) || ctx.Err() != nil {
+	if contextError(ctx) != nil {
 		return nil, fmt.Errorf("%w: active context is required", ErrInvalidMCPBinding)
 	}
 	allowed := make(map[string]struct{}, len(binding.ToolAllow))
@@ -222,7 +222,7 @@ func cloneToolDeclaration(declaration *trpctool.Declaration) *trpctool.Declarati
 }
 
 func (set *stdioMCPToolSet) ensureConnectedLocked(ctx context.Context) error {
-	if nilvalue.Is(ctx) || ctx.Err() != nil {
+	if contextError(ctx) != nil {
 		return fmt.Errorf("active context is required")
 	}
 	set.mu.RLock()
@@ -364,7 +364,7 @@ func decodeStdioSchema(raw json.RawMessage) (*trpctool.Schema, error) {
 	if err := jsonstrict.Validate(raw, false); err != nil {
 		return nil, err
 	}
-	trimmed := bytes.TrimSpace(raw)
+	trimmed := bytes.Trim(raw, " \t\r\n")
 	if bytes.Equal(trimmed, []byte("null")) {
 		return nil, nil
 	}
@@ -382,14 +382,14 @@ func (set *stdioMCPToolSet) callTool(ctx context.Context, name string, args []by
 	if set == nil {
 		return nil, fmt.Errorf("%w: MCP stdio ToolSet is unavailable", ErrInvalidMCPBinding)
 	}
-	if nilvalue.Is(ctx) || ctx.Err() != nil {
+	if contextError(ctx) != nil {
 		return nil, contextError(ctx)
 	}
 	if !validMCPArguments(args) {
 		return nil, ErrMCPInvalidArguments
 	}
 	var arguments map[string]any
-	if len(bytes.TrimSpace(args)) == 0 {
+	if len(bytes.Trim(args, " \t\r\n")) == 0 {
 		arguments = map[string]any{}
 	} else if err := json.Unmarshal(args, &arguments); err != nil {
 		return nil, ErrMCPInvalidArguments
@@ -414,13 +414,13 @@ func (set *stdioMCPToolSet) callTool(ctx context.Context, name string, args []by
 	if err != nil {
 		// Close a broken transport, but never send tools/call again here. The
 		// lifecycle wrapper may refresh it for a later explicit call.
-		if ctx.Err() == nil && mcpConnectionFailure(err) {
+		if contextError(ctx) == nil && mcpConnectionFailure(err) {
 			set.dropProcess(process)
 		}
 		return nil, err
 	}
 	var value any
-	if len(result) == 0 || bytes.Equal(bytes.TrimSpace(result), []byte("null")) {
+	if len(result) == 0 || bytes.Equal(bytes.Trim(result, " \t\r\n"), []byte("null")) {
 		return nil, nil
 	}
 	if err := jsonstrict.Validate(result, false); err != nil {
@@ -433,10 +433,13 @@ func (set *stdioMCPToolSet) callTool(ctx context.Context, name string, args []by
 }
 
 func contextError(ctx context.Context) error {
-	if nilvalue.Is(ctx) {
-		return errors.New("context is required")
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		if errors.Is(err, nilvalue.ErrInvalidContext) {
+			return errors.New("context is unavailable")
+		}
+		return err
 	}
-	return ctx.Err()
+	return nil
 }
 
 func (set *stdioMCPToolSet) dropProcess(process *stdioMCPProcess) {
@@ -548,10 +551,13 @@ func (process *stdioMCPProcess) request(ctx context.Context, timeout time.Durati
 	if process == nil {
 		return nil, errors.New("MCP stdio process is unavailable")
 	}
-	if nilvalue.Is(ctx) || ctx.Err() != nil {
+	if contextError(ctx) != nil {
 		return nil, contextError(ctx)
 	}
-	requestCtx, cancel := withMCPTimeout(ctx, timeout)
+	requestCtx, cancel, timeoutErr := withMCPTimeout(ctx, timeout)
+	if timeoutErr != nil {
+		return nil, timeoutErr
+	}
 	defer cancel()
 	id := process.nextID.Add(1)
 	idBytes := []byte(strconv.FormatInt(id, 10))
@@ -577,14 +583,18 @@ func (process *stdioMCPProcess) request(ctx context.Context, timeout time.Durati
 	if writeErr != nil {
 		return nil, fmt.Errorf("send MCP stdio request: %w", writeErr)
 	}
+	requestDone, requestDoneErr := nilvalue.ContextDone(requestCtx)
+	if requestDoneErr != nil {
+		return nil, requestDoneErr
+	}
 	select {
 	case response := <-responseCh:
 		if response.err != nil {
 			return nil, response.err
 		}
 		return response.result, nil
-	case <-requestCtx.Done():
-		return nil, requestCtx.Err()
+	case <-requestDone:
+		return nil, nilvalue.ContextErr(requestCtx)
 	case <-process.done:
 		return nil, process.failure()
 	}
@@ -594,7 +604,7 @@ func (process *stdioMCPProcess) notify(ctx context.Context, notification any) er
 	if process == nil {
 		return errors.New("MCP stdio process is unavailable")
 	}
-	if nilvalue.Is(ctx) || ctx.Err() != nil {
+	if contextError(ctx) != nil {
 		return contextError(ctx)
 	}
 	process.writeMu.Lock()
@@ -608,14 +618,36 @@ func (process *stdioMCPProcess) notify(ctx context.Context, notification any) er
 	return nil
 }
 
-func withMCPTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+func withMCPTimeout(ctx context.Context, timeout time.Duration) (requestCtx context.Context, cancel context.CancelFunc, err error) {
+	if nilvalue.Is(ctx) {
+		return nil, func() {}, errors.New("context is unavailable")
+	}
+	if contextErr := contextError(ctx); contextErr != nil {
+		return nil, func() {}, contextErr
+	}
+	defer func() {
+		if recover() != nil {
+			requestCtx = nil
+			cancel = func() {}
+			err = errors.New("context is unavailable")
+		}
+	}()
+	// Always derive a standard context. Besides giving the request a stable
+	// Done channel, this turns a panic from a custom parent Deadline/Done
+	// implementation into the error returned above rather than allowing it to
+	// escape from the stdio request boundary.
+	base, baseCancel := context.WithCancel(ctx)
 	if timeout <= 0 {
-		return ctx, func() {}
+		return base, baseCancel, nil
 	}
-	if _, hasDeadline := ctx.Deadline(); hasDeadline {
-		return ctx, func() {}
+	if _, hasDeadline := base.Deadline(); hasDeadline {
+		return base, baseCancel, nil
 	}
-	return context.WithTimeout(ctx, timeout)
+	requestCtx, timeoutCancel := context.WithTimeout(base, timeout)
+	return requestCtx, func() {
+		timeoutCancel()
+		baseCancel()
+	}, nil
 }
 
 func (process *stdioMCPProcess) readLoop() {
@@ -628,7 +660,7 @@ func (process *stdioMCPProcess) readLoop() {
 			}
 			return
 		}
-		if len(bytes.TrimSpace(line)) == 0 {
+		if len(bytes.Trim(line, " \t\r\n")) == 0 {
 			continue
 		}
 		if !utf8.Valid(line) {
@@ -655,16 +687,16 @@ func (process *stdioMCPProcess) readLoop() {
 			}
 			return
 		}
-		if envelope.JSONRPC != "2.0" || (len(bytes.TrimSpace(envelope.Result)) == 0 && envelope.Error == nil) || (len(bytes.TrimSpace(envelope.Result)) > 0 && envelope.Error != nil) {
+		if envelope.JSONRPC != "2.0" || (len(bytes.Trim(envelope.Result, " \t\r\n")) == 0 && envelope.Error == nil) || (len(bytes.Trim(envelope.Result, " \t\r\n")) > 0 && envelope.Error != nil) {
 			if !process.doneNow() {
 				process.finish(errors.New("MCP stdio response has an invalid JSON-RPC envelope"))
 			}
 			return
 		}
-		if len(bytes.TrimSpace(envelope.ID)) == 0 {
+		if len(bytes.Trim(envelope.ID, " \t\r\n")) == 0 {
 			continue
 		}
-		key := string(bytes.TrimSpace(envelope.ID))
+		key := string(bytes.Trim(envelope.ID, " \t\r\n"))
 		process.pendingMu.Lock()
 		responseCh := process.pending[key]
 		process.pendingMu.Unlock()

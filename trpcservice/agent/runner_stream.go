@@ -67,6 +67,9 @@ func Invoke(ctx context.Context, runner Runner, request Invocation, drainTimeout
 	if nilvalue.Is(ctx) {
 		return nil, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
+	if contextErr := nilvalue.ContextErr(ctx); contextErr != nil {
+		return nil, contextErr
+	}
 	if nilvalue.Is(runner) {
 		return nil, fmt.Errorf("%w: runner is required", ErrInvalid)
 	}
@@ -90,9 +93,14 @@ func Invoke(ctx context.Context, runner Runner, request Invocation, drainTimeout
 
 func forwardRunnerEvents(ctx context.Context, source <-chan *trpcevent.Event, output chan<- RunnerEvent, drainTimeout time.Duration) {
 	defer close(output)
+	done, contextErr := nilvalue.ContextDone(ctx)
+	if contextErr != nil {
+		drainRunnerEvents(source, drainTimeout)
+		return
+	}
 	for {
 		select {
-		case <-ctx.Done():
+		case <-done:
 			drainRunnerEvents(source, drainTimeout)
 			return
 		case event, ok := <-source:
@@ -162,18 +170,22 @@ func externalResponseText(response *trpcmodel.Response) string {
 }
 
 func sendRunnerEvent(ctx context.Context, output chan<- RunnerEvent, event RunnerEvent) bool {
-	if nilvalue.Is(ctx) || ctx.Err() != nil {
+	if nilvalue.Is(ctx) || nilvalue.ContextErr(ctx) != nil {
+		return false
+	}
+	done, err := nilvalue.ContextDone(ctx)
+	if err != nil {
 		return false
 	}
 	select {
-	case <-ctx.Done():
+	case <-done:
 		return false
 	default:
 	}
 	select {
 	case output <- event:
 		return true
-	case <-ctx.Done():
+	case <-done:
 		return false
 	}
 }

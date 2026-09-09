@@ -304,5 +304,5 @@ func toolInvocationContext(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return runtimestorage.ErrInvalid
 	}
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
 }

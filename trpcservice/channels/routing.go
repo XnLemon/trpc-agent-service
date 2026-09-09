@@ -333,7 +333,7 @@ func ResolveCandidateRoutingTarget(
 	if nilvalue.Is(ctx) {
 		return RoutingTarget{}, ErrVerificationFailed
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return RoutingTarget{}, err
 	}
 	if nilvalue.Is(consumer) || nilvalue.Is(tenants) || nilvalue.Is(apps) || verify == nil || candidate.Channel == "" {
@@ -365,7 +365,7 @@ func ResolveConfiguredRoutingTarget(ctx context.Context, consumer CandidateConsu
 	if nilvalue.Is(ctx) {
 		return RoutingTarget{}, ErrVerificationFailed
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return RoutingTarget{}, err
 	}
 	if nilvalue.Is(consumer) || nilvalue.Is(tenants) || nilvalue.Is(apps) || tenantID == "" || bindingID == "" {

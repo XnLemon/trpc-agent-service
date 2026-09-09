@@ -62,7 +62,7 @@ func (downloader *HTTPMediaDownloader) Download(ctx context.Context, request Med
 	if err != nil || downloader == nil || nilvalue.Is(ctx) {
 		return nil, ErrAttachment
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	return downloader.provider(request).downloadMedia(ctx, request)
@@ -304,7 +304,7 @@ func (p *Provider) downloadMedia(ctx context.Context, download MediaDownloadRequ
 	if p == nil || nilvalue.Is(ctx) || strings.TrimSpace(download.MediaID) == "" || hasControl(download.MediaID) {
 		return nil, ErrAttachment
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	token, err := p.accessToken(ctx)
@@ -348,7 +348,7 @@ func readWeComMediaResponse(ctx context.Context, response *http.Response, downlo
 
 func wecomAttachmentError(ctx context.Context) error {
 	if !nilvalue.Is(ctx) {
-		if err := ctx.Err(); err != nil {
+		if err := nilvalue.ContextErr(ctx); err != nil {
 			return err
 		}
 	}
@@ -429,7 +429,7 @@ func attachmentFileName(name string) string {
 
 func attachmentLoadError(ctx context.Context, err error) error {
 	if !nilvalue.Is(ctx) {
-		if contextErr := ctx.Err(); contextErr != nil {
+		if contextErr := nilvalue.ContextErr(ctx); contextErr != nil {
 			return transportDeliveryError(contextErr)
 		}
 	}

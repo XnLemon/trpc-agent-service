@@ -6,8 +6,9 @@
 
 > 当前实现状态：schema v1 已支持 `llm`、顺序 `chain`、`parallel`、`cycle` 和 `graph` Agent kind；
 > `trpcservice/agent/factory.go` 通过 `kind + schema_version` 注册并构造对应上游 Agent。
-> Revision 已封存 MCP Binding；MCP ToolSet 从 ExecutionPlan 物化并受 HTTPS/stdio、SecretRef、
-> allowlist、Reviewer、Audit 和请求预算约束。租户级 Skill/Guardrail 仍按后续阶段实现。
+> Revision 已封存 MCP Binding 和带来源、版本、内容摘要、签名及执行资源策略的 Skill Authorization；
+> Skill Repository 只在固定 tenant/App/Revision、可信来源和验证后的清单下可见，当前 Runner 默认仅开放
+> knowledge-only Skill 工具，执行权限保持显式关闭。MCP/Guardrail 的主链路接入不属于本版验收范围。
 
 ## 目标与边界
 

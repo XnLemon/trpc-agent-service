@@ -587,7 +587,7 @@ func environmentPing(ctx context.Context, driver ControlPlaneDriver, db *sql.DB,
 	if nilvalue.Is(ctx) {
 		return ErrInvalidConfig
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	if driver == ControlPlaneDriverMySQL {

@@ -36,7 +36,7 @@ func Open(ctx context.Context, dsn string, options Options) (*sql.DB, error) {
 	if nilvalue.Is(ctx) {
 		return nil, ErrStorage
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	dsn = normalizeDSN(dsn)
@@ -71,7 +71,7 @@ func Ping(ctx context.Context, db *sql.DB) error {
 	if db == nil || nilvalue.Is(ctx) {
 		return ErrStorage
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	if err := db.PingContext(ctx); err != nil {
@@ -108,7 +108,7 @@ func Begin(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
 	if db == nil || nilvalue.Is(ctx) {
 		return nil, ErrStorage
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
@@ -131,7 +131,7 @@ func MapError(ctx context.Context, err error, notFound, duplicate, conflict, inv
 		return nil
 	}
 	if !nilvalue.Is(ctx) {
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr := nilvalue.ContextErr(ctx); ctxErr != nil {
 			return ctxErr
 		}
 	}
@@ -165,7 +165,7 @@ func Commit(ctx context.Context, tx *sql.Tx) error {
 		Rollback(tx)
 		return ErrStorage
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		Rollback(tx)
 		return err
 	}

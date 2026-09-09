@@ -11,6 +11,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	skillsecurity "github.com/XnLemon/trpc-agent-service/trpcservice/skill"
 )
 
 // RevisionState distinguishes mutable draft content from immutable published
@@ -47,6 +49,16 @@ const (
 	maxReferenceRunes   = 256
 	maxChainSteps       = 32
 )
+
+// SkillAuthorization is the published, secret-free identity and execution
+// policy for one Agent Skill.
+type SkillAuthorization = skillsecurity.Authorization
+
+// SkillExecutionPolicy is the bounded, deny-by-default execution policy for a
+// Skill. The current Agent adapter exposes knowledge-only Skill tools; the
+// policy is nevertheless sealed now so a future executor cannot widen access
+// at runtime.
+type SkillExecutionPolicy = skillsecurity.ExecutionPolicy
 
 // GenerationConfig is the provider-neutral subset materialized by the first
 // Agent App schema. Nil fields preserve provider defaults.
@@ -119,42 +131,44 @@ type ToolAuthorization struct {
 
 // DraftConfiguration is the complete executable content of one revision.
 type DraftConfiguration struct {
-	Description       string
-	Instruction       string
-	GlobalInstruction string
-	ModelProfileID    string
-	Generation        GenerationConfig
-	Runtime           RuntimePolicy
-	Tools             []ToolAuthorization
-	MCPBindings       []MCPBinding
-	Skills            []string
-	Chain             *ChainConfiguration
+	Description         string
+	Instruction         string
+	GlobalInstruction   string
+	ModelProfileID      string
+	Generation          GenerationConfig
+	Runtime             RuntimePolicy
+	Tools               []ToolAuthorization
+	MCPBindings         []MCPBinding
+	Skills              []string             `json:"skills,omitempty"`
+	SkillAuthorizations []SkillAuthorization `json:"skill_authorizations,omitempty"`
+	Chain               *ChainConfiguration
 }
 
 // Revision is one tenant-scoped version of an Agent App definition.
 // Published revisions are immutable and content-addressed.
 type Revision struct {
-	TenantID          string
-	AppID             string
-	Revision          int64
-	State             RevisionState
-	DraftVersion      int64
-	Kind              Kind
-	SchemaVersion     int
-	Description       string
-	Instruction       string
-	GlobalInstruction string
-	ModelProfileID    string
-	Generation        GenerationConfig
-	Runtime           RuntimePolicy
-	Tools             []ToolAuthorization
-	MCPBindings       []MCPBinding
-	Skills            []string
-	Chain             *ChainConfiguration
-	ContentDigest     string
-	PublishedAt       *time.Time
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	TenantID            string
+	AppID               string
+	Revision            int64
+	State               RevisionState
+	DraftVersion        int64
+	Kind                Kind
+	SchemaVersion       int
+	Description         string
+	Instruction         string
+	GlobalInstruction   string
+	ModelProfileID      string
+	Generation          GenerationConfig
+	Runtime             RuntimePolicy
+	Tools               []ToolAuthorization
+	MCPBindings         []MCPBinding
+	Skills              []string
+	SkillAuthorizations []SkillAuthorization
+	Chain               *ChainConfiguration
+	ContentDigest       string
+	PublishedAt         *time.Time
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 }
 
 // CreateRevisionInput contains trusted identity and caller-selected content for
@@ -196,25 +210,26 @@ func NewRevision(input CreateRevisionInput) (*Revision, error) {
 	}
 	now := time.Now().UTC()
 	revision := &Revision{
-		TenantID:          input.TenantID,
-		AppID:             input.AppID,
-		Revision:          input.Revision,
-		State:             RevisionStateDraft,
-		DraftVersion:      1,
-		Kind:              kind,
-		SchemaVersion:     schemaVersion,
-		Description:       configuration.Description,
-		Instruction:       configuration.Instruction,
-		GlobalInstruction: configuration.GlobalInstruction,
-		ModelProfileID:    configuration.ModelProfileID,
-		Generation:        cloneGenerationConfig(configuration.Generation),
-		Runtime:           cloneRuntimePolicy(configuration.Runtime),
-		Tools:             cloneTools(configuration.Tools),
-		MCPBindings:       cloneMCPBindings(configuration.MCPBindings),
-		Skills:            cloneStrings(configuration.Skills),
-		Chain:             configuration.Chain.Clone(),
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		TenantID:            input.TenantID,
+		AppID:               input.AppID,
+		Revision:            input.Revision,
+		State:               RevisionStateDraft,
+		DraftVersion:        1,
+		Kind:                kind,
+		SchemaVersion:       schemaVersion,
+		Description:         configuration.Description,
+		Instruction:         configuration.Instruction,
+		GlobalInstruction:   configuration.GlobalInstruction,
+		ModelProfileID:      configuration.ModelProfileID,
+		Generation:          cloneGenerationConfig(configuration.Generation),
+		Runtime:             cloneRuntimePolicy(configuration.Runtime),
+		Tools:               cloneTools(configuration.Tools),
+		MCPBindings:         cloneMCPBindings(configuration.MCPBindings),
+		Skills:              cloneStrings(configuration.Skills),
+		SkillAuthorizations: cloneSkillAuthorizations(configuration.SkillAuthorizations),
+		Chain:               configuration.Chain.Clone(),
+		CreatedAt:           now,
+		UpdatedAt:           now,
 	}
 	return revision, nil
 }
@@ -227,6 +242,7 @@ func (r Revision) Clone() Revision {
 	clone.Tools = cloneTools(r.Tools)
 	clone.MCPBindings = cloneMCPBindings(r.MCPBindings)
 	clone.Skills = cloneStrings(r.Skills)
+	clone.SkillAuthorizations = cloneSkillAuthorizations(r.SkillAuthorizations)
 	clone.Chain = r.Chain.Clone()
 	clone.PublishedAt = cloneTime(r.PublishedAt)
 	return clone
@@ -235,16 +251,17 @@ func (r Revision) Clone() Revision {
 // Configuration returns a deep copy of the revision's executable definition.
 func (r Revision) Configuration() DraftConfiguration {
 	return DraftConfiguration{
-		Description:       r.Description,
-		Instruction:       r.Instruction,
-		GlobalInstruction: r.GlobalInstruction,
-		ModelProfileID:    r.ModelProfileID,
-		Generation:        cloneGenerationConfig(r.Generation),
-		Runtime:           cloneRuntimePolicy(r.Runtime),
-		Tools:             cloneTools(r.Tools),
-		MCPBindings:       cloneMCPBindings(r.MCPBindings),
-		Skills:            cloneStrings(r.Skills),
-		Chain:             r.Chain.Clone(),
+		Description:         r.Description,
+		Instruction:         r.Instruction,
+		GlobalInstruction:   r.GlobalInstruction,
+		ModelProfileID:      r.ModelProfileID,
+		Generation:          cloneGenerationConfig(r.Generation),
+		Runtime:             cloneRuntimePolicy(r.Runtime),
+		Tools:               cloneTools(r.Tools),
+		MCPBindings:         cloneMCPBindings(r.MCPBindings),
+		Skills:              cloneStrings(r.Skills),
+		SkillAuthorizations: cloneSkillAuthorizations(r.SkillAuthorizations),
+		Chain:               r.Chain.Clone(),
 	}
 }
 
@@ -333,31 +350,33 @@ func (r Revision) ComputeContentDigest() (string, error) {
 		return "", err
 	}
 	payload := struct {
-		Kind              Kind                `json:"kind"`
-		SchemaVersion     int                 `json:"schema_version"`
-		Description       string              `json:"description"`
-		Instruction       string              `json:"instruction"`
-		GlobalInstruction string              `json:"global_instruction"`
-		ModelProfileID    string              `json:"model_profile_id"`
-		Generation        GenerationConfig    `json:"generation"`
-		Runtime           RuntimePolicy       `json:"runtime"`
-		Tools             []ToolAuthorization `json:"tools"`
-		MCPBindings       []MCPBinding        `json:"mcp_bindings,omitempty"`
-		Skills            []string            `json:"skills,omitempty"`
-		Chain             *ChainConfiguration `json:"chain,omitempty"`
+		Kind                Kind                 `json:"kind"`
+		SchemaVersion       int                  `json:"schema_version"`
+		Description         string               `json:"description"`
+		Instruction         string               `json:"instruction"`
+		GlobalInstruction   string               `json:"global_instruction"`
+		ModelProfileID      string               `json:"model_profile_id"`
+		Generation          GenerationConfig     `json:"generation"`
+		Runtime             RuntimePolicy        `json:"runtime"`
+		Tools               []ToolAuthorization  `json:"tools"`
+		MCPBindings         []MCPBinding         `json:"mcp_bindings,omitempty"`
+		Skills              []string             `json:"skills,omitempty"`
+		SkillAuthorizations []SkillAuthorization `json:"skill_authorizations,omitempty"`
+		Chain               *ChainConfiguration  `json:"chain,omitempty"`
 	}{
-		Kind:              r.Kind,
-		SchemaVersion:     r.SchemaVersion,
-		Description:       configuration.Description,
-		Instruction:       configuration.Instruction,
-		GlobalInstruction: configuration.GlobalInstruction,
-		ModelProfileID:    configuration.ModelProfileID,
-		Generation:        cloneGenerationConfig(configuration.Generation),
-		Runtime:           cloneRuntimePolicy(configuration.Runtime),
-		Tools:             cloneTools(configuration.Tools),
-		MCPBindings:       cloneMCPBindings(configuration.MCPBindings),
-		Skills:            cloneStrings(configuration.Skills),
-		Chain:             configuration.Chain.Clone(),
+		Kind:                r.Kind,
+		SchemaVersion:       r.SchemaVersion,
+		Description:         configuration.Description,
+		Instruction:         configuration.Instruction,
+		GlobalInstruction:   configuration.GlobalInstruction,
+		ModelProfileID:      configuration.ModelProfileID,
+		Generation:          cloneGenerationConfig(configuration.Generation),
+		Runtime:             cloneRuntimePolicy(configuration.Runtime),
+		Tools:               cloneTools(configuration.Tools),
+		MCPBindings:         cloneMCPBindings(configuration.MCPBindings),
+		Skills:              cloneStrings(configuration.Skills),
+		SkillAuthorizations: cloneSkillAuthorizations(configuration.SkillAuthorizations),
+		Chain:               configuration.Chain.Clone(),
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -417,7 +436,18 @@ func normalizeDraftConfiguration(configuration DraftConfiguration) (DraftConfigu
 	if err != nil {
 		return DraftConfiguration{}, err
 	}
+	authorizations, err := normalizeSkillAuthorizations(skills, configuration.SkillAuthorizations)
+	if err != nil {
+		return DraftConfiguration{}, err
+	}
+	if len(skills) == 0 && len(authorizations) > 0 {
+		skills = make([]string, 0, len(authorizations))
+		for _, authorization := range authorizations {
+			skills = append(skills, authorization.Name)
+		}
+	}
 	normalized.Skills = skills
+	normalized.SkillAuthorizations = authorizations
 	chain, err := normalizeChainConfiguration(configuration.Chain)
 	if err != nil {
 		return DraftConfiguration{}, err
@@ -469,7 +499,11 @@ func validateRevisionDefinition(kind Kind, schemaVersion int, configuration Draf
 	if _, err := normalizeMCPBindings(configuration.MCPBindings); err != nil {
 		return err
 	}
-	if _, err := normalizeSkills(configuration.Skills); err != nil {
+	skills, err := normalizeSkills(configuration.Skills)
+	if err != nil {
+		return err
+	}
+	if _, err := normalizeSkillAuthorizations(skills, configuration.SkillAuthorizations); err != nil {
 		return err
 	}
 	return nil
@@ -636,7 +670,7 @@ func sameDraftConfiguration(left, right DraftConfiguration) bool {
 	if left.Description != right.Description || left.Instruction != right.Instruction || left.GlobalInstruction != right.GlobalInstruction || left.ModelProfileID != right.ModelProfileID || !sameRuntimePolicy(left.Runtime, right.Runtime) {
 		return false
 	}
-	if !sameGenerationConfig(left.Generation, right.Generation) || len(left.Tools) != len(right.Tools) || !sameMCPBindings(left.MCPBindings, right.MCPBindings) || !sameStrings(left.Skills, right.Skills) {
+	if !sameGenerationConfig(left.Generation, right.Generation) || len(left.Tools) != len(right.Tools) || !sameMCPBindings(left.MCPBindings, right.MCPBindings) || !sameStrings(left.Skills, right.Skills) || !sameSkillAuthorizations(left.SkillAuthorizations, right.SkillAuthorizations) {
 		return false
 	}
 	if !sameChainConfiguration(left.Chain, right.Chain) {
@@ -739,6 +773,63 @@ func cloneStrings(values []string) []string {
 	clone := make([]string, len(values))
 	copy(clone, values)
 	return clone
+}
+
+func normalizeSkillAuthorizations(skills []string, values []SkillAuthorization) ([]SkillAuthorization, error) {
+	if len(values) == 0 {
+		if len(skills) > 0 {
+			return nil, fmt.Errorf("%w: every Skill requires a pinned authorization", ErrInvalid)
+		}
+		return []SkillAuthorization{}, nil
+	}
+	normalized := make([]SkillAuthorization, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		authorization, err := value.Normalize()
+		if err != nil {
+			return nil, fmt.Errorf("%w: Skill authorization: %v", ErrInvalid, err)
+		}
+		if _, exists := seen[authorization.Name]; exists {
+			return nil, fmt.Errorf("%w: duplicate Skill authorization %q", ErrInvalid, authorization.Name)
+		}
+		seen[authorization.Name] = struct{}{}
+		normalized = append(normalized, authorization)
+	}
+	sort.Slice(normalized, func(i, j int) bool { return normalized[i].Name < normalized[j].Name })
+	if len(skills) > 0 {
+		if len(skills) != len(normalized) {
+			return nil, fmt.Errorf("%w: Skills and SkillAuthorizations must contain the same names", ErrInvalid)
+		}
+		for index, name := range skills {
+			if normalized[index].Name != name {
+				return nil, fmt.Errorf("%w: Skill authorization does not match the allowlist", ErrInvalid)
+			}
+		}
+	}
+	return normalized, nil
+}
+
+func cloneSkillAuthorizations(values []SkillAuthorization) []SkillAuthorization {
+	if values == nil {
+		return nil
+	}
+	clone := make([]SkillAuthorization, len(values))
+	for index, value := range values {
+		clone[index] = value.Clone()
+	}
+	return clone
+}
+
+func sameSkillAuthorizations(left, right []SkillAuthorization) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !left[index].Equal(right[index]) {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeSkills(values []string) ([]string, error) {

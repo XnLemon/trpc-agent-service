@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -105,7 +107,16 @@ type Config struct {
 
 // New creates a reply worker after validating delivery and lease settings.
 func New(config Config) (*Worker, error) {
-	if nilvalue.Is(config.Store) || nilvalue.Is(config.MessageStore) || nilvalue.Is(config.Provider) || runtimestorage.ValidateTenant(config.TenantID) != nil || config.Owner == "" || config.LeaseDuration <= 0 {
+	if nilvalue.Is(config.Store) || nilvalue.Is(config.MessageStore) || nilvalue.Is(config.Provider) || runtimestorage.ValidateTenant(config.TenantID) != nil || !validWorkerText(config.Owner, 256, true) || config.LeaseDuration <= 0 {
+		return nil, ErrInvalid
+	}
+	if config.Channel == "" {
+		config.Channel = "outbox"
+	}
+	if config.ProviderName == "" {
+		config.ProviderName = "other"
+	}
+	if !validWorkerText(config.Channel, 128, true) || !validWorkerText(config.ProviderName, 128, true) {
 		return nil, ErrInvalid
 	}
 	retry, err := newRetryPolicy(config)
@@ -113,12 +124,6 @@ func New(config Config) (*Worker, error) {
 		return nil, err
 	}
 	config.Observability = observability.ProtectProvider(config.Observability)
-	if config.Channel == "" {
-		config.Channel = "outbox"
-	}
-	if config.ProviderName == "" {
-		config.ProviderName = "other"
-	}
 	return &Worker{
 		store: config.Store, messageStore: config.MessageStore, provider: config.Provider,
 		channel: config.Channel, providerName: config.ProviderName,
@@ -156,7 +161,7 @@ func (w *Worker) beginRun(ctx context.Context) (context.Context, error) {
 	if w == nil || nilvalue.Is(ctx) {
 		return nil, ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	w.mu.Lock()
@@ -164,7 +169,10 @@ func (w *Worker) beginRun(ctx context.Context) (context.Context, error) {
 	if w.runCancel != nil {
 		return nil, ErrAlreadyRunning
 	}
-	runCtx, cancel := context.WithCancel(ctx)
+	runCtx, cancel, err := withCancelSafely(ctx)
+	if err != nil {
+		return nil, err
+	}
 	w.runCancel = cancel
 	w.runDone = make(chan struct{})
 	return runCtx, nil
@@ -191,6 +199,10 @@ func (w *Worker) runLoop(runCtx context.Context, pollInterval time.Duration) err
 			close(done)
 		}
 	}()
+	done, doneErr := nilvalue.ContextDone(runCtx)
+	if doneErr != nil {
+		return ErrInvalid
+	}
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	for {
@@ -198,8 +210,8 @@ func (w *Worker) runLoop(runCtx context.Context, pollInterval time.Duration) err
 			return err
 		}
 		select {
-		case <-runCtx.Done():
-			return runCtx.Err()
+		case <-done:
+			return nilvalue.ContextErr(runCtx)
 		case <-ticker.C:
 		}
 	}
@@ -229,6 +241,9 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 	if w == nil || nilvalue.Is(ctx) {
 		return 0, ErrInvalid
 	}
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		return 0, err
+	}
 	candidates, err := observeStorage(w, ctx, func(operationCtx context.Context) ([]runtimestorage.ReplyOutbox, error) {
 		return w.store.ListReplyCandidates(operationCtx, w.tenantID)
 	})
@@ -242,8 +257,17 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 		}
 		return candidates[i].ReplyID < candidates[j].ReplyID
 	})
+	if !validReplyCandidateBatch(w, candidates) {
+		return 0, ErrInvalid
+	}
 	processed := 0
 	for _, candidate := range candidates {
+		// Candidate stores are durable trust boundaries. Never let a malformed
+		// or cross-tenant snapshot reach ClaimReply or a provider, even when a
+		// custom adapter returns rows outside its documented query scope.
+		if !validReplyCandidate(w, candidate) {
+			return processed, ErrInvalid
+		}
 		// A later segment must not overtake a retrying or leased predecessor.
 		state, readyErr := w.precedingSegmentsState(ctx, candidate)
 		if readyErr != nil {
@@ -258,6 +282,9 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 		}
 		if !claimedOK {
 			continue
+		}
+		if !validClaimedReply(w, candidate, claimed) {
+			return processed, ErrInvalid
 		}
 		processed++
 		if err := w.processClaimed(ctx, candidate, claimed, state == precedingSegmentsDeadLettered); err != nil && !errors.Is(err, runtimestorage.ErrConflict) {
@@ -277,6 +304,9 @@ func (w *Worker) precedingSegmentsState(ctx context.Context, candidate runtimest
 		}
 		if err != nil {
 			return precedingSegmentsPending, err
+		}
+		if !validReplyCandidate(w, previous) || previous.TenantID != candidate.TenantID || previous.ReplyID != candidate.ReplyID || previous.EventID != candidate.EventID || previous.SegmentIndex != index {
+			return precedingSegmentsPending, ErrInvalid
 		}
 		switch previous.Status {
 		case runtimestorage.ReplySent:
@@ -328,9 +358,12 @@ func (w *Worker) processClaimed(ctx context.Context, candidate, claimed runtimes
 		// A sending lease means the previous worker may have reached the
 		// provider before losing its lease. Reconcile is the only safe
 		// resolution path; an unknown/error result must not redeliver.
-		if w.reconcile(operationCtx, claimed) {
+		status, reconciled := w.reconcileDelivery(operationCtx, claimed)
+		if reconciled && status == DeliveryAccepted {
 			w.advanceEvent(ctx, claimed.EventID)
 			_ = w.metrics.Delivery(operationCtx, map[string]string{"component": "channel", "channel": w.channel, "provider": w.providerName, "status": "success", "error_class": ""})
+		} else if reconciled && status == DeliveryRejected {
+			_ = w.metrics.Delivery(operationCtx, map[string]string{"component": "channel", "channel": w.channel, "provider": w.providerName, "status": "retry", "error_class": "provider_rejected"})
 		} else {
 			operationErr = ErrProvider
 			_ = w.metrics.Delivery(operationCtx, map[string]string{"component": "channel", "channel": w.channel, "provider": w.providerName, "status": "retry", "error_class": "error"})
@@ -379,13 +412,22 @@ func getReplyCorrelationSafely(store runtimestorage.ReplyCorrelationStore, ctx c
 }
 
 func (w *Worker) acceptDelivery(ctx, operationCtx context.Context, claimed runtimestorage.ReplyOutbox, providerID string) error {
+	if !validProviderMessageID(providerID) {
+		// A nil provider error without a durable receipt is an uncertain
+		// hand-off. Leave the row sending so reconciliation can resolve it;
+		// never convert it into a fresh delivery attempt here.
+		return ErrProvider
+	}
+	// Record the durable audit fact before committing the terminal row. If
+	// audit is unavailable, leave the row sending so recovery can reconcile
+	// without replaying the provider side effect and retry the audit fact.
+	if err := w.recordDelivery(operationCtx, audit.EventIMDeliverySent, claimed, ""); err != nil {
+		return err
+	}
 	_ = w.metrics.Delivery(operationCtx, map[string]string{"component": "channel", "channel": w.channel, "provider": w.providerName, "status": "success", "error_class": ""})
 	_, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.ReplyOutbox, error) {
 		return w.store.TransitionReply(operationCtx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: runtimestorage.ReplySent, Owner: w.owner, FencingToken: claimed.FencingToken, ProviderID: providerID})
 	})
-	if err == nil {
-		err = w.recordDelivery(operationCtx, audit.EventIMDeliverySent, claimed, "")
-	}
 	if err == nil {
 		w.advanceEvent(ctx, claimed.EventID)
 	}
@@ -398,16 +440,19 @@ func (w *Worker) rejectDelivery(ctx, operationCtx context.Context, claimed runti
 	if !retryable || claimed.Attempts >= w.retry.maxAttempts {
 		to = runtimestorage.ReplyDeadLetter
 	}
+	eventType := audit.EventIMDeliveryRetryScheduled
+	if to == runtimestorage.ReplyDeadLetter {
+		eventType = audit.EventIMDeliveryDeadLettered
+	}
+	// As with acceptance, audit first. A failed audit leaves the lease in an
+	// uncertain state and is intentionally reconciled rather than silently
+	// committing a lifecycle decision without its durable fact.
+	if err := w.recordDelivery(operationCtx, eventType, claimed, class); err != nil {
+		return err
+	}
 	_, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.ReplyOutbox, error) {
 		return w.store.TransitionReply(operationCtx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: to, Owner: w.owner, FencingToken: claimed.FencingToken, ErrorClass: class})
 	})
-	if err == nil {
-		eventType := audit.EventIMDeliveryRetryScheduled
-		if to == runtimestorage.ReplyDeadLetter {
-			eventType = audit.EventIMDeliveryDeadLettered
-		}
-		err = w.recordDelivery(operationCtx, eventType, claimed, class)
-	}
 	if retryable && to == runtimestorage.ReplyRetryable {
 		_ = w.metrics.Retry(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "channel": w.channel, "provider": w.providerName, "status": "retry", "error_class": metricErrorClass(class)})
 	}
@@ -441,6 +486,7 @@ func (w *Worker) recordDelivery(ctx context.Context, eventType audit.EventType, 
 		}
 	}
 	return w.audit.Record(ctx, audit.Event{
+		EventID:   audit.NewEventID(string(eventType), requestID, traceID, value.ReplyID, strconv.Itoa(value.SegmentIndex)),
 		EventType: eventType, RequestID: requestID, TraceID: traceID,
 		Decision: decision, ErrorType: class,
 	})
@@ -460,6 +506,170 @@ func eligible(value runtimestorage.ReplyOutbox) bool {
 	return value.Status == runtimestorage.ReplySending && value.LeaseExpiresAt != nil && !value.LeaseExpiresAt.After(time.Now().UTC())
 }
 
+func validReplyCandidate(worker *Worker, value runtimestorage.ReplyOutbox) bool {
+	if worker == nil || runtimestorage.ValidateTenant(value.TenantID) != nil || value.TenantID != worker.tenantID ||
+		!validOutboxIdentity(value.ReplyID) || !validOutboxIdentity(value.EventID) || value.SegmentIndex < 0 || value.SegmentCount < 0 || value.SegmentCount == 0 && value.SegmentIndex != 0 || value.SegmentCount > maxWorkerSegments || value.Attempts < 0 || value.FencingToken < 0 {
+		return false
+	}
+	if value.SegmentCount > 0 && value.SegmentIndex >= value.SegmentCount {
+		return false
+	}
+	if !validOutboxPayload(value.Payload) || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil {
+		return false
+	}
+	normalized, err := runtimestorage.NormalizeReplyOutbox(value)
+	if err != nil || value.Kind != "" && normalized.Kind != value.Kind || normalized.Payload != value.Payload || normalized.Fallback != value.Fallback || normalized.Attachment != value.Attachment {
+		return false
+	}
+	if value.ProviderMessageID != "" && !validProviderMessageID(value.ProviderMessageID) {
+		return false
+	}
+	if value.Status == runtimestorage.ReplySent && value.SegmentCount > 0 && !validProviderMessageID(value.ProviderMessageID) {
+		return false
+	}
+	if value.LeaseOwner != "" && !validOutboxIdentity(value.LeaseOwner) {
+		return false
+	}
+	if value.CreatedAt.IsZero() != value.UpdatedAt.IsZero() {
+		return false
+	}
+	if !value.CreatedAt.IsZero() && (value.CreatedAt.Location() != time.UTC || value.UpdatedAt.Location() != time.UTC || value.UpdatedAt.Before(value.CreatedAt)) {
+		return false
+	}
+	if value.LeaseExpiresAt != nil && value.LeaseExpiresAt.IsZero() {
+		return false
+	}
+	if !validOutboxErrorClass(value.LastErrorClass) {
+		return false
+	}
+	switch value.Status {
+	case runtimestorage.ReplyPending:
+		return value.LeaseOwner == "" && value.LeaseExpiresAt == nil && value.ProviderMessageID == ""
+	case runtimestorage.ReplyRetryable:
+		// Some durable stores retain the historical owner as an audit field;
+		// the absence of an expiry is what makes the row unleased.
+		return value.LeaseExpiresAt == nil && value.ProviderMessageID == ""
+	case runtimestorage.ReplySending:
+		// SegmentCount==0 is the legacy shape used by pre-segmentation rows.
+		// New segmented rows must carry the complete lease envelope; otherwise
+		// a worker cannot prove that its delivery attempt is fenced.
+		if value.SegmentCount > 0 {
+			return value.LeaseOwner != "" && value.LeaseExpiresAt != nil
+		}
+		return true
+	case runtimestorage.ReplySent, runtimestorage.ReplyDeadLetter:
+		return value.LeaseExpiresAt == nil
+	default:
+		return false
+	}
+}
+
+const maxWorkerSegments = 1 << 20
+
+func validOutboxPayload(value string) bool {
+	return len(value) <= 4<<20 && runtimestorage.ValidateText(value, 4<<20, false)
+}
+
+func validOutboxErrorClass(value string) bool {
+	switch value {
+	case "", "rate_limited", "timeout", "canceled", "invalid", "unauthenticated", "not_ready", "unavailable", "provider_rejected", "provider_error", "permanent", "preceding_segment_dead_lettered":
+		return true
+	default:
+		return false
+	}
+}
+
+func validReplyCandidateBatch(worker *Worker, values []runtimestorage.ReplyOutbox) bool {
+	// Candidate stores are untrusted, so validate every row before any claim.
+	// A count of one is the legacy shape emitted for the first row while a
+	// store is upgraded to segmented delivery; other conflicting counts are
+	// not compatible with one reply identity.
+	type replyGroup struct {
+		eventID      string
+		target       runtimestorage.ReplyTarget
+		segmentCount int
+		segments     map[int]struct{}
+	}
+	groups := make(map[string]replyGroup)
+	for _, value := range values {
+		if !validReplyCandidate(worker, value) {
+			return false
+		}
+		group, exists := groups[value.ReplyID]
+		if !exists {
+			group = replyGroup{eventID: value.EventID, target: value.ReplyTarget, segmentCount: value.SegmentCount, segments: make(map[int]struct{})}
+		} else if group.eventID != value.EventID || group.target != value.ReplyTarget || group.segmentCount != value.SegmentCount && group.segmentCount != 1 && value.SegmentCount != 1 {
+			return false
+		}
+		if _, duplicate := group.segments[value.SegmentIndex]; duplicate {
+			return false
+		}
+		group.segments[value.SegmentIndex] = struct{}{}
+		if group.segmentCount == 1 && value.SegmentCount > 1 {
+			group.segmentCount = value.SegmentCount
+		}
+		groups[value.ReplyID] = group
+	}
+	for _, group := range groups {
+		// Zero-count rows are the pre-segmentation compatibility shape. A
+		// count of one is also accepted while stores upgrade their first row.
+		// Once a reply advertises multiple segments, the worker must observe
+		// the complete contiguous set before it can deliver or advance the
+		// inbound event; otherwise a truncated candidate list could mark an
+		// event replied while a segment is missing.
+		if group.segmentCount <= 1 {
+			continue
+		}
+		if len(group.segments) != group.segmentCount {
+			return false
+		}
+		for index := 0; index < group.segmentCount; index++ {
+			if _, present := group.segments[index]; !present {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validClaimedReply(worker *Worker, candidate, claimed runtimestorage.ReplyOutbox) bool {
+	if !validReplyCandidate(worker, claimed) || claimed.TenantID != candidate.TenantID || claimed.ReplyID != candidate.ReplyID || claimed.EventID != candidate.EventID || claimed.SegmentIndex != candidate.SegmentIndex || claimed.Status != runtimestorage.ReplySending {
+		return false
+	}
+	candidateKind := candidate.Kind
+	if candidateKind == "" {
+		candidateKind = runtimestorage.ReplyKindText
+	}
+	claimedKind := claimed.Kind
+	if claimedKind == "" {
+		claimedKind = runtimestorage.ReplyKindText
+	}
+	if claimed.SegmentCount != candidate.SegmentCount || claimedKind != candidateKind || claimed.Payload != candidate.Payload || claimed.Attachment != candidate.Attachment || claimed.Fallback != candidate.Fallback || claimed.ReplyTarget != candidate.ReplyTarget {
+		return false
+	}
+	// Legacy test/compatibility stores did not return lease metadata for their
+	// zero-count rows. Every real segmented row must prove the incremented
+	// attempt and fencing token and must be leased to this worker.
+	if candidate.SegmentCount > 0 {
+		if candidate.Attempts >= int(^uint(0)>>1) || candidate.FencingToken >= int64(^uint64(0)>>1) || claimed.Attempts != candidate.Attempts+1 || claimed.FencingToken != candidate.FencingToken+1 || claimed.LeaseOwner != worker.owner || claimed.LeaseExpiresAt == nil || !claimed.LeaseExpiresAt.After(time.Now().UTC()) {
+			return false
+		}
+	}
+	return true
+}
+
+func validWorkerText(value string, max int, required bool) bool {
+	return value == strings.TrimSpace(value) && !strings.Contains(value, "://") && runtimestorage.ValidateText(value, max, required)
+}
+
+func validOutboxIdentity(value string) bool {
+	return validWorkerText(value, 256, true)
+}
+
+func validProviderMessageID(value string) bool {
+	return validWorkerText(value, 1024, true)
+}
+
 func (w *Worker) advanceEvent(ctx context.Context, eventID string) {
 	if w == nil || nilvalue.Is(w.messageStore) || eventID == "" {
 		return
@@ -467,13 +677,16 @@ func (w *Worker) advanceEvent(ctx context.Context, eventID string) {
 	candidates, err := observeStorage(w, ctx, func(operationCtx context.Context) ([]runtimestorage.ReplyOutbox, error) {
 		return w.store.ListReplyCandidates(operationCtx, w.tenantID)
 	})
-	if err != nil {
+	if err != nil || !validReplyCandidateBatch(w, candidates) {
 		return
 	}
 	hasEvent := false
 	for _, value := range candidates {
 		if value.EventID != eventID {
 			continue
+		}
+		if !validReplyCandidate(w, value) {
+			return
 		}
 		hasEvent = true
 		if value.Status != runtimestorage.ReplySent {
@@ -487,6 +700,12 @@ func (w *Worker) advanceEvent(ctx context.Context, eventID string) {
 		return w.messageStore.GetMessage(operationCtx, w.tenantID, eventID)
 	})
 	if err != nil {
+		return
+	}
+	// Legacy adapters may omit identity fields, but a populated identity must
+	// still agree with the worker's tenant/event lookup. Never use a fetched
+	// cross-tenant snapshot to decide a lifecycle transition.
+	if event.TenantID != "" && event.TenantID != w.tenantID || event.EventID != "" && event.EventID != eventID {
 		return
 	}
 	if event.Status == runtimestorage.EventCompleted {
@@ -512,6 +731,8 @@ func deliverSafely(provider Provider, ctx context.Context, value runtimestorage.
 		if recover() != nil {
 			providerID = ""
 			err = &DeliveryError{Class: "provider_error", Retryable: true}
+		} else if nilvalue.Is(err) {
+			err = nil
 		}
 	}()
 	return provider.Deliver(ctx, value)
@@ -524,29 +745,62 @@ func reconcileSafely(provider Provider, ctx context.Context, value runtimestorag
 	defer func() {
 		if recover() != nil {
 			status, providerID, err = DeliveryUnknown, "", ErrProvider
+		} else if nilvalue.Is(err) {
+			err = nil
 		}
 	}()
 	return provider.Reconcile(ctx, value)
 }
 
 func (w *Worker) reconcile(ctx context.Context, claimed runtimestorage.ReplyOutbox) bool {
+	_, ok := w.reconcileDelivery(ctx, claimed)
+	return ok
+}
+
+func (w *Worker) reconcileDelivery(ctx context.Context, claimed runtimestorage.ReplyOutbox) (DeliveryStatus, bool) {
 	if w == nil || nilvalue.Is(ctx) || nilvalue.Is(w.provider) {
-		return false
+		return DeliveryUnknown, false
 	}
 	status, providerID, err := reconcileSafely(w.provider, ctx, claimed)
-	if err != nil || (status != DeliveryAccepted && status != DeliveryRejected) {
-		return false
+	if err != nil || (status != DeliveryAccepted && status != DeliveryRejected) || (status == DeliveryAccepted && !validProviderMessageID(providerID)) || (status == DeliveryRejected && providerID != "" && !validProviderMessageID(providerID)) {
+		return DeliveryUnknown, false
 	}
 	to := runtimestorage.ReplySent
 	class := ""
+	eventType := audit.EventIMDeliverySent
 	if status == DeliveryRejected {
 		to = runtimestorage.ReplyRetryable
 		class = "provider_rejected"
+		eventType = audit.EventIMDeliveryRetryScheduled
+		if w.retry.maxAttempts > 0 && claimed.Attempts >= w.retry.maxAttempts {
+			to = runtimestorage.ReplyDeadLetter
+			eventType = audit.EventIMDeliveryDeadLettered
+		}
+	}
+	// The row remains sending until the audit fact is present. This makes an
+	// audit outage recoverable while preserving the no-replay guarantee.
+	if err := w.recordDelivery(ctx, eventType, claimed, class); err != nil {
+		return DeliveryUnknown, false
 	}
 	_, transitionErr := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.ReplyOutbox, error) {
 		return w.store.TransitionReply(operationCtx, runtimestorage.ReplyTransition{TenantID: claimed.TenantID, ReplyID: claimed.ReplyID, SegmentIndex: claimed.SegmentIndex, From: runtimestorage.ReplySending, To: to, Owner: w.owner, FencingToken: claimed.FencingToken, ProviderID: providerID, ErrorClass: class})
 	})
-	return transitionErr == nil
+	return status, transitionErr == nil
+}
+
+func withCancelSafely(ctx context.Context) (runCtx context.Context, cancel context.CancelFunc, err error) {
+	if nilvalue.Is(ctx) {
+		return nil, func() {}, ErrInvalid
+	}
+	defer func() {
+		if recover() != nil {
+			runCtx = nil
+			cancel = func() {}
+			err = ErrInvalid
+		}
+	}()
+	runCtx, cancel = context.WithCancel(ctx)
+	return runCtx, cancel, nil
 }
 
 func observeStorage[T any](worker *Worker, ctx context.Context, operation func(context.Context) (T, error)) (value T, err error) {
@@ -565,6 +819,9 @@ func observeStorage[T any](worker *Worker, ctx context.Context, operation func(c
 	provider := worker.providerName
 	_ = worker.metrics.Request(operationCtx, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": provider, "status": "started"})
 	value, err = operation(operationCtx)
+	if nilvalue.Is(err) {
+		err = nil
+	}
 	finish(err)
 	_ = worker.metrics.Operation(operationCtx, started, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": provider}, err)
 	status := "success"

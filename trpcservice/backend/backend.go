@@ -659,7 +659,7 @@ func (spec compiledProviderSpec) normalizeBinding(capability Capability, endpoin
 		Capability: capability, Provider: spec.provider, Endpoint: endpoint,
 		Options: normalizedOptions, SecretRef: secretRef,
 	}
-	if spec.validateBinding != nil && !spec.validateBinding(result.Clone()) {
+	if spec.validateBinding != nil && !callBindingValidator(spec.validateBinding, result.Clone()) {
 		return CapabilityBinding{}, fmt.Errorf("%w: provider binding is invalid", ErrInvalid)
 	}
 	return result, nil
@@ -893,6 +893,18 @@ func normalizeOptionValue(value string, spec OptionSpec) (string, error) {
 	}
 }
 
+func callBindingValidator(validator func(CapabilityBinding) bool, binding CapabilityBinding) (valid bool) {
+	if validator == nil {
+		return true
+	}
+	defer func() {
+		if recover() != nil {
+			valid = false
+		}
+	}()
+	return validator(binding)
+}
+
 func validFieldPolicy(policy FieldPolicy) bool {
 	return policy == FieldForbidden || policy == FieldOptional || policy == FieldRequired
 }
@@ -1090,6 +1102,10 @@ func validateTenantID(id string) error {
 // adapters. Tenant identity remains a backend-domain concern even when a
 // runtime package uses it to key an in-process registry.
 func ValidateTenantID(id string) error { return validateTenantID(id) }
+
+// ValidateProfileID validates the canonical backend profile identifier used
+// by runtime storage cache and materialization boundaries.
+func ValidateProfileID(id string) error { return validateProfileID(id) }
 
 func validateProfileID(id string) error {
 	return validateCrockfordID(id, "bp_", "backend profile")

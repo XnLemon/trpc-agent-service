@@ -103,7 +103,11 @@ func (runnerAdapter *a2aPlatformRunner) Run(ctx context.Context, userID, session
 	runCtx := ctx
 	var cancel context.CancelFunc
 	if runnerAdapter.requestTimeout > 0 {
-		runCtx, cancel = context.WithTimeout(ctx, runnerAdapter.requestTimeout)
+		var timeoutErr error
+		runCtx, cancel, timeoutErr = withGatewayTimeout(ctx, runnerAdapter.requestTimeout)
+		if timeoutErr != nil {
+			return nil, timeoutErr
+		}
 	}
 	dispatchEvents, err := callDispatch(runCtx, runnerAdapter.dispatcher, DispatchRequest{
 		Principal: principal, Message: input, RequestID: requestID, TraceID: traceID,
@@ -119,6 +123,13 @@ func (runnerAdapter *a2aPlatformRunner) Run(ctx context.Context, userID, session
 			cancel()
 		}
 		return nil, ErrNotReady
+	}
+	runDone, runDoneErr := nilvalue.ContextDone(runCtx)
+	if runDoneErr != nil {
+		if cancel != nil {
+			cancel()
+		}
+		return nil, runDoneErr
 	}
 	output := make(chan *event.Event)
 	go func() {
@@ -138,10 +149,10 @@ func (runnerAdapter *a2aPlatformRunner) Run(ctx context.Context, userID, session
 				}
 				select {
 				case output <- converted:
-				case <-runCtx.Done():
+				case <-runDone:
 					return
 				}
-			case <-runCtx.Done():
+			case <-runDone:
 				return
 			}
 		}
@@ -181,7 +192,11 @@ func a2aPrincipalFromContext(ctx context.Context) (Principal, error) {
 	if nilvalue.Is(ctx) {
 		return Principal{}, ErrUnauthenticated
 	}
-	user, ok := ctx.Value(auth.AuthUserKey).(*auth.User)
+	raw, valueErr := nilvalue.ContextValue(ctx, auth.AuthUserKey)
+	if valueErr != nil {
+		return Principal{}, ErrUnauthenticated
+	}
+	user, ok := raw.(*auth.User)
 	if !ok || user == nil {
 		return Principal{}, ErrUnauthenticated
 	}
@@ -205,7 +220,11 @@ func a2aClaimString(ctx context.Context, key string) (string, bool) {
 	if nilvalue.Is(ctx) {
 		return "", false
 	}
-	user, ok := ctx.Value(auth.AuthUserKey).(*auth.User)
+	raw, valueErr := nilvalue.ContextValue(ctx, auth.AuthUserKey)
+	if valueErr != nil {
+		return "", false
+	}
+	user, ok := raw.(*auth.User)
 	if !ok || user == nil || user.Claims == nil {
 		return "", false
 	}

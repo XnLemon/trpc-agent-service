@@ -104,7 +104,7 @@ func (store *IdempotencyStore) Begin(ctx context.Context, principal Principal, m
 	if nilvalue.Is(ctx) {
 		return nil, nil, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, nil, err
 	}
 	if err := principal.Validate(); err != nil {

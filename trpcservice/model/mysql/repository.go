@@ -99,7 +99,7 @@ func checkContext(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return ErrStorage
 	}
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
 }
 
 // Create persists a model profile and returns its creation event.

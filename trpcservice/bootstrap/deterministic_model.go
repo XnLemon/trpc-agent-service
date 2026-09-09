@@ -28,11 +28,15 @@ func (model deterministicModel) GenerateContent(ctx context.Context, request *tr
 	if request == nil {
 		return nil, errors.New("deterministic model request is required")
 	}
+	done, doneErr := nilvalue.ContextDoneChannel(ctx)
+	if doneErr != nil {
+		return nil, errors.New("deterministic model context is unavailable")
+	}
 	responses := make(chan *trpcmodel.Response, 1)
 	go func() {
 		defer close(responses)
 		select {
-		case <-ctx.Done():
+		case <-done:
 			return
 		default:
 		}
@@ -42,7 +46,7 @@ func (model deterministicModel) GenerateContent(ctx context.Context, request *tr
 			Choices: []trpcmodel.Choice{{Message: trpcmodel.NewAssistantMessage(deterministicDemoResponse)}},
 			Done:    true,
 		}:
-		case <-ctx.Done():
+		case <-done:
 		}
 	}()
 	return responses, nil

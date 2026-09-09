@@ -3,9 +3,11 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -256,6 +258,24 @@ func validateScopedID(value, prefix, label string) error {
 
 func isNilGatewayValue(value any) bool {
 	return nilvalue.Is(value)
+}
+
+func withGatewayTimeout(parent context.Context, timeout time.Duration) (ctx context.Context, cancel context.CancelFunc, err error) {
+	if nilvalue.Is(parent) {
+		return nil, func() {}, nilvalue.ErrInvalidContext
+	}
+	if _, err := nilvalue.ContextDone(parent); err != nil {
+		return nil, func() {}, err
+	}
+	defer func() {
+		if recover() != nil {
+			ctx = nil
+			cancel = func() {}
+			err = nilvalue.ErrInvalidContext
+		}
+	}()
+	ctx, cancel = context.WithTimeout(parent, timeout)
+	return ctx, cancel, nil
 }
 
 func callReady(check func() bool) (ready bool) {

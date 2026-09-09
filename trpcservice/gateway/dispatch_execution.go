@@ -67,7 +67,7 @@ func (state *executionForwardState) markSendFailure(ctx context.Context) {
 	if nilvalue.Is(ctx) {
 		state.terminalErr = context.Canceled
 	} else {
-		state.terminalErr = ctx.Err()
+		state.terminalErr = nilvalue.ContextErr(ctx)
 	}
 	if state.terminalErr == nil {
 		state.terminalErr = context.Canceled
@@ -80,8 +80,8 @@ func (state *executionForwardState) ensureTerminal(ctx context.Context) {
 	if state.terminalSeen || state.terminalErr != nil {
 		return
 	}
-	if !nilvalue.Is(ctx) && ctx.Err() != nil {
-		state.terminalErr = ctx.Err()
+	if !nilvalue.Is(ctx) && nilvalue.ContextErr(ctx) != nil {
+		state.terminalErr = nilvalue.ContextErr(ctx)
 		state.terminalEventType, state.terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
 		return
 	}
@@ -301,25 +301,29 @@ func executionAuditResult(eventType audit.EventType) audit.ExecutionResult {
 }
 
 func cancellationStatus(ctx context.Context) string {
-	if !nilvalue.Is(ctx) && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if !nilvalue.Is(ctx) && errors.Is(nilvalue.ContextErr(ctx), context.DeadlineExceeded) {
 		return "deadline_exceeded"
 	}
 	return "canceled"
 }
 
 func sendDispatchEvent(ctx context.Context, output chan<- DispatchEvent, event DispatchEvent) bool {
-	if nilvalue.Is(ctx) || nilvalue.Is(output) || ctx.Err() != nil {
+	if nilvalue.Is(ctx) || nilvalue.Is(output) || nilvalue.ContextErr(ctx) != nil {
+		return false
+	}
+	done, doneErr := nilvalue.ContextDone(ctx)
+	if doneErr != nil {
 		return false
 	}
 	select {
-	case <-ctx.Done():
+	case <-done:
 		return false
 	default:
 	}
 	select {
 	case output <- event:
 		return true
-	case <-ctx.Done():
+	case <-done:
 		return false
 	}
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/jsonstrict"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 type openAICompatRequest struct {
@@ -259,6 +260,10 @@ func (handler *HTTPHandler) writeOpenAIStream(writer http.ResponseWriter, ctx co
 	writer.Header().Set("Connection", "keep-alive")
 	writer.WriteHeader(http.StatusOK)
 	flusher.Flush()
+	done, doneErr := nilvalue.ContextDone(ctx)
+	if doneErr != nil {
+		return false
+	}
 	collected := make([]DispatchEvent, 0, 4)
 	first := true
 	finishReason := "stop"
@@ -303,7 +308,7 @@ func (handler *HTTPHandler) writeOpenAIStream(writer http.ResponseWriter, ctx co
 				flusher.Flush()
 				return true
 			}
-		case <-ctx.Done():
+		case <-done:
 			return false
 		}
 	}

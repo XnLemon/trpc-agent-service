@@ -87,7 +87,7 @@ func (repository *VersionRepository) ListVersions(ctx context.Context, scope kno
 	if nilvalue.Is(ctx) {
 		return nil, knowledgeadmin.ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	if err := scope.Validate(); err != nil {
@@ -120,7 +120,7 @@ func validateVersionContext(ctx context.Context, value knowledgeadmin.Version) e
 	if nilvalue.Is(ctx) {
 		return knowledgeadmin.ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	if (knowledgeadmin.Scope{TenantID: value.TenantID, AppID: value.AppID}).Validate() != nil || value.Version != 0 || value.DocumentCount < 0 || len(value.ContentDigest) != 64 || strings.ToLower(value.ContentDigest) != value.ContentDigest || value.PublishedAt.IsZero() || value.PublishedAt.Location() != time.UTC || value.ActorID != strings.TrimSpace(value.ActorID) || strings.TrimSpace(value.ActorID) == "" || len([]rune(value.ActorID)) > 256 {
@@ -150,7 +150,7 @@ func mapVersionError(ctx context.Context, err error) error {
 		return nil
 	}
 	if !nilvalue.Is(ctx) {
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr := nilvalue.ContextErr(ctx); ctxErr != nil {
 			return ctxErr
 		}
 	}

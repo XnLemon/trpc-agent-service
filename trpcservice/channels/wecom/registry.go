@@ -136,6 +136,10 @@ func (g *WorkerGroup) Dispatch(ctx context.Context, tenantID, accountID string, 
 			err = ErrInvalid
 		}
 	}()
+	done, doneErr := nilvalue.ContextDone(ctx)
+	if doneErr != nil {
+		return doneErr
+	}
 	g.mu.Lock()
 	if g.closed {
 		g.mu.Unlock()
@@ -147,8 +151,8 @@ func (g *WorkerGroup) Dispatch(ctx context.Context, tenantID, accountID string, 
 	select {
 	case g.sem <- struct{}{}:
 		defer func() { <-g.sem }()
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-done:
+		return nilvalue.ContextErr(ctx)
 	}
 	provider, err := g.registry.Resolve(tenantID, accountID)
 	if err != nil {

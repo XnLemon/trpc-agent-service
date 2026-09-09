@@ -238,9 +238,16 @@ func checkContext(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return modelprofile.ErrInvalid
 	}
+	done, err := nilvalue.ContextDone(ctx)
+	if err != nil {
+		if err == nilvalue.ErrInvalidContext {
+			return modelprofile.ErrInvalid
+		}
+		return err
+	}
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-done:
+		return nilvalue.ContextErr(ctx)
 	default:
 		return nil
 	}

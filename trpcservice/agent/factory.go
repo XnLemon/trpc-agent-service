@@ -182,7 +182,13 @@ func agentContextErr(ctx context.Context) error {
 	if isNilAgentValue(ctx) {
 		return ErrInvalid
 	}
-	return ctx.Err()
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		if err == nilvalue.ErrInvalidContext {
+			return ErrInvalid
+		}
+		return err
+	}
+	return nil
 }
 
 // DefaultAgentFactoryRegistry returns the built-in Agent kinds supported by
@@ -200,6 +206,9 @@ func DefaultAgentFactoryRegistry() *AgentFactoryRegistry {
 }
 
 func buildLLMAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
+	if err := validateSkillDefinition(input.Definition); err != nil {
+		return nil, err
+	}
 	if len(input.Definition.Skills) > 0 && isNilAgentValue(input.SkillRepositoryProvider) {
 		return nil, fmt.Errorf("%w: skill repository provider is required", ErrAgentFactory)
 	}
@@ -227,6 +236,8 @@ func llmAgentOptionsWithSkillProvider(input LLMAgentFactoryInput, model trpcmode
 		llmagent.WithSkillRepositoryProvider(provider),
 		llmagent.WithSkillScopeMode(skill.SkillScopeApp),
 		llmagent.WithSkillToolProfile(llmagent.SkillToolProfileKnowledgeOnly),
+		llmagent.WithMaxLoadedSkills(len(input.Skills)),
+		llmagent.WithMaxOverviewSkills(len(input.Skills)),
 		llmagent.WithSkillFilter(func(_ context.Context, summary skill.Summary) bool {
 			_, ok := allowed[summary.Name]
 			return ok
@@ -316,6 +327,21 @@ func (agent compositeInvocationAgent) FindSubAgent(name string) trpcagent.Agent 
 	return agent.delegate.FindSubAgent(name)
 }
 
+func validateSkillDefinition(input LLMAgentFactoryInput) error {
+	if len(input.Skills) == 0 && len(input.SkillAuthorizations) == 0 {
+		return nil
+	}
+	if len(input.Skills) == 0 || len(input.Skills) != len(input.SkillAuthorizations) {
+		return fmt.Errorf("%w: every Skill requires a pinned authorization", ErrAgentFactory)
+	}
+	for index, name := range input.Skills {
+		if input.SkillAuthorizations[index].Name != name {
+			return fmt.Errorf("%w: Skill authorization does not match the allowlist", ErrAgentFactory)
+		}
+	}
+	return nil
+}
+
 func buildCompositeChildren(input AgentBuildInput) ([]trpcagent.Agent, error) {
 	configuration := input.Definition.Chain
 	if configuration == nil || len(configuration.Steps) < 2 {
@@ -336,6 +362,9 @@ func buildCompositeChildren(input AgentBuildInput) ([]trpcagent.Agent, error) {
 		stepDefinition.Instruction = step.Instruction
 		stepDefinition.GlobalInstruction = step.GlobalInstruction
 		stepDefinition.Chain = nil
+		if err := validateSkillDefinition(stepDefinition); err != nil {
+			return nil, err
+		}
 		if len(stepDefinition.Skills) > 0 && isNilAgentValue(input.SkillRepositoryProvider) {
 			return nil, fmt.Errorf("%w: skill repository provider is required", ErrAgentFactory)
 		}

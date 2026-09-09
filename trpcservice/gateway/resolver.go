@@ -47,7 +47,7 @@ func (resolver *PlanResolver) Resolve(ctx context.Context, principal Principal) 
 	if nilvalue.Is(ctx) {
 		return runtime.ExecutionPlan{}, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return runtime.ExecutionPlan{}, err
 	}
 	if !resolver.Ready() {

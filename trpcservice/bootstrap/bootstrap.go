@@ -51,6 +51,7 @@ import (
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	runtimestoragemysql "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/mysql"
 	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
+	skillsecurity "github.com/XnLemon/trpc-agent-service/trpcservice/skill"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
@@ -122,6 +123,9 @@ type Config struct {
 	// SkillRepositoryProvider resolves tenant/app-scoped upstream skill
 	// repositories. Skills are never loaded from process-global filesystem roots.
 	SkillRepositoryProvider skill.RepositoryProvider
+	// SkillTrustPolicy pins the process-owned trusted sources and signing keys
+	// used by revision-bound Skill manifests. A zero policy fails closed.
+	SkillTrustPolicy skillsecurity.TrustPolicy
 	// ToolInvocations is the durable tool side-effect ledger. A nil value is
 	// filled with PostgreSQL or an explicitly local in-memory implementation.
 	ToolInvocations runtimestorage.ToolInvocationStore
@@ -266,7 +270,7 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 	if nilvalue.Is(ctx) {
 		return nil, ErrInvalidConfig
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	normalizeConfigInterfaces(&config)
@@ -597,18 +601,18 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	if approvalReviewer == nil && config.ToolInvocations != nil {
 		approvalReviewer = servicetool.NewDurableApprovalReviewer(config.ToolInvocations)
 	}
+	// MCP remains an isolated capability in this release. It is materialized
+	// only when an embedding explicitly supplies ToolSetFactory; the default
+	// Runner graph must not activate remote tool transports.
 	toolSetFactory := config.ToolSetFactory
-	if toolSetFactory == nil {
-		toolSetFactory = agentrunnerfactory.NewMCPToolSetFactory(config.SecretResolver, approvalReviewer)
-	}
 	registry, err := agentrunnerfactory.NewRuntimeRunnerRegistry(agentrunnerfactory.Config{
 		Registry: config.Registry, SecretResolver: config.SecretResolver,
 		ModelFactory: config.ModelFactory, Sessions: config.Sessions, StorageFactory: config.StorageFactory,
 		Observability: config.Observability, ToolRegistry: config.ToolRegistry, ToolSetFactory: toolSetFactory, EnableUsageCallbacks: config.BudgetStore != nil,
-		SkillRepositoryProvider: config.SkillRepositoryProvider, ToolInvocationStore: config.ToolInvocations,
+		SkillRepositoryProvider: config.SkillRepositoryProvider, SkillTrustPolicy: config.SkillTrustPolicy, ToolInvocationStore: config.ToolInvocations,
 		ApprovalReviewer: approvalReviewer, PromptInjectionReviewer: config.PromptInjectionReviewer, UnsafeIntentReviewer: config.UnsafeIntentReviewer,
 		PluginFactory: agentrunnerfactory.NewDefaultPluginFactory(agentrunnerfactory.Config{
-			SkillRepositoryProvider: config.SkillRepositoryProvider, ToolInvocationStore: config.ToolInvocations,
+			SkillRepositoryProvider: config.SkillRepositoryProvider, SkillTrustPolicy: config.SkillTrustPolicy, ToolInvocationStore: config.ToolInvocations,
 			ApprovalReviewer: approvalReviewer, PromptInjectionReviewer: config.PromptInjectionReviewer, UnsafeIntentReviewer: config.UnsafeIntentReviewer,
 		}),
 	})
@@ -870,9 +874,6 @@ func startToolInvocationRecovery(runtimeGraph *Runtime, config Config) error {
 		return ErrInvalidConfig
 	}
 	reconcile := func(ctx context.Context) error {
-		if nilvalue.Is(runtimeGraph.auditWriter) {
-			return nil
-		}
 		values, err := recoverStaleSafely(recovery, ctx, time.Now().UTC().Add(-staleAfter))
 		if err != nil {
 			return err
@@ -921,6 +922,12 @@ func startToolInvocationRecovery(runtimeGraph *Runtime, config Config) error {
 			return values[i].InvocationID < values[j].InvocationID
 		})
 		for _, value := range values {
+			// Recovery fencing is required even when audit persistence is not
+			// configured. A nil audit writer is an intentional no-op; it must
+			// not prevent dispatching/accepted rows from being marked unknown.
+			if nilvalue.Is(runtimeGraph.auditWriter) {
+				continue
+			}
 			if err := servicetool.RecordToolInvocationAudit(ctx, audit.NewRecorder(runtimeGraph.auditWriter, value.TenantID), value); err != nil {
 				return err
 			}
@@ -940,9 +947,13 @@ func startToolInvocationRecovery(runtimeGraph *Runtime, config Config) error {
 		_ = callBootstrapError(func() error { return reconcile(ctx) })
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		done, doneErr := nilvalue.ContextDone(ctx)
+		if doneErr != nil {
+			return
+		}
 		for {
 			select {
-			case <-ctx.Done():
+			case <-done:
 				return
 			case <-ticker.C:
 				_ = callBootstrapError(func() error { return reconcile(ctx) })

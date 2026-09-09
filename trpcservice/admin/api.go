@@ -510,7 +510,11 @@ func (h *Handler) knowledge(ctx context.Context, r *http.Request, p Principal, t
 	// caller probe or create an arbitrary app namespace through the corpus API.
 	appValue, appErr := h.config.Apps.Get(ctx, tenantID, appID)
 	if appErr != nil {
-		if errors.Is(appErr, appmodel.ErrNotFound) {
+		// Knowledge routes must not distinguish a syntactically invalid or
+		// unknown app from an app outside the caller's visible corpus. A GET
+		// therefore presents every failed app lookup as the same route-level
+		// 404 instead of leaking repository validation details.
+		if errors.Is(appErr, appmodel.ErrNotFound) || errors.Is(appErr, appmodel.ErrInvalid) {
 			return 0, nil, errNotFound
 		}
 		return 0, nil, appErr

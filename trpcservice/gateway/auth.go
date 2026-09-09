@@ -139,10 +139,8 @@ func (authenticator *StaticAPIAuthenticator) Authenticate(ctx context.Context, r
 	if nilvalue.Is(ctx) {
 		return AuthenticatedAPI{}, ErrUnauthenticated
 	}
-	select {
-	case <-ctx.Done():
-		return AuthenticatedAPI{}, ctx.Err()
-	default:
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		return AuthenticatedAPI{}, err
 	}
 	if authenticator == nil || request == nil {
 		return AuthenticatedAPI{}, ErrUnauthenticated

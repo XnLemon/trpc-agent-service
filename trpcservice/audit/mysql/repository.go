@@ -62,7 +62,7 @@ func appendEvent(ctx context.Context, db *sql.DB, event audit.Event, tenantID st
 	if nilvalue.Is(ctx) {
 		return audit.AppendResult{}, audit.ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return audit.AppendResult{}, err
 	}
 	if db == nil {

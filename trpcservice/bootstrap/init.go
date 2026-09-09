@@ -80,7 +80,7 @@ func Initialize(ctx context.Context, db *sql.DB, config InitConfig) (InitResult,
 	if nilvalue.Is(ctx) {
 		return InitResult{}, ErrInvalidConfig
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return InitResult{}, err
 	}
 	if db == nil {
@@ -122,7 +122,7 @@ func completeInitialization(ctx context.Context, tx *sql.Tx, state initialState,
 	if state.apps[0].tenantID != state.tenants[0] {
 		return InitResult{}, initializationStateError(ErrInitializationAmbiguous)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return InitResult{}, err
 	}
 	return InitResult{TenantID: state.tenants[0], AppID: state.apps[0].appID}, nil
@@ -272,7 +272,7 @@ func mapInitializationDBError(ctx context.Context, err error) error {
 		return nil
 	}
 	if !nilvalue.Is(ctx) {
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr := nilvalue.ContextErr(ctx); ctxErr != nil {
 			return ctxErr
 		}
 	}

@@ -153,6 +153,69 @@ type MessageEventInput struct {
 	ReplyTarget       ReplyTarget
 }
 
+// ValidateMessageEventInput validates the complete inbound identity envelope.
+// The runtime store intentionally accepts legacy tenant identifiers, but every
+// identity is still bounded, UTF-8, control-free, and exact (not padded).
+func ValidateMessageEventInput(input MessageEventInput) error {
+	if ValidateSession(input.TenantID, input.SessionID) != nil ||
+		!validToolInvocationText(input.EventID, 256, true) ||
+		!validToolInvocationText(input.BindingID, 256, true) ||
+		!validToolInvocationText(input.ExternalMessageID, 512, true) ||
+		!validToolInvocationText(input.IdempotencyKey, 512, false) ||
+		ValidateReplyTarget(input.ReplyTarget) != nil {
+		return ErrInvalid
+	}
+	if input.ReplyTarget != (ReplyTarget{}) && input.ReplyTarget.BindingID != input.BindingID {
+		return ErrInvalid
+	}
+	return nil
+}
+
+// ValidateMessageEvent validates a persisted event before it is returned to
+// execution code. It catches cross-row corruption at every storage adapter,
+// rather than trusting SQL predicates or an in-memory map key.
+func ValidateMessageEvent(value MessageEvent) error {
+	if err := ValidateMessageEventInput(MessageEventInput{
+		TenantID: value.TenantID, EventID: value.EventID, SessionID: value.SessionID,
+		BindingID: value.BindingID, ExternalMessageID: value.ExternalMessageID,
+		IdempotencyKey: value.IdempotencyKey, ReplyTarget: value.ReplyTarget,
+	}); err != nil {
+		return err
+	}
+	switch value.Status {
+	case EventReceived, EventRunning, EventCompleted, EventExecutionReconciling, EventReplyPending, EventReplied, EventFailed:
+	default:
+		return ErrInvalid
+	}
+	if value.EventSeq < 1 || value.FencingToken < 0 || value.SegmentCount < 0 ||
+		!validToolInvocationText(value.ReplyID, 256, false) ||
+		value.CreatedAt.IsZero() || value.UpdatedAt.IsZero() ||
+		value.CreatedAt.Location() != time.UTC || value.UpdatedAt.Location() != time.UTC ||
+		value.UpdatedAt.Before(value.CreatedAt) {
+		return ErrInvalid
+	}
+	if value.Status == EventRunning {
+		if !validToolInvocationText(value.LeaseOwner, 256, true) || value.LeaseExpiresAt == nil || value.LeaseExpiresAt.IsZero() {
+			return ErrInvalid
+		}
+	} else if value.LeaseOwner != "" || value.LeaseExpiresAt != nil {
+		return ErrInvalid
+	}
+	if value.LeaseExpiresAt != nil && value.LeaseExpiresAt.Location() != time.UTC {
+		return ErrInvalid
+	}
+	return nil
+}
+
+// MessageEventMatchesInput reports whether an existing idempotency row is
+// structurally usable for a retry. EventID is deliberately not compared: the
+// durable external-message key is the idempotency authority and legacy callers
+// may generate a new local event ID on a retry.
+func MessageEventMatchesInput(value MessageEvent, input MessageEventInput) bool {
+	return ValidateMessageEvent(value) == nil && value.TenantID == input.TenantID &&
+		value.BindingID == input.BindingID && value.ExternalMessageID == input.ExternalMessageID
+}
+
 // MessageTransition advances a persisted inbound message through its execution
 // lifecycle. Transitions out of running require the current owner and fence.
 type MessageTransition struct {
@@ -395,7 +458,7 @@ func ValidToolInvocationStatus(status ToolInvocationStatus) bool {
 // ValidateToolInvocationTransitionRequest validates the full fenced
 // transition envelope shared by every storage implementation.
 func ValidateToolInvocationTransitionRequest(transition ToolInvocationTransition) error {
-	if ValidateToolInvocationTenantApp(transition.TenantID, transition.AppID) != nil || !validToolInvocationText(transition.InvocationID, 256, true) || !validToolInvocationText(transition.Owner, 256, true) || !ValidToolInvocationStatus(transition.From) || !ValidToolInvocationStatus(transition.To) || !ValidateToolInvocationTransition(transition.From, transition.To) || transition.FencingToken < 1 {
+	if ValidateToolInvocationTenantApp(transition.TenantID, transition.AppID) != nil || !validToolInvocationText(transition.InvocationID, 256, true) || !validToolInvocationText(transition.Owner, 256, true) || !ValidToolInvocationStatus(transition.From) || !ValidToolInvocationStatus(transition.To) || !ValidateToolInvocationTransition(transition.From, transition.To) || transition.FencingToken < 1 || transition.FencingToken == math.MaxInt64 {
 		return ErrInvalid
 	}
 	for _, value := range []string{transition.TenantID, transition.AppID, transition.InvocationID, transition.Owner, transition.ErrorClass, transition.ReviewerID} {
@@ -544,6 +607,50 @@ func ValidateReplyTarget(target ReplyTarget) error {
 
 func validReplyTargetID(value string) bool {
 	return validToolInvocationText(value, maxReplyTargetIDRunes, true)
+}
+
+// ValidateReplyOutbox validates a persisted reply row before it is handed to
+// a delivery worker. Zero segment counts and zero timestamps remain accepted
+// for rows written by the pre-segmentation runtime; populated envelopes are
+// checked strictly.
+func ValidateReplyOutbox(value ReplyOutbox) error {
+	if ValidateTenant(value.TenantID) != nil || !validToolInvocationText(value.ReplyID, 256, true) || !validToolInvocationText(value.EventID, 256, true) || value.SegmentIndex < 0 || value.SegmentCount < 0 || value.SegmentCount == 0 && value.SegmentIndex != 0 || value.SegmentCount > 0 && value.SegmentIndex >= value.SegmentCount || !ValidateText(value.Payload, 4<<20, false) || ValidateReplyTarget(value.ReplyTarget) != nil || value.Attempts < 0 || value.FencingToken < 0 {
+		return ErrInvalid
+	}
+	normalized, err := NormalizeReplyOutbox(value)
+	if err != nil || normalized.Payload != value.Payload || normalized.Fallback != value.Fallback || normalized.Attachment != value.Attachment {
+		return ErrInvalid
+	}
+	if value.LeaseOwner != "" && !validToolInvocationText(value.LeaseOwner, 256, true) || value.ProviderMessageID != "" && !validToolInvocationText(value.ProviderMessageID, 1024, true) || !validToolInvocationText(value.LastErrorClass, 128, false) {
+		return ErrInvalid
+	}
+	if value.CreatedAt.IsZero() != value.UpdatedAt.IsZero() || !value.CreatedAt.IsZero() && (value.CreatedAt.Location() != time.UTC || value.UpdatedAt.Location() != time.UTC || value.UpdatedAt.Before(value.CreatedAt)) {
+		return ErrInvalid
+	}
+	if value.LeaseExpiresAt != nil && (value.LeaseExpiresAt.IsZero() || value.LeaseExpiresAt.Location() != time.UTC) {
+		return ErrInvalid
+	}
+	switch value.Status {
+	case ReplyPending:
+		if value.LeaseOwner != "" || value.LeaseExpiresAt != nil || value.ProviderMessageID != "" {
+			return ErrInvalid
+		}
+	case ReplyRetryable, ReplyDeadLetter:
+		if value.LeaseExpiresAt != nil {
+			return ErrInvalid
+		}
+	case ReplySent:
+		if value.LeaseExpiresAt != nil || value.SegmentCount > 0 && !validToolInvocationText(value.ProviderMessageID, 1024, true) {
+			return ErrInvalid
+		}
+	case ReplySending:
+		if value.SegmentCount > 0 && (value.LeaseOwner == "" || value.LeaseExpiresAt == nil) {
+			return ErrInvalid
+		}
+	default:
+		return ErrInvalid
+	}
+	return nil
 }
 
 // NormalizeReplyOutbox validates a reply's protocol-neutral media contract and

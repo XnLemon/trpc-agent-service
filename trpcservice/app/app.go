@@ -233,6 +233,10 @@ func validateTenantID(id string) error {
 	return validateCrockfordID(id, "t_", "tenant")
 }
 
+// ValidateTenantID validates the canonical tenant identifier used by control
+// plane repositories and runtime capability scopes.
+func ValidateTenantID(id string) error { return validateTenantID(id) }
+
 func validateAppID(id string) error {
 	return validateCrockfordID(id, "app_", "agent app")
 }

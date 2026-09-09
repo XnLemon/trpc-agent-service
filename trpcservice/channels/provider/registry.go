@@ -70,7 +70,7 @@ func (registry *Registry) Resolve(ctx context.Context, binding channels.Binding)
 	if nilvalue.Is(ctx) {
 		return nil, fmt.Errorf("%w: context is required", channels.ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	if registry == nil || binding.Validate() != nil {

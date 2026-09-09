@@ -27,6 +27,9 @@ func ResolveAndBuild(ctx context.Context, input modelprofile.ModelFactoryInput, 
 	if isNilModelValue(factory) {
 		return nil, fmt.Errorf("%w: model factory is required", modelprofile.ErrInvalid)
 	}
+	if err := modelContextErr(ctx); err != nil {
+		return nil, err
+	}
 	if err := input.Validate(); err != nil {
 		return nil, err
 	}
@@ -81,7 +84,11 @@ func callSecretResolver(ctx context.Context, resolver modelprofile.SecretResolve
 			err = ErrSecretResolution
 		}
 	}()
-	return resolver.Resolve(ctx, scope)
+	secret, resolveErr := resolver.Resolve(ctx, scope)
+	if nilvalue.Is(resolveErr) {
+		resolveErr = nil
+	}
+	return secret, resolveErr
 }
 
 func callModelFactory(ctx context.Context, factory modelprofile.ModelFactory, input modelprofile.ModelFactoryInput, secret modelprofile.SecretValue) (model trpcmodel.Model, err error) {
@@ -94,14 +101,24 @@ func callModelFactory(ctx context.Context, factory modelprofile.ModelFactory, in
 			err = ErrModelFactory
 		}
 	}()
-	return factory.New(ctx, input, secret)
+	model, factoryErr := factory.New(ctx, input, secret)
+	if nilvalue.Is(factoryErr) {
+		factoryErr = nil
+	}
+	return model, factoryErr
 }
 
 func modelContextErr(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return modelprofile.ErrInvalid
 	}
-	return ctx.Err()
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		if errors.Is(err, nilvalue.ErrInvalidContext) {
+			return modelprofile.ErrInvalid
+		}
+		return err
+	}
+	return nil
 }
 
 func closeModel(model trpcmodel.Model) (err error) {
@@ -117,7 +134,11 @@ func closeModel(model trpcmodel.Model) (err error) {
 			err = ErrModelFactory
 		}
 	}()
-	return closer.Close()
+	err = closer.Close()
+	if nilvalue.Is(err) {
+		err = nil
+	}
+	return err
 }
 
 // isNilModelValue handles interfaces containing typed nil pointers. A typed

@@ -15,6 +15,7 @@ import (
 	modelruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/model"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
+	skillsecurity "github.com/XnLemon/trpc-agent-service/trpcservice/skill"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
@@ -44,6 +45,9 @@ type RunnerConfig struct {
 	ToolRegistry            *servicetool.Registry
 	AgentFactories          *AgentFactoryRegistry
 	SkillRepositoryProvider skill.RepositoryProvider
+	// SkillTrustPolicy is process-owned trust configuration for revision-pinned
+	// skill manifests. A zero policy intentionally rejects declared Skills.
+	SkillTrustPolicy skillsecurity.TrustPolicy
 	// ToolInvocationStore is fixed into the policy Runner and injected into
 	// direct Runner calls as well as Gateway dispatches. A caller cannot
 	// replace the app-scoped side-effect ledger through a context value.
@@ -113,6 +117,13 @@ func NewRunnerWithConfig(ctx context.Context, config RunnerConfig) (runner trpcr
 	}
 	if isNilAgentValue(runner) {
 		return nil, errors.New("build runner: assembled runner is nil")
+	}
+	if contextErr := agentContextErr(ctx); contextErr != nil {
+		_ = closeAgentRunner(runner)
+		owned = false
+		pluginsOwned = false
+		toolSetsOwned = false
+		return nil, contextErr
 	}
 	owned = false
 	pluginsOwned = false
@@ -633,7 +644,13 @@ func assembleRunner(ctx context.Context, config RunnerConfig, resources runnerRe
 		if isNilAgentValue(config.SkillRepositoryProvider) {
 			return nil, fmt.Errorf("build runner: skill repository provider is required")
 		}
-		skillProvider = newTenantSkillRepositoryProvider(config.SkillRepositoryProvider, agentInput.TenantID, agentInput.AppID, agentInput.Skills)
+		if len(agentInput.SkillAuthorizations) != len(agentInput.Skills) {
+			return nil, fmt.Errorf("build runner: every Skill requires a pinned authorization")
+		}
+		if _, trustErr := config.SkillTrustPolicy.Normalize(); trustErr != nil {
+			return nil, fmt.Errorf("build runner: skill trust policy: %w", trustErr)
+		}
+		skillProvider = newSecuredTenantSkillRepositoryProvider(config.SkillRepositoryProvider, agentInput.TenantID, agentInput.AppID, agentInput.Revision, agentInput.SkillAuthorizations, config.SkillTrustPolicy)
 	}
 	modelOptions := []llmagent.Option(nil)
 	if !isNilAgentValue(telemetryProvider) {

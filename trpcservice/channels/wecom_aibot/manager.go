@@ -205,7 +205,11 @@ func (m *Manager) Run(ctx context.Context) error {
 		m.mu.Unlock()
 		return ErrInvalid
 	}
-	runCtx, cancel := context.WithCancel(ctx)
+	runCtx, cancel, contextErr := withCancelSafely(ctx)
+	if contextErr != nil {
+		m.mu.Unlock()
+		return contextErr
+	}
 	m.runCancel, m.runDone = cancel, make(chan struct{})
 	m.mu.Unlock()
 	defer func() {
@@ -221,7 +225,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	}()
 	var attempt int
 	for {
-		if err := runCtx.Err(); err != nil {
+		if err := nilvalue.ContextErr(runCtx); err != nil {
 			return err
 		}
 		conn, err := m.dialer.DialContext(runCtx, m.wsURL, nil)
@@ -230,7 +234,7 @@ func (m *Manager) Run(ctx context.Context) error {
 		}
 		if err != nil {
 			if !sleepBackoff(runCtx, m.reconnectBase, m.reconnectMax, attempt) {
-				return runCtx.Err()
+				return nilvalue.ContextErr(runCtx)
 			}
 			attempt++
 			continue
@@ -243,16 +247,16 @@ func (m *Manager) Run(ctx context.Context) error {
 			if errors.Is(err, errConnectionReplaced) {
 				return nil
 			}
-			if runCtx.Err() != nil {
-				return runCtx.Err()
+			if nilvalue.ContextErr(runCtx) != nil {
+				return nilvalue.ContextErr(runCtx)
 			}
 			if !sleepBackoff(runCtx, m.reconnectBase, m.reconnectMax, attempt) {
-				return runCtx.Err()
+				return nilvalue.ContextErr(runCtx)
 			}
 			attempt++
 		}
-		if runCtx.Err() != nil {
-			return runCtx.Err()
+		if nilvalue.ContextErr(runCtx) != nil {
+			return nilvalue.ContextErr(runCtx)
 		}
 	}
 }
@@ -266,10 +270,14 @@ func sleepBackoff(ctx context.Context, base, max time.Duration, attempt int) boo
 		d = max
 	}
 	jitter := randomizedJitter(d / 4)
+	done, doneErr := nilvalue.ContextDone(ctx)
+	if doneErr != nil {
+		return false
+	}
 	timer := time.NewTimer(d - d/8 + jitter)
 	defer timer.Stop()
 	select {
-	case <-ctx.Done():
+	case <-done:
 		return false
 	case <-timer.C:
 		return true
@@ -316,8 +324,15 @@ func (m *Manager) serveConnection(ctx context.Context, conn Conn) error {
 		}
 		m.mu.Unlock()
 	}()
-	connCtx, cancel := context.WithCancel(ctx)
+	connCtx, cancel, contextErr := withCancelSafely(ctx)
+	if contextErr != nil {
+		return contextErr
+	}
 	defer cancel()
+	connDone, connDoneErr := nilvalue.ContextDone(connCtx)
+	if connDoneErr != nil {
+		return connDoneErr
+	}
 	queue := make(chan outboundFrame, m.queueSize)
 	m.mu.Lock()
 	m.queue = queue
@@ -346,16 +361,16 @@ func (m *Manager) serveConnection(ctx context.Context, conn Conn) error {
 		return err
 	case <-authTimer.C:
 		return ErrAuthentication
-	case <-connCtx.Done():
-		return connCtx.Err()
+	case <-connDone:
+		return nilvalue.ContextErr(connCtx)
 	}
 	select {
 	case err := <-readErr:
 		return err
 	case err := <-writeErr:
 		return err
-	case <-connCtx.Done():
-		return connCtx.Err()
+	case <-connDone:
+		return nilvalue.ContextErr(connCtx)
 	}
 }
 
@@ -367,8 +382,19 @@ func (m *Manager) sendReply(ctx context.Context, reqID string, body StreamReply)
 	if err != nil {
 		return err
 	}
-	replyCtx, cancel := context.WithTimeout(ctx, m.replyAcknowledgementTimeout())
+	replyCtx, cancel, contextErr := withTimeoutSafely(ctx, m.replyAcknowledgementTimeout())
+	if contextErr != nil {
+		return contextErr
+	}
 	defer cancel()
+	replyDone, replyDoneErr := nilvalue.ContextDone(replyCtx)
+	if replyDoneErr != nil {
+		return replyDoneErr
+	}
+	parentDone, parentDoneErr := nilvalue.ContextDone(ctx)
+	if parentDoneErr != nil {
+		return parentDoneErr
+	}
 	m.mu.Lock()
 	queue, closing := m.queue, m.closing
 	if closing || queue == nil {
@@ -376,23 +402,23 @@ func (m *Manager) sendReply(ctx context.Context, reqID string, body StreamReply)
 		return ErrNotReady
 	}
 	ack := make(chan error, 1)
-	done := make(chan struct{})
+	pendingDone := make(chan struct{})
 	select {
-	case queue <- outboundFrame{context: replyCtx, data: data, replyReqID: reqID, ack: ack, done: done}:
+	case queue <- outboundFrame{context: replyCtx, data: data, replyReqID: reqID, ack: ack, done: pendingDone}:
 		m.mu.Unlock()
 		select {
 		case err := <-ack:
 			return err
-		case <-replyCtx.Done():
+		case <-replyDone:
 			m.clearPendingReplyFor(reqID, ErrAcknowledgementTimeout)
-			if ctx.Err() != nil {
-				return ctx.Err()
+			if nilvalue.ContextErr(ctx) != nil {
+				return nilvalue.ContextErr(ctx)
 			}
 			return ErrAcknowledgementTimeout
 		}
-	case <-ctx.Done():
+	case <-parentDone:
 		m.mu.Unlock()
-		return ctx.Err()
+		return nilvalue.ContextErr(ctx)
 	default:
 		m.mu.Unlock()
 		return ErrQueueFull
@@ -420,13 +446,18 @@ func (m *Manager) writePump(ctx context.Context, conn Conn, queue <-chan outboun
 		}
 		return
 	}
+	done, doneErr := nilvalue.ContextDoneChannel(ctx)
+	if doneErr != nil {
+		errs <- ErrInvalid
+		return
+	}
 	defer func() {
 		m.clearPendingReply(ErrClosed)
 		drainOutboundReplies(queue, ErrClosed)
 	}()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-done:
 			errs <- ErrClosed
 			return
 		case outbound := <-queue:
@@ -434,7 +465,7 @@ func (m *Manager) writePump(ctx context.Context, conn Conn, queue <-chan outboun
 				errs <- nil
 				return
 			}
-			if !nilvalue.Is(outbound.context) && outbound.context.Err() != nil {
+			if !nilvalue.Is(outbound.context) && nilvalue.ContextErr(outbound.context) != nil {
 				if outbound.ack != nil {
 					outbound.ack <- ErrAcknowledgementTimeout
 				}
@@ -446,7 +477,7 @@ func (m *Manager) writePump(ctx context.Context, conn Conn, queue <-chan outboun
 					continue
 				}
 			}
-			if !nilvalue.Is(outbound.context) && outbound.context.Err() != nil {
+			if !nilvalue.Is(outbound.context) && nilvalue.ContextErr(outbound.context) != nil {
 				m.clearPendingReplyFor(outbound.replyReqID, ErrAcknowledgementTimeout)
 				continue
 			}
@@ -463,7 +494,7 @@ func (m *Manager) writePump(ctx context.Context, conn Conn, queue <-chan outboun
 			}
 			if outbound.replyReqID != "" {
 				select {
-				case <-ctx.Done():
+				case <-done:
 					m.clearPendingReply(ErrClosed)
 					errs <- ErrClosed
 					return
@@ -502,11 +533,15 @@ func (m *Manager) enqueueAuth(ctx context.Context, queue chan<- outboundFrame) e
 	m.mu.Lock()
 	m.authReqID = reqID
 	m.mu.Unlock()
+	done, doneErr := nilvalue.ContextDoneChannel(ctx)
+	if doneErr != nil {
+		return doneErr
+	}
 	select {
 	case queue <- outboundFrame{data: data}:
 		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-done:
+		return nilvalue.ContextErr(ctx)
 	}
 }
 
@@ -514,14 +549,18 @@ func (m *Manager) readPump(ctx context.Context, conn Conn, queue chan<- outbound
 	if m == nil || nilvalue.Is(ctx) || nilvalue.Is(conn) || queue == nil {
 		return ErrInvalid
 	}
+	done, doneErr := nilvalue.ContextDoneChannel(ctx)
+	if doneErr != nil {
+		return doneErr
+	}
 	reads := make(chan inboundReadResult, 1)
 	go readInboundFrames(ctx, conn, reads)
 	heartbeats := time.NewTicker(m.heartbeat)
 	defer heartbeats.Stop()
 	for {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-done:
+			return nilvalue.ContextErr(ctx)
 		case <-heartbeats.C:
 			if err := m.scheduleHeartbeat(conn, queue); err != nil {
 				return err
@@ -550,11 +589,15 @@ func readInboundFrames(ctx context.Context, conn Conn, reads chan<- inboundReadR
 	if nilvalue.Is(ctx) || nilvalue.Is(conn) || reads == nil {
 		return
 	}
+	done, doneErr := nilvalue.ContextDoneChannel(ctx)
+	if doneErr != nil {
+		return
+	}
 	for {
 		_, data, err := conn.ReadMessage()
 		select {
 		case reads <- inboundReadResult{data: data, err: err}:
-		case <-ctx.Done():
+		case <-done:
 			return
 		}
 		if err != nil {
@@ -721,7 +764,10 @@ func (m *Manager) handleCallback(parent context.Context, frame Frame) {
 		inbound.ExternalChatID = message.ChatID
 		inbound.ExternalPeerID = ""
 	}
-	ctx, cancel := context.WithTimeout(parent, m.executionTimeout)
+	ctx, cancel, contextErr := withTimeoutSafely(parent, m.executionTimeout)
+	if contextErr != nil {
+		return
+	}
 	defer cancel()
 	stream, err := m.dispatcher.Dispatch(ctx, gateway.DispatchRequest{Principal: mustPrincipal(m.target), RequestID: frame.Headers.ReqID, Message: inbound})
 	if err != nil {
@@ -805,6 +851,42 @@ func (m *Manager) clearPendingReplyFor(reqID string, err error) {
 	m.mu.Unlock()
 	pending.ack <- err
 	close(pending.done)
+}
+
+func withCancelSafely(parent context.Context) (ctx context.Context, cancel context.CancelFunc, err error) {
+	if nilvalue.Is(parent) {
+		return nil, func() {}, nilvalue.ErrInvalidContext
+	}
+	if _, err := nilvalue.ContextDone(parent); err != nil {
+		return nil, func() {}, err
+	}
+	defer func() {
+		if recover() != nil {
+			ctx = nil
+			cancel = func() {}
+			err = nilvalue.ErrInvalidContext
+		}
+	}()
+	ctx, cancel = context.WithCancel(parent)
+	return ctx, cancel, nil
+}
+
+func withTimeoutSafely(parent context.Context, timeout time.Duration) (ctx context.Context, cancel context.CancelFunc, err error) {
+	if nilvalue.Is(parent) {
+		return nil, func() {}, nilvalue.ErrInvalidContext
+	}
+	if _, err := nilvalue.ContextDone(parent); err != nil {
+		return nil, func() {}, err
+	}
+	defer func() {
+		if recover() != nil {
+			ctx = nil
+			cancel = func() {}
+			err = nilvalue.ErrInvalidContext
+		}
+	}()
+	ctx, cancel = context.WithTimeout(parent, timeout)
+	return ctx, cancel, nil
 }
 
 func mustJSON(v any) []byte { data, _ := json.Marshal(v); return data }

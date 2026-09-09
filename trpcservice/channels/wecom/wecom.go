@@ -299,7 +299,7 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	_ = h.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "wecom", "status": "started"})
 	defer func() {
 		var outcome error
-		if ctxErr := r.Context().Err(); ctxErr != nil {
+		if ctxErr := nilvalue.ContextErr(r.Context()); ctxErr != nil {
 			outcome = ctxErr
 		} else if capture.status >= http.StatusBadRequest {
 			outcome = errors.New("wecom callback failed")
@@ -347,6 +347,10 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	accepted := make(chan struct{}, 1)
 	result := make(chan error, 1)
 	requestID, traceID := uuid.NewString(), uuid.NewString()
+	requestDone, requestDoneErr := nilvalue.ContextDone(r.Context())
+	if requestDoneErr != nil {
+		return
+	}
 	go func() {
 		defer h.drains.Done()
 		defer cancel()
@@ -383,7 +387,7 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
-	case <-r.Context().Done():
+	case <-requestDone:
 	}
 }
 
@@ -454,7 +458,7 @@ func (h *Handler) ingestAttachment(ctx context.Context, state callbackState, mes
 	if nilvalue.Is(ctx) {
 		return attachment.Reference{}, ErrAttachment
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return attachment.Reference{}, err
 	}
 	download := MediaDownloadRequest{
@@ -486,7 +490,7 @@ func (h *Handler) ingestAttachment(ctx context.Context, state callbackState, mes
 	data, readErr := io.ReadAll(io.LimitReader(reader, h.maxAttachmentBytes+1))
 	closeErr := reader.Close()
 	if readErr != nil || closeErr != nil {
-		if contextErr := ctx.Err(); contextErr != nil {
+		if contextErr := nilvalue.ContextErr(ctx); contextErr != nil {
 			return attachment.Reference{}, contextErr
 		}
 		return attachment.Reference{}, ErrAttachment

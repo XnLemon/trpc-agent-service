@@ -36,7 +36,10 @@ func (store *Store) PrepareToolInvocation(ctx context.Context, input runtimestor
 	}
 	_, err := store.db.ExecContext(ctx, "INSERT INTO runtime_tool_invocation (tenant_id,app_id,invocation_id,event_id,request_id,trace_id,tool_call_id,tool_name,args_sha256,status,owner,fencing_token) VALUES (?,?,?,?,?,?,?,?,?,'prepared',?,1) ON DUPLICATE KEY UPDATE invocation_id=invocation_id", input.TenantID, input.AppID, input.InvocationID, input.EventID, input.RequestID, input.TraceID, input.ToolCallID, input.ToolName, input.ArgsSHA256, input.Owner)
 	if err != nil {
-		return runtimestorage.ToolInvocation{}, controlmysql.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.ToolInvocation{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		return runtimestorage.ToolInvocation{}, contextError(err)
 	}
 	value, err := store.GetToolInvocation(ctx, input.TenantID, input.AppID, input.InvocationID)
 	if err != nil {
@@ -47,7 +50,7 @@ func (store *Store) PrepareToolInvocation(ctx context.Context, input runtimestor
 		}
 		return runtimestorage.ToolInvocation{}, err
 	}
-	if value.AppID != input.AppID || value.EventID != input.EventID || value.RequestID != input.RequestID || value.TraceID != input.TraceID || value.ToolCallID != input.ToolCallID || value.ToolName != input.ToolName || value.ArgsSHA256 != input.ArgsSHA256 {
+	if value.AppID != input.AppID || value.EventID != input.EventID || value.RequestID != input.RequestID || value.TraceID != input.TraceID || value.ToolCallID != input.ToolCallID || value.ToolName != input.ToolName || value.ArgsSHA256 != input.ArgsSHA256 || value.Owner != input.Owner {
 		return runtimestorage.ToolInvocation{}, runtimestorage.ErrConflict
 	}
 	return value, nil
@@ -63,20 +66,30 @@ func (store *Store) TransitionToolInvocation(ctx context.Context, transition run
 	owner := strings.TrimSpace(transition.Owner)
 	result, err := store.db.ExecContext(ctx, "UPDATE runtime_tool_invocation SET status=?,error_class=?,reviewer_id=?,fencing_token=fencing_token+1,updated_at=CURRENT_TIMESTAMP(6) WHERE tenant_id=? AND app_id=? AND invocation_id=? AND status=? AND fencing_token=? AND (?='' OR owner=? OR ?='manual' OR ?='manual')", string(transition.To), strings.TrimSpace(transition.ErrorClass), strings.TrimSpace(transition.ReviewerID), transition.TenantID, transition.AppID, transition.InvocationID, string(transition.From), transition.FencingToken, owner, owner, string(transition.To), string(transition.From))
 	if err != nil {
-		return runtimestorage.ToolInvocation{}, controlmysql.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return runtimestorage.ToolInvocation{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
 		return runtimestorage.ToolInvocation{}, runtimestorage.ErrStorage
 	}
+	if rows > 1 {
+		return runtimestorage.ToolInvocation{}, runtimestorage.ErrStorage
+	}
 	if rows == 1 {
-		return store.GetToolInvocation(ctx, transition.TenantID, transition.AppID, transition.InvocationID)
+		current, getErr := store.GetToolInvocation(ctx, transition.TenantID, transition.AppID, transition.InvocationID)
+		if getErr != nil {
+			return runtimestorage.ToolInvocation{}, getErr
+		}
+		if !matchesToolInvocationTransition(current, transition) {
+			return runtimestorage.ToolInvocation{}, runtimestorage.ErrConflict
+		}
+		return current, nil
 	}
 	current, getErr := store.GetToolInvocation(ctx, transition.TenantID, transition.AppID, transition.InvocationID)
 	if getErr != nil {
 		return runtimestorage.ToolInvocation{}, getErr
 	}
-	if current.Status == transition.To && current.FencingToken == transition.FencingToken+1 {
+	if current.Status == transition.To && current.FencingToken == transition.FencingToken+1 && current.ErrorClass == strings.TrimSpace(transition.ErrorClass) && current.ReviewerID == strings.TrimSpace(transition.ReviewerID) {
 		return current, nil
 	}
 	return runtimestorage.ToolInvocation{}, runtimestorage.ErrConflict
@@ -93,9 +106,9 @@ func (store *Store) RecoverStaleToolInvocations(ctx context.Context, before time
 	if before.IsZero() {
 		return nil, runtimestorage.ErrInvalid
 	}
-	tx, err := store.db.BeginTx(ctx, nil)
+	tx, err := begin(ctx, store.db)
 	if err != nil {
-		return nil, controlmysql.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, err
 	}
 	rollback := true
 	defer func() {
@@ -105,20 +118,15 @@ func (store *Store) RecoverStaleToolInvocations(ctx context.Context, before time
 	}()
 	rows, err := tx.QueryContext(ctx, "SELECT "+toolInvocationColumns+" FROM runtime_tool_invocation WHERE status IN ('dispatching','accepted') AND updated_at < ? ORDER BY created_at,tenant_id,app_id,invocation_id FOR UPDATE", before.UTC())
 	if err != nil {
-		return nil, controlmysql.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	values := make([]runtimestorage.ToolInvocation, 0)
 	for rows.Next() {
 		var value runtimestorage.ToolInvocation
 		var status string
-		if scanErr := rows.Scan(toolInvocationArgs(&value, &status)...); scanErr != nil {
+		if scanErr := scanToolInvocation(rows, &value, &status); scanErr != nil {
 			_ = rows.Close()
-			return nil, runtimestorage.ErrStorage
-		}
-		value.Status = runtimestorage.ToolInvocationStatus(status)
-		if err := runtimestorage.ValidateToolInvocation(value); err != nil {
-			_ = rows.Close()
-			return nil, runtimestorage.ErrStorage
+			return nil, normalizeScanError(ctx, scanErr)
 		}
 		values = append(values, value)
 	}
@@ -134,7 +142,7 @@ func (store *Store) RecoverStaleToolInvocations(ctx context.Context, before time
 		value := &values[index]
 		result, updateErr := tx.ExecContext(ctx, "UPDATE runtime_tool_invocation SET status='unknown',error_class='provider_uncertain',reviewer_id='',fencing_token=fencing_token+1,updated_at=? WHERE tenant_id=? AND app_id=? AND invocation_id=? AND status=? AND fencing_token=?", recoveredAt, value.TenantID, value.AppID, value.InvocationID, string(value.Status), value.FencingToken)
 		if updateErr != nil {
-			return nil, controlmysql.MapError(ctx, updateErr, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+			return nil, mapError(ctx, updateErr, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 		}
 		affected, affectedErr := result.RowsAffected()
 		if affectedErr != nil || affected != 1 {
@@ -146,8 +154,8 @@ func (store *Store) RecoverStaleToolInvocations(ctx context.Context, before time
 		value.FencingToken++
 		value.UpdatedAt = recoveredAt
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, controlmysql.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	if err := commit(ctx, tx); err != nil {
+		return nil, err
 	}
 	rollback = false
 	return values, nil
@@ -177,23 +185,22 @@ func (store *Store) ListToolInvocationAuditCandidates(ctx context.Context) ([]ru
 	}
 	rows, err := store.db.QueryContext(ctx, "SELECT "+toolInvocationColumns+" FROM runtime_tool_invocation WHERE status IN ('accepted','succeeded','failed','denied','unknown','manual') ORDER BY tenant_id,app_id,created_at,invocation_id")
 	if err != nil {
-		return nil, controlmysql.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer func() { _ = rows.Close() }()
 	values := make([]runtimestorage.ToolInvocation, 0)
 	for rows.Next() {
 		var value runtimestorage.ToolInvocation
 		var status string
-		if err := rows.Scan(toolInvocationArgs(&value, &status)...); err != nil {
-			return nil, runtimestorage.ErrStorage
-		}
-		value.Status = runtimestorage.ToolInvocationStatus(status)
-		if err := runtimestorage.ValidateToolInvocation(value); err != nil {
-			return nil, runtimestorage.ErrStorage
+		if err := scanToolInvocation(rows, &value, &status); err != nil {
+			return nil, normalizeScanError(ctx, err)
 		}
 		values = append(values, value)
 	}
 	if err := rows.Err(); err != nil {
+		return nil, normalizeScanError(ctx, err)
+	}
+	if err := rows.Close(); err != nil {
 		return nil, runtimestorage.ErrStorage
 	}
 	return values, nil
@@ -208,12 +215,17 @@ func (store *Store) GetToolInvocation(ctx context.Context, tenantID, appID, invo
 	}
 	var value runtimestorage.ToolInvocation
 	var status string
-	err := store.db.QueryRowContext(ctx, "SELECT "+toolInvocationColumns+" FROM runtime_tool_invocation WHERE tenant_id=? AND app_id=? AND invocation_id=?", tenantID, appID, invocationID).Scan(toolInvocationArgs(&value, &status)...)
+	err := scanToolInvocation(store.db.QueryRowContext(ctx, "SELECT "+toolInvocationColumns+" FROM runtime_tool_invocation WHERE tenant_id=? AND app_id=? AND invocation_id=?", tenantID, appID, invocationID), &value, &status)
 	if err != nil {
-		return runtimestorage.ToolInvocation{}, controlmysql.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		if errors.Is(err, runtimestorage.ErrStorage) {
+			return runtimestorage.ToolInvocation{}, runtimestorage.ErrStorage
+		}
+		return runtimestorage.ToolInvocation{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
-	value.Status = runtimestorage.ToolInvocationStatus(status)
-	if err := runtimestorage.ValidateToolInvocation(value); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		return runtimestorage.ToolInvocation{}, contextError(err)
+	}
+	if value.TenantID != tenantID || value.AppID != appID || value.InvocationID != invocationID {
 		return runtimestorage.ToolInvocation{}, runtimestorage.ErrStorage
 	}
 	return value, nil
@@ -242,23 +254,25 @@ func (store *Store) ListToolInvocations(ctx context.Context, tenantID, appID str
 	query += " ORDER BY created_at,invocation_id"
 	rows, err := store.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, controlmysql.MapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
 	defer func() { _ = rows.Close() }()
 	values := make([]runtimestorage.ToolInvocation, 0)
 	for rows.Next() {
 		var value runtimestorage.ToolInvocation
 		var status string
-		if err := rows.Scan(toolInvocationArgs(&value, &status)...); err != nil {
-			return nil, runtimestorage.ErrStorage
+		if err := scanToolInvocation(rows, &value, &status); err != nil {
+			return nil, normalizeScanError(ctx, err)
 		}
-		value.Status = runtimestorage.ToolInvocationStatus(status)
-		if err := runtimestorage.ValidateToolInvocation(value); err != nil {
+		if value.TenantID != tenantID || value.AppID != appID {
 			return nil, runtimestorage.ErrStorage
 		}
 		values = append(values, value)
 	}
 	if err := rows.Err(); err != nil {
+		return nil, normalizeScanError(ctx, err)
+	}
+	if err := rows.Close(); err != nil {
 		return nil, runtimestorage.ErrStorage
 	}
 	return values, nil
@@ -272,11 +286,78 @@ func check(ctx context.Context, store *Store) error {
 	if nilvalue.Is(ctx) {
 		return runtimestorage.ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
-		return err
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		return contextError(err)
 	}
 	if store == nil || store.db == nil {
 		return runtimestorage.ErrStorage
 	}
 	return nil
+}
+
+// invocationScanner is implemented by both sql.Row and sql.Rows. Keeping the
+// scan and validation path shared prevents one read path from accidentally
+// returning a non-UTC or otherwise corrupt snapshot.
+type invocationScanner interface {
+	Scan(...any) error
+}
+
+func scanToolInvocation(scanner invocationScanner, value *runtimestorage.ToolInvocation, status *string) error {
+	if scanner == nil || value == nil || status == nil {
+		return runtimestorage.ErrStorage
+	}
+	if err := scanner.Scan(toolInvocationArgs(value, status)...); err != nil {
+		return err
+	}
+	value.Status = runtimestorage.ToolInvocationStatus(*status)
+	value.CreatedAt = controlmysql.AsUTC(value.CreatedAt)
+	value.UpdatedAt = controlmysql.AsUTC(value.UpdatedAt)
+	if err := runtimestorage.ValidateToolInvocation(*value); err != nil {
+		return runtimestorage.ErrStorage
+	}
+	return nil
+}
+
+func normalizeScanError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	return mapError(ctx, err, runtimestorage.ErrStorage, runtimestorage.ErrStorage, runtimestorage.ErrStorage, runtimestorage.ErrStorage)
+}
+
+func matchesToolInvocationTransition(value runtimestorage.ToolInvocation, transition runtimestorage.ToolInvocationTransition) bool {
+	return value.Status == transition.To && value.FencingToken == transition.FencingToken+1 && value.ErrorClass == strings.TrimSpace(transition.ErrorClass) && value.ReviewerID == strings.TrimSpace(transition.ReviewerID)
+}
+
+func contextError(err error) error {
+	if errors.Is(err, nilvalue.ErrInvalidContext) {
+		return runtimestorage.ErrInvalid
+	}
+	return err
+}
+
+func mapError(ctx context.Context, err error, notFound, duplicate, conflict, invalid error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, runtimestorage.ErrStorage) {
+		return runtimestorage.ErrStorage
+	}
+	mapped := controlmysql.MapError(ctx, err, notFound, duplicate, conflict, invalid)
+	if errors.Is(mapped, controlmysql.ErrStorage) {
+		return runtimestorage.ErrStorage
+	}
+	return contextError(mapped)
+}
+
+func begin(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
+	tx, err := controlmysql.Begin(ctx, db)
+	if err != nil {
+		return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	return tx, nil
+}
+
+func commit(ctx context.Context, tx *sql.Tx) error {
+	return mapError(ctx, controlmysql.Commit(ctx, tx), runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 }

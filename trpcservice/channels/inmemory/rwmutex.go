@@ -110,11 +110,18 @@ func (m *contextRWMutex) wakeLocked() {
 
 func waitContext(ctx context.Context, wait <-chan struct{}) error {
 	if nilvalue.Is(ctx) {
-		return context.Canceled
+		return channels.ErrInvalid
+	}
+	done, err := nilvalue.ContextDone(ctx)
+	if err != nil {
+		if err == nilvalue.ErrInvalidContext {
+			return channels.ErrInvalid
+		}
+		return err
 	}
 	select {
-	case <-ctx.Done():
-		return checkContext(ctx)
+	case <-done:
+		return nilvalue.ContextErr(ctx)
 	case <-wait:
 		return nil
 	}
@@ -124,9 +131,16 @@ func checkContext(ctx context.Context) error {
 	if nilvalue.Is(ctx) {
 		return channels.ErrInvalid
 	}
+	done, err := nilvalue.ContextDone(ctx)
+	if err != nil {
+		if err == nilvalue.ErrInvalidContext {
+			return channels.ErrInvalid
+		}
+		return err
+	}
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-done:
+		return nilvalue.ContextErr(ctx)
 	default:
 		return nil
 	}

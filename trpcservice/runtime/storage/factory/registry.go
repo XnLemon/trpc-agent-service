@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -127,7 +129,7 @@ func validProviderName(value string) bool {
 
 func validCapabilityBinding(binding CapabilityBinding) bool {
 	provider := strings.ToLower(strings.TrimSpace(binding.Provider))
-	if !validCapability(binding.Capability) || !validProviderName(provider) || provider != binding.Provider || !validBindingText(binding.Endpoint, 4096, false) || !validBindingText(binding.SecretRef, 256, false) {
+	if !validCapability(binding.Capability) || !validProviderName(provider) || provider != binding.Provider || !validBindingText(binding.Endpoint, 2048, false) || !validNormalizedEndpoint(binding.Endpoint) || !validBindingText(binding.SecretRef, 256, false) {
 		return false
 	}
 	if binding.SecretRef != "" && !validStorageSecretRef(binding.SecretRef) {
@@ -143,6 +145,26 @@ func validCapabilityBinding(binding CapabilityBinding) bool {
 
 func validBindingText(value string, max int, required bool) bool {
 	return utf8.ValidString(value) && strings.TrimSpace(value) == value && strings.IndexFunc(value, unicode.IsControl) < 0 && len([]rune(value)) <= max && (!required || value != "")
+}
+
+func validNormalizedEndpoint(value string) bool {
+	if value == "" {
+		return true
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return false
+	}
+	if parsed.Scheme != strings.ToLower(parsed.Scheme) || parsed.Host != strings.ToLower(parsed.Host) || parsed.String() != value {
+		return false
+	}
+	if port := parsed.Port(); port != "" {
+		parsedPort, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || parsedPort == 0 || strconv.FormatUint(parsedPort, 10) != port {
+			return false
+		}
+	}
+	return true
 }
 
 func validOptionKey(value string) bool {

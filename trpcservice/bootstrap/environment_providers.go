@@ -25,6 +25,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
+	skillsecurity "github.com/XnLemon/trpc-agent-service/trpcservice/skill"
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
 	artifactcos "trpc.group/trpc-go/trpc-agent-go/artifact/cos"
 	artifactinmemory "trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
@@ -54,7 +55,7 @@ func (resolver environmentWeComCredentialResolver) Resolve(ctx context.Context, 
 	if nilvalue.Is(ctx) {
 		return wecom.Credentials{}, errors.New("wecom credential resolver context is required")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return wecom.Credentials{}, err
 	}
 	if err := scope.Validate(); err != nil || scope.TenantID != resolver.tenantID || scope.SecretRef != resolver.config.secretRef {
@@ -72,7 +73,7 @@ func (resolver environmentWeComAIBotCredentialResolver) Resolve(ctx context.Cont
 	if nilvalue.Is(ctx) {
 		return wecom_aibot.Credentials{}, errors.New("wecom ai bot credential resolver context is required")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return wecom_aibot.Credentials{}, err
 	}
 	if err := scope.Validate(); err != nil || scope.TenantID != resolver.tenantID {
@@ -97,7 +98,7 @@ func (resolver environmentSecretResolver) Resolve(ctx context.Context, scope mod
 	if nilvalue.Is(ctx) {
 		return modelprofile.SecretValue{}, errors.New("secret resolver context is required")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return modelprofile.SecretValue{}, err
 	}
 	if err := scope.Validate(); err != nil {
@@ -140,7 +141,7 @@ func (provider environmentNativeCapabilityProvider) New(ctx context.Context, _ b
 	if nilvalue.Is(ctx) {
 		return nil, context.Canceled
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	switch provider.capability {
@@ -170,7 +171,7 @@ func (environmentHashEmbedder) GetEmbedding(ctx context.Context, text string) ([
 	if nilvalue.Is(ctx) {
 		return nil, context.Canceled
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	const dimensions = 32
@@ -193,7 +194,7 @@ func (environmentHashEmbedder) GetDimensions() int { return 32 }
 type environmentChromaMemoryProvider struct{}
 
 func (environmentChromaMemoryProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
-	if nilvalue.Is(ctx) || ctx.Err() != nil || input.TenantID == "" || strings.TrimSpace(input.AppID) == "" || binding.Capability != backend.CapabilityMemory || strings.TrimSpace(binding.Endpoint) == "" {
+	if nilvalue.Is(ctx) || nilvalue.ContextErr(ctx) != nil || input.TenantID == "" || strings.TrimSpace(input.AppID) == "" || binding.Capability != backend.CapabilityMemory || strings.TrimSpace(binding.Endpoint) == "" {
 		return nil, storagefactory.ErrStorageFactory
 	}
 	apiKey := secret.Value()
@@ -234,7 +235,7 @@ type environmentPostgresVectorKnowledgeProvider struct {
 }
 
 func (provider environmentPostgresVectorKnowledgeProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
-	if nilvalue.Is(ctx) || ctx.Err() != nil || provider.db == nil || input.TenantID == "" || strings.TrimSpace(input.AppID) == "" || binding.Capability != backend.CapabilityKnowledge || strings.ToLower(strings.TrimSpace(binding.Provider)) != "postgres_vector" || secret.Value() == "" {
+	if nilvalue.Is(ctx) || nilvalue.ContextErr(ctx) != nil || provider.db == nil || input.TenantID == "" || strings.TrimSpace(input.AppID) == "" || binding.Capability != backend.CapabilityKnowledge || strings.ToLower(strings.TrimSpace(binding.Provider)) != "postgres_vector" || secret.Value() == "" {
 		return nil, storagefactory.ErrStorageFactory
 	}
 	dimension := optionInt(binding.Options, "dimension")
@@ -268,7 +269,7 @@ func (provider *environmentKnowledgeManagementProvider) Open(ctx context.Context
 	if nilvalue.Is(ctx) || provider == nil || scope.Validate() != nil {
 		return knowledgeadmin.Backend{}, storagefactory.ErrStorageFactory
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return knowledgeadmin.Backend{}, err
 	}
 	if provider.demo {
@@ -313,7 +314,7 @@ type environmentSkillRepositoryProvider struct {
 }
 
 func (provider environmentSkillRepositoryProvider) Repository(ctx context.Context, scope skill.SkillScope) (skill.Repository, error) {
-	if nilvalue.Is(ctx) || ctx.Err() != nil || provider.root == "" {
+	if nilvalue.Is(ctx) || nilvalue.ContextErr(ctx) != nil || provider.root == "" {
 		return nil, storagefactory.ErrStorageFactory
 	}
 	metadata, ok := agentcontext.ExecutionMetadataFromContext(ctx)
@@ -345,13 +346,17 @@ func (provider environmentSkillRepositoryProvider) Repository(ctx context.Contex
 	if err != nil {
 		return nil, storagefactory.ErrStorageFactory
 	}
-	return repository, nil
+	attested, err := skillsecurity.NewFilesystemAttestedRepository(repository, "filesystem")
+	if err != nil {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	return attested, nil
 }
 
 type environmentCOSCapabilityProvider struct{}
 
 func (environmentCOSCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
-	if nilvalue.Is(ctx) || ctx.Err() != nil || input.TenantID == "" || strings.TrimSpace(input.AppID) == "" || binding.Capability != backend.CapabilityArtifact || strings.ToLower(strings.TrimSpace(binding.Provider)) != "cos" || strings.TrimSpace(binding.Endpoint) == "" {
+	if nilvalue.Is(ctx) || nilvalue.ContextErr(ctx) != nil || input.TenantID == "" || strings.TrimSpace(input.AppID) == "" || binding.Capability != backend.CapabilityArtifact || strings.ToLower(strings.TrimSpace(binding.Provider)) != "cos" || strings.TrimSpace(binding.Endpoint) == "" {
 		return nil, storagefactory.ErrStorageFactory
 	}
 	parts := strings.SplitN(secret.Value(), ":", 2)
@@ -457,7 +462,7 @@ func (environmentModelFactory) New(ctx context.Context, input modelprofile.Model
 	if nilvalue.Is(ctx) {
 		return nil, errors.New("model factory context is required")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	provider := strings.ToLower(strings.TrimSpace(input.Provider))

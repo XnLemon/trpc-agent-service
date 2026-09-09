@@ -361,7 +361,7 @@ func validate(ctx context.Context, tenantID string) error {
 	if nilvalue.Is(ctx) || tenantID == "" {
 		return ErrInvalid
 	}
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
 }
 
 func (t *Tool) loadState(ctx context.Context, tenantID string) (State, bool, error) {

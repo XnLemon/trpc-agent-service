@@ -279,8 +279,8 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = db.Close()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if nilvalue.ContextErr(ctx) != nil {
+			return nil, nilvalue.ContextErr(ctx)
 		}
 		if config.runtimeStorage == "redis" {
 			return nil, fmt.Errorf("%w: Redis runtime storage is unavailable", ErrInvalidConfig)
@@ -435,15 +435,15 @@ func openEnvironmentDatabaseForConfig(ctx context.Context, config environmentCon
 		}
 	}
 	if migrationErr != nil {
-		if ctx.Err() != nil {
-			return nil, nil, nil, ctx.Err()
+		if nilvalue.ContextErr(ctx) != nil {
+			return nil, nil, nil, nilvalue.ContextErr(ctx)
 		}
 		return nil, nil, nil, fmt.Errorf("%w: MySQL migrations are not ready", ErrInvalidConfig)
 	}
 	db, err := openMySQLEnvironmentDatabase(ctx, config.dsn, mysql.Options{MaxOpenConns: 8, MaxIdleConns: 8})
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, nil, nil, ctx.Err()
+		if nilvalue.ContextErr(ctx) != nil {
+			return nil, nil, nil, nilvalue.ContextErr(ctx)
 		}
 		return nil, nil, nil, fmt.Errorf("%w: mysql control plane is unavailable", ErrInvalidConfig)
 	}
@@ -451,8 +451,8 @@ func openEnvironmentDatabaseForConfig(ctx context.Context, config environmentCon
 	applicationDatabase, databaseErr := mysql.CurrentDatabase(ctx, db)
 	if userErr != nil || databaseErr != nil || applicationUser == migrationUser || applicationDatabase != migrationDatabase {
 		_ = db.Close()
-		if ctx.Err() != nil {
-			return nil, nil, nil, ctx.Err()
+		if nilvalue.ContextErr(ctx) != nil {
+			return nil, nil, nil, nilvalue.ContextErr(ctx)
 		}
 		return nil, nil, nil, fmt.Errorf("%w: MySQL migration and application accounts/databases are invalid", ErrInvalidConfig)
 	}
@@ -467,22 +467,22 @@ func openPostgresEnvironmentDatabaseForConfig(ctx context.Context, config enviro
 	}
 	db, err := openEnvironmentDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if nilvalue.ContextErr(ctx) != nil {
+			return nil, nilvalue.ContextErr(ctx)
 		}
 		return nil, fmt.Errorf("%w: %s control plane is unavailable", ErrInvalidConfig, config.driver)
 	}
 	if err := applyEnvironmentMigrations(ctx, db); err != nil {
 		_ = db.Close()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if nilvalue.ContextErr(ctx) != nil {
+			return nil, nilvalue.ContextErr(ctx)
 		}
 		return nil, fmt.Errorf("%w: PostgreSQL migrations are not ready", ErrInvalidConfig)
 	}
 	if err := verifyEnvironmentMigrations(ctx, db); err != nil {
 		_ = db.Close()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if nilvalue.ContextErr(ctx) != nil {
+			return nil, nilvalue.ContextErr(ctx)
 		}
 		return nil, fmt.Errorf("%w: PostgreSQL migrations are not ready", ErrInvalidConfig)
 	}

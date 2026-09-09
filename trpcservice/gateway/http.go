@@ -376,7 +376,12 @@ func (handler *HTTPHandler) chat(writer http.ResponseWriter, request *http.Reque
 	ctx := request.Context()
 	if handler.requestTimeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, handler.requestTimeout)
+		var contextErr error
+		ctx, cancel, contextErr = withGatewayTimeout(ctx, handler.requestTimeout)
+		if contextErr != nil {
+			handler.writeMappedError(writer, request, requestID, traceID, contextErr)
+			return
+		}
 		defer cancel()
 	}
 	authenticated, err := authenticateAPI(ctx, handler.authenticator, request)
@@ -513,6 +518,10 @@ func collectHTTPEvents(ctx context.Context, events <-chan DispatchEvent) ([]Disp
 	if nilvalue.Is(ctx) || events == nil {
 		return nil, ErrInvalid
 	}
+	done, doneErr := nilvalue.ContextDone(ctx)
+	if doneErr != nil {
+		return nil, doneErr
+	}
 	collected := make([]DispatchEvent, 0, 4)
 	for {
 		select {
@@ -521,8 +530,8 @@ func collectHTTPEvents(ctx context.Context, events <-chan DispatchEvent) ([]Disp
 				return collected, nil
 			}
 			collected = append(collected, event)
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		case <-done:
+			return nil, nilvalue.ContextErr(ctx)
 		}
 	}
 }
@@ -546,6 +555,10 @@ func (handler *HTTPHandler) writeStream(writer http.ResponseWriter, ctx context.
 	writer.Header().Set("Connection", "keep-alive")
 	writer.WriteHeader(http.StatusOK)
 	flusher.Flush()
+	done, doneErr := nilvalue.ContextDone(ctx)
+	if doneErr != nil {
+		return false
+	}
 	collected := make([]DispatchEvent, 0, 4)
 	for {
 		select {
@@ -565,7 +578,7 @@ func (handler *HTTPHandler) writeStream(writer http.ResponseWriter, ctx context.
 				_ = claim.Complete(collected)
 				return true
 			}
-		case <-ctx.Done():
+		case <-done:
 			return false
 		}
 	}
