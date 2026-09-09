@@ -23,13 +23,13 @@ Telegram long polling / WeCom HTTPS callback
 - Binding-aware Session identity、持久化入站幂等和受控文本回复；
 - 既有 Outbox 的 retry、lease/fencing、dead-letter 与重启恢复语义。
 
-卡片、被动 XML 回复和第三方应用仍不在自建应用 provider 范围。媒体仅通过 Issue #98 的
-attachment store / rich Outbox 边界进入，不允许 provider URL 或 token 穿过 Gateway。公众号和微信客服
-使用 `trpcservice/channels/wechat` 中互不兼容的显式 provider，不复用 WeCom credential。
+自建应用 provider 使用文本、媒体和 rich Outbox 边界；卡片、被动 XML 回复和第三方应用由
+显式协议 provider 管理，不允许 provider URL 或 token 穿过 Gateway。公众号和微信客服使用
+`trpcservice/channels/wechat` 中互不兼容的显式 provider，不复用 WeCom credential。
 
 `channels.ChannelWeCom` 的持久化值继续为 `wecom` 以保持已有 Binding 和 Admin API
-兼容，但在本页和代码注释中它专指 `wecom_app`。未来公众号、微信客服必须使用新的
-显式 Channel 类型和独立 Adapter。
+兼容，但在本页和代码注释中它专指 `wecom_app`。公众号、微信客服使用独立的显式
+Channel 类型和 Adapter。
 
 ## 绑定与凭据
 
@@ -207,6 +207,5 @@ fallback。未设置任何 `WECOM_*` 变量时，现有无 WeCom 的环境行为
 ## 运维前提
 
 真实 E2E 需要公网 HTTPS callback、有效证书、反向代理到服务、企业微信应用的可信出口
-IP、测试成员处于应用可见范围，并可访问 `qyapi.weixin.qq.com`。2C2G 主机是否足够只
-能在完成实现后，结合已部署 Blog 的实际 CPU、内存、磁盘、PostgreSQL 与模型调用
-方式测量；本阶段不承诺共享主机容量。
+IP、测试成员处于应用可见范围，并可访问 `qyapi.weixin.qq.com`。主机容量按部署实例的
+CPU、内存、磁盘、PostgreSQL 与模型调用指标持续测量，并纳入运维门禁。

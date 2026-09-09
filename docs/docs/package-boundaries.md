@@ -1,8 +1,8 @@
 # app、agent 与 runtime 包边界
 
 本页是 `trpcservice/app`、`trpcservice/agent` 和
-`trpcservice/runtime` 的实现契约。它把当前已经落地的职责和后续重构
-必须遵守的依赖方向写清楚，避免“包名正确但职责继续漂移”。
+`trpcservice/runtime` 的实现契约。它把当前已经落地的职责和演进中必须遵守的依赖方向写清楚，
+避免“包名正确但职责继续漂移”。
 
 本页不新增 `control-plane` domain，也不要求把控制面代码搬到新的顶层
 包。控制面是系统语义；应用与版本领域仍由 `app` 负责，组合装配和测试
@@ -55,8 +55,7 @@ Agent 的实现。
 运行时物化的叶子适配器，不属于调度核心：它们只接收无密钥的 Profile 输入，
 在 `agent/runnerfactory` 组装时创建 Model/Storage capability。这样保留了
 现有导出路径和兼容调用，同时让 `runtime/runner`、`runtime/execution` 不再
-直接依赖上游 Agent-Go 的实现；后续若物化实现需要独立演进，再单独移动这两
-个叶子包。
+直接依赖上游 Agent-Go 的实现；物化实现保持在这两个叶子包和 runnerfactory 的所有权边界内。
 
 `runtime/storage` 的基础持久化契约已经按能力拆成
 `SessionStateStore`、`EventHistoryStore`、`MessageStore` 和 `ReplyStore`。
@@ -108,10 +107,9 @@ Registry 的组合实现位于 `trpcservice/channels/provider`，Binding 根包�
 Session 行为接到租户范围的持久化能力。具体存储实现直接实现该契约；Session
 适配器不反向依赖 runtime 调度或 runtime 存储包。
 
-同样，`runtime` 当前需要读取 `agent` 的 execution snapshot 和 factory
-input，以便为完整 Plan 建立 Runner 缓存键。这是 runtime 消费 agent 契约，
-不是 runtime 重新实现 Agent。只有当这条依赖阻碍真实的下一步扩展时，才
-引入更窄的中立 capability contract，不为预想中的扩展提前抽象。
+同样，`runtime` 读取 `agent` 的 execution snapshot 和 factory input，以便为完整 Plan
+建立 Runner 缓存键。这是 runtime 消费 agent 契约，不是 runtime 重新实现 Agent；中立
+capability contract 只在存在多个独立消费者时作为共享边界。
 
 ## 一次执行的所有权
 
@@ -145,7 +143,7 @@ runtime/storage 与 trpcservice/outbox
 Outbox 负责回复投递资源。Context 始终由调用链显式传递，不存储在长期
 对象中。
 
-## 后续重构规则
+## 包边界维护规则
 
 - queue 是 runtime 的独立、显式组合边界：Bootstrap 可选地接管
   `runtime/queue.Worker` 的生命周期。`trpcservice/internal/migration` 的阶段状态
@@ -156,9 +154,7 @@ Outbox 负责回复投递资源。Context 始终由调用链显式传递，不�
   授权和数据隔离。
 - 任何影响导出 API、持久化格式、事件顺序、取消或关闭语义的变化，都
   必须单独说明兼容性，不作为目录整理的附带结果。
-- 每个后续 PR 应包含与边界相关的契约测试，并验证
+- 每个包边界变更都包含与边界相关的契约测试，并验证
   `go test ./...`、Race（如果涉及并发）和 `git diff --check`。
 
-本页描述的是包的责任，不是未来必须一次完成的目录迁移清单。具体移动
-应继续拆成小的、可独立验证和回滚的 PR，并在 tracker #130 中链接对应
-实现。
+本页描述的是包的责任；目录移动保持小步、可独立验证和可回滚，并在 tracker #130 中链接对应实现。

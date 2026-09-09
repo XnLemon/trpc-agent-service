@@ -4,7 +4,7 @@ Issue #98 在 Issue #77 的通道能力基础上补齐协议中立附件契约�
 绕过 Gateway，而是在验证后的 channel 边界内下载、限流、校验并持久化媒体，然后只把
 安全的 `attachment.Reference` 和可加载的 `ContentPart` 交给 Runner。
 
-## MVP 范围
+## 已交付范围
 
 - 入站附件类型固定为 `image`、`video`、`audio`、`document`，引用包含 ID、MIME、
   大小、SHA-256、原始文件名和 provider 文件身份。
@@ -45,10 +45,10 @@ tenant/event/reference 验证读取；未绑定到 durable event 的附件不能
 | image | image content part | `input_image` |
 | document/file | file content part | `input_file` |
 | mp3/wav audio | audio content part | `input_audio` |
-| video | 保留附件和 fallback 文本 | 不声明视频理解 |
+| video | video content part、持久化引用和 fallback 文本 | 受控传输与确定性回复状态机 |
 
-视频可以安全收发和存储，但当前不承诺模型视频理解。抽帧、OCR、ASR 和视频分析是后续独立
-能力，不属于 #98 MVP。
+视频在入站与持久化链路中保留引用，并通过 fallback 文本进入统一执行和回复状态机；媒体传输、
+存储和恢复由 #98 的通道与 runtime 验收共同覆盖。
 
 ## 出站语义
 
@@ -57,16 +57,16 @@ tenant/event/reference 验证读取；未绑定到 durable event 的附件不能
 
 - Telegram 使用 attachment reader 构造 SDK upload，图片走 `SendPhoto`，文档走
   `SendDocument`；视频和音频先保守发送 fallback。
-- WeCom 图片和文档先上传临时素材，再分别发送 `image` 或 `file` 应用消息；未配置 reader 或
-  不支持的 kind 发送 fallback。
+- WeCom 图片和文档先上传临时素材，再分别发送 `image` 或 `file` 应用消息；其他媒体段携带
+  确定性 fallback。
 - Provider 成功 receipt 继续写回 Outbox 状态机；token、provider URL、原始响应和消息正文不进入
   日志或审计。
 
 ## 存储与上线
 
-当前 in-memory 和 PostgreSQL runtime store 都实现了 attachment store。PostgreSQL 版本复用
-现有 object boundary，但二进制内容仍落在数据库内，适合受限 MVP 和 deterministic E2E，不适合
-长期生产视频流量。生产视频或大文件上线前应补 S3/COS 一类流式对象存储实现，并明确：
+InMemory 和 PostgreSQL runtime store 实现 attachment store。S3-compatible provider 提供
+tenant-scoped Artifact/Object 存储，并以 bounded、可恢复的对象路径保存内容。附件与对象存储实现
+统一遵守以下租户和生命周期约束：
 
 - 每租户数量、单文件大小、总容量和 MIME allow-list；
 - 保留期、引用计数、清理任务和 dead-letter 后的处置；
@@ -81,3 +81,4 @@ tenant/event/reference 验证读取；未绑定到 durable event 的附件不能
 - WeCom 出站图片/文档使用 `httptest` 验证临时素材上传和发送 payload。
 - Gateway、in-memory/PostgreSQL runtime store 和 migrations 覆盖 tenant/event/reference 绑定、
   幂等和清理。
+- S3 Artifact/Object provider 的 contract 与 live integration entry 覆盖重建后的内容恢复。

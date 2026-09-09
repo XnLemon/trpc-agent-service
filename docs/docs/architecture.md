@@ -1,10 +1,10 @@
 # 生产架构设计
 
-本页描述 tRPC-Agent-Service 的长期生产架构。它回答四个问题：系统如何分层、一次请求如何流转、
-租户和运行时状态如何保持边界、平台将如何从当前能力演进到生产规模。
+本页描述 tRPC-Agent-Service 的生产架构。它回答四个问题：系统如何分层、一次请求如何流转、
+租户和运行时状态如何保持边界、各模块如何通过共享契约协作。
 
-具体 API 字段、数据库表、供应商协议和测试命令属于对应的开发文档；本页只在“实施路线图”中
-列出 issue/PR，作为设计到实现的追踪入口。
+具体 API 字段、数据库表、供应商协议和测试命令属于对应的开发文档；本页用交付追踪表
+关联 issue/PR，作为设计与实现的统一入口。
 
 ## 设计目标与原则
 
@@ -214,10 +214,10 @@ PlanResolver -> Runtime Execution/RunnerRegistry -> HTTP 服务 -> readiness”�
 - **扩展性**：新增通道、模型、存储后端只实现对应 Adapter/Provider，不改变 Gateway 和 Runner 契约。
 - **运维性**：readiness、租约、Outbox、审计和低基数 telemetry 提供可验证的恢复与容量信号。
 
-## 实施路线图
+## 交付追踪
 
-路线图是架构到代码的追踪关系；issue/PR 记录放在这里，不作为前文设计前提。每个阶段都应
-保持上一阶段的不变量，并以对应开发文档和测试矩阵验收。
+交付追踪表把架构增量、实现 issue/PR 和验收文档对应起来；每项能力都保持既有不变量，
+并由对应开发文档和测试矩阵验收。
 
 | 阶段 | 架构增量 | 追踪实现 |
 | --- | --- | --- |
@@ -226,7 +226,7 @@ PlanResolver -> Runtime Execution/RunnerRegistry -> HTTP 服务 -> readiness”�
 | 3. 可恢复控制面 | PostgreSQL 控制面、真实 bootstrap、readiness、Admin API、首次初始化、重启恢复 | Issue #37/#38、Issue #41、Issue #67/#68 |
 | 4. 多租户运行时 | 多 identity bootstrap、Tenant-scoped Provider Registry、Storage Factory、精确缓存失效 | Issue #69、Issue #70、Issue #71/#73、Issue #72 |
 | 5. 可靠交付与治理 | Reply Outbox、重试/DLQ、租户审计、用量成本和可观测性 | Issue #50、Issue #54/PR #55、Issue #45 |
-| 6. 生产扩展 | 分布式队列与失效广播、更多 IM/模型/存储 Adapter、容量与灾备演练 | 后续规划，按独立 issue/PR 交付 |
+| 6. 生产扩展 | 分布式队列与租约恢复、Telegram/WeCom/WeCom AI Bot、Redis/S3 Adapter、部署与故障验证 | Issue #50/#71/#76/#77/#88/#98/#99/#108/#113 |
 
 详细实现边界见 [数据模型](data-model.md)、[Channel Binding](channel-binding.md)、
 [Gateway 契约](gateway.md)、[PostgreSQL 控制面](postgresql-control-plane.md)、

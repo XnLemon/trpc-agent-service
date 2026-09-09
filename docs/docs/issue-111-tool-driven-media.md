@@ -1,12 +1,11 @@
 # Issue #111: Tool-driven Media Reply
 
 Issue #98 provides the channel, attachment store, Gateway and Outbox transport
-for native media. It intentionally does not make ordinary model text create a
-media reply. Issue #111 adds the narrow execution bridge: an explicitly
-allowlisted agent tool can select a server-owned attachment and queue a
-structured reply.
+for native media. Issue #111 adds the execution bridge: an explicitly
+allowlisted agent tool selects a server-owned attachment and queues a
+structured reply from the same durable path.
 
-## Current MVP
+## Delivered Tool Contract
 
 The first installed tool is send_test_image. A published revision must
 explicitly include it in ToolAuthorization; unlisted tools are not exposed to
@@ -39,12 +38,10 @@ deterministic execution fallback with the original request/trace correlation.
 Storage/provider error details and raw tool arguments remain outside the
 channel reply and audit payloads.
 
-## Deliberate Boundaries
+## Tool Extension Contract
 
-send_test_image is a transport smoke-test tool, not an image-generation
-service. Image generation, arbitrary file selection, video understanding, OCR,
-ASR, and specialized external agent services remain separate capabilities.
-New tools should implement the same context-bound tool.Factory contract:
-they may create a validated attachment reference and ReplyIntent, but must not
-widen the Runner-facing contract with provider-specific credentials or
-download URLs.
+`send_test_image` is the installed deterministic media tool and provides the
+transport path used by the channel acceptance tests. New tools use the same
+context-bound `tool.Factory` contract: they create validated attachment
+references and `ReplyIntent` records, while the Runner-facing contract stays
+provider-neutral and credential-free.

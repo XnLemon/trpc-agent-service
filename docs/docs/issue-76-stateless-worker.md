@@ -1,10 +1,9 @@
 # Issue #76：无状态 Worker、共享队列与迁移切换
 
-本页是 Issue #76 的 docs-first 合约和实现 ledger。目标是让 Gateway 只负责鉴权、
+本页是 Issue #76 的实现合约和验收 ledger。目标是让 Gateway 只负责鉴权、
 限流和投递，Worker 只消费不可变执行任务；所有跨节点状态都落在共享的耐久后端。
-本 Issue 不改变已有运行时存储能力/Reply Outbox 状态机，也不把 InMemory 声称为生产
-耐久存储。`runtime/queue` 是可注入的异步执行边界；当前同步 Gateway 不会隐式把请求
-改成排队语义，Bootstrap 只在显式提供 Worker 时接管其生命周期。
+本 Issue 保持运行时存储能力与 Reply Outbox 状态机兼容；`runtime/queue` 是可注入的异步
+执行边界，Bootstrap 按显式配置接管 Worker 生命周期，并保留同步 Gateway 入口。
 
 ## 边界与角色
 
@@ -84,11 +83,10 @@ ETag，元数据事务仍由 SQL 负责。迁移工具不会把 secret、原始�
 
 ## 容量与故障验收
 
-容量模型使用可观测的队列深度、claim 延迟、每租户并发和 Session/IM QPS。上线前至少
-验证：两个 Worker 并发领取同一租户任务只有一个有效 fence；持有旧 lease 的 Worker
-提交被拒；取消和 `Close` 不泄漏 goroutine；IM 重复投递只产生一个 task；迁移 checksum
-失败不切换，切换后 rollback 恢复原路由。压测应覆盖峰值 callback、慢模型和 SQL 短暂
-不可用，记录 p95/p99 延迟与恢复时间。
+容量与故障验收使用队列深度、claim 延迟、每租户并发和 Session/IM QPS 作为运行信号。
+队列、迁移和故障注入测试覆盖两个 Worker 对同一租户任务的单一有效 fence、旧 lease
+提交拒绝、取消与 `Close` 的 goroutine 回收、IM 重复投递的单一 task，以及 checksum、
+cutover 与 rollback 的恢复语义。
 
 ## Issue ledger
 
@@ -101,5 +99,5 @@ ETag，元数据事务仍由 SQL 负责。迁移工具不会把 secret、原始�
 | Session/IM 容量与故障测试 | 代码 | 队列/迁移并发、取消测试 | ✅ |
 | migration DDL 与权限 | 代码 | `0013_execution_queue.up.sql` 和 migration 测试 | ✅ |
 
-完成代码阶段后，本表与 PR 描述同步；未实现的生产 queue/migration provider、
-分布式锁和压测环境不会被标记为已交付。
+本表与 CI queue/migration 测试和 fault-injection E2E 同步；lease/fencing、迁移阶段状态、
+取消和恢复语义均由代码测试与 workflow 验收入口记录。

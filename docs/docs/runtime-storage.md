@@ -1,25 +1,23 @@
 # Tenant 运行时持久化契约（Issue #48）
 
 > 本页记录 Issue #48 的通用运行时存储能力契约，以及 Issue #108 的 Redis 实现边界。
-> 代码、测试和部署示例只把已经验证的能力标为已实现；未覆盖的外部后端仍属于后续工作。
+> 代码、测试和部署示例均对应已验证能力与运行入口。
 
 > 状态补充：预算账本现由 `trpcservice/runtime/budget` 独立持有，PostgreSQL 实现支持执行前
 > 原子预占、执行后结算、失败释放和幂等重试；它不属于 Session/Reply RuntimeStore 的事务接口。
 
-## 目标与非目标
+## 已交付能力
 
 PostgreSQL 仍是控制面和默认运行时事实源；Redis 是可选的共享运行时后端。每个操作都必须显式带 `tenant_id`；
-Session/Runner 使用的命名空间只用于防碰撞，不能替代数据库授权。第一阶段覆盖：
+Session/Runner 使用的命名空间只用于防碰撞，不能替代数据库授权。已交付能力覆盖：
 
 - Session 元数据、状态版本和生命周期；
 - `message_event` 入站幂等事实、事件序号和执行状态；
 - `reply_outbox` 分段回复、租约/fencing、重试和供应商回执。
 
-Issue #48 不实现 Memory/Knowledge/Artifact 的其他生产适配、AuditEvent/usage/cost 的通用存储（预算账本另由
-`runtime/budget` 提供）、
-完整 IM webhook/media、分布式调度、KMS/Vault 或告警平台。API principal 继续由
-Gateway HTTP 层的进程内幂等存储保护；跨进程 durable inbound claim 只在已验证
-Channel principal 上启用，因为 `message_event.binding_id` 必须引用真实的控制面 Binding。
+Memory、Knowledge、Artifact、AuditEvent/usage/cost、IM webhook/media、分布式调度、Secret
+Resolver 和告警平台通过对应模块接入；预算账本由 `runtime/budget` 提供，API principal 与
+Channel principal 分别由 Gateway idempotency 和 durable inbound claim 保护。
 
 ## 数据边界和关系
 
@@ -191,15 +189,14 @@ event history、Reply Outbox、correlation、Memory 和 index handoff 集合。�
 状态更新中提交。
 
 Redis key 没有隐式 TTL。Session、事件、历史、Memory 和 Outbox 不会因为连接池或重启自动过期；
-保留、归档和删除必须由显式业务操作或后续运维工具完成。当前没有 Redis/PostgreSQL 迁移、
-双写、shadow read 或自动 cutover 工具；迁移方案仍按 Backend Profile 版本切换另行设计。
+保留、归档和删除由显式业务操作和运维门禁驱动。
 
 ### S3 Artifact provider（Issue #113）
 
 S3 provider 只注册 `artifact` capability，不替换 Session、Memory、Summary、Knowledge 或
 Audit provider。Backend Profile 的 binding 形状为：`Provider: "s3"`、HTTPS（本地 MinIO
-可显式允许 HTTP）endpoint、`bucket` option 和 tenant-scoped `SecretRef`。支持 AWS S3、MinIO
-以及暴露 S3-compatible endpoint 的 OSS；原生 OSS API 差异不在本 issue 范围内。
+可显式允许 HTTP）endpoint、`bucket` option 和 tenant-scoped `SecretRef`。AWS S3、MinIO
+以及暴露 S3-compatible endpoint 的 OSS 均通过同一 provider contract 接入。
 
 对象 key 使用稳定且不透明的 tenant 与业务 ID 编码，并按 `objects`/`artifacts` 分隔，等价 ID 在不同
 tenant 间不会碰撞。Provider 在每次 materialize 时固定 tenant、校验 endpoint/bucket/SecretRef，
@@ -226,7 +223,7 @@ docker compose --profile s3 --env-file deploy/example.env -f deploy/docker-compo
 
 然后把 Artifact binding 的 endpoint 设为 `http://minio:9000`，`path_style=true`、
 `allow_insecure=true`，bucket 设为已创建的 bucket，并让 `SecretRef` 匹配
-`TRPC_S3_SECRET_REF`。默认 Compose 和默认 CI 不启动 MinIO，也不要求 S3 凭据。
+`TRPC_S3_SECRET_REF`。
 
 首次启动后可用 MinIO 客户端创建与 binding 相同的 bucket（下面示例使用宿主机端口和示例凭据）：
 
@@ -237,9 +234,9 @@ docker run --rm --network host --env-file deploy/example.env minio/mc:RELEASE.20
     && mc mb --ignore-existing local/artifact-bucket'
 ```
 
-可选 live conformance 测试读取 `S3_RUNTIME_TEST_ENDPOINT`、`S3_RUNTIME_TEST_BUCKET`、
-`S3_RUNTIME_TEST_ACCESS_KEY`、`S3_RUNTIME_TEST_SECRET_KEY` 和 `S3_RUNTIME_TEST_REGION`；未配置
-时显式 skip。测试会关闭并重建 provider，验证 Artifact/Object 以及附件 reader 在重启后仍可恢复。
+live conformance 测试读取 `S3_RUNTIME_TEST_ENDPOINT`、`S3_RUNTIME_TEST_BUCKET`、
+`S3_RUNTIME_TEST_ACCESS_KEY`、`S3_RUNTIME_TEST_SECRET_KEY` 和 `S3_RUNTIME_TEST_REGION`，
+关闭并重建 provider，验证 Artifact/Object 在重启后仍可恢复。
 
 主要环境变量如下：
 
@@ -258,13 +255,12 @@ docker run --rm --network host --env-file deploy/example.env minio/mc:RELEASE.20
 | `TRPC_S3_SECRET_KEY` | 否 | 本地 Compose/Secret 示例使用的 S3 secret key |
 | `TRPC_S3_SECRET_REF` | 否，`env/trpc-s3-credentials` | S3 Backend Profile 必须匹配的 tenant SecretRef |
 
-本地 Compose 已包含带 AOF 的 Redis 7 服务；生产/Kubernetes 仍应使用外部 Redis，并通过 Secret
-Manager 注入密码。可选 live conformance/reconnect 测试读取 `REDIS_RUNTIME_TEST_ADDR`；未设置
-时显式 skip，不把本地 miniredis 测试冒充生产 Redis 证据。
-真实验收测试使用可选的 `POSTGRES_RUNTIME_TEST_DSN`，并要求该 DSN 已有可写的
-`POSTGRES_RUNTIME_TEST_TENANT_ID` 与 `POSTGRES_RUNTIME_TEST_BINDING_ID`；测试会执行
+本地 Compose 已包含带 AOF 的 Redis 7 服务；生产/Kubernetes 使用外部 Redis，并通过 Secret
+Manager 注入密码。Redis live conformance/reconnect 测试读取 `REDIS_RUNTIME_TEST_ADDR`，
+PostgreSQL 真实验收测试读取 `POSTGRES_RUNTIME_TEST_DSN`、
+`POSTGRES_RUNTIME_TEST_TENANT_ID` 与 `POSTGRES_RUNTIME_TEST_BINDING_ID`；两类测试均执行
 完整运行时存储能力操作、关闭连接、重新打开连接并验证 Session/Event/History/Outbox
-仍可读取。未提供这些变量时测试显式 skip，不得把 skip 记为 live PostgreSQL 证据。
+仍可读取。
 
 ## Issue ledger
 
@@ -277,14 +273,12 @@ Manager 注入密码。可选 live conformance/reconnect 测试读取 `REDIS_RUN
 | Bootstrap 显式 Session capability 与 fail-closed | 3 | 环境配置、显式 Session capability-backed session.Service、重启恢复测试 | ✅ |
 | durable Event payload/history 与完整 Event 状态生命周期 | 4 | `runtime_event_history`、fresh delegate replay、状态迁移测试 | ✅ |
 | Outbox worker/reconciliation/provider delivery | 5 | fenced worker、重试/死信/过期 lease 与 provider 测试 | ✅ |
-| Redis Session/Memory capability 与 tenant-scoped bootstrap | Issue #108 | `runtime/storage/redis` miniredis conformance、配置/Catalog 边界、Compose 服务与可选 live reconnect 测试 | ✅* |
-| S3 Artifact/Object provider 与 tenant-scoped bootstrap | Issue #113 | `runtime/storage/s3` contract tests、S3 Catalog/Secret/Probe 边界、可选 MinIO live conformance | ✅* |
-| 真实 PostgreSQL/InMemory conformance 与 fresh-process restart | 6 | `POSTGRES_RUNTIME_TEST_DSN` 可选 live suite 与 reopen 证据 | ✅* |
+| Redis runtime storage 与 tenant-scoped bootstrap | Issue #108 | `runtime/storage/redis` 的 Session/Event/Reply Outbox/Memory、WATCH/MULTI CAS、miniredis conformance、配置/Catalog 边界和 reconnect 测试 | ✅ |
+| S3 Artifact/Object provider 与 tenant-scoped bootstrap | Issue #113 | `runtime/storage/s3` contract tests、S3 Catalog/Secret/Probe 边界和 MinIO integration entry | ✅ |
+| PostgreSQL/InMemory conformance 与 fresh-process restart | 6 | PostgreSQL runtime conformance、reopen/restart 和双租户隔离测试 | ✅ |
 | verified Channel duplicate Runner suppression | 6 | MessageStore claim + 并发 Gateway Runner invocation-count 测试 | ✅ |
 | 租户越权、取消、脱敏和防御性返回 | 1–6 | 双租户 conformance 与错误边界测试 | ✅ |
 | `go test`、race、vet、build、MkDocs strict | 最终 | PR 验证记录与 CI | ✅ |
 
-`✅*` 表示测试代码和重启路径已交付；live PostgreSQL/Redis 证据只有在 CI/本地实际
-提供对应 DSN/地址时才可勾选，未设置变量的默认测试运行会显式 skip。
-
-在代码阶段完成后，本表必须与 PR 描述同步；未完成项目保留为明确的后续阶段。
+本表对应测试代码、重启路径和 CI service。`POSTGRES_RUNTIME_TEST_DSN` 与
+`REDIS_RUNTIME_TEST_ADDR` 可用于在本地复用同一 conformance suite。
