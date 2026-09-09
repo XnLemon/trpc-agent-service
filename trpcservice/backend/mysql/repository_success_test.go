@@ -93,6 +93,8 @@ func TestBackendRepositoryListsProfiles(t *testing.T) {
 }
 
 func TestBackendRepositoryListBoundaries(t *testing.T) {
+	const tenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	const profileID = "bp_01ARZ3NDEKTSV4RRFFQ69G5FAW"
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, _, err := NewRepository(nil, nil).List(ctx, "tenant", "", "", "", 50); err == nil {
@@ -114,8 +116,8 @@ func TestBackendRepositoryListBoundaries(t *testing.T) {
 	if _, _, err := repository.List(context.Background(), "tenant", "", "", "bad", 50); err == nil {
 		t.Fatal("invalid backend cursor was accepted")
 	}
-	mock.ExpectQuery(`SELECT profile_id FROM backend_profile WHERE tenant_id = \? ORDER BY profile_id`).WithArgs("tenant").WillReturnError(errors.New("query down"))
-	if _, _, err := repository.List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+	mock.ExpectQuery(`SELECT profile_id FROM backend_profile WHERE tenant_id = \? ORDER BY profile_id`).WithArgs(tenantID).WillReturnError(errors.New("query down"))
+	if _, _, err := repository.List(context.Background(), tenantID, "", "", "", 50); !errors.Is(err, ErrStorage) {
 		t.Fatalf("backend query error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -127,8 +129,8 @@ func TestBackendRepositoryListBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = scanDB.Close() })
-	scanMock.ExpectQuery(`SELECT profile_id FROM backend_profile WHERE tenant_id = \? ORDER BY profile_id`).WithArgs("tenant").WillReturnRows(sqlmock.NewRows([]string{"profile_id", "extra"}).AddRow("profile", "bad"))
-	if _, _, err := NewRepository(scanDB, catalog).List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, ErrStorage) {
+	scanMock.ExpectQuery(`SELECT profile_id FROM backend_profile WHERE tenant_id = \? ORDER BY profile_id`).WithArgs(tenantID).WillReturnRows(sqlmock.NewRows([]string{"profile_id", "extra"}).AddRow(profileID, "bad"))
+	if _, _, err := NewRepository(scanDB, catalog).List(context.Background(), tenantID, "", "", "", 50); !errors.Is(err, ErrStorage) {
 		t.Fatalf("backend scan error = %v", err)
 	}
 }
@@ -338,6 +340,7 @@ func TestBackendRepositoryDatabaseAndConflictErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	const profileID = "bp_01ARZ3NDEKTSV4RRFFQ69G5FAW"
 	validCreate := backend.CreateInput{
 		TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", ProfileKey: "error-path", DisplayName: "Error Path", Status: backend.StatusActive,
 		Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory", Options: map[string]string{"namespace": "safe"}}},
@@ -361,9 +364,9 @@ func TestBackendRepositoryDatabaseAndConflictErrors(t *testing.T) {
 			case "Create":
 				_, _, err = NewRepository(db, catalog).Create(context.Background(), validCreate)
 			case "Update":
-				_, _, err = NewRepository(db, catalog).UpdateConfiguration(context.Background(), backend.UpdateConfigurationInput{})
+				_, _, err = NewRepository(db, catalog).UpdateConfiguration(context.Background(), backend.UpdateConfigurationInput{TenantID: validCreate.TenantID, ProfileID: profileID})
 			default:
-				_, _, err = NewRepository(db, catalog).TransitionStatus(context.Background(), backend.TransitionStatusInput{})
+				_, _, err = NewRepository(db, catalog).TransitionStatus(context.Background(), backend.TransitionStatusInput{TenantID: validCreate.TenantID, ProfileID: profileID})
 			}
 			if !errors.Is(err, ErrStorage) {
 				t.Fatalf("%s begin error = %v", operation, err)

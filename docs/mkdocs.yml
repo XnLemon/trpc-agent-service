@@ -31,6 +31,7 @@ nav:
   - 项目架构:
       - 生产架构设计: architecture.md
       - 上游优先重构设计: upstream-reuse-redesign.md
+      - 上游 server / OpenClaw 兼容性评估: upstream-compatibility.md
       - app、agent 与 runtime 包边界: package-boundaries.md
       - 数据模型: data-model.md
       - Tenant 运行时边界: tenant-runtime-boundary.md

@@ -40,28 +40,29 @@ func TestChromaMemoryDualWorkerRestartLive(t *testing.T) {
 	if collection == "" {
 		collection = "trpc_live_" + nonce
 	}
-	chromaTenant := liveOptionOrDefault(os.Getenv("TRPC_CHROMA_LIVE_TENANT"), "default_tenant")
 	database := liveOptionOrDefault(os.Getenv("TRPC_CHROMA_LIVE_DATABASE"), "default_database")
 	apiKey := strings.TrimSpace(os.Getenv("TRPC_CHROMA_LIVE_API_KEY"))
+	if apiKey == "" {
+		t.Skip("TRPC_CHROMA_LIVE_API_KEY is required")
+	}
+	secret, err := modelprofile.NewSecretValue(apiKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	newWorker := func() *memorychromadb.Service {
-		opts := []memorychromadb.ServiceOpt{
-			memorychromadb.WithBaseURL(endpoint),
-			memorychromadb.WithTenant(chromaTenant),
-			memorychromadb.WithDatabase(database),
-			memorychromadb.WithCollectionName(collection),
-			memorychromadb.WithEmbedder(environmentHashEmbedder{}),
-			memorychromadb.WithIndexDimension(32),
-			memorychromadb.WithTimeout(10 * time.Second),
+		value, providerErr := (environmentChromaMemoryProvider{}).New(ctx, backendStorageInput("live"), backend.CapabilityBinding{
+			Capability: backend.CapabilityMemory, Provider: "chromadb", Endpoint: endpoint,
+			Options: map[string]string{"database": database, "collection": collection, "dimension": "32", "embedder": "hash"},
+		}, secret)
+		if providerErr != nil {
+			t.Fatalf("create Chroma worker: %v", providerErr)
 		}
-		if apiKey != "" {
-			opts = append(opts, memorychromadb.WithAPIKey(apiKey))
-		}
-		worker, err := memorychromadb.NewService(opts...)
-		if err != nil {
-			t.Fatalf("create Chroma worker: %v", err)
+		worker, ok := value.(*memorychromadb.Service)
+		if !ok || worker == nil {
+			t.Fatalf("Chroma worker type = %T", value)
 		}
 		return worker
 	}

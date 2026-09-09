@@ -257,12 +257,14 @@ func TestAgentMySQLPublishReadbackErrorBranches(t *testing.T) {
 }
 
 func TestAgentMySQLControlPlanePreflightErrorBranches(t *testing.T) {
+	const tenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	const appID = "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"
 	metadata := appmodel.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "coverage", CorrelationID: "mysql-control-coverage"}
 
 	t.Run("canary begin error", func(t *testing.T) {
 		db, mock := newMySQLCoverageDB(t)
 		mock.ExpectBegin().WillReturnError(errors.New("begin"))
-		_, _, err := NewAppRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: "tenant", AppID: "app", TenantActive: true, Metadata: metadata})
+		_, _, err := NewAppRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: tenantID, AppID: appID, TenantActive: true, Metadata: metadata})
 		if !errors.Is(err, ErrStorage) {
 			t.Fatalf("SetCanary begin error = %v", err)
 		}

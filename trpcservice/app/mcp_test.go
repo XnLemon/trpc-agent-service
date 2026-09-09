@@ -28,6 +28,15 @@ func TestMCPBindingNormalizesPublishedConfiguration(t *testing.T) {
 	}
 }
 
+func TestMCPBindingRequiresCanonicalEndpointAuthority(t *testing.T) {
+	for _, endpoint := range []string{"https://EXAMPLE.test/tools", "https://example.test:000443/tools", "https://example.test:bad/tools"} {
+		binding := MCPBinding{Name: "mcp", Transport: "sse", ServerURL: endpoint, SecretRef: "secret://mcp", ToolAllow: []string{"read"}}
+		if err := binding.Validate(); !errors.Is(err, ErrInvalidMCPBinding) {
+			t.Fatalf("endpoint %q error = %v", endpoint, err)
+		}
+	}
+}
+
 func TestMCPBindingRejectsUnsafeOrIncompleteDeclarations(t *testing.T) {
 	cases := []MCPBinding{
 		{Name: "mcp", Transport: "sse", ServerURL: "http://example.test", SecretRef: "secret://mcp", ToolAllow: []string{"read"}},

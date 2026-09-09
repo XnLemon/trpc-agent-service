@@ -70,11 +70,10 @@ type Config struct {
 // NewRuntimeRunnerRegistry creates a generic Runner registry backed by the
 // concrete Agent adapter. The concrete assembly deliberately lives in this
 // package so runtime/runner stays independent of Agent implementations.
-// NewDefaultPluginFactory returns only the platform's always-on identity and
-// durable tool-invocation plugins. Guardrail materialization is intentionally
-// exposed through NewGuardrailPlugins but is not part of the default Runner
-// graph in this release. Every returned plugin is runner-owned and must not be
-// shared between cached Runners.
+// NewDefaultPluginFactory returns the platform identity, durable
+// tool-invocation, and revision-enabled guardrail plugins for each sealed plan.
+// Every returned plugin is runner-owned and must not be shared between cached
+// Runners.
 func NewDefaultPluginFactory(config Config) PluginFactory {
 	return func(ctx context.Context, plan runtime.ExecutionPlan) (plugins []plugin.Plugin, err error) {
 		defer func() {
@@ -96,9 +95,13 @@ func NewDefaultPluginFactory(config Config) PluginFactory {
 		if !isNilFactoryValue(config.ToolInvocationStore) {
 			plugins = append(plugins, servicetool.NewToolInvocationPreparePlugin())
 		}
-		// Guardrail is intentionally isolated from the default execution path;
-		// callers that opt in must use NewGuardrailPlugins from an explicit
-		// PluginFactory and own its review configuration.
+		guardrailPlugins, guardrailErr := NewGuardrailPlugins(ctx, plan, config)
+		if guardrailErr != nil {
+			_ = closePlugins(plugins)
+			plugins = nil
+			return nil, guardrailErr
+		}
+		plugins = append(plugins, guardrailPlugins...)
 		if !isNilFactoryValue(config.ToolInvocationStore) {
 			plugins = append(plugins, servicetool.NewToolInvocationDispatchPlugin())
 		}

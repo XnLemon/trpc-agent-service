@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -174,6 +175,32 @@ func TestPostgresVectorKnowledgeProviderUsesUpstreamKnowledgeService(t *testing.
 		Provider:   "postgres_vector",
 	}, modelprofile.SecretValue{}); !errors.Is(err, storagefactory.ErrStorageFactory) {
 		t.Fatalf("missing embedding secret error = %v", err)
+	}
+}
+
+func TestChromaMemoryProviderSupportsDeterministicEmbedderForLiveProbes(t *testing.T) {
+	requireLiveIntegration(t)
+	endpoint := strings.TrimSpace(os.Getenv("TRPC_CHROMA_LIVE_ENDPOINT"))
+	apiKey := strings.TrimSpace(os.Getenv("TRPC_CHROMA_LIVE_API_KEY"))
+	if endpoint == "" || apiKey == "" {
+		t.Skip("TRPC_CHROMA_LIVE_ENDPOINT and TRPC_CHROMA_LIVE_API_KEY are required")
+	}
+	secret := mustEnvironmentSecret(t, apiKey)
+	value, err := (environmentChromaMemoryProvider{}).New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000"}, backend.CapabilityBinding{
+		Capability: backend.CapabilityMemory, Provider: "chromadb", Endpoint: endpoint,
+		Options: map[string]string{"dimension": "32", "embedder": "hash"},
+	}, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, ok := value.(memory.Service)
+	if !ok || service == nil {
+		t.Fatalf("Chroma provider returned %T", value)
+	}
+	if closer, ok := service.(interface{ Close() error }); ok {
+		if err := closer.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

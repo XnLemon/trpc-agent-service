@@ -12,9 +12,11 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	runtimerunner "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/runner"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
+	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
+	approvalreview "trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -225,6 +227,21 @@ func TestRuntimeRunnerRegistryMaterializesPluginsFromPlan(t *testing.T) {
 	}
 }
 
+func TestDefaultPluginFactoryIncludesRevisionGuardrail(t *testing.T) {
+	plan := newRunnerFactoryGuardrailPlan(t)
+	store := runtimestorageinmemory.NewToolInvocationStore()
+	plugins, err := NewDefaultPluginFactory(Config{ApprovalReviewer: runnerFactoryApprovalReviewer{}, ToolInvocationStore: store})(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plugins) != 4 {
+		t.Fatalf("default plugins = %d, want identity/prepare/guardrail/dispatch", len(plugins))
+	}
+	if err := closePlugins(plugins); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimeRunnerRegistryRejectsPluginFactoryFailure(t *testing.T) {
 	plan := newRunnerFactoryTestPlan(t)
 	sessions := inmemory.NewSessionService()
@@ -241,6 +258,12 @@ func TestRuntimeRunnerRegistryRejectsPluginFactoryFailure(t *testing.T) {
 	if _, err := registry.Acquire(context.Background(), plan); !errors.Is(err, runtimerunner.ErrRunnerUnavailable) {
 		t.Fatalf("plugin factory failure = %v", err)
 	}
+}
+
+type runnerFactoryApprovalReviewer struct{}
+
+func (runnerFactoryApprovalReviewer) Review(context.Context, *approvalreview.Request) (*approvalreview.Decision, error) {
+	return &approvalreview.Decision{Approved: true, RiskLevel: "low", Reason: "test"}, nil
 }
 
 type runnerFactoryPlugin struct{}
@@ -274,6 +297,12 @@ func newRunnerFactoryTestPlan(t *testing.T) runtime.ExecutionPlan {
 	return newRunnerFactoryPlan(t, nil)
 }
 
+func newRunnerFactoryGuardrailPlan(t *testing.T) runtime.ExecutionPlan {
+	runtimePolicy := appmodel.DefaultRuntimePolicy()
+	runtimePolicy.Guardrail = &appmodel.GuardrailPolicy{ApprovalTools: []string{"mcp_files__delete"}}
+	return newRunnerFactoryPlanWithRuntime(t, nil, runtimePolicy)
+}
+
 func newRunnerFactoryMCPPlan(t *testing.T) runtime.ExecutionPlan {
 	return newRunnerFactoryPlan(t, []appmodel.MCPBinding{{
 		Name: "files", Transport: "stdio", Command: "/usr/bin/mcp-files", ToolAllow: []string{"read"},
@@ -281,6 +310,10 @@ func newRunnerFactoryMCPPlan(t *testing.T) runtime.ExecutionPlan {
 }
 
 func newRunnerFactoryPlan(t *testing.T, mcpBindings []appmodel.MCPBinding) runtime.ExecutionPlan {
+	return newRunnerFactoryPlanWithRuntime(t, mcpBindings, appmodel.DefaultRuntimePolicy())
+}
+
+func newRunnerFactoryPlanWithRuntime(t *testing.T, mcpBindings []appmodel.MCPBinding, runtimePolicy appmodel.RuntimePolicy) runtime.ExecutionPlan {
 	t.Helper()
 	modelCatalog, err := modelprofile.NewProviderCatalog(modelprofile.ProviderSpec{
 		Provider: "fake", Models: []string{"deterministic"}, EndpointPolicy: modelprofile.FieldForbidden, SecretRefPolicy: modelprofile.FieldForbidden,
@@ -321,7 +354,7 @@ func newRunnerFactoryPlan(t *testing.T, mcpBindings []appmodel.MCPBinding) runti
 	}
 	draft, err := appmodel.NewRevision(appmodel.CreateRevisionInput{
 		TenantID: tenantValue.TenantID, AppID: appRoot.AppID, Revision: 1,
-		Configuration: appmodel.DraftConfiguration{Description: "runner factory test", Instruction: "Answer clearly.", ModelProfileID: modelValue.ProfileID, Runtime: appmodel.DefaultRuntimePolicy(), MCPBindings: mcpBindings},
+		Configuration: appmodel.DraftConfiguration{Description: "runner factory test", Instruction: "Answer clearly.", ModelProfileID: modelValue.ProfileID, Runtime: runtimePolicy, MCPBindings: mcpBindings},
 	})
 	if err != nil {
 		t.Fatal(err)

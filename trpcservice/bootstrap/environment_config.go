@@ -709,6 +709,7 @@ func chromaMemoryProviderSpec() backend.ProviderSpec {
 			"database":   {Kind: backend.OptionString, DefaultValue: stringOption("default_database")},
 			"collection": {Kind: backend.OptionString, DefaultValue: stringOption("memories")},
 			"dimension":  {Kind: backend.OptionInteger, MinInteger: &minDimension, MaxInteger: &maxDimension},
+			"embedder":   {Kind: backend.OptionEnum, DefaultValue: stringOption("openai"), AllowedValues: []string{"openai", "hash"}},
 		},
 	}
 }

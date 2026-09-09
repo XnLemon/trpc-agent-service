@@ -28,16 +28,16 @@
 | --- | --- | --- |
 | `trpcservice/agent/factory.go` | 使用 `llmagent.New`、`chainagent.New`、`parallelagent.New`、`cycleagent.New`、`graphagent.New` | 默认注册上游 LLM/Chain/Parallel/Cycle/Graph；Graph 当前是线性 StateGraph 映射，尚未实现声明式条件路由 |
 | `trpcservice/agent/runner_builder.go` | Runner 使用 `WithSessionService`、`WithMemoryService`、`WithArtifactService` 和 `WithPlugins`；LLMAgent 使用 `WithKnowledge` 与授权 ToolSet | Memory tools 和自动提取受 Revision allowlist/`memory_auto_extract` 控制；Artifact 通过显式 `export_artifact` 工具按可信 app/user/session/version 导出到平台 Attachment，不暴露上游 URL；MCP ToolSet 由 Runner 接管初始化和关闭生命周期 |
-| `trpcservice/bootstrap/bootstrap.go` | 每个封存 ExecutionPlan 创建独立上游插件实例 | 默认装配 Identity Plugin，只传播 Runner 已确认的 UserID；审批、PromptInjection 和 UnsafeIntent 在 reviewer 与预算合同完成前不虚假启用 |
+| `trpcservice/bootstrap/bootstrap.go` | 每个封存 ExecutionPlan 创建独立上游插件实例 | 默认装配 Identity、durable Tool Invocation 和 Revision-enabled Guardrail Plugin；审批、PromptInjection 和 UnsafeIntent 缺少对应 Reviewer 时 fail closed |
 | `trpcservice/runtime/storage/factory/runtime_factory.go` | Session、Summary、Audit 使用平台合同；Memory/Knowledge/Artifact 使用上游接口 | 已移除 Vector/Object 等旧平台能力捆绑，能力集合只保留平台职责和上游原生服务 |
 | `trpcservice/runtime/storage/capabilities.go` | 自研记录、CRUD、向量与对象接口 | 不再作为 Agent 能力的主合同 |
 | `trpcservice/bootstrap/environment_providers.go` | 按租户装配上游 Session/Memory/Artifact/Knowledge 服务，以及平台审计和投递存储 | demo 使用上游 InMemory；生产 Memory 使用上游 ChromaDB，Knowledge 可使用同租户 PostgreSQL VectorStore，Artifact 使用上游 COS；MCP 安全 Binding、审批/预算边界和本地 HTTP 探针已完成，真实外部服务双 Worker 并发/重启验收由受保护 live suite 覆盖 |
-| `trpcservice/skill/skill.go` | 只有 package 声明与说明 | 未接入上游 Skill Repository/`WithSkills`，不计为 Skill 实现 |
+| `trpcservice/skill/security.go`、`trpcservice/agent/skills.go` | Runner 将 revision-pinned authorizations 注入 tenant/App/Revision-scoped repository，并校验来源、manifest、版本、digest、签名和执行资源策略 | Skill 已接入上游加载合同；默认仅暴露 knowledge-only 工具，执行权限仍需显式授权且受资源限制 |
 | `trpcservice/gateway/dispatch_durable.go` | durable claim 针对 Channel principal；平台保有 message/outbox 状态 | 新协议不可绕过可信主体、执行和可靠交付边界 |
 
 已核对的上游入口：`runner.WithMemoryService`、`runner.WithArtifactService`、`runner.WithPlugins`、`llmagent.WithKnowledge`（自动注入搜索工具）；`server/openai.WithRunner` 与 `Server.Handler()`。Memory 服务含工具及自动提取任务；Artifact 支持指定历史版本读取；Knowledge 有 source/chunking/embedder/vectorstore/retriever 等配套模块。
 
-OpenClaw 在当前主模块目录中未找到对应目录：须核对上游仓库、独立模块、公开接口和版本再做接入决策。不能以没有主模块 import 断言上游不存在，也不能预先承诺某个 Channel 可直接替换。
+OpenClaw 已按其公开 Gateway/Plugin/Channel 文档完成接口评估：它是独立的 TypeScript Gateway 运行时，Channel Plugin 通过 `registerHttpRoute` 接收 webhook、通过 Gateway WebSocket JSON-RPC 暴露方法，并由 OpenClaw 自己管理 account runtime 和 outbound channel。当前 Go module 没有可复用的 OpenClaw SDK，也没有已验证的“出站交给平台 Outbox、入站绑定 tenant/app”的公开合同，因此本仓库保留平台 Gateway/Channel 主路径，不伪造 OpenClaw bridge；详见 `docs/docs/upstream-compatibility.md`。
 
 ## 3. 目标架构与包边界
 

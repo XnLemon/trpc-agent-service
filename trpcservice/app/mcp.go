@@ -124,6 +124,28 @@ func (binding MCPBinding) Normalize() (MCPBinding, error) {
 	return value, nil
 }
 
+// Validate checks the published MCP declaration without returning a mutable
+// normalized value. Publication paths should call this before persisting a
+// draft and again when sealing the immutable Revision.
+func (binding MCPBinding) Validate() error {
+	_, err := binding.Normalize()
+	return err
+}
+
+// Clone returns a defensive copy of the secret-free binding declaration.
+func (binding MCPBinding) Clone() MCPBinding {
+	clone := binding
+	clone.Args = append([]string(nil), binding.Args...)
+	clone.ToolAllow = append([]string(nil), binding.ToolAllow...)
+	if binding.ToolPolicies != nil {
+		clone.ToolPolicies = make(map[string]MCPToolPolicy, len(binding.ToolPolicies))
+		for name, policy := range binding.ToolPolicies {
+			clone.ToolPolicies[name] = policy
+		}
+	}
+	return clone
+}
+
 func normalizeMCPBindings(bindings []MCPBinding) ([]MCPBinding, error) {
 	if len(bindings) == 0 {
 		return []MCPBinding{}, nil
@@ -280,6 +302,9 @@ func validateMCPHTTPURL(raw string) error {
 	parsed, err := url.Parse(raw)
 	if err != nil || !utf8.ValidString(raw) || parsed.Scheme != "https" || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Opaque != "" {
 		return invalidMCP("MCP endpoint must be an HTTPS URL without credentials, query, or fragment")
+	}
+	if parsed.Scheme != strings.ToLower(parsed.Scheme) || parsed.Host != strings.ToLower(parsed.Host) || parsed.String() != raw {
+		return invalidMCP("MCP endpoint must use canonical HTTPS authority spelling")
 	}
 	if !validMCPHTTPPath(parsed) || !validMCPHTTPPort(parsed.Port()) {
 		return invalidMCP("MCP endpoint path or port is invalid")

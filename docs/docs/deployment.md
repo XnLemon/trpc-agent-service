@@ -205,13 +205,20 @@ curl --fail http://127.0.0.1:8080/readyz
 | `TRPC_REDIS_DIAL_TIMEOUT` / `TRPC_REDIS_READ_TIMEOUT` / `TRPC_REDIS_WRITE_TIMEOUT` | 否 | Go duration，限制 Redis 客户端 I/O |
 | `TRPC_REDIS_POOL_SIZE` | 否 | 大于 `0` 时覆盖连接池大小 |
 | `TRPC_DEMO_MODE` | 否，`false` | 仅由 `quickstart.sh --demo` 显式启用；要求 `TRPC_MODEL_PROVIDER=fake`，不读取模型凭据 |
+| `TRPC_LIVE_INTEGRATION` | 否，`0` | 只有显式设置为 `1` 才运行 ChromaDB/COS 等真实外部集成测试；默认测试不访问外部服务 |
 
 模型 API key 只在受信任的 Secret Resolver/Factory 路径中使用，不进入 Execution Plan、缓存、
 日志或数据库。
 
 Agent Artifact 的生产后端使用上游 COS provider，并通过 Backend Profile 的 tenant-scoped
 `SecretRef` 解析凭据。平台不再提供 S3-compatible Agent Artifact provider；IM 附件由独立的
-`AttachmentStore` 负责。
+`AttachmentStore` 负责。ChromaDB/COS 双 Worker 重启验收需要额外的 `TRPC_CHROMA_LIVE_*`
+或 `TRPC_COS_LIVE_*` 配置，缺少配置时只跳过 live suite，不会回退到外部网络探测。
+
+MCP 绑定、Skill attestation 和 Guardrail 策略均在 Revision/ExecutionPlan 边界校验；MCP
+不会因部署启动而自动连接未声明的远程端点，Skill 未 pin 到 Revision 或未满足可信来源/摘要
+校验时 fail closed。OpenClaw 不属于本 Go 服务的默认 Channel，兼容性限制见[上游 server /
+OpenClaw 兼容性评估](upstream-compatibility.md)。
 
 ### 企业微信与 OpenTelemetry
 

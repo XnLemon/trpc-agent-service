@@ -29,6 +29,9 @@ func (r *BackendRepository) List(ctx context.Context, tenantID, query, status, c
 	if r == nil || r.db == nil {
 		return nil, "", ErrStorage
 	}
+	if err := backend.ValidateTenantID(tenantID); err != nil {
+		return nil, "", err
+	}
 	if limit <= 0 {
 		limit = 50
 	}
@@ -186,6 +189,9 @@ func (r *BackendRepository) Get(ctx context.Context, tenantID, profileID string)
 	if r == nil || r.db == nil {
 		return nil, ErrStorage
 	}
+	if err := validateBackendScope(tenantID, profileID); err != nil {
+		return nil, err
+	}
 	value, err := loadBackendProfile(ctx, r.db, r.catalog, tenantID, profileID, false)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -203,6 +209,9 @@ func (r *BackendRepository) UpdateConfiguration(ctx context.Context, input backe
 	}
 	if r == nil || r.db == nil {
 		return nil, backend.ChangeEvent{}, ErrStorage
+	}
+	if err := validateBackendScope(input.TenantID, input.ProfileID); err != nil {
+		return nil, backend.ChangeEvent{}, err
 	}
 	tx, err := begin(ctx, r.db)
 	if err != nil {
@@ -268,6 +277,9 @@ func (r *BackendRepository) TransitionStatus(ctx context.Context, input backend.
 	}
 	if r == nil || r.db == nil {
 		return nil, backend.ChangeEvent{}, ErrStorage
+	}
+	if err := validateBackendScope(input.TenantID, input.ProfileID); err != nil {
+		return nil, backend.ChangeEvent{}, err
 	}
 	tx, err := begin(ctx, r.db)
 	if err != nil {
@@ -364,6 +376,9 @@ const backendBindingsSelect = `SELECT capability, provider, endpoint, options, s
 FROM backend_profile_binding WHERE tenant_id = ? AND profile_id = ? ORDER BY capability`
 
 func loadBackendProfile(ctx context.Context, q queryer, catalog *backend.ProviderCatalog, tenantID, profileID string, forUpdate bool) (*backend.Profile, error) {
+	if err := validateBackendScope(tenantID, profileID); err != nil {
+		return nil, err
+	}
 	query := backendRootSelect + ` WHERE tenant_id = ? AND profile_id = ?`
 	if forUpdate {
 		query += ` FOR UPDATE`
@@ -415,6 +430,16 @@ const backendEventSelect = `SELECT event_type, tenant_id, profile_id,
        previous_status, current_status, previous_digest, current_digest,
        actor_type, actor_id, reason, correlation_id, previous_version,
        next_version, occurred_at FROM backend_profile_change_outbox`
+
+func validateBackendScope(tenantID, profileID string) error {
+	if err := backend.ValidateTenantID(tenantID); err != nil {
+		return err
+	}
+	if err := backend.ValidateProfileID(profileID); err != nil {
+		return err
+	}
+	return nil
+}
 
 func scanBackendEvent(row rowScanner) (backend.ChangeEvent, error) {
 	var event backend.ChangeEvent

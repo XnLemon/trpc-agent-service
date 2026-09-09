@@ -601,10 +601,13 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	if approvalReviewer == nil && config.ToolInvocations != nil {
 		approvalReviewer = servicetool.NewDurableApprovalReviewer(config.ToolInvocations)
 	}
-	// MCP remains an isolated capability in this release. It is materialized
-	// only when an embedding explicitly supplies ToolSetFactory; the default
-	// Runner graph must not activate remote tool transports.
+	// The default factory receives only the immutable ExecutionPlan projection;
+	// it resolves secrets and owns each materialized MCP ToolSet for the Runner
+	// lifetime. Embeddings may replace it with another sealed-plan factory.
 	toolSetFactory := config.ToolSetFactory
+	if toolSetFactory == nil {
+		toolSetFactory = agentrunnerfactory.NewMCPToolSetFactory(config.SecretResolver, approvalReviewer)
+	}
 	registry, err := agentrunnerfactory.NewRuntimeRunnerRegistry(agentrunnerfactory.Config{
 		Registry: config.Registry, SecretResolver: config.SecretResolver,
 		ModelFactory: config.ModelFactory, Sessions: config.Sessions, StorageFactory: config.StorageFactory,

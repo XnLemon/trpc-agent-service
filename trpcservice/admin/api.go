@@ -1229,7 +1229,7 @@ func toExported(key string) string {
 		"default_agent_app_id": "DefaultAgentAppID", "default_backend_profile_id": "DefaultBackendProfileID",
 		"configuration": "Configuration", "provider": "Provider", "model": "Model",
 		"embedding_text": "EmbeddingText", "metadata": "Metadata", "documents": "Documents", "items": "Items", "document_id": "DocumentID", "document_count": "DocumentCount", "content_digest": "ContentDigest", "actor_id": "ActorID", "version": "Version",
-		"endpoint": "Endpoint", "server_url": "ServerURL", "transport": "Transport", "command": "Command", "args": "Args", "name": "Name", "tool_allow": "ToolAllow", "timeout_seconds": "TimeoutSeconds", "mcp_bindings": "MCPBindings", "options": "Options", "generation": "Generation",
+		"endpoint": "Endpoint", "server_url": "ServerURL", "transport": "Transport", "command": "Command", "args": "Args", "name": "Name", "tool_allow": "ToolAllow", "tool_policies": "ToolPolicies", "timeout_seconds": "TimeoutSeconds", "mcp_bindings": "MCPBindings", "skills": "Skills", "skill_authorizations": "SkillAuthorizations", "options": "Options", "generation": "Generation",
 		"temperature": "Temperature", "top_p": "TopP", "max_output_tokens": "MaxOutputTokens",
 		"fencing_token": "FencingToken", "error_class": "ErrorClass", "tool_call_id": "ToolCallID", "invocation_id": "InvocationID",
 		"binding_key": "BindingKey", "channel": "Channel", "protocol": "Protocol",

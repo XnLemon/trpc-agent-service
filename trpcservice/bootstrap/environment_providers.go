@@ -201,13 +201,21 @@ func (environmentChromaMemoryProvider) New(ctx context.Context, input backend.St
 	if apiKey == "" {
 		return nil, storagefactory.ErrStorageFactory
 	}
+	embedder := knowledgeembedder.Embedder(embedderopenai.New(embedderopenai.WithAPIKey(apiKey)))
+	switch optionOrDefault(binding.Options, "embedder", "openai") {
+	case "openai":
+	case "hash":
+		embedder = environmentHashEmbedder{}
+	default:
+		return nil, storagefactory.ErrStorageFactory
+	}
 	opts := []memorychromadb.ServiceOpt{
 		memorychromadb.WithBaseURL(binding.Endpoint),
 		memorychromadb.WithAPIKey(apiKey),
 		memorychromadb.WithTenant(input.TenantID),
 		memorychromadb.WithDatabase(optionOrDefault(binding.Options, "database", "default_database")),
 		memorychromadb.WithCollectionName(optionOrDefault(binding.Options, "collection", "memories")),
-		memorychromadb.WithEmbedder(embedderopenai.New(embedderopenai.WithAPIKey(apiKey))),
+		memorychromadb.WithEmbedder(embedder),
 	}
 	if dimension := optionInt(binding.Options, "dimension"); dimension > 0 {
 		opts = append(opts, memorychromadb.WithIndexDimension(dimension))

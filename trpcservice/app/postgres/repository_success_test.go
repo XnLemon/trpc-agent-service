@@ -69,9 +69,10 @@ func TestAgentRepositoryMapsMissingRevisionToNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	mock.ExpectQuery(".*").WithArgs("tenant", "app", int64(1)).WillReturnError(sql.ErrNoRows)
+	tenantID, appID := "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	mock.ExpectQuery(".*").WithArgs(tenantID, appID, int64(1)).WillReturnError(sql.ErrNoRows)
 
-	_, err = NewAppRepository(db).GetRevision(context.Background(), "tenant", "app", 1)
+	_, err = NewAppRepository(db).GetRevision(context.Background(), tenantID, appID, 1)
 	if !errors.Is(err, appmodel.ErrNotFound) {
 		t.Fatalf("missing revision error = %v", err)
 	}

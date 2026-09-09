@@ -31,6 +31,9 @@ func (r *AppRepository) List(ctx context.Context, tenantID, query, status, curso
 	if r == nil || r.db == nil {
 		return nil, "", ErrStorage
 	}
+	if err := appmodel.ValidateTenantID(tenantID); err != nil {
+		return nil, "", err
+	}
 	if limit <= 0 {
 		limit = 50
 	}
@@ -82,6 +85,9 @@ func (r *AppRepository) ListRevisions(ctx context.Context, tenantID, appID, quer
 	}
 	if r == nil || r.db == nil {
 		return nil, "", ErrStorage
+	}
+	if err := validateAppScope(tenantID, appID); err != nil {
+		return nil, "", err
 	}
 	if limit <= 0 {
 		limit = 50
@@ -224,6 +230,9 @@ func (r *AppRepository) Get(ctx context.Context, tenantID, appID string) (*appmo
 	if r == nil || r.db == nil {
 		return nil, ErrStorage
 	}
+	if err := validateAppScope(tenantID, appID); err != nil {
+		return nil, err
+	}
 	value, err := loadAgentApp(ctx, r.db, tenantID, appID, false)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -241,6 +250,9 @@ func (r *AppRepository) UpdateMetadata(ctx context.Context, input appmodel.Updat
 	}
 	if r == nil || r.db == nil {
 		return nil, ErrStorage
+	}
+	if err := validateAppScope(input.TenantID, input.AppID); err != nil {
+		return nil, err
 	}
 	tx, err := begin(ctx, r.db)
 	if err != nil {
@@ -291,6 +303,9 @@ func (r *AppRepository) CreateDraft(ctx context.Context, input appmodel.CreateDr
 	}
 	if r == nil || r.db == nil {
 		return nil, ErrStorage
+	}
+	if err := validateAppScope(input.TenantID, input.AppID); err != nil {
+		return nil, err
 	}
 	tx, err := begin(ctx, r.db)
 	if err != nil {
@@ -353,6 +368,9 @@ func (r *AppRepository) UpdateDraft(ctx context.Context, input appmodel.UpdateDr
 	}
 	if r == nil || r.db == nil {
 		return nil, ErrStorage
+	}
+	if err := validateAppScope(input.TenantID, input.AppID); err != nil {
+		return nil, err
 	}
 	tx, err := begin(ctx, r.db)
 	if err != nil {
@@ -427,6 +445,12 @@ func (r *AppRepository) GetRevision(ctx context.Context, tenantID, appID string,
 	if r == nil || r.db == nil {
 		return nil, ErrStorage
 	}
+	if err := validateAppScope(tenantID, appID); err != nil {
+		return nil, err
+	}
+	if revision < 1 {
+		return nil, fmt.Errorf("%w: revision must be positive", appmodel.ErrInvalid)
+	}
 	value, err := loadAgentRevision(ctx, r.db, tenantID, appID, revision, false)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -444,6 +468,12 @@ func (r *AppRepository) Publish(ctx context.Context, input appmodel.PublishInput
 	}
 	if r == nil || r.db == nil {
 		return nil, nil, appmodel.ChangeEvent{}, ErrStorage
+	}
+	if err := validateAppScope(input.TenantID, input.AppID); err != nil {
+		return nil, nil, appmodel.ChangeEvent{}, err
+	}
+	if input.Revision < 1 {
+		return nil, nil, appmodel.ChangeEvent{}, fmt.Errorf("%w: revision must be positive", appmodel.ErrInvalid)
 	}
 	if err := validatePublishInput(input); err != nil {
 		return nil, nil, appmodel.ChangeEvent{}, err
@@ -538,6 +568,9 @@ func (r *AppRepository) SetCanary(ctx context.Context, input appmodel.SetCanaryI
 	}
 	if r == nil || r.db == nil {
 		return nil, appmodel.ChangeEvent{}, ErrStorage
+	}
+	if err := validateAppScope(input.TenantID, input.AppID); err != nil {
+		return nil, appmodel.ChangeEvent{}, err
 	}
 	if err := validateAgentMetadata(input.Metadata); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
@@ -694,6 +727,12 @@ func (r *AppRepository) Rollback(ctx context.Context, input appmodel.RollbackInp
 	if r == nil || r.db == nil {
 		return nil, appmodel.ChangeEvent{}, ErrStorage
 	}
+	if err := validateAppScope(input.TenantID, input.AppID); err != nil {
+		return nil, appmodel.ChangeEvent{}, err
+	}
+	if input.TargetRevision < 1 {
+		return nil, appmodel.ChangeEvent{}, fmt.Errorf("%w: revision must be positive", appmodel.ErrInvalid)
+	}
 	if err := validateAgentMetadata(input.Metadata); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
 	}
@@ -775,6 +814,9 @@ func (r *AppRepository) TransitionStatus(ctx context.Context, input appmodel.Tra
 	}
 	if r == nil || r.db == nil {
 		return nil, appmodel.ChangeEvent{}, ErrStorage
+	}
+	if err := validateAppScope(input.TenantID, input.AppID); err != nil {
+		return nil, appmodel.ChangeEvent{}, err
 	}
 	if err := validateAgentMetadata(input.Metadata); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
@@ -876,6 +918,9 @@ const agentAppSelect = `SELECT tenant_id, app_id, app_key, display_name, descrip
 FROM agent_app`
 
 func loadAgentApp(ctx context.Context, q queryer, tenantID, appID string, forUpdate bool) (*appmodel.App, error) {
+	if err := validateAppScope(tenantID, appID); err != nil {
+		return nil, err
+	}
 	query := agentAppSelect + ` WHERE tenant_id = ? AND app_id = ?`
 	if forUpdate {
 		query += ` FOR UPDATE`
@@ -907,6 +952,12 @@ const agentRevisionSelect = `SELECT tenant_id, app_id, revision, state, draft_ve
 FROM agent_app_revision`
 
 func loadAgentRevision(ctx context.Context, q queryer, tenantID, appID string, revision int64, forUpdate bool) (*appmodel.Revision, error) {
+	if err := validateAppScope(tenantID, appID); err != nil {
+		return nil, err
+	}
+	if revision < 1 {
+		return nil, fmt.Errorf("%w: revision must be positive", appmodel.ErrInvalid)
+	}
 	query := agentRevisionSelect + ` WHERE tenant_id = ? AND app_id = ? AND revision = ?`
 	if forUpdate {
 		query += ` FOR UPDATE`
@@ -1067,6 +1118,16 @@ func nullableInt64(value sql.NullInt64) *int64 {
 func timePointer(value time.Time) *time.Time {
 	copy := value
 	return &copy
+}
+
+func validateAppScope(tenantID, appID string) error {
+	if err := appmodel.ValidateTenantID(tenantID); err != nil {
+		return err
+	}
+	if err := appmodel.ValidateAppID(appID); err != nil {
+		return err
+	}
+	return nil
 }
 
 func maxTime(left, right time.Time) time.Time {

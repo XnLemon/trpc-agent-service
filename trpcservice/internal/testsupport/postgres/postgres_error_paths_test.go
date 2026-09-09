@@ -133,6 +133,8 @@ func testPostgreSQLModelDriverFailures(t *testing.T, db *sql.DB, ctx context.Con
 
 func testPostgreSQLBackendDriverFailures(t *testing.T, db *sql.DB, ctx context.Context) {
 	t.Helper()
+	const tenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	const profileID = "bp_01ARZ3NDEKTSV4RRFFQ69G5FAW"
 	catalog, err := backend.NewProviderCatalog(backend.ProviderSpec{Provider: "inmemory", Capabilities: []backend.Capability{backend.CapabilitySession}, EndpointPolicy: backend.FieldForbidden, SecretRefPolicy: backend.FieldForbidden})
 	if err != nil {
 		t.Fatal(err)
@@ -147,17 +149,22 @@ func testPostgreSQLBackendDriverFailures(t *testing.T, db *sql.DB, ctx context.C
 			_, _, err := repo.Create(ctx, backend.CreateInput{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", ProfileKey: "primary", DisplayName: "Backend", Status: backend.StatusActive, Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory"}}, Metadata: md})
 			return err
 		}},
-		{"Get", func() error { _, err := repo.Get(ctx, "tenant", "profile"); return err }},
+		{"Get", func() error { _, err := repo.Get(ctx, tenantID, profileID); return err }},
 		{"Update", func() error {
-			_, _, err := repo.UpdateConfiguration(ctx, backend.UpdateConfigurationInput{})
+			_, _, err := repo.UpdateConfiguration(ctx, backend.UpdateConfigurationInput{TenantID: tenantID, ProfileID: profileID})
 			return err
 		}},
-		{"Transition", func() error { _, _, err := repo.TransitionStatus(ctx, backend.TransitionStatusInput{}); return err }},
+		{"Transition", func() error {
+			_, _, err := repo.TransitionStatus(ctx, backend.TransitionStatusInput{TenantID: tenantID, ProfileID: profileID})
+			return err
+		}},
 	})
 }
 
 func testPostgreSQLAgentDriverFailures(t *testing.T, db *sql.DB, ctx context.Context) {
 	t.Helper()
+	const tenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	const appID = "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"
 	repo := NewAgentRepository(db)
 	md := appmodel.ChangeMetadata{ActorType: "test", ActorID: "unit", Reason: "exercise failure", CorrelationID: "error-path"}
 	assertPostgreSQLStorageErrors(t, []struct {
@@ -168,21 +175,30 @@ func testPostgreSQLAgentDriverFailures(t *testing.T, db *sql.DB, ctx context.Con
 			_, err := repo.Create(ctx, appmodel.CreateInput{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", AppKey: "primary", DisplayName: "Agent"})
 			return err
 		}},
-		{"Get", func() error { _, err := repo.Get(ctx, "tenant", "app"); return err }},
-		{"Metadata", func() error { _, err := repo.UpdateMetadata(ctx, appmodel.UpdateMetadataInput{}); return err }},
-		{"Draft", func() error { _, err := repo.CreateDraft(ctx, appmodel.CreateDraftInput{}); return err }},
-		{"DraftUpdate", func() error { _, err := repo.UpdateDraft(ctx, appmodel.UpdateDraftInput{}); return err }},
-		{"Revision", func() error { _, err := repo.GetRevision(ctx, "tenant", "app", 1); return err }},
+		{"Get", func() error { _, err := repo.Get(ctx, tenantID, appID); return err }},
+		{"Metadata", func() error {
+			_, err := repo.UpdateMetadata(ctx, appmodel.UpdateMetadataInput{TenantID: tenantID, AppID: appID})
+			return err
+		}},
+		{"Draft", func() error {
+			_, err := repo.CreateDraft(ctx, appmodel.CreateDraftInput{TenantID: tenantID, AppID: appID})
+			return err
+		}},
+		{"DraftUpdate", func() error {
+			_, err := repo.UpdateDraft(ctx, appmodel.UpdateDraftInput{TenantID: tenantID, AppID: appID})
+			return err
+		}},
+		{"Revision", func() error { _, err := repo.GetRevision(ctx, tenantID, appID, 1); return err }},
 		{"Publish", func() error {
-			_, _, _, err := repo.Publish(ctx, appmodel.PublishInput{TenantID: "tenant", AppID: "app", Revision: 1, ExpectedAppVersion: 1, ExpectedDraftVersion: 1, TenantActive: true, Metadata: md})
+			_, _, _, err := repo.Publish(ctx, appmodel.PublishInput{TenantID: tenantID, AppID: appID, Revision: 1, ExpectedAppVersion: 1, ExpectedDraftVersion: 1, TenantActive: true, Metadata: md})
 			return err
 		}},
 		{"Rollback", func() error {
-			_, _, err := repo.Rollback(ctx, appmodel.RollbackInput{TenantID: "tenant", AppID: "app", TargetRevision: 1, ExpectedAppVersion: 1, Metadata: md})
+			_, _, err := repo.Rollback(ctx, appmodel.RollbackInput{TenantID: tenantID, AppID: appID, TargetRevision: 1, ExpectedAppVersion: 1, Metadata: md})
 			return err
 		}},
 		{"Transition", func() error {
-			_, _, err := repo.TransitionStatus(ctx, appmodel.TransitionStatusInput{TenantID: "tenant", AppID: "app", ExpectedVersion: 1, NextStatus: appmodel.StatusSuspended, Metadata: md})
+			_, _, err := repo.TransitionStatus(ctx, appmodel.TransitionStatusInput{TenantID: tenantID, AppID: appID, ExpectedVersion: 1, NextStatus: appmodel.StatusSuspended, Metadata: md})
 			return err
 		}},
 	})

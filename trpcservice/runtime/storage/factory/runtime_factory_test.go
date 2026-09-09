@@ -3,6 +3,7 @@ package factory
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -435,6 +436,48 @@ func TestRegistryStorageFactoryRejectsDuplicateCapabilities(t *testing.T) {
 	}
 }
 
+func TestRegistryStorageFactoryRejectsSensitiveAndMalformedBindingMetadata(t *testing.T) {
+	cases := []StorageFactoryInput{
+		{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory", Options: map[string]string{"api_key": "secret"}}}},
+		{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory", Endpoint: "https://EXAMPLE.test"}}},
+		{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", ProfileID: "bp_bad", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}},
+		{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", ContentDigest: "ABC", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}},
+		{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", TenantVersion: -1, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}},
+		{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilityMemory, Provider: "memory"}, {Capability: CapabilitySession, Provider: "memory"}}},
+	}
+	providers := NewProviderRegistry()
+	if err := providers.Register("t_00000000000000000000000000", CapabilitySession, "memory", &registryCapabilityProvider{}); err != nil {
+		t.Fatal(err)
+	}
+	factory, err := NewRegistryStorageFactory(providers, modelruntime.NewSecretRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, input := range cases {
+		if _, err := factory.New(context.Background(), input); !errors.Is(err, ErrStorageFactory) {
+			t.Fatalf("case %d accepted malformed storage input: %v", index, err)
+		}
+	}
+}
+
+func TestRegistryStorageFactoryRedactsSecretResolverFailure(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	providers := NewProviderRegistry()
+	if err := providers.Register(tenantID, CapabilitySession, "memory", &registryCapabilityProvider{}); err != nil {
+		t.Fatal(err)
+	}
+	factory, err := NewRegistryStorageFactory(providers, secretResolverFunc(func(context.Context, modelprofile.SecretScope) (modelprofile.SecretValue, error) {
+		return modelprofile.SecretValue{}, errors.New("vault secret-value must not escape")
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory", SecretRef: "secret/session"}}})
+	if !errors.Is(err, ErrStorageFactory) || strings.Contains(err.Error(), "secret-value") {
+		t.Fatalf("secret resolver error = %v", err)
+	}
+}
+
 func TestRegistryStorageFactoryValidationAndResolverFailures(t *testing.T) {
 	if _, err := NewRegistryStorageFactory(nil, modelruntime.NewSecretRegistry()); !errors.Is(err, ErrStorageFactory) {
 		t.Fatalf("nil providers factory = %v", err)
@@ -506,6 +549,12 @@ type failingCapabilityCloser struct{ calls int }
 func (closer *failingCapabilityCloser) Close() error {
 	closer.calls++
 	return errors.New("close detail")
+}
+
+type secretResolverFunc func(context.Context, modelprofile.SecretScope) (modelprofile.SecretValue, error)
+
+func (resolver secretResolverFunc) Resolve(ctx context.Context, scope modelprofile.SecretScope) (modelprofile.SecretValue, error) {
+	return resolver(ctx, scope)
 }
 
 type capabilityProviderFunc func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error)

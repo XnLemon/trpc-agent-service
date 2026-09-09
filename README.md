@@ -83,7 +83,7 @@ IM / HTTP -> Channel Adapter -> Gateway -> Queue/Outbox -> Agent Worker
   <img src="docs/docs/assets/channel-integrations/wecom-aibot-live-integration.gif" alt="企业微信 AI Bot 真实对话收发验证" width="720">
 </p>
 
-以下能力仍不是当前默认生产路径：Redis 或独立向量/对象存储 provider 的完整装配、IM 媒体与 rich update、完整 Plugin/Guardrail 治理链、容量压测、备份恢复和故障演练。它们的设计边界和后续路线记录在专项文档中。
+以下能力仍不是当前默认生产路径：ChromaDB/COS 等外部服务的 live 双 Worker 验收、IM 媒体与 rich update、完整的 Plugin/Guardrail 策略编排、OpenClaw bridge、容量压测、备份恢复和故障演练。MCP、Skill 和基础 Guardrail 的安全边界已实现，但未声明的能力不会自动进入执行链路；详见专项文档。
 
 ## 快速开始：离线 Golden Path
 
