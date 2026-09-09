@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -53,6 +54,9 @@ func (registry *SecretRegistry) Register(scope SecretScope, value SecretValue) e
 	if registry.closed {
 		return ErrRegistryClosed
 	}
+	if registry.values == nil {
+		registry.values = make(map[secretRegistryKey]SecretValue)
+	}
 	registry.values[secretRegistryKey{tenantID: scope.TenantID, secretRef: scope.SecretRef}] = value
 	return nil
 }
@@ -87,10 +91,10 @@ func (registry *SecretRegistry) Remove(scope SecretScope) error {
 // Resolve implements SecretResolver. Tenant and reference are checked before
 // lookup, and cancellation wins over a successful lookup.
 func (registry *SecretRegistry) Resolve(ctx context.Context, scope SecretScope) (SecretValue, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return SecretValue{}, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := modelContextErr(ctx); err != nil {
 		return SecretValue{}, err
 	}
 	if registry == nil {
@@ -106,7 +110,7 @@ func (registry *SecretRegistry) Resolve(ctx context.Context, scope SecretScope) 
 	if closed || !ok {
 		return SecretValue{}, ErrSecretUnavailable
 	}
-	if err := ctx.Err(); err != nil {
+	if err := modelContextErr(ctx); err != nil {
 		return SecretValue{}, err
 	}
 	return value, nil
@@ -149,17 +153,21 @@ func NewModelProviderRegistry() *ModelProviderRegistry {
 
 // Register installs or replaces one tenant/provider factory.
 func (registry *ModelProviderRegistry) Register(tenantID, provider string, factory ModelFactory) error {
-	if registry == nil || factory == nil || !validRegistryTenant(tenantID) {
+	if registry == nil || isNilModelValue(factory) || !validRegistryTenant(tenantID) {
 		return fmt.Errorf("%w: invalid model provider registration", ErrInvalid)
 	}
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	if provider == "" {
-		return fmt.Errorf("%w: provider is required", ErrInvalid)
+	normalizedProvider := strings.ToLower(strings.TrimSpace(provider))
+	if normalizedProvider == "" || strings.TrimSpace(provider) != provider || !validRegistryProvider(normalizedProvider) {
+		return fmt.Errorf("%w: provider is invalid", ErrInvalid)
 	}
+	provider = normalizedProvider
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	if registry.closed {
 		return ErrRegistryClosed
+	}
+	if registry.factories == nil {
+		registry.factories = make(map[modelProviderKey]ModelFactory)
 	}
 	registry.factories[modelProviderKey{tenantID: tenantID, provider: provider}] = factory
 	return nil
@@ -170,45 +178,52 @@ func (registry *ModelProviderRegistry) Remove(tenantID, provider string) error {
 	if registry == nil || !validRegistryTenant(tenantID) {
 		return fmt.Errorf("%w: invalid model provider scope", ErrInvalid)
 	}
+	normalizedProvider := strings.ToLower(strings.TrimSpace(provider))
+	if normalizedProvider == "" || strings.TrimSpace(provider) != provider || !validRegistryProvider(normalizedProvider) {
+		return fmt.Errorf("%w: provider is invalid", ErrInvalid)
+	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	if registry.closed {
 		return ErrRegistryClosed
 	}
-	delete(registry.factories, modelProviderKey{tenantID: tenantID, provider: strings.ToLower(strings.TrimSpace(provider))})
+	delete(registry.factories, modelProviderKey{tenantID: tenantID, provider: normalizedProvider})
 	return nil
 }
 
 // New implements ModelFactory and fails closed for unknown tenant/provider
 // pairs. SecretValue is passed only to the selected factory.
 func (registry *ModelProviderRegistry) New(ctx context.Context, input ModelFactoryInput, secret SecretValue) (trpcmodel.Model, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := modelContextErr(ctx); err != nil {
 		return nil, err
 	}
 	if registry == nil {
 		return nil, ErrProviderUnavailable
 	}
-	registry.mu.RLock()
-	factory := registry.factories[modelProviderKey{tenantID: input.TenantID, provider: strings.ToLower(strings.TrimSpace(input.Provider))}]
-	closed := registry.closed
-	registry.mu.RUnlock()
-	if closed || factory == nil {
+	provider := strings.ToLower(strings.TrimSpace(input.Provider))
+	if !validRegistryTenant(input.TenantID) || strings.TrimSpace(input.Provider) != input.Provider || !validRegistryProvider(provider) || input.Model == "" {
 		return nil, ErrProviderUnavailable
 	}
-	model, err := factory.New(ctx, input.Clone(), secret)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	registry.mu.RLock()
+	factory := registry.factories[modelProviderKey{tenantID: input.TenantID, provider: provider}]
+	closed := registry.closed
+	registry.mu.RUnlock()
+	if closed || isNilModelValue(factory) {
+		return nil, ErrProviderUnavailable
+	}
+	model, err := callModelFactory(ctx, factory, input.Clone(), secret)
+	if err != nil || isNilModelValue(model) {
+		_ = closeModel(model)
+		if contextErr := modelContextErr(ctx); contextErr != nil {
+			return nil, contextErr
 		}
 		return nil, ErrProviderUnavailable
 	}
-	if model == nil {
-		return nil, ErrProviderUnavailable
-	}
-	if err := ctx.Err(); err != nil {
+	if err := modelContextErr(ctx); err != nil {
+		_ = closeModel(model)
 		return nil, err
 	}
 	return model, nil
@@ -231,6 +246,18 @@ func (registry *ModelProviderRegistry) Close() error {
 
 func validRegistryTenant(value string) bool {
 	return modelprofile.ValidateTenantID(value) == nil
+}
+
+func validRegistryProvider(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' && character != '_' && character != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 var _ ModelFactory = (*ModelProviderRegistry)(nil)

@@ -10,6 +10,7 @@ import (
 	"mime"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -183,11 +184,11 @@ type Binder interface {
 }
 
 func validText(value string, maximum int, required bool) bool {
-	if (required && value == "") || !utf8.ValidString(value) || len([]rune(value)) > maximum {
+	if (required && value == "") || !utf8.ValidString(value) || strings.Contains(value, "://") || len([]rune(value)) > maximum {
 		return false
 	}
 	for _, character := range value {
-		if character < 0x20 || character == 0x7f {
+		if unicode.IsControl(character) {
 			return false
 		}
 	}

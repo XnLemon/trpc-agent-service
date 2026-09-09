@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 var (
@@ -40,7 +42,7 @@ func accountKey(tenantID, accountID string) string { return tenantID + "\x00" + 
 
 // Register adds one tenant/account provider to the registry.
 func (r *Registry) Register(account Account) error {
-	if r == nil || strings.TrimSpace(account.TenantID) == "" || strings.TrimSpace(account.AccountID) == "" || account.Provider == nil {
+	if r == nil || strings.TrimSpace(account.TenantID) == "" || strings.TrimSpace(account.AccountID) == "" || nilvalue.Is(account.Provider) {
 		return fmt.Errorf("%w: account is invalid", ErrInvalid)
 	}
 	r.mu.Lock()
@@ -125,10 +127,15 @@ func NewWorkerGroup(registry *Registry, limit int) (*WorkerGroup, error) {
 }
 
 // Dispatch admits one bounded operation against a tenant/account provider.
-func (g *WorkerGroup) Dispatch(ctx context.Context, tenantID, accountID string, fn func(context.Context, *Provider) error) error {
-	if g == nil || ctx == nil || fn == nil {
+func (g *WorkerGroup) Dispatch(ctx context.Context, tenantID, accountID string, fn func(context.Context, *Provider) error) (err error) {
+	if g == nil || nilvalue.Is(ctx) || fn == nil {
 		return fmt.Errorf("%w: dispatch is invalid", ErrInvalid)
 	}
+	defer func() {
+		if recover() != nil {
+			err = ErrInvalid
+		}
+	}()
 	g.mu.Lock()
 	if g.closed {
 		g.mu.Unlock()

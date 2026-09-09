@@ -192,7 +192,10 @@ curl --fail http://127.0.0.1:8080/readyz
 | `TRPC_MODEL_PROVIDER` | 否，`openai` | 当前 bootstrap 支持的 Provider |
 | `TRPC_MODEL_NAMES` | 否，`gpt-4o-mini` | 逗号分隔模型白名单 |
 | `TRPC_MODEL_ENDPOINT_HOSTS` | 否，`api.openai.com` | 逗号分隔 HTTPS endpoint host 白名单 |
-| `TRPC_MODEL_SECRET_REF` | 否，`env/trpc-model-api-key` | 运行时 Secret 引用，不是 Secret 值 |
+| `TRPC_MODEL_SECRET_REF` | 否，`env/trpc-model-api-key` | 模型运行时 Secret 引用，不是 Secret 值 |
+| `TRPC_KNOWLEDGE_EMBEDDING_API_KEY` | PostgreSQL Knowledge 单租户必需 | Knowledge 管理 embedding 密钥；与模型密钥独立，不能写入计划或响应 |
+| `TRPC_KNOWLEDGE_EMBEDDING_API_KEYS` | PostgreSQL Knowledge 多租户必需 | 逗号分隔 `tenant_id=api_key`，每个 identity 都必须有 key |
+| `TRPC_KNOWLEDGE_EMBEDDING_SECRET_REF` | 否，`env/trpc-knowledge-embedding-api-key` | Knowledge 管理 embedding SecretRef；按 tenant 注册并解析 |
 | `TRPC_SESSION_BACKEND` | 必需，显式 `postgres`/`redis`/`inmemory` | Compose/Kubernetes 示例使用 `postgres`；Redis 模式只提供 Session/Memory，MySQL 控制面当前应使用 `inmemory` |
 | `TRPC_REDIS_ADDR` | Redis 模式必需 | Redis `host:port`；Compose 默认使用 `redis:6379` |
 | `TRPC_REDIS_PASSWORD` | 否 | Redis 认证密码，使用 Secret Manager 注入，不进入日志或快照 |

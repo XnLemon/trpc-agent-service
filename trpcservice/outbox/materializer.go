@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -63,13 +64,13 @@ type ReplySegment struct {
 
 // NewMaterializer creates a reply materializer with a default segment size.
 func NewMaterializer(config MaterializerConfig) (*Materializer, error) {
-	if config.BatchStore == nil {
+	if nilvalue.Is(config.BatchStore) {
 		return nil, ErrInvalid
 	}
 	if config.SegmentSize <= 0 {
 		config.SegmentSize = defaultSegmentRunes
 	}
-	if config.Observability == nil {
+	if nilvalue.Is(config.Observability) {
 		config.Observability = observability.NewNoopProvider()
 	}
 	if config.Backend == "" {
@@ -81,14 +82,14 @@ func NewMaterializer(config MaterializerConfig) (*Materializer, error) {
 // Materialize writes all segments under the stable reply identity. A repeated
 // call is idempotent when the existing rows have the same event and payload.
 func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) (count int, err error) {
-	if m == nil || ctx == nil || runtimestorage.ValidateTenant(input.TenantID) != nil || input.EventID == "" || input.ReplyID == "" || runtimestorage.ValidateReplyTarget(input.ReplyTarget) != nil {
+	if m == nil || nilvalue.Is(ctx) || runtimestorage.ValidateTenant(input.TenantID) != nil || input.EventID == "" || input.ReplyID == "" || runtimestorage.ValidateReplyTarget(input.ReplyTarget) != nil {
 		return 0, ErrInvalid
 	}
 	replies, err := m.buildReplies(input)
 	if err != nil {
 		return 0, ErrInvalid
 	}
-	if m.store == nil {
+	if nilvalue.Is(m.store) {
 		return 0, errors.Join(ErrMaterialization, runtimestorage.ErrInvalid)
 	}
 	batchStore := m.store
@@ -110,7 +111,7 @@ func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) 
 	}()
 	if input.RequestID != "" {
 		correlatedStore, correlated := m.store.(runtimestorage.ReplyBatchCorrelationEnqueuer)
-		if !correlated {
+		if !correlated || nilvalue.Is(correlatedStore) {
 			return 0, errors.Join(ErrMaterialization, runtimestorage.ErrInvalid)
 		}
 		traceParent := input.TraceParent

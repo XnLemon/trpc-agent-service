@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/jsonstrict"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/argon2"
 )
@@ -131,7 +133,7 @@ func NewSessionAuthenticator(username, password string, static *StaticAuthentica
 // Authenticate accepts a valid session cookie, or the configured static
 // bearer token when no browser session is present.
 func (a *SessionAuthenticator) Authenticate(ctx context.Context, request *http.Request) (Principal, error) {
-	if a == nil || request == nil || ctx == nil {
+	if a == nil || request == nil || nilvalue.Is(ctx) {
 		return Principal{}, ErrUnauthenticated
 	}
 	if err := ctx.Err(); err != nil {
@@ -280,7 +282,7 @@ func (a *SessionAuthenticator) sessionPrincipal(token string) (Principal, bool) 
 		return Principal{}, false
 	}
 	payloadBytes, err := base64.RawURLEncoding.DecodeString(encodedPayload)
-	if err != nil {
+	if err != nil || jsonstrict.Validate(payloadBytes, true) != nil {
 		return Principal{}, false
 	}
 	var payload sessionPayload
@@ -333,7 +335,11 @@ func decodeAuthBody(request *http.Request, target any) error {
 	if request == nil || request.Body == nil {
 		return errors.New("request body is required")
 	}
-	decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
+	payload, err := io.ReadAll(io.LimitReader(request.Body, 1<<20+1))
+	if err != nil || len(payload) > 1<<20 || jsonstrict.Validate(payload, true) != nil {
+		return errors.New("invalid JSON body")
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(payload)))
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}
@@ -424,7 +430,7 @@ func NewStaticAuthenticator(token string, scopes []string) (*StaticAuthenticator
 
 // Authenticate validates the request bearer token and returns its principal.
 func (a *StaticAuthenticator) Authenticate(ctx context.Context, request *http.Request) (Principal, error) {
-	if a == nil || request == nil || ctx == nil {
+	if a == nil || request == nil || nilvalue.Is(ctx) {
 		return Principal{}, ErrUnauthenticated
 	}
 	if err := ctx.Err(); err != nil {

@@ -11,6 +11,9 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/admin"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
+	knowledgeadmin "github.com/XnLemon/trpc-agent-service/trpcservice/knowledge"
+	knowledgepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/knowledge/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
@@ -51,8 +54,14 @@ const (
 	envModelEndpointHost = "TRPC_MODEL_ENDPOINT_HOSTS"
 	// #nosec G101 -- environment variable name, not a secret.
 	envModelSecretRef = "TRPC_MODEL_SECRET_REF"
-	envSessionBackend = "TRPC_SESSION_BACKEND"
-	envRedisAddr      = "TRPC_REDIS_ADDR"
+	// #nosec G101 -- environment variable name, not a credential.
+	envKnowledgeEmbeddingAPIKey = "TRPC_KNOWLEDGE_EMBEDDING_API_KEY"
+	// #nosec G101 -- environment variable name, not a credential.
+	envKnowledgeEmbeddingAPIKeys = "TRPC_KNOWLEDGE_EMBEDDING_API_KEYS"
+	// #nosec G101 -- environment variable name, not a secret.
+	envKnowledgeEmbeddingSecretRef = "TRPC_KNOWLEDGE_EMBEDDING_SECRET_REF"
+	envSessionBackend              = "TRPC_SESSION_BACKEND"
+	envRedisAddr                   = "TRPC_REDIS_ADDR"
 	// #nosec G101 -- environment variable name, not a credential.
 	envRedisPassword  = "TRPC_REDIS_PASSWORD"
 	envRedisDB        = "TRPC_REDIS_DB"
@@ -64,6 +73,14 @@ const (
 	envRedisWriteTimeout = "TRPC_REDIS_WRITE_TIMEOUT"
 	envRedisPoolSize     = "TRPC_REDIS_POOL_SIZE"
 	envDemoMode          = "TRPC_DEMO_MODE"
+	envSkillsRoot        = "TRPC_SKILLS_ROOT"
+	envA2AEnabled        = "TRPC_A2A_ENABLED"
+	envA2AHost           = "TRPC_A2A_HOST"
+	envA2APath           = "TRPC_A2A_PATH"
+	envA2AAgentName      = "TRPC_A2A_AGENT_NAME"
+	envTRPCAgentEnabled  = "TRPC_AGENT_API_ENABLED"
+	envTRPCAgentBasePath = "TRPC_AGENT_API_BASE_PATH"
+	envTRPCAgentAppName  = "TRPC_AGENT_API_APP_NAME"
 	// #nosec G101 -- environment variable name, not a secret.
 	envWeComCallbackToken  = "WECOM_CALLBACK_TOKEN"
 	envWeComEncodingAESKey = "WECOM_ENCODING_AES_KEY"
@@ -85,8 +102,10 @@ const (
 	demoModelName        = "deterministic"
 	// #nosec G101 -- symbolic secret reference, not secret material.
 	defaultModelSecretRef = "env/trpc-model-api-key"
-	defaultSubjectID      = "service"
-	maxRedisDB            = 1 << 15
+	// #nosec G101 -- symbolic secret reference, not secret material.
+	defaultKnowledgeEmbeddingSecretRef = "env/trpc-knowledge-embedding-api-key"
+	defaultSubjectID                   = "service"
+	maxRedisDB                         = 1 << 15
 )
 
 var (
@@ -107,33 +126,38 @@ var (
 // handed to the ModelFactory and must not become a serializable application
 // configuration object.
 type environmentConfig struct {
-	driver         ControlPlaneDriver
-	dsn            string
-	migrationDSN   string
-	apiToken       string
-	apiIdentities  map[string]gateway.APIIdentity
-	adminToken     string
-	adminTenants   []string
-	adminUsername  string
-	adminPassword  string
-	tenantID       string
-	appID          string
-	subjectID      string
-	modelAPIKey    string
-	modelAPIKeys   map[string]string
-	modelProvider  string
-	modelNames     []string
-	endpointHosts  []string
-	secretRef      string
-	runtimeStorage string
-	redis          runtimestorageredis.Config
-	redisEndpoint  string
-	redisSecretRef string
-	demoMode       bool
-	wecom          *environmentWeComConfig
-	wecomAIBots    []environmentWeComAIBotConfig
-	telemetry      observability.Provider
-	otlp           observability.OTLPConfig
+	driver                      ControlPlaneDriver
+	dsn                         string
+	migrationDSN                string
+	apiToken                    string
+	apiIdentities               map[string]gateway.APIIdentity
+	adminToken                  string
+	adminTenants                []string
+	adminUsername               string
+	adminPassword               string
+	tenantID                    string
+	appID                       string
+	subjectID                   string
+	modelAPIKey                 string
+	modelAPIKeys                map[string]string
+	modelProvider               string
+	modelNames                  []string
+	endpointHosts               []string
+	secretRef                   string
+	knowledgeEmbeddingAPIKey    string
+	knowledgeEmbeddingAPIKeys   map[string]string
+	knowledgeEmbeddingSecretRef string
+	runtimeStorage              string
+	redis                       runtimestorageredis.Config
+	redisEndpoint               string
+	redisSecretRef              string
+	demoMode                    bool
+	wecom                       *environmentWeComConfig
+	wecomAIBots                 []environmentWeComAIBotConfig
+	skillsRoot                  string
+	http                        gateway.HTTPConfig
+	telemetry                   observability.Provider
+	otlp                        observability.OTLPConfig
 }
 
 type environmentWeComConfig struct {
@@ -214,7 +238,7 @@ func environmentAdminAuthenticator(config environmentConfig) (admin.Authenticato
 // process configuration. It fails before binding an HTTP server when the
 // durable control plane or required credentials are not configured.
 func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, ErrInvalidConfig
 	}
 	config, err := loadEnvironment()
@@ -317,33 +341,49 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: storage factory: %v", ErrInvalidConfig, err)
 	}
+	var knowledgeManager knowledgeadmin.Service
+	if config.driver != ControlPlaneDriverMySQL {
+		managerProvider := &environmentKnowledgeManagementProvider{
+			db: db, secrets: secretRegistry, secretRef: config.knowledgeEmbeddingSecretRef, demo: config.demoMode,
+		}
+		knowledgeManager, err = knowledgeadmin.NewManager(managerProvider, knowledgepostgres.NewVersionRepository(db))
+		if err != nil {
+			_ = delegateSessions.Close()
+			_ = runtimeStores.Close()
+			_ = db.Close()
+			return nil, fmt.Errorf("%w: knowledge management: %v", ErrInvalidConfig, err)
+		}
+	}
 	graph, err := NewWithDatabase(ctx, db, Config{
-		OwnDB:               true,
-		ControlPlaneDriver:  config.driver,
-		Observability:       config.telemetry,
-		Tenants:             tenantRepo,
-		Apps:                appRepo,
-		Channels:            channelRepo,
-		ModelCatalog:        modelCatalog,
-		BackendCatalog:      backendCatalog,
-		SecretResolver:      secretRegistry,
-		ModelFactory:        modelRegistry,
-		StorageFactory:      storageFactory,
-		Sessions:            delegateSessions,
-		SessionStore:        runtimeStore,
-		EventHistoryStore:   runtimeStore,
-		MessageStore:        runtimeStore,
-		ReplyBatchStore:     replyBatchStore,
-		Attachments:         attachments,
-		AttachmentStore:     attachmentStore,
-		RuntimeTenantID:     "",
-		Authenticator:       authenticator,
-		AdminAuthenticator:  adminAuthenticator,
-		WeComHandlerFactory: wecomFactory,
-		WeComAIBotFactories: aiBotFactories,
-		OutboxWorkerFactory: workerFactory,
-		OutboxPollInterval:  time.Second,
-		AuditWriter:         auditWriter,
+		OwnDB:                   true,
+		ControlPlaneDriver:      config.driver,
+		Observability:           config.telemetry,
+		SkillRepositoryProvider: environmentSkillRepositoryProvider{root: config.skillsRoot},
+		KnowledgeAdmin:          knowledgeManager,
+		Tenants:                 tenantRepo,
+		Apps:                    appRepo,
+		Channels:                channelRepo,
+		ModelCatalog:            modelCatalog,
+		BackendCatalog:          backendCatalog,
+		SecretResolver:          secretRegistry,
+		ModelFactory:            modelRegistry,
+		StorageFactory:          storageFactory,
+		Sessions:                delegateSessions,
+		SessionStore:            runtimeStore,
+		EventHistoryStore:       runtimeStore,
+		MessageStore:            runtimeStore,
+		ReplyBatchStore:         replyBatchStore,
+		Attachments:             attachments,
+		AttachmentStore:         attachmentStore,
+		RuntimeTenantID:         "",
+		Authenticator:           authenticator,
+		HTTP:                    config.http,
+		AdminAuthenticator:      adminAuthenticator,
+		WeComHandlerFactory:     wecomFactory,
+		WeComAIBotFactories:     aiBotFactories,
+		OutboxWorkerFactory:     workerFactory,
+		OutboxPollInterval:      time.Second,
+		AuditWriter:             auditWriter,
 		Ping: func(pingContext context.Context) error {
 			pinger, _ := runtimeStore.(interface{ Ping(context.Context) error })
 			return environmentPing(pingContext, config.driver, db, pinger)
@@ -365,6 +405,9 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 }
 
 func openEnvironmentDatabaseForConfig(ctx context.Context, config environmentConfig) (*sql.DB, func(context.Context, *sql.DB) error, func(context.Context, *sql.DB) error, error) {
+	if nilvalue.Is(ctx) {
+		return nil, nil, nil, ErrInvalidConfig
+	}
 	if config.driver != ControlPlaneDriverMySQL {
 		db, err := openPostgresEnvironmentDatabaseForConfig(ctx, config)
 		if err != nil {
@@ -419,6 +462,9 @@ func openEnvironmentDatabaseForConfig(ctx context.Context, config environmentCon
 }
 
 func openPostgresEnvironmentDatabaseForConfig(ctx context.Context, config environmentConfig) (*sql.DB, error) {
+	if nilvalue.Is(ctx) {
+		return nil, ErrInvalidConfig
+	}
 	db, err := openEnvironmentDatabase(ctx, config.dsn, postgres.Options{MaxOpenConns: 8, MaxIdleConns: 8})
 	if err != nil {
 		if ctx.Err() != nil {

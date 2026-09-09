@@ -8,7 +8,7 @@ import (
 )
 
 func TestConfigurationSnapshotIsolatedFromContextAndSource(t *testing.T) {
-	appID := "app-original"
+	appID := "app_01J1K9ZQTVE4PAWF1TSB2WMHNP"
 	input := validCreate("snapshot")
 	input.DefaultAgentAppID = &appID
 	tenant, err := NewTenant(input)
@@ -26,7 +26,7 @@ func TestConfigurationSnapshotIsolatedFromContextAndSource(t *testing.T) {
 	if !ok || fromTenant.DisplayName != "Example" {
 		t.Fatalf("unexpected context snapshot: %+v", fromContext)
 	}
-	if fromTenant.DefaultAgentAppID == nil || *fromTenant.DefaultAgentAppID != "app-original" {
+	if fromTenant.DefaultAgentAppID == nil || *fromTenant.DefaultAgentAppID != "app_01J1K9ZQTVE4PAWF1TSB2WMHNP" {
 		t.Fatalf("snapshot lost pointer configuration: %+v", fromTenant.DefaultAgentAppID)
 	}
 	fromTenant.DisplayName = "caller mutation"
@@ -36,7 +36,7 @@ func TestConfigurationSnapshotIsolatedFromContextAndSource(t *testing.T) {
 	if againTenant.DisplayName != "Example" {
 		t.Fatal("context exposed mutable snapshot")
 	}
-	if againTenant.DefaultAgentAppID == nil || *againTenant.DefaultAgentAppID != "app-original" {
+	if againTenant.DefaultAgentAppID == nil || *againTenant.DefaultAgentAppID != "app_01J1K9ZQTVE4PAWF1TSB2WMHNP" {
 		t.Fatal("context exposed mutable pointer configuration")
 	}
 	if againTenant.Version != snapshot.Tenant().Version {

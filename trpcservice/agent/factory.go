@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/chainagent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/cycleagent"
@@ -17,6 +18,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/graph"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/skill"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -36,12 +38,13 @@ var (
 // ModelOptions are shared callback/options hooks and are applied to every LLM
 // node created by a composite factory.
 type AgentBuildInput struct {
-	Definition   LLMAgentFactoryInput
-	Model        trpcmodel.Model
-	Tools        []trpctool.Tool
-	ToolSets     []trpctool.ToolSet
-	Knowledge    knowledge.Knowledge
-	ModelOptions []llmagent.Option
+	Definition              LLMAgentFactoryInput
+	Model                   trpcmodel.Model
+	Tools                   []trpctool.Tool
+	ToolSets                []trpctool.ToolSet
+	Knowledge               knowledge.Knowledge
+	SkillRepositoryProvider skill.RepositoryProvider
+	ModelOptions            []llmagent.Option
 }
 
 // AgentFactory builds one concrete tRPC-Agent-Go Agent from a published
@@ -104,13 +107,16 @@ func (registry *AgentFactoryRegistry) Register(kind appmodel.Kind, schemaVersion
 
 // Build resolves and invokes the constructor for one published definition.
 func (registry *AgentFactoryRegistry) Build(ctx context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, fmt.Errorf("%w: context is required", ErrAgentFactory)
+	}
+	if err := agentContextErr(ctx); err != nil {
+		return nil, err
 	}
 	if input.Definition.Name == "" || input.Definition.Kind == "" || input.Definition.SchemaVersion < 1 {
 		return nil, fmt.Errorf("%w: complete Agent definition is required", ErrAgentFactory)
 	}
-	if input.Model == nil {
+	if isNilAgentValue(input.Model) {
 		return nil, fmt.Errorf("%w: model is required", ErrAgentFactory)
 	}
 	if registry == nil {
@@ -123,14 +129,60 @@ func (registry *AgentFactoryRegistry) Build(ctx context.Context, input AgentBuil
 	if factory == nil {
 		return nil, fmt.Errorf("%w: kind %q schema %d", ErrAgentFactoryNotFound, key.kind, key.schemaVersion)
 	}
-	built, err := factory(ctx, input)
+	built, err := callAgentFactory(ctx, factory, input)
 	if err != nil {
+		_ = closeBuiltAgent(built)
 		return nil, fmt.Errorf("%w: build %q: %w", ErrAgentFactory, key.kind, err)
 	}
-	if built == nil {
+	if isNilAgentValue(built) {
 		return nil, fmt.Errorf("%w: build %q returned nil Agent", ErrAgentFactory, key.kind)
 	}
+	if err := agentContextErr(ctx); err != nil {
+		_ = closeBuiltAgent(built)
+		return nil, err
+	}
 	return built, nil
+}
+
+func closeBuiltAgent(value trpcagent.Agent) (err error) {
+	if isNilAgentValue(value) {
+		return nil
+	}
+	closer, ok := value.(interface{ Close() error })
+	if !ok || isNilAgentValue(closer) {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrAgentFactory
+		}
+	}()
+	return closer.Close()
+}
+
+func callAgentFactory(ctx context.Context, factory AgentFactory, input AgentBuildInput) (built trpcagent.Agent, err error) {
+	if factory == nil {
+		return nil, ErrAgentFactoryNotFound
+	}
+	defer func() {
+		if recover() != nil {
+			built = nil
+			err = ErrAgentFactory
+		}
+	}()
+	return factory(ctx, input)
+}
+
+func isNilAgentValue(value any) bool { return nilvalue.Is(value) }
+
+// agentContextErr is the only context error accessor used by this package.
+// Context is an interface and typed-nil implementations are possible at
+// public boundaries, so Err must never be called before the nil check.
+func agentContextErr(ctx context.Context) error {
+	if isNilAgentValue(ctx) {
+		return ErrInvalid
+	}
+	return ctx.Err()
 }
 
 // DefaultAgentFactoryRegistry returns the built-in Agent kinds supported by
@@ -148,15 +200,39 @@ func DefaultAgentFactoryRegistry() *AgentFactoryRegistry {
 }
 
 func buildLLMAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
-	options := llmAgentOptions(input.Definition, input.Model, input.Tools)
+	if len(input.Definition.Skills) > 0 && isNilAgentValue(input.SkillRepositoryProvider) {
+		return nil, fmt.Errorf("%w: skill repository provider is required", ErrAgentFactory)
+	}
+	options := llmAgentOptionsWithSkillProvider(input.Definition, input.Model, input.Tools, input.SkillRepositoryProvider)
 	if len(input.ToolSets) > 0 {
 		options = append(options, llmagent.WithToolSets(input.ToolSets))
 	}
-	if input.Knowledge != nil {
+	if !isNilAgentValue(input.Knowledge) {
 		options = append(options, llmagent.WithKnowledge(input.Knowledge))
 	}
 	options = append(options, input.ModelOptions...)
 	return llmagent.New(input.Definition.Name, options...), nil
+}
+
+func llmAgentOptionsWithSkillProvider(input LLMAgentFactoryInput, model trpcmodel.Model, tools []trpctool.Tool, provider skill.RepositoryProvider) []llmagent.Option {
+	options := llmAgentOptions(input, model, tools)
+	if len(input.Skills) == 0 {
+		return options
+	}
+	allowed := make(map[string]struct{}, len(input.Skills))
+	for _, name := range input.Skills {
+		allowed[name] = struct{}{}
+	}
+	options = append(options,
+		llmagent.WithSkillRepositoryProvider(provider),
+		llmagent.WithSkillScopeMode(skill.SkillScopeApp),
+		llmagent.WithSkillToolProfile(llmagent.SkillToolProfileKnowledgeOnly),
+		llmagent.WithSkillFilter(func(_ context.Context, summary skill.Summary) bool {
+			_, ok := allowed[summary.Name]
+			return ok
+		}),
+	)
+	return options
 }
 
 func buildChainAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
@@ -260,11 +336,14 @@ func buildCompositeChildren(input AgentBuildInput) ([]trpcagent.Agent, error) {
 		stepDefinition.Instruction = step.Instruction
 		stepDefinition.GlobalInstruction = step.GlobalInstruction
 		stepDefinition.Chain = nil
-		options := llmAgentOptions(stepDefinition, input.Model, input.Tools)
+		if len(stepDefinition.Skills) > 0 && isNilAgentValue(input.SkillRepositoryProvider) {
+			return nil, fmt.Errorf("%w: skill repository provider is required", ErrAgentFactory)
+		}
+		options := llmAgentOptionsWithSkillProvider(stepDefinition, input.Model, input.Tools, input.SkillRepositoryProvider)
 		if len(input.ToolSets) > 0 {
 			options = append(options, llmagent.WithToolSets(input.ToolSets))
 		}
-		if input.Knowledge != nil {
+		if !isNilAgentValue(input.Knowledge) {
 			options = append(options, llmagent.WithKnowledge(input.Knowledge))
 		}
 		options = append(options, input.ModelOptions...)

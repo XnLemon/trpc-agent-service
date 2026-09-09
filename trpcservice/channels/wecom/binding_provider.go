@@ -10,6 +10,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	storage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 )
@@ -53,7 +54,7 @@ func (p *BindingProvider) Reconcile(ctx context.Context, value storage.ReplyOutb
 }
 
 func (p *BindingProvider) provider(ctx context.Context, value storage.ReplyOutbox) (*Provider, error) {
-	if p == nil || ctx == nil || p.Bindings == nil || p.Credentials == nil || value.TenantID == "" || value.ReplyTarget.BindingID == "" {
+	if p == nil || nilvalue.Is(ctx) || nilvalue.Is(p.Bindings) || nilvalue.Is(p.Credentials) || value.TenantID == "" || value.ReplyTarget.BindingID == "" {
 		return nil, invalidDelivery()
 	}
 	if err := ctx.Err(); err != nil {
@@ -63,7 +64,7 @@ func (p *BindingProvider) provider(ctx context.Context, value storage.ReplyOutbo
 	if err != nil {
 		return nil, mapBindingLookupError(err)
 	}
-	if binding == nil || !binding.CanAcceptInbound() || binding.Channel != channels.ChannelWeCom || binding.Protocol.WeCom == nil {
+	if nilvalue.Is(binding) || !binding.CanAcceptInbound() || binding.Channel != channels.ChannelWeCom || binding.Protocol.WeCom == nil {
 		return nil, invalidDelivery()
 	}
 	credentials, err := p.Credentials.Resolve(ctx, channels.SecretScope{TenantID: binding.TenantID, SecretRef: binding.SecretRef})

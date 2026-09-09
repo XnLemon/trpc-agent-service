@@ -8,6 +8,7 @@ import (
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
@@ -45,8 +46,9 @@ type PlanRequest struct {
 // Validate checks the minimum identity required for plan resolution. Runtime
 // deliberately does not recreate the Gateway's proof validation rules.
 func (request PlanRequest) Validate() error {
-	if strings.TrimSpace(request.TenantID) == "" || strings.TrimSpace(request.AppID) == "" {
-		return fmt.Errorf("%w: tenant and app IDs are required", ErrInvalidPlanRequest)
+	if request.TenantID != strings.TrimSpace(request.TenantID) || request.AppID != strings.TrimSpace(request.AppID) ||
+		modelprofile.ValidateTenantID(request.TenantID) != nil || appmodel.ValidateAppID(request.AppID) != nil {
+		return fmt.Errorf("%w: canonical tenant and app IDs are required", ErrInvalidPlanRequest)
 	}
 	return nil
 }
@@ -73,7 +75,7 @@ type resolvedPlanInputs struct {
 // NewPlanResolver validates the dependencies required to resolve execution
 // plans from tenant-scoped configuration.
 func NewPlanResolver(config PlanResolverConfig) (*PlanResolver, error) {
-	if config.Tenants == nil || config.Apps == nil || config.Models == nil || config.Backends == nil || config.ModelCatalog == nil || config.BackendCatalog == nil {
+	if nilvalue.Is(config.Tenants) || nilvalue.Is(config.Apps) || nilvalue.Is(config.Models) || nilvalue.Is(config.Backends) || nilvalue.Is(config.ModelCatalog) || nilvalue.Is(config.BackendCatalog) {
 		return nil, fmt.Errorf("%w: all repositories and provider catalogs are required", ErrInvalidPlanResolverConfig)
 	}
 	return &PlanResolver{
@@ -84,17 +86,17 @@ func NewPlanResolver(config PlanResolverConfig) (*PlanResolver, error) {
 
 // Ready reports whether all required resolver dependencies are present.
 func (resolver *PlanResolver) Ready() bool {
-	return resolver != nil && resolver.tenants != nil && resolver.apps != nil && resolver.models != nil && resolver.backends != nil && resolver.modelCatalog != nil && resolver.backendCatalog != nil
+	return resolver != nil && !nilvalue.Is(resolver.tenants) && !nilvalue.Is(resolver.apps) && !nilvalue.Is(resolver.models) && !nilvalue.Is(resolver.backends) && !nilvalue.Is(resolver.modelCatalog) && !nilvalue.Is(resolver.backendCatalog)
 }
 
 // Resolve constructs one immutable plan. All non-cancellation failures are
 // reduced to ErrPlanUnavailable so repository existence and provider details do
 // not escape this internal scheduling boundary.
 func (resolver *PlanResolver) Resolve(ctx context.Context, request PlanRequest) (ExecutionPlan, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return ExecutionPlan{}, fmt.Errorf("%w: context is required", ErrInvalidPlanRequest)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := planContextErr(ctx); err != nil {
 		return ExecutionPlan{}, err
 	}
 	if !resolver.Ready() {
@@ -122,7 +124,7 @@ func (resolver *PlanResolver) Resolve(ctx context.Context, request PlanRequest) 
 	if _, err := plan.CacheKey(); err != nil {
 		return ExecutionPlan{}, ErrPlanUnavailable
 	}
-	if err := ctx.Err(); err != nil {
+	if err := planContextErr(ctx); err != nil {
 		return ExecutionPlan{}, err
 	}
 	return plan, nil
@@ -130,10 +132,10 @@ func (resolver *PlanResolver) Resolve(ctx context.Context, request PlanRequest) 
 
 func (resolver *PlanResolver) resolveInputs(ctx context.Context, request PlanRequest) (resolvedPlanInputs, error) {
 	tenantValue, err := resolver.tenants.Get(ctx, request.TenantID)
-	if err != nil || tenantValue == nil {
+	if err != nil || nilvalue.Is(tenantValue) {
 		return resolvedPlanInputs{}, resolver.planError(ctx)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := planContextErr(ctx); err != nil {
 		return resolvedPlanInputs{}, err
 	}
 	tenantSnapshot, err := tenant.NewConfigurationSnapshot(tenantValue)
@@ -141,10 +143,19 @@ func (resolver *PlanResolver) resolveInputs(ctx context.Context, request PlanReq
 		return resolvedPlanInputs{}, ErrPlanUnavailable
 	}
 	appValue, err := resolver.apps.Get(ctx, request.TenantID, request.AppID)
-	if err != nil || appValue == nil || appValue.CurrentRevision == nil {
+	if err != nil || nilvalue.Is(appValue) || appValue.CurrentRevision == nil || appValue.TenantID != request.TenantID || appValue.AppID != request.AppID || !appValue.CanAcceptExecution() {
 		return resolvedPlanInputs{}, resolver.planError(ctx)
 	}
-	if err := ctx.Err(); err != nil {
+	if tenantValue.DefaultAgentAppID != nil && *tenantValue.DefaultAgentAppID != request.AppID {
+		defaultApp, defaultErr := resolver.apps.Get(ctx, request.TenantID, *tenantValue.DefaultAgentAppID)
+		if defaultErr != nil || nilvalue.Is(defaultApp) || defaultApp.TenantID != request.TenantID || defaultApp.AppID != *tenantValue.DefaultAgentAppID || !defaultApp.CanAcceptExecution() {
+			return resolvedPlanInputs{}, resolver.planError(ctx)
+		}
+		if err := defaultApp.Validate(); err != nil {
+			return resolvedPlanInputs{}, ErrPlanUnavailable
+		}
+	}
+	if err := planContextErr(ctx); err != nil {
 		return resolvedPlanInputs{}, err
 	}
 	selectedRevision := appValue.CurrentRevision
@@ -152,32 +163,44 @@ func (resolver *PlanResolver) resolveInputs(ctx context.Context, request PlanReq
 		selectedRevision = appValue.CanaryRevision
 	}
 	revisionValue, err := resolver.apps.GetRevision(ctx, request.TenantID, request.AppID, *selectedRevision)
-	if err != nil || revisionValue == nil {
+	if err != nil || nilvalue.Is(revisionValue) || revisionValue.TenantID != request.TenantID || revisionValue.AppID != request.AppID || revisionValue.Revision != *selectedRevision || revisionValue.State != appmodel.RevisionStatePublished {
 		return resolvedPlanInputs{}, resolver.planError(ctx)
 	}
 	modelValue, err := resolver.models.Get(ctx, request.TenantID, revisionValue.ModelProfileID)
-	if err != nil || modelValue == nil {
+	if err != nil || nilvalue.Is(modelValue) || modelValue.TenantID != request.TenantID || modelValue.ProfileID != revisionValue.ModelProfileID {
 		return resolvedPlanInputs{}, resolver.planError(ctx)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := planContextErr(ctx); err != nil {
 		return resolvedPlanInputs{}, err
 	}
 	if tenantValue.DefaultBackendProfileID == nil {
 		return resolvedPlanInputs{}, ErrPlanUnavailable
 	}
 	backendValue, err := resolver.backends.Get(ctx, request.TenantID, *tenantValue.DefaultBackendProfileID)
-	if err != nil || backendValue == nil {
+	if err != nil || nilvalue.Is(backendValue) || backendValue.TenantID != request.TenantID || backendValue.ProfileID != *tenantValue.DefaultBackendProfileID || !backendValue.CanAcceptExecution() {
 		return resolvedPlanInputs{}, resolver.planError(ctx)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := planContextErr(ctx); err != nil {
 		return resolvedPlanInputs{}, err
 	}
 	return resolvedPlanInputs{tenantSnapshot: tenantSnapshot, app: appValue, revision: revisionValue, model: modelValue, backend: backendValue}, nil
 }
 
 func (resolver *PlanResolver) planError(ctx context.Context) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
+	if err := planContextErr(ctx); err != nil {
+		return err
 	}
 	return ErrPlanUnavailable
+}
+
+func planContextErr(ctx context.Context) (err error) {
+	if nilvalue.Is(ctx) {
+		return ErrInvalidPlanRequest
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrInvalidPlanRequest
+		}
+	}()
+	return ctx.Err()
 }

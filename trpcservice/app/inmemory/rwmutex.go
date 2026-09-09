@@ -3,6 +3,8 @@ package inmemory
 import (
 	"context"
 	"sync"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // contextRWMutex preserves concurrent readers while allowing blocked readers
@@ -105,9 +107,12 @@ func (m *contextRWMutex) wakeLocked() {
 }
 
 func waitContext(ctx context.Context, wait <-chan struct{}) error {
+	if nilvalue.Is(ctx) {
+		return context.Canceled
+	}
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return checkContext(ctx)
 	case <-wait:
 		return nil
 	}

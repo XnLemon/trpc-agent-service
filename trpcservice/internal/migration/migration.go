@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 var (
@@ -356,7 +358,7 @@ func normalizeRecords(tenantID string, records []Record) []Record {
 }
 
 func validate(ctx context.Context, tenantID string) error {
-	if ctx == nil || tenantID == "" {
+	if nilvalue.Is(ctx) || tenantID == "" {
 		return ErrInvalid
 	}
 	return ctx.Err()

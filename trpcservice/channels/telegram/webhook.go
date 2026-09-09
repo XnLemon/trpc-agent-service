@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/jsonstrict"
 	"github.com/go-telegram/bot/models"
 )
 
@@ -70,7 +71,7 @@ func (w *Webhook) Channel() channels.Channel { return channels.ChannelTelegram }
 
 // ServeHTTP authenticates, decodes and dispatches one Telegram update.
 func (w *Webhook) ServeHTTP(response http.ResponseWriter, request *http.Request) {
-	if w == nil || request == nil || request.URL.Path != w.path {
+	if w == nil || request == nil || request.URL == nil || request.Body == nil || request.URL.Path != w.path {
 		http.NotFound(response, request)
 		return
 	}
@@ -85,7 +86,7 @@ func (w *Webhook) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, w.maxBody+1))
-	if err != nil || int64(len(body)) > w.maxBody {
+	if err != nil || int64(len(body)) > w.maxBody || jsonstrict.Validate(body, true) != nil {
 		http.Error(response, "bad request", http.StatusBadRequest)
 		return
 	}

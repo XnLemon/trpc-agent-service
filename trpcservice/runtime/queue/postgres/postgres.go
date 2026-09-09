@@ -7,6 +7,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue"
 )
 
@@ -133,7 +134,7 @@ func (s *Store) transition(ctx context.Context, tenantID, taskID, owner string, 
 func (s *Store) Close() error { return nil }
 
 func check(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return queue.ErrInvalid
 	}
 	return ctx.Err()

@@ -61,7 +61,7 @@ func TestMySQLMigrationSetUsesBinaryIdentityAndRecoveryMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 4 || files[0].version != 1 || files[1].version != 2 || files[2].version != 3 || files[3].version != 4 {
+	if len(files) != 7 || files[0].version != 1 || files[1].version != 2 || files[2].version != 3 || files[3].version != 4 || files[4].version != 5 || files[5].version != 6 || files[6].version != 7 {
 		t.Fatalf("MySQL files = %#v", files)
 	}
 	script := files[0].statements
@@ -95,7 +95,7 @@ func TestMySQLHistoryAndArgumentHelpers(t *testing.T) {
 	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{0: {status: "applied"}}, files); !errors.Is(err, ErrInvalidHistory) {
 		t.Fatalf("zero history version error = %v", err)
 	}
-	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{5: {status: "applied"}}, files); !errors.Is(err, ErrInvalidHistory) {
+	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{8: {status: "applied"}}, files); !errors.Is(err, ErrInvalidHistory) {
 		t.Fatalf("future history version error = %v", err)
 	}
 	if err := validateMySQLHistory(map[int]mysqlMigrationHistory{1: {status: "unknown"}}, files); !errors.Is(err, ErrInvalidHistory) {
@@ -113,7 +113,7 @@ func TestMySQLHistoryAndArgumentHelpers(t *testing.T) {
 		t.Fatalf("next empty MySQL version = %d, want 1", got)
 	}
 	tableArgs := mysqlTableArgs()
-	if len(tableArgs) != len(requiredMySQLTables) || tableArgs[0] != "schema_migrations" || tableArgs[len(tableArgs)-1] != "tenant_configuration_outbox" {
+	if len(tableArgs) != len(requiredMySQLTables) || tableArgs[0] != "schema_migrations" || tableArgs[len(tableArgs)-1] != "audit_event" {
 		t.Fatalf("MySQL table args = %#v", tableArgs)
 	}
 	indexArgs := mysqlIndexArgs()
@@ -385,7 +385,7 @@ func TestVerifyMySQLSchemaAndIndexes(t *testing.T) {
 				defer closeMySQLMock(t, db, conn, mock)
 				query := `SELECT table_name, engine, table_collation
 		FROM information_schema.tables
-		WHERE table_schema = DATABASE() AND table_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		WHERE table_schema = DATABASE() AND table_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 				if tc.rows == nil {
 					mock.ExpectQuery(regexp.QuoteMeta(query)).WithArgs(mysqlMockArgs(mysqlTableArgs())...).WillReturnError(errors.New("table query failed"))
 				} else {
@@ -466,7 +466,7 @@ func TestVerifyMySQLTriggersRejectsMetadataAndBodyDrift(t *testing.T) {
 func expectMySQLSchemaRows(mock sqlmock.Sqlmock, tables []mysqlSchemaTable) {
 	query := `SELECT table_name, engine, table_collation
 		FROM information_schema.tables
-		WHERE table_schema = DATABASE() AND table_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		WHERE table_schema = DATABASE() AND table_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	rows := sqlmock.NewRows([]string{"table_name", "engine", "table_collation"})
 	for _, table := range tables {
 		rows.AddRow(table.name, "InnoDB", "utf8mb4_bin")

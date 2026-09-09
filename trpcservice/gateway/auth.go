@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // APIIdentity is the fixed Tenant/App mapping configured by an API
@@ -38,11 +41,30 @@ type APIAuthenticator interface {
 type APIAuthenticatorFunc func(context.Context, *http.Request) (AuthenticatedAPI, error)
 
 // Authenticate implements APIAuthenticator.
-func (f APIAuthenticatorFunc) Authenticate(ctx context.Context, request *http.Request) (AuthenticatedAPI, error) {
-	if f == nil {
+func (f APIAuthenticatorFunc) Authenticate(ctx context.Context, request *http.Request) (result AuthenticatedAPI, err error) {
+	if f == nil || nilvalue.Is(ctx) || request == nil {
 		return AuthenticatedAPI{}, ErrUnauthenticated
 	}
+	defer func() {
+		if recover() != nil {
+			result = AuthenticatedAPI{}
+			err = ErrUnauthenticated
+		}
+	}()
 	return f(ctx, request)
+}
+
+func authenticateAPI(ctx context.Context, authenticator APIAuthenticator, request *http.Request) (result AuthenticatedAPI, err error) {
+	if nilvalue.Is(ctx) || request == nil || isNilGatewayValue(authenticator) {
+		return AuthenticatedAPI{}, ErrUnauthenticated
+	}
+	defer func() {
+		if recover() != nil {
+			result = AuthenticatedAPI{}
+			err = ErrUnauthenticated
+		}
+	}()
+	return authenticator.Authenticate(ctx, request)
 }
 
 // Validate confirms that the result was issued by the Gateway authenticator
@@ -114,7 +136,7 @@ func NewStaticAPIAuthenticator(credentials map[string]APIIdentity) (*StaticAPIAu
 
 // Authenticate maps the Authorization Bearer credential to its fixed result.
 func (authenticator *StaticAPIAuthenticator) Authenticate(ctx context.Context, request *http.Request) (AuthenticatedAPI, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return AuthenticatedAPI{}, ErrUnauthenticated
 	}
 	select {
@@ -138,7 +160,7 @@ func (authenticator *StaticAPIAuthenticator) Authenticate(ctx context.Context, r
 }
 
 func validateCredential(credential string) error {
-	if strings.TrimSpace(credential) == "" || hasControl(credential) || len([]rune(credential)) > maxPrincipalIDRunes {
+	if strings.TrimSpace(credential) == "" || !utf8.ValidString(credential) || hasControl(credential) || len([]rune(credential)) > maxPrincipalIDRunes {
 		return fmt.Errorf("%w: API credential is invalid", ErrInvalid)
 	}
 	return nil

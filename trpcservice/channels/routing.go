@@ -9,6 +9,7 @@ import (
 	"time"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -329,13 +330,13 @@ func ResolveCandidateRoutingTarget(
 	candidate CandidateBindingContext,
 	verify func(context.Context, Binding) error,
 ) (RoutingTarget, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return RoutingTarget{}, ErrVerificationFailed
 	}
 	if err := ctx.Err(); err != nil {
 		return RoutingTarget{}, err
 	}
-	if consumer == nil || tenants == nil || apps == nil || verify == nil || candidate.Channel == "" {
+	if nilvalue.Is(consumer) || nilvalue.Is(tenants) || nilvalue.Is(apps) || verify == nil || candidate.Channel == "" {
 		return RoutingTarget{}, ErrVerificationFailed
 	}
 	binding, err := consumer.ConsumeCandidate(ctx, candidate)
@@ -348,7 +349,7 @@ func ResolveCandidateRoutingTarget(
 	if binding == nil {
 		return RoutingTarget{}, ErrVerificationFailed
 	}
-	if err := verify(ctx, binding.Clone()); err != nil {
+	if err := callBindingVerifier(ctx, verify, binding.Clone()); err != nil {
 		if IsContextCancellation(err) {
 			return RoutingTarget{}, err
 		}
@@ -361,13 +362,13 @@ func ResolveCandidateRoutingTarget(
 // Binding after reading the current trusted control-plane state. BindingID is
 // an operator-owned startup setting, never an inbound routing hint.
 func ResolveConfiguredRoutingTarget(ctx context.Context, consumer CandidateConsumer, tenants tenant.Repository, apps appmodel.Repository, tenantID, bindingID string) (RoutingTarget, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return RoutingTarget{}, ErrVerificationFailed
 	}
 	if err := ctx.Err(); err != nil {
 		return RoutingTarget{}, err
 	}
-	if consumer == nil || tenants == nil || apps == nil || tenantID == "" || bindingID == "" {
+	if nilvalue.Is(consumer) || nilvalue.Is(tenants) || nilvalue.Is(apps) || tenantID == "" || bindingID == "" {
 		return RoutingTarget{}, ErrVerificationFailed
 	}
 	binding, err := consumer.Get(ctx, tenantID, bindingID)
@@ -380,8 +381,20 @@ func ResolveConfiguredRoutingTarget(ctx context.Context, consumer CandidateConsu
 	return routingTargetForBinding(ctx, tenants, apps, binding)
 }
 
+func callBindingVerifier(ctx context.Context, verify func(context.Context, Binding) error, binding Binding) (err error) {
+	if verify == nil || nilvalue.Is(ctx) {
+		return ErrVerificationFailed
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrVerificationFailed
+		}
+	}()
+	return verify(ctx, binding)
+}
+
 func routingTargetForBinding(ctx context.Context, tenants tenant.Repository, apps appmodel.Repository, binding *Binding) (RoutingTarget, error) {
-	if binding == nil {
+	if nilvalue.Is(ctx) || nilvalue.Is(tenants) || nilvalue.Is(apps) || nilvalue.Is(binding) {
 		return RoutingTarget{}, ErrVerificationFailed
 	}
 	verified, err := newVerifiedBinding(*binding)

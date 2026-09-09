@@ -3,9 +3,12 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	agentcontext "github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
@@ -16,7 +19,39 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/memory"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/skill"
 )
+
+func TestEnvironmentSkillRepositoryIsTenantAndAppBound(t *testing.T) {
+	root := t.TempDir()
+	tenantID, appID := "t_00000000000000000000000000", "app_00000000000000000000000000"
+	skillDir := filepath.Join(root, "tenants", tenantID, "apps", appID, "demo")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, skill.SkillFile), []byte("---\nname: demo\ndescription: demo skill\n---\nUse the demo skill.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	provider := environmentSkillRepositoryProvider{root: root}
+	ctx := agentcontext.WithExecutionMetadata(context.Background(), agentcontext.ExecutionMetadata{
+		TenantID: tenantID, AppID: appID, Revision: 1, UserID: "user", SessionID: "session",
+	})
+	repository, err := provider.Repository(ctx, skill.SkillScope{AppName: appID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := repository.Get("demo")
+	if err != nil || value == nil || value.Summary.Name != "demo" {
+		t.Fatalf("scoped skill = %#v, err=%v", value, err)
+	}
+	if _, err := provider.Repository(ctx, skill.SkillScope{AppName: "other"}); !errors.Is(err, storagefactory.ErrStorageFactory) {
+		t.Fatalf("cross-app skill scope = %v", err)
+	}
+	withoutMetadata := context.Background()
+	if _, err := provider.Repository(withoutMetadata, skill.SkillScope{AppName: appID}); !errors.Is(err, storagefactory.ErrStorageFactory) {
+		t.Fatalf("missing metadata skill scope = %v", err)
+	}
+}
 
 func TestProductionAgentProviderCatalog(t *testing.T) {
 	catalog, err := newEnvironmentBackendCatalog("postgres")
@@ -44,7 +79,7 @@ func TestCOSArtifactProviderUsesUpstreamService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	value, err := (environmentCOSCapabilityProvider{}).New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000"}, backend.CapabilityBinding{
+	value, err := (environmentCOSCapabilityProvider{}).New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000"}, backend.CapabilityBinding{
 		Capability: backend.CapabilityArtifact,
 		Provider:   "cos",
 		Endpoint:   "https://bucket.cos.ap-guangzhou.myqcloud.com",
@@ -57,7 +92,7 @@ func TestCOSArtifactProviderUsesUpstreamService(t *testing.T) {
 	}
 
 	for _, invalid := range []modelprofile.SecretValue{{}, mustEnvironmentSecret(t, "missing-separator")} {
-		_, err := (environmentCOSCapabilityProvider{}).New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000"}, backend.CapabilityBinding{Capability: backend.CapabilityArtifact, Provider: "cos", Endpoint: "https://bucket.cos.example.test"}, invalid)
+		_, err := (environmentCOSCapabilityProvider{}).New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000"}, backend.CapabilityBinding{Capability: backend.CapabilityArtifact, Provider: "cos", Endpoint: "https://bucket.cos.example.test"}, invalid)
 		if !errors.Is(err, storagefactory.ErrStorageFactory) {
 			t.Fatalf("invalid COS secret error = %v", err)
 		}
@@ -96,11 +131,11 @@ func TestDemoRegistriesMaterializeNativeCapabilitiesWithoutSecrets(t *testing.T)
 	}
 	for capability, accepts := range expected {
 		binding := backend.CapabilityBinding{Capability: capability, Provider: "inmemory"}
-		provider, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: tenantID}, binding)
+		provider, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000"}, binding)
 		if err != nil {
 			t.Fatalf("resolve demo %s: %v", capability, err)
 		}
-		value, err := provider.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantID}, binding, modelprofile.SecretValue{})
+		value, err := provider.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000"}, binding, modelprofile.SecretValue{})
 		if err != nil || !accepts(value) {
 			t.Fatalf("materialize demo %s = %T, %v", capability, value, err)
 		}
@@ -117,7 +152,7 @@ func TestPostgresVectorKnowledgeProviderUsesUpstreamKnowledgeService(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	value, err := (environmentPostgresVectorKnowledgeProvider{db: db}).New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000"}, backend.CapabilityBinding{
+	value, err := (environmentPostgresVectorKnowledgeProvider{db: db}).New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000"}, backend.CapabilityBinding{
 		Capability: backend.CapabilityKnowledge,
 		Provider:   "postgres_vector",
 		Options:    map[string]string{"dimension": "32"},
@@ -134,7 +169,7 @@ func TestPostgresVectorKnowledgeProviderUsesUpstreamKnowledgeService(t *testing.
 			t.Fatal(err)
 		}
 	}
-	if _, err := (environmentPostgresVectorKnowledgeProvider{db: db}).New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000"}, backend.CapabilityBinding{
+	if _, err := (environmentPostgresVectorKnowledgeProvider{db: db}).New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000"}, backend.CapabilityBinding{
 		Capability: backend.CapabilityKnowledge,
 		Provider:   "postgres_vector",
 	}, modelprofile.SecretValue{}); !errors.Is(err, storagefactory.ErrStorageFactory) {
@@ -143,7 +178,7 @@ func TestPostgresVectorKnowledgeProviderUsesUpstreamKnowledgeService(t *testing.
 }
 
 func TestChromaMemoryProviderRejectsMissingSecretBeforeNetwork(t *testing.T) {
-	_, err := (environmentChromaMemoryProvider{}).New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000"}, backend.CapabilityBinding{
+	_, err := (environmentChromaMemoryProvider{}).New(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000"}, backend.CapabilityBinding{
 		Capability: backend.CapabilityMemory,
 		Provider:   "chromadb",
 		Endpoint:   "https://chroma.example.test",

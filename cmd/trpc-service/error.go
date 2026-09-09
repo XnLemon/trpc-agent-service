@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/XnLemon/trpc-agent-service/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
 )
 
@@ -15,7 +16,7 @@ var (
 )
 
 func mapInitCommandError(ctx context.Context, err error, message string) error {
-	if ctx != nil {
+	if !nilvalue.Is(ctx) {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}

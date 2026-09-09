@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	storage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 )
@@ -58,7 +59,7 @@ var _ MediaDownloader = (*HTTPMediaDownloader)(nil)
 // and persist.
 func (downloader *HTTPMediaDownloader) Download(ctx context.Context, request MediaDownloadRequest) (io.ReadCloser, error) {
 	request, err := normalizeMediaDownloadRequest(request)
-	if err != nil || downloader == nil || ctx == nil {
+	if err != nil || downloader == nil || nilvalue.Is(ctx) {
 		return nil, ErrAttachment
 	}
 	if err := ctx.Err(); err != nil {
@@ -114,7 +115,7 @@ func normalizeMediaDownloadRequest(request MediaDownloadRequest) (MediaDownloadR
 //
 //nolint:gocyclo
 func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (string, error) {
-	if p == nil || strings.TrimSpace(p.CorpID) == "" || strings.TrimSpace(p.AgentID) == "" || strings.TrimSpace(p.AppSecret) == "" || ctx == nil {
+	if p == nil || strings.TrimSpace(p.CorpID) == "" || strings.TrimSpace(p.AgentID) == "" || strings.TrimSpace(p.AppSecret) == "" || nilvalue.Is(ctx) {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
 	}
 	normalized, err := normalizeDeliveryReply(value)
@@ -129,7 +130,7 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 	if parseErr != nil || agentID <= 0 || strconv.Itoa(agentID) != strings.TrimSpace(p.AgentID) {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
 	}
-	nativeMedia := nativeWeComMedia(value.Kind) && p.Attachments != nil
+	nativeMedia := nativeWeComMedia(value.Kind) && !nilvalue.Is(p.Attachments)
 	text := ""
 	if !nativeMedia {
 		text, err = deliveryText(value)
@@ -300,7 +301,7 @@ func (p *Provider) uploadTempMedia(ctx context.Context, token, mediaType, name s
 }
 
 func (p *Provider) downloadMedia(ctx context.Context, download MediaDownloadRequest) (io.ReadCloser, error) {
-	if p == nil || ctx == nil || strings.TrimSpace(download.MediaID) == "" || hasControl(download.MediaID) {
+	if p == nil || nilvalue.Is(ctx) || strings.TrimSpace(download.MediaID) == "" || hasControl(download.MediaID) {
 		return nil, ErrAttachment
 	}
 	if err := ctx.Err(); err != nil {
@@ -346,7 +347,7 @@ func readWeComMediaResponse(ctx context.Context, response *http.Response, downlo
 }
 
 func wecomAttachmentError(ctx context.Context) error {
-	if ctx != nil {
+	if !nilvalue.Is(ctx) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -382,6 +383,9 @@ func downloadContentTypeMatches(kind attachment.Kind, contentType string) bool {
 }
 
 func (p *Provider) sendMessage(ctx context.Context, token string, payload wecomSendPayload) (string, error) {
+	if p == nil || nilvalue.Is(ctx) {
+		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
@@ -424,8 +428,10 @@ func attachmentFileName(name string) string {
 }
 
 func attachmentLoadError(ctx context.Context, err error) error {
-	if contextErr := ctx.Err(); contextErr != nil {
-		return transportDeliveryError(contextErr)
+	if !nilvalue.Is(ctx) {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return transportDeliveryError(contextErr)
+		}
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return transportDeliveryError(err)
@@ -473,9 +479,9 @@ func deliveryText(value storage.ReplyOutbox) (string, error) {
 }
 
 // Reconcile reports unknown because WeCom does not expose a stable receipt query for app text sends.
-func (p *Provider) Reconcile(_ context.Context, value storage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
-	if p == nil {
-		return outbox.DeliveryUnknown, "", nil
+func (p *Provider) Reconcile(ctx context.Context, value storage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
+	if p == nil || nilvalue.Is(ctx) {
+		return outbox.DeliveryUnknown, "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -490,6 +496,9 @@ func deliveryKey(value storage.ReplyOutbox) string {
 }
 
 func (p *Provider) accessToken(ctx context.Context) (string, error) {
+	if p == nil || nilvalue.Is(ctx) {
+		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
+	}
 	now := time.Now().UTC()
 	if p.Now != nil {
 		now = p.Now().UTC()

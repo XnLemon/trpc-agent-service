@@ -75,6 +75,24 @@ func TestSecretManagerResolverMapsManagerFailureAndLateCancellation(t *testing.T
 	}
 }
 
+func TestSecretManagerResolverIsolatesPanicsAndTypedNilManagers(t *testing.T) {
+	resolver, err := NewSecretManagerResolver(panicSecretManager{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Resolve(context.Background(), SecretScope{TenantID: registryTenant, SecretRef: "secret/manager"}); !errors.Is(err, ErrSecretUnavailable) {
+		t.Fatalf("panic manager Resolve() = %v", err)
+	}
+	var nilManager *panicSecretManager
+	if _, err := NewSecretManagerResolver(nilManager); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("typed nil manager = %v", err)
+	}
+	var nilFunction secretManagerFunc
+	if _, err := NewSecretManagerResolver(nilFunction); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("typed nil function manager = %v", err)
+	}
+}
+
 func TestSecretManagerResolverNilBoundaries(t *testing.T) {
 	resolver, err := NewSecretManagerResolver(secretManagerFunc(func(context.Context, SecretScope) (SecretValue, error) {
 		return NewSecretValue("value")
@@ -89,6 +107,12 @@ func TestSecretManagerResolverNilBoundaries(t *testing.T) {
 	if _, err := nilResolver.Resolve(context.Background(), SecretScope{TenantID: registryTenant, SecretRef: "secret/manager"}); !errors.Is(err, ErrSecretUnavailable) {
 		t.Fatalf("nil resolver Resolve() = %v", err)
 	}
+}
+
+type panicSecretManager struct{}
+
+func (panicSecretManager) Read(context.Context, SecretScope) (SecretValue, error) {
+	panic("secret backend panic")
 }
 
 type secretManagerFunc func(context.Context, SecretScope) (SecretValue, error)

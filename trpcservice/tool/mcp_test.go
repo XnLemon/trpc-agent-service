@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
@@ -10,6 +11,11 @@ import (
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+)
+
+const (
+	mcpTestTenantID = "t_01J1K9ZQTVE4PAWF1TSB2WMHNP"
+	mcpTestAppID    = "app_01J1K9ZQTVE4PAWF1TSB2WMHNP"
 )
 
 func TestMCPBindingNormalize(t *testing.T) {
@@ -47,7 +53,7 @@ func TestNewMCPToolSetRequiresTenantScopedSecretResolver(t *testing.T) {
 	}
 }
 
-func TestWrapMCPToolSetLifecycleRetriesDisconnectedCalls(t *testing.T) {
+func TestWrapMCPToolSetLifecycleDoesNotRetryDisconnectedCalls(t *testing.T) {
 	delegateTool := &lifecycleProbeTool{declaration: &trpctool.Declaration{Name: "echo"}}
 	delegate := &lifecycleProbeSet{tool: delegateTool}
 	wrapped, err := WrapMCPToolSetLifecycle(delegate)
@@ -59,11 +65,17 @@ func TestWrapMCPToolSetLifecycleRetriesDisconnectedCalls(t *testing.T) {
 	if !ok {
 		t.Fatalf("lifecycle tool is not callable: %T", tools[0])
 	}
+	if _, err := callable.Call(context.Background(), nil); err == nil {
+		t.Fatal("disconnected call was unexpectedly retried")
+	}
+	if delegateTool.calls != 1 || delegate.closeCalls != 1 {
+		t.Fatalf("lifecycle first call = calls:%d closes:%d", delegateTool.calls, delegate.closeCalls)
+	}
 	if _, err := callable.Call(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if delegateTool.calls != 2 || delegate.closeCalls != 1 {
-		t.Fatalf("lifecycle retry = calls:%d closes:%d", delegateTool.calls, delegate.closeCalls)
+		t.Fatalf("lifecycle explicit retry = calls:%d closes:%d", delegateTool.calls, delegate.closeCalls)
 	}
 }
 
@@ -162,6 +174,80 @@ func TestToolCallBudgetIsRequestLocalAndBounded(t *testing.T) {
 	}
 }
 
+func TestGovernMCPToolSetCoversStreamableToolsAndAllowlist(t *testing.T) {
+	writer := &mcpGovernanceWriter{}
+	binding := MCPBinding{Name: "files", Transport: "stdio", Command: "/usr/bin/files", ToolAllow: []string{"stream"}, ToolPolicies: map[string]appmodel.MCPToolPolicy{"stream": appmodel.MCPToolPolicySkipApproval}}
+	streamTool := &mcpStreamProbeTool{declaration: &trpctool.Declaration{Name: "mcp_files__stream"}}
+	extraTool := &namespaceProbeTool{declaration: &trpctool.Declaration{Name: "mcp_files__not-allowlisted"}}
+	governed, err := GovernMCPToolSet(context.Background(), &namespaceProbeSet{tools: []trpctool.Tool{streamTool, extraTool}}, mcpTestTenantID, mcpTestAppID, binding, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution := WithExecutionContext(context.Background(), ExecutionContext{
+		TenantID: mcpTestTenantID, AppID: mcpTestAppID, UserID: "user-a", SessionID: "session-a", EventID: "event-stream", RequestID: "request-stream", TraceID: "trace-stream",
+		Audit: audit.NewRecorder(writer, mcpTestTenantID), ToolInvocations: runtimestorageinmemory.NewToolInvocationStore(),
+	})
+	tools := governed.Tools(execution)
+	if len(tools) != 1 || tools[0].Declaration().Name != "mcp_files__stream" {
+		t.Fatalf("governed stream tools = %#v", tools)
+	}
+	streamable, ok := tools[0].(trpctool.StreamableTool)
+	if !ok {
+		t.Fatalf("governed stream tool is not streamable: %T", tools[0])
+	}
+	reader, err := streamable.StreamableCall(execution, []byte(`{"value":"hello"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	chunk, err := reader.Recv()
+	if err != nil || chunk.Content != "stream-ok" {
+		t.Fatalf("stream chunk = %#v, %v", chunk, err)
+	}
+	if _, err := reader.Recv(); err != io.EOF {
+		t.Fatalf("stream close = %v", err)
+	}
+	if streamTool.calls != 1 || len(writer.events) != 2 || writer.events[0].EventType != audit.EventToolAllowed || writer.events[1].EventType != audit.EventToolExecuted {
+		t.Fatalf("stream governance = calls:%d events:%#v", streamTool.calls, writer.events)
+	}
+}
+
+func TestGovernMCPToolSetFailsClosedWithoutAuditOrForMalformedArguments(t *testing.T) {
+	binding := MCPBinding{Name: "files", Transport: "stdio", Command: "/usr/bin/files", ToolAllow: []string{"read"}, ToolPolicies: map[string]appmodel.MCPToolPolicy{"read": appmodel.MCPToolPolicySkipApproval}}
+	readTool := &namespaceProbeTool{declaration: &trpctool.Declaration{Name: "mcp_files__read"}}
+	governed, err := GovernMCPToolSet(context.Background(), &namespaceProbeSet{tools: []trpctool.Tool{readTool}}, mcpTestTenantID, mcpTestAppID, binding, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callable := governed.Tools(WithExecutionContext(context.Background(), ExecutionContext{
+		TenantID: mcpTestTenantID, AppID: mcpTestAppID, UserID: "user-a", SessionID: "session-a", EventID: "event-no-audit", RequestID: "request-no-audit",
+	}))[0].(trpctool.CallableTool)
+	if _, err := callable.Call(context.Background(), []byte(`{"ok":true}`)); !errors.Is(err, ErrMCPExecutionUnavailable) || readTool.called {
+		t.Fatalf("missing audit = err:%v called:%v", err, readTool.called)
+	}
+	execution := WithExecutionContext(context.Background(), ExecutionContext{
+		TenantID: mcpTestTenantID, AppID: mcpTestAppID, UserID: "user-a", SessionID: "session-a", EventID: "event-bad-args", RequestID: "request-bad-args", Audit: audit.NewRecorder(&mcpGovernanceWriter{}, mcpTestTenantID), ToolInvocations: runtimestorageinmemory.NewToolInvocationStore(),
+	})
+	callable = governed.Tools(execution)[0].(trpctool.CallableTool)
+	if _, err := callable.Call(execution, []byte(`[]`)); !errors.Is(err, ErrMCPInvalidArguments) || readTool.called {
+		t.Fatalf("malformed arguments = err:%v called:%v", err, readTool.called)
+	}
+}
+
+type mcpStreamProbeTool struct {
+	declaration *trpctool.Declaration
+	calls       int
+}
+
+func (tool *mcpStreamProbeTool) Declaration() *trpctool.Declaration { return tool.declaration }
+func (tool *mcpStreamProbeTool) StreamableCall(context.Context, []byte) (*trpctool.StreamReader, error) {
+	tool.calls++
+	stream := trpctool.NewStream(1)
+	stream.Writer.Send(trpctool.StreamChunk{Content: "stream-ok"}, nil)
+	stream.Writer.Close()
+	return stream.Reader, nil
+}
+
 func TestGovernMCPToolSetRequiresReviewAndAuditsExecution(t *testing.T) {
 	writer := &mcpGovernanceWriter{}
 	attachments := runtimestorageinmemory.New()
@@ -174,13 +260,13 @@ func TestGovernMCPToolSetRequiresReviewAndAuditsExecution(t *testing.T) {
 	deleteTool := &namespaceProbeTool{declaration: &trpctool.Declaration{Name: "mcp_files__delete", Description: "delete a file"}, metadata: trpctool.ToolMetadata{Destructive: true}}
 	delegate := &namespaceProbeSet{tools: []trpctool.Tool{readTool, deleteTool}}
 	reviewer := &mcpGovernanceReviewer{approved: true}
-	governed, err := GovernMCPToolSet(context.Background(), delegate, "tenant-a", binding, reviewer)
+	governed, err := GovernMCPToolSet(context.Background(), delegate, mcpTestTenantID, mcpTestAppID, binding, reviewer)
 	if err != nil {
 		t.Fatal(err)
 	}
 	execution := WithExecutionContext(context.Background(), ExecutionContext{
-		TenantID: "tenant-a", AppID: "app-a", UserID: "user-a", SessionID: "session-a", EventID: "event-a", RequestID: "request-a", TraceID: "trace-a",
-		Attachments: attachments, Replies: NewReplyCollector(), Audit: audit.NewRecorder(writer, "tenant-a"),
+		TenantID: mcpTestTenantID, AppID: mcpTestAppID, UserID: "user-a", SessionID: "session-a", EventID: "event-a", RequestID: "request-a", TraceID: "trace-a",
+		Attachments: attachments, Replies: NewReplyCollector(), Audit: audit.NewRecorder(writer, mcpTestTenantID), ToolInvocations: runtimestorageinmemory.NewToolInvocationStore(),
 	})
 	tools := governed.Tools(execution)
 	for _, candidate := range tools {
@@ -196,7 +282,7 @@ func TestGovernMCPToolSetRequiresReviewAndAuditsExecution(t *testing.T) {
 		t.Fatalf("MCP governance audit events = %#v", writer.events)
 	}
 
-	if _, err := GovernMCPToolSet(context.Background(), delegate, "tenant-a", binding, nil); !errors.Is(err, ErrApprovalRequired) {
+	if _, err := GovernMCPToolSet(context.Background(), delegate, mcpTestTenantID, mcpTestAppID, binding, nil); !errors.Is(err, ErrApprovalRequired) {
 		t.Fatalf("missing reviewer error = %v", err)
 	}
 }

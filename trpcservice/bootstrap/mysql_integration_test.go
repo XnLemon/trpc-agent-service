@@ -6,18 +6,23 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	appmysql "github.com/XnLemon/trpc-agent-service/trpcservice/app/mysql"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
+	auditmysql "github.com/XnLemon/trpc-agent-service/trpcservice/audit/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendmysql "github.com/XnLemon/trpc-agent-service/trpcservice/backend/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/channels/mysql"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/model/mysql"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
+	runtimestoragemysql "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/mysql"
 	storage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmysql "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/mysql"
@@ -86,6 +91,78 @@ func TestMySQLControlPlaneRepositoriesLive(t *testing.T) {
 	assertMySQLTestChannel(t, ctx, db, first.TenantID, appRoot.AppID, routeDigest, suffix)
 	if publishedApp.CurrentRevision == nil || publishedRevision.State != appmodel.RevisionStatePublished {
 		t.Fatalf("publish = app=%+v revision=%+v", publishedApp, publishedRevision)
+	}
+
+	invocations := runtimestoragemysql.New(db)
+	invocationInput := runtimestorage.ToolInvocationInput{
+		TenantID: first.TenantID, AppID: appRoot.AppID, EventID: "tool-event-" + suffix, RequestID: "tool-request-" + suffix,
+		TraceID: "tool-trace-" + suffix, ToolCallID: "tool-call-" + suffix,
+		ToolName: "mcp_demo__write", ArgsSHA256: strings.Repeat("a", 64), Owner: "tool-request-" + suffix,
+	}
+	invocationInput.InvocationID = runtimestorage.DeriveToolInvocationIDForApp(invocationInput.TenantID, invocationInput.AppID, invocationInput.EventID, invocationInput.ToolCallID, invocationInput.ToolName, invocationInput.ArgsSHA256)
+	prepared, err := invocations.PrepareToolInvocation(ctx, invocationInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := invocations.TransitionToolInvocation(ctx, runtimestorage.ToolInvocationTransition{
+		TenantID: invocationInput.TenantID, AppID: invocationInput.AppID, InvocationID: invocationInput.InvocationID,
+		From: prepared.Status, To: runtimestorage.ToolInvocationDispatching,
+		Owner: invocationInput.Owner, FencingToken: prepared.FencingToken,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err = invocations.TransitionToolInvocation(ctx, runtimestorage.ToolInvocationTransition{
+		TenantID: invocationInput.TenantID, AppID: invocationInput.AppID, InvocationID: invocationInput.InvocationID,
+		From: accepted.Status, To: runtimestorage.ToolInvocationAccepted,
+		Owner: invocationInput.Owner, FencingToken: accepted.FencingToken,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := invocations.RecoverStaleToolInvocations(ctx, time.Now().UTC().Add(time.Second))
+	if err != nil || len(recovered) == 0 || recovered[0].Status != runtimestorage.ToolInvocationUnknown {
+		t.Fatalf("tool invocation recovery = %+v, err=%v", recovered, err)
+	}
+	if _, err := invocations.GetToolInvocation(ctx, second.TenantID, invocationInput.AppID, invocationInput.InvocationID); !errors.Is(err, runtimestorage.ErrNotFound) {
+		t.Fatalf("cross-tenant tool invocation read = %v", err)
+	}
+	if _, err := invocations.TransitionToolInvocation(ctx, runtimestorage.ToolInvocationTransition{
+		TenantID: invocationInput.TenantID, AppID: invocationInput.AppID, InvocationID: invocationInput.InvocationID,
+		From: runtimestorage.ToolInvocationAccepted, To: runtimestorage.ToolInvocationSucceeded,
+		Owner: invocationInput.Owner, FencingToken: accepted.FencingToken,
+	}); !errors.Is(err, runtimestorage.ErrConflict) {
+		t.Fatalf("stale tool invocation completion = %v", err)
+	}
+	auditWriter, err := auditmysql.New(db, first.TenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auditEvent := audit.Event{
+		SchemaVersion: audit.SchemaVersion, EventID: "audit-event-" + suffix, EventType: audit.EventToolExecuted,
+		TenantID: first.TenantID, ToolName: invocationInput.ToolName, RequestID: invocationInput.RequestID,
+		TraceID: invocationInput.TraceID, Decision: audit.DecisionAccepted, OccurredAt: time.Now().UTC(),
+	}
+	if _, err := auditWriter.Append(ctx, auditEvent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auditWriter.Append(ctx, auditEvent); err != nil {
+		t.Fatalf("idempotent audit append = %v", err)
+	}
+	auditEvent.Reason = "conflicting digest"
+	if _, err := auditWriter.Append(ctx, auditEvent); !errors.Is(err, audit.ErrConflict) {
+		t.Fatalf("conflicting audit append = %v", err)
+	}
+	otherAudit, err := auditmysql.New(db, second.TenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := otherAudit.Append(ctx, audit.Event{
+		SchemaVersion: audit.SchemaVersion, EventID: "audit-other-" + suffix, EventType: audit.EventToolExecuted,
+		TenantID: first.TenantID, ToolName: invocationInput.ToolName, RequestID: invocationInput.RequestID,
+		TraceID: invocationInput.TraceID, Decision: audit.DecisionAccepted, OccurredAt: time.Now().UTC(),
+	}); !errors.Is(err, audit.ErrConflict) {
+		t.Fatalf("cross-tenant audit append = %v", err)
 	}
 }
 

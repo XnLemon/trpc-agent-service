@@ -20,7 +20,20 @@ func NewMCPToolSetFactory(secrets modelprofile.SecretResolver, reviewers ...revi
 	if len(reviewers) > 0 {
 		reviewer = reviewers[0]
 	}
-	return func(ctx context.Context, plan runtime.ExecutionPlan) ([]tool.ToolSet, error) {
+	return func(ctx context.Context, plan runtime.ExecutionPlan) (sets []tool.ToolSet, err error) {
+		defer func() {
+			if recover() != nil {
+				_ = closeToolSets(sets)
+				sets = nil
+				err = fmt.Errorf("%w: MCP tool-set construction failed", runtimerunner.ErrInvalid)
+			}
+		}()
+		if isNilFactoryValue(ctx) {
+			return nil, fmt.Errorf("%w: MCP context is required", runtimerunner.ErrInvalid)
+		}
+		if err := factoryContextErr(ctx); err != nil {
+			return nil, err
+		}
 		input, err := plan.AgentFactoryInput()
 		if err != nil {
 			return nil, fmt.Errorf("%w: MCP execution plan is invalid", runtimerunner.ErrInvalid)
@@ -28,64 +41,87 @@ func NewMCPToolSetFactory(secrets modelprofile.SecretResolver, reviewers ...revi
 		if len(input.MCPBindings) == 0 {
 			return nil, nil
 		}
-		if secrets == nil {
-			return nil, fmt.Errorf("%w: MCP secret resolver is required", runtimerunner.ErrInvalid)
-		}
-		sets := make([]tool.ToolSet, 0, len(input.MCPBindings))
+		sets = make([]tool.ToolSet, 0, len(input.MCPBindings))
 		seenTools := make(map[string]struct{})
+		seenBindings := make(map[string]struct{}, len(input.MCPBindings))
 		for _, binding := range input.MCPBindings {
-			if binding.Name == "" {
+			value, normalizeErr := binding.Normalize()
+			if normalizeErr != nil {
 				_ = closeToolSets(sets)
-				return nil, fmt.Errorf("%w: MCP binding name is empty", runtimerunner.ErrInvalid)
+				return nil, fmt.Errorf("%w: MCP binding is invalid", runtimerunner.ErrInvalid)
 			}
-			set, materializeErr := servicetool.NewMCPToolSet(ctx, input.TenantID, binding, secrets)
+			if _, duplicate := seenBindings[value.Name]; duplicate {
+				_ = closeToolSets(sets)
+				return nil, fmt.Errorf("%w: duplicate MCP binding %q", runtimerunner.ErrInvalid, value.Name)
+			}
+			seenBindings[value.Name] = struct{}{}
+			set, materializeErr := servicetool.NewMCPToolSet(ctx, input.TenantID, value, secrets)
 			if materializeErr != nil {
 				_ = closeToolSets(sets)
-				return nil, fmt.Errorf("%w: MCP binding %q: %v", runtimerunner.ErrInvalid, binding.Name, materializeErr)
+				return nil, fmt.Errorf("%w: MCP binding %q: %v", runtimerunner.ErrInvalid, value.Name, materializeErr)
 			}
 			lifecycle, lifecycleErr := servicetool.WrapMCPToolSetLifecycle(set)
 			if lifecycleErr != nil {
-				_ = set.Close()
+				_ = closeToolSet(set)
 				_ = closeToolSets(sets)
-				return nil, fmt.Errorf("%w: MCP binding %q lifecycle: %v", runtimerunner.ErrInvalid, binding.Name, lifecycleErr)
+				return nil, fmt.Errorf("%w: MCP binding %q lifecycle: %v", runtimerunner.ErrInvalid, value.Name, lifecycleErr)
 			}
-			namespaced, namespaceErr := servicetool.NamespaceMCPToolSet(lifecycle, binding.Name)
+			namespaced, namespaceErr := servicetool.NamespaceMCPToolSet(lifecycle, value.Name)
 			if namespaceErr != nil {
-				_ = lifecycle.Close()
+				_ = closeToolSet(lifecycle)
 				_ = closeToolSets(sets)
-				return nil, fmt.Errorf("%w: namespace MCP binding %q", runtimerunner.ErrInvalid, binding.Name)
+				return nil, fmt.Errorf("%w: namespace MCP binding %q", runtimerunner.ErrInvalid, value.Name)
 			}
-			governed, governanceErr := servicetool.GovernMCPToolSet(ctx, namespaced, input.TenantID, binding, reviewer)
+			governed, governanceErr := servicetool.GovernMCPToolSet(ctx, namespaced, input.TenantID, input.AppID, value, reviewer)
 			if governanceErr != nil {
-				_ = namespaced.Close()
+				_ = closeToolSet(namespaced)
 				_ = closeToolSets(sets)
-				return nil, fmt.Errorf("%w: govern MCP binding %q", runtimerunner.ErrInvalid, binding.Name)
+				return nil, fmt.Errorf("%w: govern MCP binding %q", runtimerunner.ErrInvalid, value.Name)
 			}
-			available := make(map[string]struct{}, len(binding.ToolAllow))
-			for _, candidate := range governed.Tools(ctx) {
-				if candidate == nil || candidate.Declaration() == nil || candidate.Declaration().Name == "" {
-					_ = governed.Close()
+			available := make(map[string]struct{}, len(value.ToolAllow))
+			governedTools, toolsOK := callToolSetTools(ctx, governed)
+			if !toolsOK {
+				_ = closeToolSet(governed)
+				_ = closeToolSets(sets)
+				return nil, fmt.Errorf("%w: MCP binding %q tools unavailable", runtimerunner.ErrInvalid, value.Name)
+			}
+			for _, candidate := range governedTools {
+				declaration, declarationOK := safeToolDeclaration(candidate)
+				if !declarationOK || declaration.Name == "" {
+					_ = closeToolSet(governed)
 					_ = closeToolSets(sets)
-					return nil, fmt.Errorf("%w: MCP binding %q returned an invalid tool", runtimerunner.ErrInvalid, binding.Name)
+					return nil, fmt.Errorf("%w: MCP binding %q returned an invalid tool", runtimerunner.ErrInvalid, value.Name)
 				}
-				name := candidate.Declaration().Name
+				name := declaration.Name
 				if _, duplicate := seenTools[name]; duplicate {
-					_ = governed.Close()
+					_ = closeToolSet(governed)
 					_ = closeToolSets(sets)
 					return nil, fmt.Errorf("%w: duplicate MCP tool %q", runtimerunner.ErrInvalid, name)
 				}
 				seenTools[name] = struct{}{}
 				available[name] = struct{}{}
 			}
-			for _, allowed := range binding.ToolAllow {
-				if _, found := available["mcp_"+binding.Name+"__"+allowed]; !found {
-					_ = governed.Close()
+			for _, allowed := range value.ToolAllow {
+				if _, found := available["mcp_"+value.Name+"__"+allowed]; !found {
+					_ = closeToolSet(governed)
 					_ = closeToolSets(sets)
-					return nil, fmt.Errorf("%w: MCP binding %q did not advertise allowed tool %q", runtimerunner.ErrInvalid, binding.Name, allowed)
+					return nil, fmt.Errorf("%w: MCP binding %q did not advertise allowed tool %q", runtimerunner.ErrInvalid, value.Name, allowed)
 				}
 			}
 			sets = append(sets, governed)
 		}
 		return sets, nil
 	}
+}
+
+func callToolSetTools(ctx context.Context, set tool.ToolSet) (tools []tool.Tool, ok bool) {
+	if isNilFactoryValue(ctx) || isNilFactoryValue(set) {
+		return nil, false
+	}
+	defer func() {
+		if recover() != nil {
+			tools, ok = nil, false
+		}
+	}()
+	return set.Tools(ctx), true
 }

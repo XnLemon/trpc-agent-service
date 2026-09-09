@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // DefaultFakeMaxClockSkew is the timestamp window used by the offline fake.
@@ -93,7 +95,7 @@ func (r *FakeCandidateResolver) ResolveCandidate(ctx context.Context, request Ca
 	if err := checkFakeContext(ctx); err != nil {
 		return ScopedVerifierHandle{}, err
 	}
-	if r == nil || r.repo == nil || request.Purpose != PurposeWebhookVerification || request.Candidate.Purpose != request.Purpose {
+	if r == nil || nilvalue.Is(r.repo) || request.Purpose != PurposeWebhookVerification || request.Candidate.Purpose != request.Purpose {
 		return ScopedVerifierHandle{}, ErrVerificationFailed
 	}
 	now := r.nowUTC()
@@ -143,7 +145,7 @@ func (r *FakeCandidateResolver) Verify(ctx context.Context, handle ScopedVerifie
 	if err := checkFakeContext(ctx); err != nil {
 		return VerifiedBinding{}, err
 	}
-	if r == nil || r.repo == nil || handle.Token() == "" {
+	if r == nil || nilvalue.Is(r.repo) || handle.Token() == "" {
 		return VerifiedBinding{}, ErrVerificationFailed
 	}
 	now := r.nowUTC()
@@ -294,8 +296,8 @@ func (r *FakeCandidateResolver) HandleCount() int {
 }
 
 func checkFakeContext(ctx context.Context) error {
-	if ctx == nil {
-		return nil
+	if nilvalue.Is(ctx) {
+		return ErrVerificationFailed
 	}
 	select {
 	case <-ctx.Done():

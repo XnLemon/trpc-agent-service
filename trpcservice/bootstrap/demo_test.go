@@ -334,25 +334,25 @@ func TestEnsureDemoDefaultsFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, changed, err := ensureDemoDefaults(context.Background(), repo, root, "app_demo", "backend_demo")
+	updated, changed, err := ensureDemoDefaults(context.Background(), repo, root, "app_01J1K9ZQTVE4PAWF1TSB2WMHNP", "bp_01J1K9ZQTVE4PAWF1TSB2WMHNP")
 	if err != nil || !changed || updated.DefaultAgentAppID == nil || updated.DefaultBackendProfileID == nil {
 		t.Fatalf("initial defaults update = %+v, changed=%v, err=%v", updated, changed, err)
 	}
-	stable, changed, err := ensureDemoDefaults(context.Background(), repo, updated, "app_demo", "backend_demo")
-	if err != nil || changed || stable.DefaultAgentAppID == nil || *stable.DefaultAgentAppID != "app_demo" {
+	stable, changed, err := ensureDemoDefaults(context.Background(), repo, updated, "app_01J1K9ZQTVE4PAWF1TSB2WMHNP", "bp_01J1K9ZQTVE4PAWF1TSB2WMHNP")
+	if err != nil || changed || stable.DefaultAgentAppID == nil || *stable.DefaultAgentAppID != "app_01J1K9ZQTVE4PAWF1TSB2WMHNP" {
 		t.Fatalf("matching defaults = %+v, changed=%v, err=%v", stable, changed, err)
 	}
-	wrong := "app_other"
+	wrong := "app_01J1K9ZQTVE4PAWF1TSB2WMHNQ"
 	stable.DefaultAgentAppID = &wrong
-	if _, _, err := ensureDemoDefaults(context.Background(), repo, stable, "app_demo", "backend_demo"); !errors.Is(err, ErrDemoState) {
+	if _, _, err := ensureDemoDefaults(context.Background(), repo, stable, "app_01J1K9ZQTVE4PAWF1TSB2WMHNP", "bp_01J1K9ZQTVE4PAWF1TSB2WMHNP"); !errors.Is(err, ErrDemoState) {
 		t.Fatalf("incompatible defaults error = %v", err)
 	}
 	suspended := *root
 	suspended.Status = tenant.StatusSuspended
-	if _, _, err := ensureDemoDefaults(context.Background(), repo, &suspended, "app_demo", "backend_demo"); !errors.Is(err, ErrDemoState) {
+	if _, _, err := ensureDemoDefaults(context.Background(), repo, &suspended, "app_01J1K9ZQTVE4PAWF1TSB2WMHNP", "bp_01J1K9ZQTVE4PAWF1TSB2WMHNP"); !errors.Is(err, ErrDemoState) {
 		t.Fatalf("suspended tenant error = %v", err)
 	}
-	if _, _, err := ensureDemoDefaults(context.Background(), repo, nil, "app_demo", "backend_demo"); !errors.Is(err, ErrDemoState) {
+	if _, _, err := ensureDemoDefaults(context.Background(), repo, nil, "app_01J1K9ZQTVE4PAWF1TSB2WMHNP", "bp_01J1K9ZQTVE4PAWF1TSB2WMHNP"); !errors.Is(err, ErrDemoState) {
 		t.Fatalf("nil tenant error = %v", err)
 	}
 }

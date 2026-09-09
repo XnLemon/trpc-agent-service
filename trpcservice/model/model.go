@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -529,7 +530,7 @@ func compileEnumValues(values []string) ([]string, error) {
 	seen := make(map[string]struct{}, len(values))
 	for index, value := range values {
 		normalized := strings.ToLower(strings.TrimSpace(value))
-		if normalized == "" || len([]rune(normalized)) > maxOptionLen || hasControl(normalized) {
+		if normalized == "" || !utf8.ValidString(normalized) || len([]rune(normalized)) > maxOptionLen || hasControl(normalized) {
 			return nil, fmt.Errorf("%w: enum value is invalid", ErrInvalid)
 		}
 		if _, exists := seen[normalized]; exists {
@@ -554,6 +555,9 @@ func normalizeOptionDefault(compiled *OptionSpec) error {
 }
 
 func normalizeEndpoint(endpoint string, policy FieldPolicy, schemes, hosts map[string]struct{}) (string, error) {
+	if !utf8.ValidString(endpoint) {
+		return "", fmt.Errorf("%w: endpoint is invalid", ErrInvalid)
+	}
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
 		if policy == FieldRequired {
@@ -678,6 +682,9 @@ func asciiLetterOrDigit(value byte) bool {
 }
 
 func normalizeSecretRef(secretRef string, policy FieldPolicy) (string, error) {
+	if !utf8.ValidString(secretRef) {
+		return "", fmt.Errorf("%w: secret reference is invalid", ErrInvalid)
+	}
 	secretRef = strings.TrimSpace(secretRef)
 	if secretRef == "" {
 		if policy == FieldRequired {
@@ -727,6 +734,9 @@ func normalizeOptions(options map[string]string, specs map[string]OptionSpec) (m
 }
 
 func normalizeOptionValue(value string, spec OptionSpec) (string, error) {
+	if !utf8.ValidString(value) {
+		return "", fmt.Errorf("%w: option value is invalid", ErrInvalid)
+	}
 	value = strings.TrimSpace(value)
 	if len([]rune(value)) > maxOptionLen || hasControl(value) {
 		return "", fmt.Errorf("%w: option value is invalid", ErrInvalid)
@@ -825,6 +835,9 @@ func sameInt(left, right *int) bool {
 }
 
 func normalizeMetadata(displayName, description string) (string, string, error) {
+	if !utf8.ValidString(displayName) || !utf8.ValidString(description) || hasControl(displayName) || hasControl(description) {
+		return "", "", fmt.Errorf("%w: profile metadata contains invalid text", ErrInvalid)
+	}
 	displayName = strings.TrimSpace(displayName)
 	description = strings.TrimSpace(description)
 	if n := len([]rune(displayName)); n < 1 || n > 200 {

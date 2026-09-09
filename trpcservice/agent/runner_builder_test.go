@@ -225,8 +225,11 @@ func TestNewRunnerWithConfigInjectsNativeServices(t *testing.T) {
 	registries, err := NewAgentFactoryRegistry(AgentFactoryRegistration{
 		Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1,
 		Factory: func(_ context.Context, build AgentBuildInput) (trpcagent.Agent, error) {
-			if build.Knowledge != kb {
+			if build.Knowledge == nil {
 				t.Fatal("native Knowledge was not passed to the Agent factory")
+			}
+			if _, ok := build.Knowledge.(scopedKnowledge); !ok {
+				t.Fatalf("Knowledge was not wrapped with the app scope: %T", build.Knowledge)
 			}
 			return invocationCaptureAgent{captured: captured}, nil
 		},

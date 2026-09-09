@@ -8,6 +8,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // BindingLookup loads the current tenant-scoped Binding used to create one
@@ -47,14 +48,17 @@ type BindingConfig struct {
 // Binding, then constructs a connection manager. Resolution failures are
 // redacted so Secret Manager errors cannot cross the channel boundary.
 func NewForBinding(ctx context.Context, config BindingConfig) (*Manager, error) {
-	if ctx == nil || config.Bindings == nil || config.Credentials == nil || config.Dispatcher == nil {
+	if nilvalue.Is(ctx) || nilvalue.Is(config.Bindings) || nilvalue.Is(config.Credentials) || nilvalue.Is(config.Dispatcher) {
 		return nil, ErrInvalid
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if err := config.Target.Validate(); err != nil || config.Target.Channel != channels.ChannelWeComAIBot {
 		return nil, ErrInvalid
 	}
 	binding, err := config.Bindings.Get(ctx, config.Target.TenantID, config.Target.BindingID)
-	if err != nil || binding == nil || !binding.CanAcceptInbound() || binding.Channel != channels.ChannelWeComAIBot || binding.Protocol.WeComAIBot == nil || binding.TenantID != config.Target.TenantID || binding.BindingID != config.Target.BindingID || binding.Version != config.Target.BindingVersion || binding.ConfigDigest != config.Target.ConfigDigest {
+	if err != nil || nilvalue.Is(binding) || !binding.CanAcceptInbound() || binding.Channel != channels.ChannelWeComAIBot || binding.Protocol.WeComAIBot == nil || binding.TenantID != config.Target.TenantID || binding.BindingID != config.Target.BindingID || binding.Version != config.Target.BindingVersion || binding.ConfigDigest != config.Target.ConfigDigest {
 		return nil, ErrInvalid
 	}
 	credentials, err := config.Credentials.Resolve(ctx, channels.SecretScope{TenantID: binding.TenantID, SecretRef: binding.SecretRef})

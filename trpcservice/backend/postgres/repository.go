@@ -9,10 +9,14 @@ import (
 	"strings"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // List returns a stable page of Backend Profiles belonging to one tenant.
 func (r *BackendRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*backend.Profile, string, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, "", err
+	}
 	if r == nil || r.db == nil {
 		return nil, "", ErrStorage
 	}
@@ -96,9 +100,16 @@ func NewRepository(db *sql.DB, catalog *backend.ProviderCatalog) *BackendReposit
 	return &BackendRepository{db: db, catalog: catalog}
 }
 
+func checkContext(ctx context.Context) error {
+	if nilvalue.Is(ctx) {
+		return ErrStorage
+	}
+	return ctx.Err()
+}
+
 // Create persists a backend profile and returns its creation event.
 func (r *BackendRepository) Create(ctx context.Context, input backend.CreateInput) (*backend.Profile, backend.ChangeEvent, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, backend.ChangeEvent{}, err
 	}
 	if r == nil || r.db == nil {
@@ -152,7 +163,7 @@ func (r *BackendRepository) Create(ctx context.Context, input backend.CreateInpu
 
 // Get loads a backend profile within the requested tenant.
 func (r *BackendRepository) Get(ctx context.Context, tenantID, profileID string) (*backend.Profile, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	if r == nil || r.db == nil {
@@ -170,7 +181,7 @@ func (r *BackendRepository) Get(ctx context.Context, tenantID, profileID string)
 
 // UpdateConfiguration applies an expected-version configuration update.
 func (r *BackendRepository) UpdateConfiguration(ctx context.Context, input backend.UpdateConfigurationInput) (*backend.Profile, backend.ChangeEvent, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, backend.ChangeEvent{}, err
 	}
 	if r == nil || r.db == nil {
@@ -224,7 +235,7 @@ func (r *BackendRepository) UpdateConfiguration(ctx context.Context, input backe
 
 // TransitionStatus changes a backend profile status with optimistic concurrency.
 func (r *BackendRepository) TransitionStatus(ctx context.Context, input backend.TransitionStatusInput) (*backend.Profile, backend.ChangeEvent, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, backend.ChangeEvent{}, err
 	}
 	if r == nil || r.db == nil {

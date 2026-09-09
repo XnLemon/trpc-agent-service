@@ -220,6 +220,9 @@ func TestVerifyApplicationPrivilegesQueryEnforcesFullAllowlist(t *testing.T) {
 		"allowed_tables",
 		"required_privilege_types",
 		"required_privileges",
+		"WHERE allowed_tables.table_name <> 'audit_event'",
+		"UNION ALL SELECT 'audit_event', 'SELECT'",
+		"UNION ALL SELECT 'audit_event', 'INSERT'",
 		"effective_table_privileges",
 		"NOT EXISTS",
 		"table_schema <> DATABASE()",
@@ -238,6 +241,9 @@ func TestVerifyApplicationPrivilegesQueryEnforcesFullAllowlist(t *testing.T) {
 	}
 	if strings.Contains(privilegeQuery, "WHERE privilege_type IN ('ALL PRIVILEGES'") {
 		t.Fatal("privilege query still applies the obsolete DDL-only outer filter")
+	}
+	if strings.Contains(privilegeQuery, "SELECT 'audit_event' UNION ALL SELECT 'INSERT' UNION ALL SELECT 'UPDATE'") {
+		t.Fatal("audit_event still requires update/delete privileges")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

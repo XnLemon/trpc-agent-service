@@ -15,7 +15,7 @@ func TestOrderedFilesAreContiguousAndDigestable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 18 {
+	if len(files) != 23 {
 		t.Fatalf("migration order = %+v", files)
 	}
 	for index, migration := range files {

@@ -7,14 +7,19 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
+	agentcontext "github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	agentsessionstore "github.com/XnLemon/trpc-agent-service/trpcservice/agent/sessionstore"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom_aibot"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
+	knowledgeadmin "github.com/XnLemon/trpc-agent-service/trpcservice/knowledge"
 	knowledgepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/knowledge/postgres"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
@@ -32,6 +37,7 @@ import (
 	memoryinmemory "trpc.group/trpc-go/trpc-agent-go/memory/inmemory"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
+	"trpc.group/trpc-go/trpc-agent-go/skill"
 )
 
 type environmentSecretResolver struct {
@@ -45,7 +51,7 @@ type environmentWeComCredentialResolver struct {
 }
 
 func (resolver environmentWeComCredentialResolver) Resolve(ctx context.Context, scope channels.SecretScope) (wecom.Credentials, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return wecom.Credentials{}, errors.New("wecom credential resolver context is required")
 	}
 	if err := ctx.Err(); err != nil {
@@ -63,7 +69,7 @@ type environmentWeComAIBotCredentialResolver struct {
 }
 
 func (resolver environmentWeComAIBotCredentialResolver) Resolve(ctx context.Context, scope channels.SecretScope) (wecom_aibot.Credentials, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return wecom_aibot.Credentials{}, errors.New("wecom ai bot credential resolver context is required")
 	}
 	if err := ctx.Err(); err != nil {
@@ -88,7 +94,7 @@ func environmentWeComOwner() (string, error) {
 }
 
 func (resolver environmentSecretResolver) Resolve(ctx context.Context, scope modelprofile.SecretScope) (modelprofile.SecretValue, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return modelprofile.SecretValue{}, errors.New("secret resolver context is required")
 	}
 	if err := ctx.Err(); err != nil {
@@ -131,7 +137,7 @@ type environmentNativeCapabilityProvider struct {
 }
 
 func (provider environmentNativeCapabilityProvider) New(ctx context.Context, _ backend.StorageFactoryInput, _ backend.CapabilityBinding, _ modelprofile.SecretValue) (any, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, context.Canceled
 	}
 	if err := ctx.Err(); err != nil {
@@ -161,7 +167,7 @@ type environmentHashEmbedder struct{}
 var _ knowledgeembedder.Embedder = environmentHashEmbedder{}
 
 func (environmentHashEmbedder) GetEmbedding(ctx context.Context, text string) ([]float64, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, context.Canceled
 	}
 	if err := ctx.Err(); err != nil {
@@ -187,7 +193,7 @@ func (environmentHashEmbedder) GetDimensions() int { return 32 }
 type environmentChromaMemoryProvider struct{}
 
 func (environmentChromaMemoryProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
-	if ctx == nil || ctx.Err() != nil || input.TenantID == "" || binding.Capability != backend.CapabilityMemory || strings.TrimSpace(binding.Endpoint) == "" {
+	if nilvalue.Is(ctx) || ctx.Err() != nil || input.TenantID == "" || strings.TrimSpace(input.AppID) == "" || binding.Capability != backend.CapabilityMemory || strings.TrimSpace(binding.Endpoint) == "" {
 		return nil, storagefactory.ErrStorageFactory
 	}
 	apiKey := secret.Value()
@@ -228,14 +234,14 @@ type environmentPostgresVectorKnowledgeProvider struct {
 }
 
 func (provider environmentPostgresVectorKnowledgeProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
-	if ctx == nil || ctx.Err() != nil || provider.db == nil || input.TenantID == "" || binding.Capability != backend.CapabilityKnowledge || strings.ToLower(strings.TrimSpace(binding.Provider)) != "postgres_vector" || secret.Value() == "" {
+	if nilvalue.Is(ctx) || ctx.Err() != nil || provider.db == nil || input.TenantID == "" || strings.TrimSpace(input.AppID) == "" || binding.Capability != backend.CapabilityKnowledge || strings.ToLower(strings.TrimSpace(binding.Provider)) != "postgres_vector" || secret.Value() == "" {
 		return nil, storagefactory.ErrStorageFactory
 	}
 	dimension := optionInt(binding.Options, "dimension")
 	if dimension == 0 {
 		dimension = embedderopenai.DefaultDimensions
 	}
-	store, err := knowledgepostgres.New(provider.db, input.TenantID, knowledgepostgres.WithDimension(dimension))
+	store, err := knowledgepostgres.New(provider.db, input.TenantID, knowledgepostgres.WithAppID(input.AppID), knowledgepostgres.WithDimension(dimension))
 	if err != nil {
 		return nil, storagefactory.ErrStorageFactory
 	}
@@ -244,10 +250,108 @@ func (provider environmentPostgresVectorKnowledgeProvider) New(ctx context.Conte
 	return service, nil
 }
 
+// environmentKnowledgeManagementProvider binds the Admin corpus manager to
+// the tenant-scoped PostgreSQL store and its independent embedding SecretRef.
+// Runtime capability bindings may use a different secret and are never
+// borrowed implicitly by the management path.
+type environmentKnowledgeManagementProvider struct {
+	db        *sql.DB
+	secrets   modelprofile.SecretResolver
+	secretRef string
+	demo      bool
+
+	mu         sync.Mutex
+	demoStores map[string]*knowledgevector.VectorStore
+}
+
+func (provider *environmentKnowledgeManagementProvider) Open(ctx context.Context, scope knowledgeadmin.Scope) (knowledgeadmin.Backend, error) {
+	if nilvalue.Is(ctx) || provider == nil || scope.Validate() != nil {
+		return knowledgeadmin.Backend{}, storagefactory.ErrStorageFactory
+	}
+	if err := ctx.Err(); err != nil {
+		return knowledgeadmin.Backend{}, err
+	}
+	if provider.demo {
+		provider.mu.Lock()
+		if provider.demoStores == nil {
+			provider.demoStores = make(map[string]*knowledgevector.VectorStore)
+		}
+		key := scope.TenantID + "\x00" + scope.AppID
+		store := provider.demoStores[key]
+		if store == nil {
+			store = knowledgevector.New()
+			provider.demoStores[key] = store
+		}
+		provider.mu.Unlock()
+		return knowledgeadmin.Backend{Store: store, Embedder: environmentHashEmbedder{}}, nil
+	}
+	if provider.db == nil || nilvalue.Is(provider.secrets) || strings.TrimSpace(provider.secretRef) == "" {
+		return knowledgeadmin.Backend{}, storagefactory.ErrStorageFactory
+	}
+	secret, err := provider.secrets.Resolve(ctx, modelprofile.SecretScope{TenantID: scope.TenantID, SecretRef: provider.secretRef})
+	if err != nil || secret.Value() == "" {
+		return knowledgeadmin.Backend{}, storagefactory.ErrStorageFactory
+	}
+	store, err := knowledgepostgres.New(provider.db, scope.TenantID, knowledgepostgres.WithAppID(scope.AppID), knowledgepostgres.WithDimension(embedderopenai.DefaultDimensions))
+	if err != nil {
+		return knowledgeadmin.Backend{}, storagefactory.ErrStorageFactory
+	}
+	return knowledgeadmin.Backend{
+		Store:    store,
+		Embedder: embedderopenai.New(embedderopenai.WithAPIKey(secret.Value()), embedderopenai.WithDimensions(embedderopenai.DefaultDimensions)),
+		Close:    store.Close,
+	}, nil
+}
+
+var _ knowledgeadmin.Provider = (*environmentKnowledgeManagementProvider)(nil)
+
+// environmentSkillRepositoryProvider maps each trusted tenant and app to
+// a separate upstream FSRepository. The repository is created per request so
+// no live filesystem handle or unscoped global root is retained by a Runner.
+type environmentSkillRepositoryProvider struct {
+	root string
+}
+
+func (provider environmentSkillRepositoryProvider) Repository(ctx context.Context, scope skill.SkillScope) (skill.Repository, error) {
+	if nilvalue.Is(ctx) || ctx.Err() != nil || provider.root == "" {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	metadata, ok := agentcontext.ExecutionMetadataFromContext(ctx)
+	if !ok || strings.TrimSpace(scope.AppName) == "" || scope.AppName != metadata.AppID || scope.UserID != "" {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	if strings.ContainsAny(metadata.TenantID, "/\\\\\x00\r\n") || strings.Contains(metadata.TenantID, "..") {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	parts, err := skill.ScopePathParts(skill.SkillScopeApp, scope)
+	if err != nil {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	pathParts := append([]string{provider.root, "tenants", metadata.TenantID}, parts...)
+	repositoryRoot := filepath.Join(pathParts...)
+	info, err := os.Stat(repositoryRoot)
+	if err != nil || !info.IsDir() {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(repositoryRoot)
+	if err != nil {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	relative, err := filepath.Rel(provider.root, resolvedRoot)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	repository, err := skill.NewFSRepository(resolvedRoot)
+	if err != nil {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	return repository, nil
+}
+
 type environmentCOSCapabilityProvider struct{}
 
 func (environmentCOSCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
-	if ctx == nil || ctx.Err() != nil || input.TenantID == "" || binding.Capability != backend.CapabilityArtifact || strings.ToLower(strings.TrimSpace(binding.Provider)) != "cos" || strings.TrimSpace(binding.Endpoint) == "" {
+	if nilvalue.Is(ctx) || ctx.Err() != nil || input.TenantID == "" || strings.TrimSpace(input.AppID) == "" || binding.Capability != backend.CapabilityArtifact || strings.ToLower(strings.TrimSpace(binding.Provider)) != "cos" || strings.TrimSpace(binding.Endpoint) == "" {
 		return nil, storagefactory.ErrStorageFactory
 	}
 	parts := strings.SplitN(secret.Value(), ":", 2)
@@ -262,7 +366,7 @@ func (environmentCOSCapabilityProvider) New(ctx context.Context, input backend.S
 }
 
 func (provider environmentRuntimeCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, context.Canceled
 	}
 	if err := provider.validateRedisBinding(binding, secret); err != nil {
@@ -299,29 +403,29 @@ func (provider environmentRuntimeCapabilityProvider) newCapability(ctx context.C
 	// workers when one runner is torn down.
 	switch provider.capability {
 	case backend.CapabilityMemory:
-		if provider.memory == nil {
+		if nilvalue.Is(provider.memory) {
 			return nil, storagefactory.ErrStorageFactory
 		}
 		return borrowedMemoryService{Service: provider.memory}, nil
 	case backend.CapabilitySummary:
 		store, ok := provider.store.(runtimestorage.SummaryStore)
-		if !ok {
+		if !ok || nilvalue.Is(store) {
 			return nil, storagefactory.ErrStorageFactory
 		}
 		return borrowedSummaryStore{SummaryStore: store}, nil
 	case backend.CapabilityKnowledge:
-		if provider.knowledge == nil {
+		if nilvalue.Is(provider.knowledge) {
 			return nil, storagefactory.ErrStorageFactory
 		}
-		return provider.knowledge, nil
+		return borrowedKnowledgeService{Knowledge: provider.knowledge}, nil
 	case backend.CapabilityArtifact:
-		if provider.artifact == nil {
+		if nilvalue.Is(provider.artifact) {
 			return nil, storagefactory.ErrStorageFactory
 		}
-		return provider.artifact, nil
+		return borrowedArtifactService{Service: provider.artifact}, nil
 	case backend.CapabilityAudit:
 		store, ok := provider.store.(runtimestorage.AuditStore)
-		if !ok {
+		if !ok || nilvalue.Is(store) {
 			return nil, storagefactory.ErrStorageFactory
 		}
 		return borrowedAuditStore{AuditStore: store}, nil
@@ -333,20 +437,24 @@ func (provider environmentRuntimeCapabilityProvider) newCapability(ctx context.C
 type borrowedMemoryService struct{ memory.Service }
 type borrowedSummaryStore struct{ runtimestorage.SummaryStore }
 type borrowedAuditStore struct{ runtimestorage.AuditStore }
+type borrowedArtifactService struct{ artifact.Service }
+type borrowedKnowledgeService struct{ knowledge.Knowledge }
 
-func (borrowedMemoryService) Close() error { return nil }
-func (borrowedSummaryStore) Close() error  { return nil }
-func (borrowedAuditStore) Close() error    { return nil }
+func (borrowedMemoryService) Close() error    { return nil }
+func (borrowedSummaryStore) Close() error     { return nil }
+func (borrowedAuditStore) Close() error       { return nil }
+func (borrowedArtifactService) Close() error  { return nil }
+func (borrowedKnowledgeService) Close() error { return nil }
 
 func (provider environmentSessionCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, _ backend.CapabilityBinding, _ modelprofile.SecretValue) (any, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, context.Canceled
 	}
 	return agentsessionstore.NewWithObservability(input.TenantID, provider.delegate, provider.store, provider.telemetry, provider.backend)
 }
 
 func (environmentModelFactory) New(ctx context.Context, input modelprofile.ModelFactoryInput, secret modelprofile.SecretValue) (trpcmodel.Model, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, errors.New("model factory context is required")
 	}
 	if err := ctx.Err(); err != nil {

@@ -1,5 +1,5 @@
-// Package postgres provides a tenant-scoped PostgreSQL implementation of the
-// upstream knowledge/vectorstore.VectorStore contract.
+// Package postgres provides a tenant/app-scoped PostgreSQL implementation of
+// the upstream knowledge/vectorstore.VectorStore contract.
 //
 // Embeddings are kept as JSONB rather than requiring a database extension. This
 // keeps migrations portable across managed PostgreSQL offerings; the adapter
@@ -20,7 +20,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/jackc/pgx/v5/pgconn"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/document"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge/searchfilter"
@@ -46,7 +49,7 @@ var (
 	ErrClosed = errors.New("PostgreSQL knowledge vector store is closed")
 )
 
-// Option configures one tenant-scoped Store.
+// Option configures one tenant/app-scoped Store.
 type Option func(*Store)
 
 // WithMaxResults sets the default result limit for searches.
@@ -67,11 +70,21 @@ func WithDimension(dimension int) Option {
 	}
 }
 
-// Store implements vectorstore.VectorStore for one explicit tenant. The SQL
+// WithAppID fixes the immutable Agent App partition for this store. It is
+// required for every operation; metadata alone is not an authorization
+// boundary because the same document ID may exist in multiple Apps.
+func WithAppID(appID string) Option {
+	return func(store *Store) {
+		store.appID = appID
+	}
+}
+
+// Store implements vectorstore.VectorStore for one explicit tenant and App. The SQL
 // pool is borrowed and is never closed by Store.Close.
 type Store struct {
 	db       *sql.DB
 	tenantID string
+	appID    string
 
 	maxResults int
 	dimension  int
@@ -82,10 +95,10 @@ type Store struct {
 
 var _ vectorstore.VectorStore = (*Store)(nil)
 
-// New creates a tenant-scoped PostgreSQL vector store. It does not issue a
-// network query; migration/readiness checks remain owned by Bootstrap.
+// New creates a tenant/app-scoped PostgreSQL vector store. It does not issue
+// a network query; migration/readiness checks remain owned by Bootstrap.
 func New(db *sql.DB, tenantID string, opts ...Option) (*Store, error) {
-	if db == nil || strings.TrimSpace(tenantID) == "" {
+	if db == nil || !validScopeID(tenantID) {
 		return nil, ErrInvalid
 	}
 	store := &Store{db: db, tenantID: tenantID, maxResults: defaultMaxResults}
@@ -94,15 +107,15 @@ func New(db *sql.DB, tenantID string, opts ...Option) (*Store, error) {
 			opt(store)
 		}
 	}
-	if store.dimension < 0 || store.dimension > maxDimension {
+	if store.dimension < 0 || store.dimension > maxDimension || !validScopeID(store.appID) {
 		return nil, ErrInvalid
 	}
 	return store, nil
 }
 
-// Add inserts or replaces a document for this tenant. Replacing a document is
-// intentionally idempotent by document ID, while the original creation time
-// remains durable in PostgreSQL.
+// Add inserts or replaces a document for this tenant/App. Replacing a
+// document is intentionally idempotent by its app-scoped ID, while the
+// original creation time remains durable in PostgreSQL.
 func (store *Store) Add(ctx context.Context, doc *document.Document, embedding []float64) error {
 	if err := store.check(ctx); err != nil {
 		return err
@@ -111,33 +124,39 @@ func (store *Store) Add(ctx context.Context, doc *document.Document, embedding [
 	if err != nil {
 		return err
 	}
+	if documentAppID(value) != store.appID {
+		return ErrInvalid
+	}
 	const query = `INSERT INTO public.runtime_knowledge_document
-		(tenant_id, document_id, name, content, embedding_text, metadata, embedding, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9)
-		ON CONFLICT (tenant_id, document_id) DO UPDATE SET
+		(tenant_id, app_id, document_id, name, content, embedding_text, metadata, embedding, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10)
+		ON CONFLICT (tenant_id, app_id, document_id) DO UPDATE SET
 		name = EXCLUDED.name, content = EXCLUDED.content,
 		embedding_text = EXCLUDED.embedding_text, metadata = EXCLUDED.metadata,
 		embedding = EXCLUDED.embedding, updated_at = EXCLUDED.updated_at
 		RETURNING created_at, updated_at`
-	if err := store.db.QueryRowContext(ctx, query, store.tenantID, value.ID, value.Name, value.Content, value.EmbeddingText, metadata, vector, value.CreatedAt, value.UpdatedAt).Scan(&value.CreatedAt, &value.UpdatedAt); err != nil {
+	if err := store.db.QueryRowContext(ctx, query, store.tenantID, store.appID, value.ID, value.Name, value.Content, value.EmbeddingText, metadata, vector, value.CreatedAt, value.UpdatedAt).Scan(&value.CreatedAt, &value.UpdatedAt); err != nil {
 		return mapError(ctx, err)
 	}
 	return nil
 }
 
-// Get retrieves one document and its embedding from this tenant.
+// Get retrieves one document and its embedding from this tenant/App.
 func (store *Store) Get(ctx context.Context, id string) (*document.Document, []float64, error) {
 	if err := store.check(ctx); err != nil {
 		return nil, nil, err
 	}
-	if strings.TrimSpace(id) == "" {
+	if !validDocumentID(id) {
 		return nil, nil, ErrInvalid
 	}
 	const query = `SELECT document_id, name, content, embedding_text, metadata, embedding, created_at, updated_at
-		FROM public.runtime_knowledge_document WHERE tenant_id = $1 AND document_id = $2`
-	value, err := scanDocument(store.db.QueryRowContext(ctx, query, store.tenantID, id), store.dimension)
+		FROM public.runtime_knowledge_document WHERE tenant_id = $1 AND app_id = $2 AND document_id = $3`
+	value, err := scanDocument(store.db.QueryRowContext(ctx, query, store.tenantID, store.appID, id), store.dimension)
 	if err != nil {
 		return nil, nil, mapError(ctx, err)
+	}
+	if documentAppID(value.doc) != store.appID {
+		return nil, nil, ErrInvalid
 	}
 	return value.doc, value.embedding, nil
 }
@@ -151,26 +170,29 @@ func (store *Store) Update(ctx context.Context, doc *document.Document, embeddin
 	if err != nil {
 		return err
 	}
+	if documentAppID(value) != store.appID {
+		return ErrInvalid
+	}
 	const query = `UPDATE public.runtime_knowledge_document
-		SET name = $3, content = $4, embedding_text = $5, metadata = $6::jsonb,
-			embedding = $7::jsonb, updated_at = $8
-		WHERE tenant_id = $1 AND document_id = $2
+		SET name = $4, content = $5, embedding_text = $6, metadata = $7::jsonb,
+			embedding = $8::jsonb, updated_at = $9
+		WHERE tenant_id = $1 AND app_id = $2 AND document_id = $3
 		RETURNING created_at, updated_at`
-	if err := store.db.QueryRowContext(ctx, query, store.tenantID, value.ID, value.Name, value.Content, value.EmbeddingText, metadata, vector, value.UpdatedAt).Scan(&value.CreatedAt, &value.UpdatedAt); err != nil {
+	if err := store.db.QueryRowContext(ctx, query, store.tenantID, store.appID, value.ID, value.Name, value.Content, value.EmbeddingText, metadata, vector, value.UpdatedAt).Scan(&value.CreatedAt, &value.UpdatedAt); err != nil {
 		return mapError(ctx, err)
 	}
 	return nil
 }
 
-// Delete removes one document from this tenant.
+// Delete removes one document from this tenant/App.
 func (store *Store) Delete(ctx context.Context, id string) error {
 	if err := store.check(ctx); err != nil {
 		return err
 	}
-	if strings.TrimSpace(id) == "" {
+	if !validDocumentID(id) {
 		return ErrInvalid
 	}
-	result, err := store.db.ExecContext(ctx, `DELETE FROM public.runtime_knowledge_document WHERE tenant_id = $1 AND document_id = $2`, store.tenantID, id)
+	result, err := store.db.ExecContext(ctx, `DELETE FROM public.runtime_knowledge_document WHERE tenant_id = $1 AND app_id = $2 AND document_id = $3`, store.tenantID, store.appID, id)
 	if err != nil {
 		return mapError(ctx, err)
 	}
@@ -184,7 +206,7 @@ func (store *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// Search loads only this tenant's rows, applies the upstream filter contract,
+// Search loads only this tenant/App's rows, applies the upstream filter contract,
 // and computes cosine scores. The schema deliberately stores portable JSONB;
 // a future pgvector implementation can replace this bounded read path while
 // preserving the public VectorStore contract.
@@ -202,7 +224,10 @@ func (store *Store) Search(ctx context.Context, query *vectorstore.SearchQuery) 
 	if needsVector && len(query.Vector) == 0 {
 		return nil, ErrInvalid
 	}
-	if len(query.Vector) > 0 && !validDimension(len(query.Vector), store.dimension) {
+	if query.SearchMode == vectorstore.SearchModeKeyword && strings.TrimSpace(query.Query) == "" {
+		return nil, ErrInvalid
+	}
+	if len(query.Vector) > 0 && (!validDimension(len(query.Vector), store.dimension) || !finiteVector(query.Vector)) {
 		return nil, ErrInvalid
 	}
 	rows, err := store.listDocuments(ctx)
@@ -210,9 +235,6 @@ func (store *Store) Search(ctx context.Context, query *vectorstore.SearchQuery) 
 		return nil, err
 	}
 	minScore := query.MinScore
-	if minScore < 0 {
-		minScore = 0
-	}
 	results := make([]*vectorstore.ScoredDocument, 0, len(rows))
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
@@ -222,7 +244,7 @@ func (store *Store) Search(ctx context.Context, query *vectorstore.SearchQuery) 
 		if matchErr != nil {
 			return nil, matchErr
 		}
-		if !matches {
+		if !matches || !matchesKeyword(row.doc, query) {
 			continue
 		}
 		score := 1.0
@@ -254,7 +276,8 @@ func (store *Store) Search(ctx context.Context, query *vectorstore.SearchQuery) 
 }
 
 // DeleteByFilter deletes matching rows. Filtering is always intersected with
-// the fixed tenant predicate and never accepts a caller-provided tenant field.
+// the fixed tenant/app predicate and never accepts a caller-provided tenant or
+// app field.
 func (store *Store) DeleteByFilter(ctx context.Context, opts ...vectorstore.DeleteOption) error {
 	if err := store.check(ctx); err != nil {
 		return err
@@ -264,7 +287,7 @@ func (store *Store) DeleteByFilter(ctx context.Context, opts ...vectorstore.Dele
 		if len(config.DocumentIDs) > 0 || len(config.Filter) > 0 {
 			return ErrInvalid
 		}
-		if _, err := store.db.ExecContext(ctx, `DELETE FROM public.runtime_knowledge_document WHERE tenant_id = $1`, store.tenantID); err != nil {
+		if _, err := store.db.ExecContext(ctx, `DELETE FROM public.runtime_knowledge_document WHERE tenant_id = $1 AND app_id = $2`, store.tenantID, store.appID); err != nil {
 			return mapError(ctx, err)
 		}
 		return nil
@@ -290,7 +313,7 @@ func (store *Store) DeleteByFilter(ctx context.Context, opts ...vectorstore.Dele
 }
 
 // UpdateByFilter applies the upstream update fields to rows selected in this
-// tenant. It validates all update keys before changing any row.
+// tenant/App. It validates all update keys before changing any row.
 func (store *Store) UpdateByFilter(ctx context.Context, opts ...vectorstore.UpdateByFilterOption) (int64, error) {
 	if err := store.check(ctx); err != nil {
 		return 0, err
@@ -334,7 +357,7 @@ func (store *Store) UpdateByFilter(ctx context.Context, opts ...vectorstore.Upda
 }
 
 // Count returns the number of documents matching a metadata filter in this
-// tenant.
+// tenant/App.
 func (store *Store) Count(ctx context.Context, opts ...vectorstore.CountOption) (int, error) {
 	if err := store.check(ctx); err != nil {
 		return 0, err
@@ -353,7 +376,8 @@ func (store *Store) Count(ctx context.Context, opts ...vectorstore.CountOption) 
 	return count, nil
 }
 
-// GetMetadata returns defensive metadata copies with deterministic pagination.
+// GetMetadata returns defensive metadata copies for this App with
+// deterministic pagination.
 func (store *Store) GetMetadata(ctx context.Context, opts ...vectorstore.GetMetadataOption) (map[string]vectorstore.DocumentMetadata, error) {
 	if err := store.check(ctx); err != nil {
 		return nil, err
@@ -422,7 +446,7 @@ type rowScanner interface {
 
 func (store *Store) listDocuments(ctx context.Context) ([]storedDocument, error) {
 	rows, err := store.db.QueryContext(ctx, `SELECT document_id, name, content, embedding_text, metadata, embedding, created_at, updated_at
-		FROM public.runtime_knowledge_document WHERE tenant_id = $1`, store.tenantID)
+		FROM public.runtime_knowledge_document WHERE tenant_id = $1 AND app_id = $2`, store.tenantID, store.appID)
 	if err != nil {
 		return nil, mapError(ctx, err)
 	}
@@ -432,6 +456,9 @@ func (store *Store) listDocuments(ctx context.Context) ([]storedDocument, error)
 		value, scanErr := scanDocument(rows, store.dimension)
 		if scanErr != nil {
 			return nil, mapError(ctx, scanErr)
+		}
+		if documentAppID(value.doc) != store.appID {
+			return nil, ErrInvalid
 		}
 		values = append(values, value)
 	}
@@ -474,13 +501,13 @@ func (store *Store) deleteIDs(ctx context.Context, ids []string) error {
 		return nil
 	}
 	placeholders := make([]string, len(ids))
-	args := make([]any, 0, len(ids)+1)
-	args = append(args, store.tenantID)
+	args := make([]any, 0, len(ids)+2)
+	args = append(args, store.tenantID, store.appID)
 	for index, id := range ids {
-		placeholders[index] = fmt.Sprintf("$%d", index+2)
+		placeholders[index] = fmt.Sprintf("$%d", index+3)
 		args = append(args, id)
 	}
-	query := `DELETE FROM public.runtime_knowledge_document WHERE tenant_id = $1 AND document_id IN (` + strings.Join(placeholders, ",") + ")"
+	query := `DELETE FROM public.runtime_knowledge_document WHERE tenant_id = $1 AND app_id = $2 AND document_id IN (` + strings.Join(placeholders, ",") + ")"
 	if _, err := store.db.ExecContext(ctx, query, args...); err != nil {
 		return mapError(ctx, err)
 	}
@@ -488,13 +515,13 @@ func (store *Store) deleteIDs(ctx context.Context, ids []string) error {
 }
 
 func (store *Store) check(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return ErrInvalid
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if store == nil || store.db == nil || strings.TrimSpace(store.tenantID) == "" {
+	if store == nil || store.db == nil || !validScopeID(store.tenantID) || !validScopeID(store.appID) {
 		return ErrInvalid
 	}
 	store.mu.RLock()
@@ -507,7 +534,7 @@ func (store *Store) check(ctx context.Context) error {
 }
 
 func normalizeDocument(doc *document.Document, embedding []float64, dimension int) ([]byte, []byte, *document.Document, error) {
-	if doc == nil || strings.TrimSpace(doc.ID) == "" || !validDimension(len(embedding), dimension) {
+	if doc == nil || !validDocumentID(doc.ID) || !validDimension(len(embedding), dimension) || !finiteVector(embedding) {
 		return nil, nil, nil, ErrInvalid
 	}
 	value := doc.Clone()
@@ -515,9 +542,10 @@ func normalizeDocument(doc *document.Document, embedding []float64, dimension in
 	if value.CreatedAt.IsZero() {
 		value.CreatedAt = now
 	}
-	if value.UpdatedAt.IsZero() {
-		value.UpdatedAt = now
-	}
+	// Timestamps are server-owned. CreatedAt is retained when a caller is
+	// importing an existing document, while every write receives a fresh
+	// UpdatedAt so retries cannot resurrect stale chronology.
+	value.UpdatedAt = now
 	metadata, err := json.Marshal(value.Metadata)
 	if err != nil {
 		return nil, nil, nil, ErrInvalid
@@ -532,15 +560,52 @@ func normalizeDocument(doc *document.Document, embedding []float64, dimension in
 	return metadata, vector, value, nil
 }
 
+func documentAppID(doc *document.Document) string {
+	if doc == nil || doc.Metadata == nil {
+		return ""
+	}
+	value, _ := doc.Metadata["_trpc_app_id"].(string)
+	return value
+}
+
 func validDimension(got, expected int) bool {
 	return got > 0 && got <= maxDimension && (expected == 0 || got == expected)
+}
+
+func validScopeID(id string) bool {
+	return validIdentifier(id, 256, true)
+}
+
+func validDocumentID(id string) bool {
+	return validIdentifier(id, 512, true)
+}
+
+func validIdentifier(value string, max int, rejectURL bool) bool {
+	if !utf8.ValidString(value) || value == "" || value != strings.TrimSpace(value) || len([]rune(value)) > max || rejectURL && strings.Contains(value, "://") {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
+}
+
+func finiteVector(vector []float64) bool {
+	for _, value := range vector {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return false
+		}
+	}
+	return true
 }
 
 func mapError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
-	if ctx != nil {
+	if !nilvalue.Is(ctx) {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
@@ -580,6 +645,14 @@ func matchesMetadata(metadata map[string]any, filter map[string]any) bool {
 		}
 	}
 	return true
+}
+
+func matchesKeyword(doc *document.Document, query *vectorstore.SearchQuery) bool {
+	if query == nil || (query.SearchMode != vectorstore.SearchModeKeyword && query.SearchMode != vectorstore.SearchModeHybrid) || strings.TrimSpace(query.Query) == "" {
+		return true
+	}
+	needle := strings.ToLower(strings.TrimSpace(query.Query))
+	return strings.Contains(strings.ToLower(doc.Name), needle) || strings.Contains(strings.ToLower(doc.Content), needle) || strings.Contains(strings.ToLower(doc.EmbeddingText), needle)
 }
 
 func matchesFilter(doc *document.Document, filter *vectorstore.SearchFilter) (bool, error) {
@@ -848,14 +921,24 @@ func asTime(value any) (time.Time, bool) {
 }
 
 func cosineSimilarity(left, right []float64) float64 {
-	if len(left) == 0 || len(left) != len(right) {
+	if len(left) == 0 || len(left) != len(right) || !finiteVector(left) || !finiteVector(right) {
+		return 0
+	}
+	var leftScale, rightScale float64
+	for index := range left {
+		leftScale = math.Max(leftScale, math.Abs(left[index]))
+		rightScale = math.Max(rightScale, math.Abs(right[index]))
+	}
+	if leftScale == 0 || rightScale == 0 {
 		return 0
 	}
 	var dot, leftNorm, rightNorm float64
 	for index := range left {
-		dot += left[index] * right[index]
-		leftNorm += left[index] * left[index]
-		rightNorm += right[index] * right[index]
+		normalizedLeft := left[index] / leftScale
+		normalizedRight := right[index] / rightScale
+		dot += normalizedLeft * normalizedRight
+		leftNorm += normalizedLeft * normalizedLeft
+		rightNorm += normalizedRight * normalizedRight
 	}
 	if leftNorm == 0 || rightNorm == 0 {
 		return 0

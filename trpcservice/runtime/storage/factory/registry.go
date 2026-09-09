@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
+	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	backendprofile "github.com/XnLemon/trpc-agent-service/trpcservice/backend"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 )
 
@@ -45,10 +49,13 @@ func NewProviderRegistry() *ProviderRegistry {
 
 // Register installs or replaces one tenant/capability/provider implementation.
 func (registry *ProviderRegistry) Register(tenantID string, capability Capability, provider string, value CapabilityProvider) error {
-	if registry == nil || backendprofile.ValidateTenantID(tenantID) != nil || !validCapability(capability) || value == nil {
+	if registry == nil || backendprofile.ValidateTenantID(tenantID) != nil || !validCapability(capability) || isNilCapability(value) {
 		return fmt.Errorf("%w: invalid backend provider registration", ErrInvalid)
 	}
 	provider = strings.ToLower(strings.TrimSpace(provider))
+	if !validProviderName(provider) {
+		return fmt.Errorf("%w: provider is invalid", ErrInvalid)
+	}
 	if provider == "" {
 		return fmt.Errorf("%w: provider is required", ErrInvalid)
 	}
@@ -56,6 +63,9 @@ func (registry *ProviderRegistry) Register(tenantID string, capability Capabilit
 	defer registry.mu.Unlock()
 	if registry.closed {
 		return ErrRegistryClosed
+	}
+	if registry.providers == nil {
+		registry.providers = make(map[providerRegistryKey]CapabilityProvider)
 	}
 	registry.providers[providerRegistryKey{tenantID: tenantID, capability: capability, provider: provider}] = value
 	return nil
@@ -71,30 +81,111 @@ func (registry *ProviderRegistry) Remove(tenantID string, capability Capability,
 	if registry.closed {
 		return ErrRegistryClosed
 	}
-	delete(registry.providers, providerRegistryKey{tenantID: tenantID, capability: capability, provider: strings.ToLower(strings.TrimSpace(provider))})
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if !validCapability(capability) || !validProviderName(provider) {
+		return fmt.Errorf("%w: invalid backend provider scope", ErrInvalid)
+	}
+	delete(registry.providers, providerRegistryKey{tenantID: tenantID, capability: capability, provider: provider})
 	return nil
 }
 
 // Resolve returns a registered provider after validating the explicit tenant
 // and binding identity. It never falls back to another tenant's provider.
 func (registry *ProviderRegistry) Resolve(ctx context.Context, input StorageFactoryInput, binding CapabilityBinding) (CapabilityProvider, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := storageContextErr(ctx); err != nil {
 		return nil, err
 	}
-	if registry == nil || input.TenantID == "" {
+	if registry == nil || backendprofile.ValidateTenantID(input.TenantID) != nil || appmodel.ValidateAppID(input.AppID) != nil || !validCapability(binding.Capability) || !validCapabilityBinding(binding) {
 		return nil, ErrProviderUnavailable
 	}
+	providerName := strings.ToLower(strings.TrimSpace(binding.Provider))
 	registry.mu.RLock()
-	provider := registry.providers[providerRegistryKey{tenantID: input.TenantID, capability: binding.Capability, provider: strings.ToLower(strings.TrimSpace(binding.Provider))}]
+	provider := registry.providers[providerRegistryKey{tenantID: input.TenantID, capability: binding.Capability, provider: providerName}]
 	closed := registry.closed
 	registry.mu.RUnlock()
-	if closed || provider == nil {
+	if closed || isNilCapability(provider) {
 		return nil, ErrProviderUnavailable
 	}
 	return provider, nil
+}
+
+func validProviderName(value string) bool {
+	if value == "" || !utf8.ValidString(value) || strings.TrimSpace(value) != value || len(value) > 64 {
+		return false
+	}
+	for index, character := range value {
+		if (index == 0 && (character < 'a' || character > 'z')) ||
+			(index > 0 && (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' && character != '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func validCapabilityBinding(binding CapabilityBinding) bool {
+	provider := strings.ToLower(strings.TrimSpace(binding.Provider))
+	if !validCapability(binding.Capability) || !validProviderName(provider) || provider != binding.Provider || !validBindingText(binding.Endpoint, 4096, false) || !validBindingText(binding.SecretRef, 256, false) {
+		return false
+	}
+	if binding.SecretRef != "" && !validStorageSecretRef(binding.SecretRef) {
+		return false
+	}
+	for key, value := range binding.Options {
+		if !validOptionKey(key) || !validBindingText(value, 4096, false) || sensitiveCapabilityOptionKey(key) {
+			return false
+		}
+	}
+	return true
+}
+
+func validBindingText(value string, max int, required bool) bool {
+	return utf8.ValidString(value) && strings.TrimSpace(value) == value && strings.IndexFunc(value, unicode.IsControl) < 0 && len([]rune(value)) <= max && (!required || value != "")
+}
+
+func validOptionKey(value string) bool {
+	if value == "" || len(value) > 64 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, character := range value[1:] {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func validStorageSecretRef(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') {
+			continue
+		}
+		if index == 0 || (character != '.' && character != '_' && character != ':' && character != '/' && character != '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func sensitiveCapabilityOptionKey(key string) bool {
+	for _, part := range strings.FieldsFunc(key, func(r rune) bool { return r == '_' || r == '-' }) {
+		switch part {
+		case "api", "access", "secret", "private", "password", "passwd", "pwd", "token", "credential", "credentials", "dsn":
+			return true
+		}
+	}
+	compact := strings.NewReplacer("_", "", "-", "").Replace(key)
+	for _, sequence := range []string{"apikey", "accesskey", "secretkey", "privatekey", "connectionstring", "password", "passwd", "pwd", "passphrase", "token", "secret", "credential", "credentials", "dsn"} {
+		if strings.Contains(compact, sequence) {
+			return true
+		}
+	}
+	return false
 }
 
 // Close prevents future resolution and removes all factory references. It does

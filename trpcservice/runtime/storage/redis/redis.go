@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
@@ -62,7 +63,7 @@ type state struct {
 
 // New creates a store using a caller-owned Redis client.
 func New(client redisclient.UniversalClient, keyPrefix string) (*Store, error) {
-	if client == nil {
+	if nilvalue.Is(client) {
 		return nil, runtimestorage.ErrInvalid
 	}
 	keyPrefix = strings.TrimSpace(keyPrefix)
@@ -75,7 +76,7 @@ func New(client redisclient.UniversalClient, keyPrefix string) (*Store, error) {
 // NewFromURL creates and pings a Redis client from a redis:// URL. The URL is
 // never included in returned errors or logs.
 func NewFromURL(ctx context.Context, rawURL string) (*Store, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, runtimestorage.ErrInvalid
 	}
 	if err := ctx.Err(); err != nil {
@@ -102,7 +103,7 @@ func NewFromURL(ctx context.Context, rawURL string) (*Store, error) {
 // NewFromConfig creates and pings an owned client from explicit connection
 // settings. Password is accepted only as resolved runtime input.
 func NewFromConfig(ctx context.Context, config Config) (*Store, error) {
-	if ctx == nil || strings.TrimSpace(config.Addr) == "" || config.DB < 0 {
+	if nilvalue.Is(ctx) || strings.TrimSpace(config.Addr) == "" || config.DB < 0 {
 		return nil, runtimestorage.ErrInvalid
 	}
 	if err := ctx.Err(); err != nil {
@@ -144,13 +145,13 @@ func (s *Store) Ping(ctx context.Context) error {
 }
 
 func (s *Store) check(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return runtimestorage.ErrInvalid
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if s == nil || s.client == nil {
+	if s == nil || nilvalue.Is(s.client) {
 		return runtimestorage.ErrStorage
 	}
 	return nil
@@ -264,7 +265,7 @@ func mapRedisError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
-	if ctx != nil {
+	if !nilvalue.Is(ctx) {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
@@ -945,8 +946,8 @@ func (s *Store) Close() error {
 		return nil
 	}
 	s.closeOnce.Do(func() {
-		if s.owned {
-			if closer, ok := s.client.(interface{ Close() error }); ok {
+		if s.owned && !nilvalue.Is(s.client) {
+			if closer, ok := s.client.(interface{ Close() error }); ok && !nilvalue.Is(closer) {
 				s.closeErr = mapRedisError(context.Background(), closer.Close())
 			}
 		}

@@ -5,4 +5,13 @@ metadata:
 data:
   TRPC_CONTROL_PLANE_DRIVER: postgres
   TRPC_SESSION_BACKEND: postgres
+  TRPC_KNOWLEDGE_EMBEDDING_SECRET_REF: env/trpc-knowledge-embedding-api-key
+  TRPC_A2A_ENABLED: "false"
+  # Set this when TRPC_A2A_ENABLED is enabled.
+  TRPC_A2A_HOST: https://agent.example.com
+  TRPC_AGENT_API_ENABLED: "false"
+  TRPC_A2A_PATH: /a2a
+  TRPC_A2A_AGENT_NAME: trpc-agent
+  TRPC_AGENT_API_BASE_PATH: /trpc-agent/v1/apps
+  TRPC_AGENT_API_APP_NAME: trpc-agent
   OTEL_SERVICE_NAME: trpc-agent-service

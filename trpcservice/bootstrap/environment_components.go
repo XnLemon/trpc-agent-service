@@ -12,6 +12,7 @@ import (
 	appmysql "github.com/XnLemon/trpc-agent-service/trpcservice/app/mysql"
 	apppostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
+	auditmysql "github.com/XnLemon/trpc-agent-service/trpcservice/audit/mysql"
 	auditpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/audit/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -36,7 +37,14 @@ import (
 
 func environmentRepositories(config environmentConfig, db *sql.DB) (tenant.Repository, appmodel.Repository, channels.CandidateConsumer, audit.Writer, error) {
 	if config.driver == ControlPlaneDriverMySQL {
-		return tenantmysql.NewRepository(db), appmysql.NewAppRepository(db), channelmysql.NewRepository(db), nil, nil
+		var auditWriter audit.Writer
+		var err error
+		if len(config.apiIdentities) > 1 {
+			auditWriter = auditmysql.NewMultiTenant(db)
+		} else {
+			auditWriter, err = auditmysql.New(db, config.tenantID)
+		}
+		return tenantmysql.NewRepository(db), appmysql.NewAppRepository(db), channelmysql.NewRepository(db), auditWriter, err
 	}
 	tenantRepo := tenantpostgres.NewRepository(db)
 	appRepo := apppostgres.NewAppRepository(db)
@@ -241,6 +249,19 @@ func environmentRegistriesForStores(config environmentConfig, delegateSessions s
 		}
 		if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.secretRef}, modelAPIKey); err != nil {
 			return nil, nil, nil, err
+		}
+		embeddingAPIKey := config.knowledgeEmbeddingAPIKey
+		if len(config.knowledgeEmbeddingAPIKeys) != 0 {
+			embeddingAPIKey = config.knowledgeEmbeddingAPIKeys[identity.TenantID]
+		}
+		// loadEnvironment requires this pair for PostgreSQL Knowledge. Keep
+		// the lower-level registry constructor usable by tests and explicitly
+		// local callers that do not enable Knowledge administration; the
+		// management provider itself still fails closed when the pair is absent.
+		if embeddingAPIKey != "" && config.knowledgeEmbeddingSecretRef != "" {
+			if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.knowledgeEmbeddingSecretRef}, embeddingAPIKey); err != nil {
+				return nil, nil, nil, err
+			}
 		}
 		if err := modelRegistry.Register(identity.TenantID, config.modelProvider, environmentModelFactory{}); err != nil {
 			return nil, nil, nil, err

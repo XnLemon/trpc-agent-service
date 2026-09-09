@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/internal/nilvalue"
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelsinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
@@ -84,7 +85,7 @@ func run(ctx context.Context, lookup func(string) string, stdout io.Writer) erro
 }
 
 func runWithPreflight(ctx context.Context, lookup func(string) string, stdout io.Writer, prepare prepareBotFunc) error {
-	if ctx == nil || lookup == nil || stdout == nil {
+	if nilvalue.Is(ctx) || lookup == nil || stdout == nil {
 		return errConfiguration
 	}
 	if prepare == nil {
@@ -440,7 +441,7 @@ func newDeterministicDispatcher(marker, reply string) *deterministicDispatcher {
 }
 
 func (dispatcher *deterministicDispatcher) Dispatch(ctx context.Context, request gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
-	if dispatcher == nil || ctx == nil {
+	if dispatcher == nil || nilvalue.Is(ctx) {
 		return nil, errConfiguration
 	}
 	if err := ctx.Err(); err != nil {

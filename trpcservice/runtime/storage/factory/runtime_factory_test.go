@@ -29,7 +29,7 @@ func TestRegistryStorageFactoryMaterializesTenantSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}}
+	input := StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}}
 	set, err := storageFactory.New(context.Background(), input)
 	if err != nil {
 		t.Fatal(err)
@@ -200,10 +200,10 @@ func TestRegistryStorageFactoryCancellationAndMissingSession(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := factory.New(ctx, StorageFactoryInput{TenantID: "t_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "missing"}}}); !errors.Is(err, context.Canceled) {
+	if _, err := factory.New(ctx, StorageFactoryInput{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "missing"}}}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled New() = %v", err)
 	}
-	if _, err := factory.New(context.Background(), StorageFactoryInput{TenantID: "t_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilityMemory, Provider: "missing"}}}); !errors.Is(err, ErrStorageFactory) {
+	if _, err := factory.New(context.Background(), StorageFactoryInput{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilityMemory, Provider: "missing"}}}); !errors.Is(err, ErrStorageFactory) {
 		t.Fatalf("missing provider New() = %v", err)
 	}
 }
@@ -222,7 +222,7 @@ func TestRegistryStorageFactoryCancellationAfterProviderSuccess(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	provider.cancel = cancel
-	if _, err := factory.New(ctx, StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}}); !errors.Is(err, context.Canceled) {
+	if _, err := factory.New(ctx, StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("provider-success cancellation = %v", err)
 	}
 	select {
@@ -260,7 +260,7 @@ func TestRegistryStorageFactoryBuildsTenantCapabilitiesConcurrently(t *testing.T
 		group.Add(1)
 		go func(tenantID string) {
 			defer group.Done()
-			set, newErr := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}})
+			set, newErr := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}})
 			if newErr != nil {
 				errorsCh <- newErr
 				return
@@ -382,7 +382,7 @@ func TestRegistryStorageFactoryClosesEarlierCapabilityAndScopesSecrets(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{
+	_, err = factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{
 		{Capability: CapabilitySession, Provider: "session", SecretRef: "secret/session"},
 		{Capability: CapabilityMemory, Provider: "broken"},
 	}})
@@ -418,7 +418,7 @@ func TestRegistryStorageFactoryRejectsDuplicateCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{
+	_, err = factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{
 		{Capability: CapabilitySession, Provider: "one"},
 		{Capability: CapabilitySession, Provider: "two"},
 	}})
@@ -453,18 +453,18 @@ func TestRegistryStorageFactoryValidationAndResolverFailures(t *testing.T) {
 	})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session", SecretRef: "missing"}}}); !errors.Is(err, ErrStorageFactory) {
+	if _, err := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session", SecretRef: "missing"}}}); !errors.Is(err, ErrStorageFactory) {
 		t.Fatalf("missing secret New() = %v", err)
 	}
-	if _, err := factory.New(nil, StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session"}}}); !errors.Is(err, ErrStorageFactory) {
+	if _, err := factory.New(nil, StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session"}}}); !errors.Is(err, ErrStorageFactory) {
 		t.Fatalf("nil context New() = %v", err)
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := factory.New(canceled, StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session"}}}); !errors.Is(err, context.Canceled) {
+	if _, err := factory.New(canceled, StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session"}}}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled New() = %v", err)
 	}
-	if _, err := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{}}}); !errors.Is(err, ErrStorageFactory) {
+	if _, err := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{}}}); !errors.Is(err, ErrStorageFactory) {
 		t.Fatalf("invalid binding New() = %v", err)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -24,7 +25,7 @@ type responsesModel struct {
 
 func (m *responsesModel) Info() trpcmodel.Info { return trpcmodel.Info{Name: m.model} }
 func (m *responsesModel) GenerateContent(ctx context.Context, request *trpcmodel.Request) (<-chan *trpcmodel.Response, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, fmt.Errorf("responses model context is required")
 	}
 	if request == nil {

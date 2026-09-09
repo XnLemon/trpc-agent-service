@@ -12,6 +12,7 @@ import (
 	apppostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -82,7 +83,7 @@ type DemoResult struct {
 // local demo. It uses the existing domain repositories for every write and
 // fails closed when existing state is partial or incompatible.
 func InitializeDemo(ctx context.Context, db *sql.DB, input DemoConfig) (DemoResult, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return DemoResult{}, ErrInvalidConfig
 	}
 	if err := ctx.Err(); err != nil {

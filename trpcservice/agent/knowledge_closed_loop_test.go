@@ -19,7 +19,7 @@ import (
 func TestRunnerExecutesAuthorizedUpstreamKnowledgeTool(t *testing.T) {
 	input := runnerBuilderInputForTest(t)
 	input.Agent.Tools = []appmodel.ToolAuthorization{{ToolID: "knowledge_search", Required: true}}
-	kb := &recordingKnowledge{}
+	kb := &recordingKnowledge{appID: input.Agent.AppID}
 	toolModel := &knowledgeToolCallingModel{}
 	sessions := sessioninmemory.NewSessionService()
 	factory := storagefactory.StorageFactoryFunc(func(_ context.Context, value backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
@@ -102,13 +102,18 @@ func (factory knowledgeModelFactory) New(ctx context.Context, input modelprofile
 type recordingKnowledge struct {
 	mu        sync.Mutex
 	lastQuery string
+	appID     string
 }
 
 func (knowledgeBase *recordingKnowledge) Search(_ context.Context, request *knowledge.SearchRequest) (*knowledge.SearchResult, error) {
 	knowledgeBase.mu.Lock()
 	knowledgeBase.lastQuery = request.Query
 	knowledgeBase.mu.Unlock()
-	doc := &document.Document{ID: "policy", Name: "Tenant policy", Content: "Every execution uses its authenticated tenant identity."}
+	appID := knowledgeBase.appID
+	if appID == "" {
+		appID = "app_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	}
+	doc := &document.Document{ID: "policy", Name: "Tenant policy", Content: "Every execution uses its authenticated tenant identity.", Metadata: map[string]any{KnowledgeAppMetadataKey: appID}}
 	return &knowledge.SearchResult{Document: doc, Text: doc.Content, Score: 1, Documents: []*knowledge.Result{{Document: doc, Score: 1}}}, nil
 }
 

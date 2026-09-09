@@ -9,6 +9,7 @@ import (
 	"time"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // List returns a stable page of Apps belonging to one tenant.
@@ -639,6 +640,9 @@ func conflict(expected, actual int64) error {
 }
 
 func checkContext(ctx context.Context) error {
+	if nilvalue.Is(ctx) {
+		return fmt.Errorf("%w: context is required", appmodel.ErrInvalid)
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

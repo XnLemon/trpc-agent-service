@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/migrations"
 	"github.com/XnLemon/trpc-agent-service/trpcservice"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
@@ -129,7 +130,7 @@ func runInit(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 	if err != nil {
 		return err
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return bootstrap.ErrInvalidConfig
 	}
 	initContext := ctx
@@ -187,7 +188,7 @@ func runDemo(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 	if dsn == "" {
 		return fmt.Errorf("%w: %s is required", bootstrap.ErrInvalidConfig, bootstrapPostgresDSN)
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return bootstrap.ErrInvalidConfig
 	}
 	demoContext := ctx
@@ -333,7 +334,7 @@ func newServiceHTTPServer(handler http.Handler, options serviceOptions) *http.Se
 }
 
 func runService(ctx context.Context, signals <-chan os.Signal, handler *gateway.HTTPHandler, shutdownTimeout time.Duration, serve func() error, shutdown func(context.Context) error) error {
-	if ctx == nil || serve == nil || shutdown == nil || shutdownTimeout <= 0 {
+	if nilvalue.Is(ctx) || serve == nil || shutdown == nil || shutdownTimeout <= 0 {
 		return errInvalidServiceSupervisorConfiguration
 	}
 	serveResult := make(chan error, 1)

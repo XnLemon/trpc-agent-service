@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 type contextKey struct{}
@@ -47,6 +49,9 @@ func NewConfigurationSnapshot(t *Tenant) (ConfigurationSnapshot, error) {
 
 // WithConfigurationSnapshot carries a fixed configuration for one execution.
 func WithConfigurationSnapshot(ctx context.Context, snapshot ConfigurationSnapshot) context.Context {
+	if nilvalue.Is(ctx) {
+		return nil
+	}
 	if snapshot.tenant == nil {
 		return context.WithValue(ctx, contextKey{}, ConfigurationSnapshot{})
 	}
@@ -55,6 +60,9 @@ func WithConfigurationSnapshot(ctx context.Context, snapshot ConfigurationSnapsh
 
 // ConfigurationSnapshotFromContext returns a defensive copy.
 func ConfigurationSnapshotFromContext(ctx context.Context) (ConfigurationSnapshot, bool) {
+	if nilvalue.Is(ctx) {
+		return ConfigurationSnapshot{}, false
+	}
 	snapshot, ok := ctx.Value(contextKey{}).(ConfigurationSnapshot)
 	if !ok || snapshot.tenant == nil {
 		return ConfigurationSnapshot{}, false

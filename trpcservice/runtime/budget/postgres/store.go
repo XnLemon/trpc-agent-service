@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
 )
 
@@ -302,7 +303,7 @@ func lockReservation(ctx context.Context, tx *sql.Tx, tenantID, reservationID st
 }
 
 func validateContext(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return budget.ErrInvalid
 	}
 	if err := ctx.Err(); err != nil {

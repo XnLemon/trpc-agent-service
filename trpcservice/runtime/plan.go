@@ -10,6 +10,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
@@ -149,15 +150,29 @@ func (plan ExecutionPlan) ModelFactoryInput() (modelprofile.ModelFactoryInput, e
 }
 
 // StorageFactoryInput returns the secret-free Storage Factory boundary.
+// Backend profiles are tenant-owned, so the immutable Agent App scope is
+// attached here before any capability provider can materialize a client.
 func (plan ExecutionPlan) StorageFactoryInput() (backend.StorageFactoryInput, error) {
 	if err := plan.validate(); err != nil {
 		return backend.StorageFactoryInput{}, err
 	}
-	return plan.backend.FactoryInput()
+	input, err := plan.backend.FactoryInput()
+	if err != nil {
+		return backend.StorageFactoryInput{}, err
+	}
+	agentInput, err := plan.agent.FactoryInput()
+	if err != nil {
+		return backend.StorageFactoryInput{}, err
+	}
+	input.AppID = agentInput.AppID
+	return input, nil
 }
 
 // WithExecutionPlan carries a validated defensive plan in a Context.
 func WithExecutionPlan(ctx context.Context, plan ExecutionPlan) context.Context {
+	if nilvalue.Is(ctx) {
+		return nil
+	}
 	if plan.validate() != nil {
 		return context.WithValue(ctx, executionPlanContextKey{}, ExecutionPlan{})
 	}
@@ -166,6 +181,9 @@ func WithExecutionPlan(ctx context.Context, plan ExecutionPlan) context.Context 
 
 // ExecutionPlanFromContext returns a validated defensive plan copy.
 func ExecutionPlanFromContext(ctx context.Context) (ExecutionPlan, bool) {
+	if nilvalue.Is(ctx) {
+		return ExecutionPlan{}, false
+	}
 	plan, ok := ctx.Value(executionPlanContextKey{}).(ExecutionPlan)
 	if !ok || plan.validate() != nil {
 		return ExecutionPlan{}, false

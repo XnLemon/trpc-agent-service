@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -57,11 +58,16 @@ type Invocation struct {
 // stream. The returned channel is closed after a terminal event, source
 // closure, or bounded cancellation drain. The caller owns the returned stream
 // consumption; the Runner lifecycle remains owned by the runtime registry.
-func Invoke(ctx context.Context, runner Runner, request Invocation, drainTimeout time.Duration) (<-chan RunnerEvent, error) {
-	if ctx == nil {
+func Invoke(ctx context.Context, runner Runner, request Invocation, drainTimeout time.Duration) (output <-chan RunnerEvent, err error) {
+	defer func() {
+		if recover() != nil {
+			output, err = nil, ErrRunnerExecution
+		}
+	}()
+	if nilvalue.Is(ctx) {
 		return nil, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if runner == nil {
+	if nilvalue.Is(runner) {
 		return nil, fmt.Errorf("%w: runner is required", ErrInvalid)
 	}
 	if request.UserID == "" || request.SessionID == "" {
@@ -77,9 +83,9 @@ func Invoke(ctx context.Context, runner Runner, request Invocation, drainTimeout
 	if runnerEvents == nil {
 		return nil, fmt.Errorf("%w: runner event stream is nil", ErrInvalid)
 	}
-	output := make(chan RunnerEvent, 32)
-	go forwardRunnerEvents(ctx, runnerEvents, output, drainTimeout)
-	return output, nil
+	stream := make(chan RunnerEvent, 32)
+	go forwardRunnerEvents(ctx, runnerEvents, stream, drainTimeout)
+	return stream, nil
 }
 
 func forwardRunnerEvents(ctx context.Context, source <-chan *trpcevent.Event, output chan<- RunnerEvent, drainTimeout time.Duration) {
@@ -156,7 +162,7 @@ func externalResponseText(response *trpcmodel.Response) string {
 }
 
 func sendRunnerEvent(ctx context.Context, output chan<- RunnerEvent, event RunnerEvent) bool {
-	if ctx == nil || ctx.Err() != nil {
+	if nilvalue.Is(ctx) || ctx.Err() != nil {
 		return false
 	}
 	select {

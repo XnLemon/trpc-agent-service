@@ -292,6 +292,11 @@ jobs:
       MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN: trpc_migration:mysql@tcp(127.0.0.1:3306)/trpc_agent_mysql_migration_test?parseTime=true&loc=UTC
       MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN: trpc_migration:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
       MYSQL_CONTROL_PLANE_TEST_DSN: trpc_app:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
+      TRPC_LIVE_INTEGRATION: "1"
+      TRPC_POSTGRES_KNOWLEDGE_LIVE_DSN: postgres://postgres:postgres@127.0.0.1:5433/trpc_agent_repository_test?sslmode=disable
+      TRPC_POSTGRES_KNOWLEDGE_LIVE_MIGRATION_DSN: postgres://postgres:postgres@127.0.0.1:5433/trpc_agent_repository_test?sslmode=disable
+      TRPC_POSTGRES_TOOL_INVOCATION_LIVE_DSN: postgres://postgres:postgres@127.0.0.1:5433/trpc_agent_repository_test?sslmode=disable
+      TRPC_POSTGRES_TOOL_INVOCATION_LIVE_MIGRATION_DSN: postgres://postgres:postgres@127.0.0.1:5433/trpc_agent_repository_test?sslmode=disable
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -321,9 +326,10 @@ jobs:
             go test ./migrations -run '^TestMySQLControlPlaneMigrationLive$' -count=1
           MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN="$MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN" \
             go test ./migrations -run '^TestMySQLControlPlaneMigrationLive$' -count=1
-          for table in tenant model_profile agent_app agent_app_revision agent_app_revision_tool backend_profile backend_profile_binding channel_binding tenant_status_change_outbox model_profile_change_outbox backend_profile_change_outbox agent_app_change_outbox channel_binding_change_outbox tenant_configuration_outbox; do
+          for table in tenant model_profile agent_app agent_app_revision agent_app_revision_tool backend_profile backend_profile_binding channel_binding tenant_status_change_outbox model_profile_change_outbox backend_profile_change_outbox agent_app_change_outbox channel_binding_change_outbox tenant_configuration_outbox runtime_tool_invocation; do
             mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "GRANT SELECT, INSERT, UPDATE, DELETE ON trpc_agent_mysql_repository_test.${table} TO 'trpc_app'@'%';"
           done
+          mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "GRANT SELECT, INSERT ON trpc_agent_mysql_repository_test.audit_event TO 'trpc_app'@'%';"
 
       - name: Build
         run: ./scripts/build.sh
@@ -412,6 +418,11 @@ jobs:
       MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN: trpc_migration:mysql@tcp(127.0.0.1:3306)/trpc_agent_mysql_migration_test?parseTime=true&loc=UTC
       MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN: trpc_migration:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
       MYSQL_CONTROL_PLANE_TEST_DSN: trpc_app:mysql@tcp(127.0.0.1:3307)/trpc_agent_mysql_repository_test?parseTime=true&loc=UTC
+      TRPC_LIVE_INTEGRATION: "1"
+      TRPC_POSTGRES_KNOWLEDGE_LIVE_DSN: postgres://postgres:postgres@127.0.0.1:5433/trpc_agent_repository_test?sslmode=disable
+      TRPC_POSTGRES_KNOWLEDGE_LIVE_MIGRATION_DSN: postgres://postgres:postgres@127.0.0.1:5433/trpc_agent_repository_test?sslmode=disable
+      TRPC_POSTGRES_TOOL_INVOCATION_LIVE_DSN: postgres://postgres:postgres@127.0.0.1:5433/trpc_agent_repository_test?sslmode=disable
+      TRPC_POSTGRES_TOOL_INVOCATION_LIVE_MIGRATION_DSN: postgres://postgres:postgres@127.0.0.1:5433/trpc_agent_repository_test?sslmode=disable
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -441,9 +452,10 @@ jobs:
             go test ./migrations -run '^TestMySQLControlPlaneMigrationLive$' -count=1
           MYSQL_CONTROL_PLANE_MIGRATION_TEST_DSN="$MYSQL_CONTROL_PLANE_REPOSITORY_MIGRATION_DSN" \
             go test ./migrations -run '^TestMySQLControlPlaneMigrationLive$' -count=1
-          for table in tenant model_profile agent_app agent_app_revision agent_app_revision_tool backend_profile backend_profile_binding channel_binding tenant_status_change_outbox model_profile_change_outbox backend_profile_change_outbox agent_app_change_outbox channel_binding_change_outbox tenant_configuration_outbox; do
+          for table in tenant model_profile agent_app agent_app_revision agent_app_revision_tool backend_profile backend_profile_binding channel_binding tenant_status_change_outbox model_profile_change_outbox backend_profile_change_outbox agent_app_change_outbox channel_binding_change_outbox tenant_configuration_outbox runtime_tool_invocation; do
             mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "GRANT SELECT, INSERT, UPDATE, DELETE ON trpc_agent_mysql_repository_test.${table} TO 'trpc_app'@'%';"
           done
+          mysql --protocol=tcp -h 127.0.0.1 -P 3307 -uroot -pmysql -e "GRANT SELECT, INSERT ON trpc_agent_mysql_repository_test.audit_event TO 'trpc_app'@'%';"
 
       - name: Race test
         run: ./scripts/race.sh

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 var (
@@ -133,7 +135,7 @@ func (s *InMemoryHandoffStore) Get(ctx context.Context, tenantID, handoffID stri
 }
 
 func handoffContext(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return ErrInvalid
 	}
 	return ctx.Err()

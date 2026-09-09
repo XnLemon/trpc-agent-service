@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/jsonstrict"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 )
 
@@ -55,13 +57,26 @@ func New(config Config) (*Manager, error) {
 	return &Manager{baseURL: baseURL, token: strings.TrimSpace(config.Token), mount: strings.Trim(config.Mount, "/"), client: client}, nil
 }
 
+func vaultContextErr(ctx context.Context) error {
+	if nilvalue.Is(ctx) {
+		return ErrInvalid
+	}
+	return ctx.Err()
+}
+
 // Read implements model.SecretManager. Vault response and transport details
 // are reduced to stable redacted errors.
-func (manager *Manager) Read(ctx context.Context, scope modelprofile.SecretScope) (modelprofile.SecretValue, error) {
-	if ctx == nil {
+func (manager *Manager) Read(ctx context.Context, scope modelprofile.SecretScope) (value modelprofile.SecretValue, err error) {
+	defer func() {
+		if recover() != nil {
+			value = modelprofile.SecretValue{}
+			err = ErrUnavailable
+		}
+	}()
+	if nilvalue.Is(ctx) {
 		return modelprofile.SecretValue{}, ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := vaultContextErr(ctx); err != nil {
 		return modelprofile.SecretValue{}, err
 	}
 	if manager == nil || manager.client == nil || scope.Validate() != nil {
@@ -79,16 +94,23 @@ func (manager *Manager) Read(ctx context.Context, scope modelprofile.SecretScope
 	request.Header.Set("X-Vault-Token", manager.token)
 	response, err := manager.client.Do(request)
 	if err != nil {
-		if ctx.Err() != nil {
-			return modelprofile.SecretValue{}, ctx.Err()
+		if contextErr := vaultContextErr(ctx); contextErr != nil {
+			return modelprofile.SecretValue{}, contextErr
 		}
 		return modelprofile.SecretValue{}, ErrUnavailable
 	}
-	defer response.Body.Close()
+	if response == nil || response.Body == nil {
+		return modelprofile.SecretValue{}, ErrUnavailable
+	}
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 		return modelprofile.SecretValue{}, ErrUnauthorized
 	}
 	if response.StatusCode != http.StatusOK {
+		return modelprofile.SecretValue{}, ErrUnavailable
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil || len(body) > 1<<20 || jsonstrict.Validate(body, true) != nil {
 		return modelprofile.SecretValue{}, ErrUnavailable
 	}
 	var payload struct {
@@ -96,18 +118,18 @@ func (manager *Manager) Read(ctx context.Context, scope modelprofile.SecretScope
 			Data map[string]any `json:"data"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		return modelprofile.SecretValue{}, ErrUnavailable
 	}
 	raw, ok := payload.Data.Data["value"].(string)
 	if !ok || raw == "" {
 		return modelprofile.SecretValue{}, ErrUnavailable
 	}
-	value, err := modelprofile.NewSecretValue(raw)
+	value, err = modelprofile.NewSecretValue(raw)
 	if err != nil {
 		return modelprofile.SecretValue{}, fmt.Errorf("%w: secret value is invalid", ErrUnavailable)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := vaultContextErr(ctx); err != nil {
 		return modelprofile.SecretValue{}, err
 	}
 	return value, nil

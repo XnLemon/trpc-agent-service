@@ -8,6 +8,8 @@ import (
 	"math/big"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Status is the lifecycle state of an Agent App.
@@ -194,6 +196,9 @@ func validStatus(status Status) bool {
 }
 
 func validateAppMetadata(displayName, description string) error {
+	if !validAppText(displayName) || !validAppText(description) {
+		return fmt.Errorf("%w: app metadata contains invalid text", ErrInvalid)
+	}
 	if n := len([]rune(strings.TrimSpace(displayName))); n < 1 || n > 200 {
 		return fmt.Errorf("%w: display name must contain 1-200 characters", ErrInvalid)
 	}
@@ -217,6 +222,13 @@ func normalizeAppKey(key string) (string, error) {
 	return key, nil
 }
 
+func validAppText(value string) bool {
+	if !utf8.ValidString(value) {
+		return false
+	}
+	return strings.IndexFunc(value, unicode.IsControl) < 0
+}
+
 func validateTenantID(id string) error {
 	return validateCrockfordID(id, "t_", "tenant")
 }
@@ -224,6 +236,10 @@ func validateTenantID(id string) error {
 func validateAppID(id string) error {
 	return validateCrockfordID(id, "app_", "agent app")
 }
+
+// ValidateAppID validates the canonical Agent App identifier used by runtime
+// capability and protocol scope boundaries.
+func ValidateAppID(id string) error { return validateAppID(id) }
 
 func validateCrockfordID(id, prefix, label string) error {
 	payload := strings.TrimPrefix(id, prefix)

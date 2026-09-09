@@ -9,6 +9,8 @@ import (
 	"math/big"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Status is the lifecycle state of a tenant.
@@ -105,6 +107,9 @@ func (t Tenant) Validate() error {
 		return fmt.Errorf("%w: unknown status %q", ErrInvalid, t.Status)
 	}
 	if err := validateConfiguration(t.DisplayName, t.RateLimitRPM, t.MaxConcurrentExecutions, t.MonthlyTokenBudget, t.MonthlySpendLimitMinor, t.BillingCurrency, t.AuditRetentionDays, t.LogMaskingLevel, t.TraceSamplingRate); err != nil {
+		return err
+	}
+	if err := ValidateDefaultReferences(t.DefaultAgentAppID, t.DefaultBackendProfileID); err != nil {
 		return err
 	}
 	if t.Version < 1 || t.CreatedAt.IsZero() || t.UpdatedAt.IsZero() {
@@ -214,6 +219,9 @@ func NewTenant(input CreateInput) (*Tenant, error) {
 	if err := validateConfiguration(input.DisplayName, input.RateLimitRPM, input.MaxConcurrentExecutions, input.MonthlyTokenBudget, input.MonthlySpendLimitMinor, input.BillingCurrency, input.AuditRetentionDays, input.LogMaskingLevel, input.TraceSamplingRate); err != nil {
 		return nil, err
 	}
+	if err := ValidateDefaultReferences(input.DefaultAgentAppID, input.DefaultBackendProfileID); err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	tenant := &Tenant{
 		TenantID: id, TenantKey: key, DisplayName: strings.TrimSpace(input.DisplayName), Status: status,
@@ -244,6 +252,9 @@ func validateConfiguration(displayName string, rate, concurrent, tokens, spend *
 }
 
 func validateDisplayName(displayName string) error {
+	if !utf8.ValidString(displayName) || strings.IndexFunc(displayName, unicode.IsControl) >= 0 {
+		return fmt.Errorf("%w: display name contains invalid text", ErrInvalid)
+	}
 	if n := len([]rune(strings.TrimSpace(displayName))); n < 1 || n > 200 {
 		return fmt.Errorf("%w: display name must contain 1-200 characters", ErrInvalid)
 	}
@@ -292,6 +303,44 @@ func validateTelemetryConfiguration(retention int, masking LogMaskingLevel, samp
 // ValidateConfiguration validates a complete configuration snapshot.
 func ValidateConfiguration(displayName string, rate, concurrent, tokens, spend *int64, currency string, retention int, masking LogMaskingLevel, sampling float64) error {
 	return validateConfiguration(displayName, rate, concurrent, tokens, spend, currency, retention, masking, sampling)
+}
+
+// ValidateDefaultReferences validates optional cross-domain references before
+// a repository performs its tenant-scoped existence checks.
+func ValidateDefaultReferences(appID, backendProfileID *string) error {
+	if err := validateDefaultReference(appID, "default agent app id"); err != nil {
+		return err
+	}
+	return validateDefaultReference(backendProfileID, "default backend profile id")
+}
+
+func validateDefaultReference(value *string, label string) error {
+	if value == nil {
+		return nil
+	}
+	if !utf8.ValidString(*value) || *value == "" || strings.TrimSpace(*value) != *value || strings.IndexFunc(*value, unicode.IsControl) >= 0 || strings.Contains(*value, "://") || len([]rune(*value)) > 256 {
+		return fmt.Errorf("%w: %s is invalid", ErrInvalid, label)
+	}
+	prefix := "app_"
+	if label == "default backend profile id" {
+		prefix = "bp_"
+	}
+	if !validScopedReferenceID(*value, prefix) {
+		return fmt.Errorf("%w: %s is not a canonical ID", ErrInvalid, label)
+	}
+	return nil
+}
+
+func validScopedReferenceID(value, prefix string) bool {
+	if len(value) != len(prefix)+26 || !strings.HasPrefix(value, prefix) || value[len(prefix)] > '7' {
+		return false
+	}
+	for _, character := range value[len(prefix):] {
+		if !strings.ContainsRune("0123456789ABCDEFGHJKMNPQRSTVWXYZ", character) {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeTenantKey(key string) (string, error) {

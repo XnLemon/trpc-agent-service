@@ -3,7 +3,11 @@ package model
 import (
 	"context"
 	"fmt"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -139,6 +143,9 @@ func (snapshot ModelExecutionSnapshot) FactoryInput() (ModelFactoryInput, error)
 // WithModelExecutionSnapshot carries a validated defensive copy for one
 // execution. Invalid or zero snapshots overwrite the context value.
 func WithModelExecutionSnapshot(ctx context.Context, snapshot ModelExecutionSnapshot) context.Context {
+	if nilvalue.Is(ctx) {
+		return nil
+	}
 	if err := snapshot.validate(); err != nil {
 		return context.WithValue(ctx, executionSnapshotContextKey{}, ModelExecutionSnapshot{})
 	}
@@ -147,6 +154,9 @@ func WithModelExecutionSnapshot(ctx context.Context, snapshot ModelExecutionSnap
 
 // ModelExecutionSnapshotFromContext returns a validated defensive copy.
 func ModelExecutionSnapshotFromContext(ctx context.Context) (ModelExecutionSnapshot, bool) {
+	if nilvalue.Is(ctx) {
+		return ModelExecutionSnapshot{}, false
+	}
 	snapshot, ok := ctx.Value(executionSnapshotContextKey{}).(ModelExecutionSnapshot)
 	if !ok || snapshot.validate() != nil {
 		return ModelExecutionSnapshot{}, false
@@ -182,7 +192,8 @@ func (scope SecretScope) Validate() error {
 	if scope.SecretRef == "" {
 		return fmt.Errorf("%w: secret reference is required", ErrInvalid)
 	}
-	if _, err := normalizeSecretRef(scope.SecretRef, FieldRequired); err != nil {
+	normalized, err := normalizeSecretRef(scope.SecretRef, FieldRequired)
+	if err != nil || normalized != scope.SecretRef {
 		return fmt.Errorf("%w: secret scope is invalid", ErrInvalid)
 	}
 	return nil
@@ -195,8 +206,13 @@ type SecretValue struct{ value string }
 // NewSecretValue creates a fake/provider value for a trusted resolver. The
 // value is deliberately not serializable through this type's public API.
 func NewSecretValue(value string) (SecretValue, error) {
-	if value == "" {
-		return SecretValue{}, fmt.Errorf("%w: secret value is empty", ErrInvalid)
+	if strings.TrimSpace(value) == "" || !utf8.ValidString(value) {
+		return SecretValue{}, fmt.Errorf("%w: secret value is empty or invalid UTF-8", ErrInvalid)
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return SecretValue{}, fmt.Errorf("%w: secret value contains control characters", ErrInvalid)
+		}
 	}
 	return SecretValue{value: value}, nil
 }
@@ -238,9 +254,29 @@ func (input ModelFactoryInput) Validate() error {
 	if input.TenantVersion < 1 || input.ProfileVersion < 1 || input.SchemaVersion != SchemaVersionV1 || input.ContentDigest == "" || input.Provider == "" || input.Model == "" {
 		return fmt.Errorf("%w: factory input is incomplete", ErrInvalid)
 	}
+	provider := strings.ToLower(strings.TrimSpace(input.Provider))
+	modelName := strings.ToLower(strings.TrimSpace(input.Model))
+	if provider != input.Provider || modelName != input.Model || !validName(provider) || !validName(modelName) {
+		return fmt.Errorf("%w: factory provider or model is not normalized", ErrInvalid)
+	}
+	if !utf8.ValidString(input.ContentDigest) || strings.TrimSpace(input.ContentDigest) != input.ContentDigest || hasControl(input.ContentDigest) {
+		return fmt.Errorf("%w: factory content digest is invalid", ErrInvalid)
+	}
+	if input.Endpoint != "" {
+		if !utf8.ValidString(input.Endpoint) || strings.TrimSpace(input.Endpoint) != input.Endpoint || hasControl(input.Endpoint) || len([]rune(input.Endpoint)) > maxEndpointLen {
+			return fmt.Errorf("%w: factory endpoint is invalid", ErrInvalid)
+		}
+	}
+	for key, value := range input.Options {
+		normalizedKey := strings.ToLower(strings.TrimSpace(key))
+		if normalizedKey != key || !validOptionKey(key) || sensitiveOptionKey(key) || !utf8.ValidString(value) || strings.TrimSpace(value) != value || hasControl(value) || len([]rune(value)) > maxOptionLen {
+			return fmt.Errorf("%w: factory option is invalid", ErrInvalid)
+		}
+	}
 	if input.SecretRef != "" {
-		if _, err := normalizeSecretRef(input.SecretRef, FieldRequired); err != nil {
-			return err
+		normalized, err := normalizeSecretRef(input.SecretRef, FieldRequired)
+		if err != nil || normalized != input.SecretRef {
+			return fmt.Errorf("%w: factory secret reference is invalid", ErrInvalid)
 		}
 	}
 	if _, err := normalizeGeneration(input.Generation); err != nil {

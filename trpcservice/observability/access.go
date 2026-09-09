@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 var (
@@ -32,13 +34,22 @@ type PlatformAuthorizer interface {
 // AuthorizeTenant validates an authorized actor/tenant pair before a dashboard
 // or aggregate query is constructed. It never builds a query expression.
 func AuthorizeTenant(ctx context.Context, authorizer TenantAuthorizer, actorID, tenantID string) error {
-	if ctx == nil || strings.TrimSpace(actorID) == "" || strings.TrimSpace(tenantID) == "" || strings.ContainsAny(actorID+tenantID, "\r\n") {
+	if nilvalue.Is(ctx) || strings.TrimSpace(actorID) == "" || strings.TrimSpace(tenantID) == "" || strings.ContainsAny(actorID+tenantID, "\r\n") {
 		return ErrInvalidTenantScope
 	}
-	if authorizer == nil || !authorizer.AllowTenant(ctx, actorID, tenantID) {
+	if nilvalue.Is(authorizer) || !callTenantAuthorization(authorizer, ctx, actorID, tenantID) {
 		return ErrTenantAccessDenied
 	}
 	return nil
+}
+
+func callTenantAuthorization(authorizer TenantAuthorizer, ctx context.Context, actorID, tenantID string) (allowed bool) {
+	defer func() {
+		if recover() != nil {
+			allowed = false
+		}
+	}()
+	return authorizer.AllowTenant(ctx, actorID, tenantID)
 }
 
 // StaticTenantAuthorizer is a small immutable authorizer for process-local

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,8 +12,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/jsonstrict"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
@@ -42,25 +47,33 @@ type HTTPConfig struct {
 	MaxBodyBytes   int64
 	RequestTimeout time.Duration
 	Observability  observability.Provider
+	A2A            A2AConfig
+	TRPCAgent      TRPCAgentConfig
 }
 
 // HTTPHandler serves the first strict JSON/SSE Gateway surface.
 type HTTPHandler struct {
-	dispatcher     DispatchService
-	authenticator  APIAuthenticator
-	admin          http.Handler
-	adminAuth      http.Handler
-	wecom          http.Handler
-	ready          func() bool
-	limiter        *TenantLimiter
-	idempotency    *IdempotencyStore
-	maxBodyBytes   int64
-	requestTimeout time.Duration
-	telemetry      observability.Provider
-	metrics        metrics.Catalog
-	ownLimiter     bool
-	ownIdempotency bool
-	draining       atomic.Bool
+	dispatcher      DispatchService
+	authenticator   APIAuthenticator
+	admin           http.Handler
+	adminAuth       http.Handler
+	wecom           http.Handler
+	ready           func() bool
+	limiter         *TenantLimiter
+	idempotency     *IdempotencyStore
+	maxBodyBytes    int64
+	requestTimeout  time.Duration
+	telemetry       observability.Provider
+	metrics         metrics.Catalog
+	a2a             http.Handler
+	a2aCloser       io.Closer
+	a2aPath         string
+	trpcAgent       http.Handler
+	trpcAgentCloser io.Closer
+	trpcAgentPath   string
+	ownLimiter      bool
+	ownIdempotency  bool
+	draining        atomic.Bool
 }
 
 type chatRequest struct {
@@ -92,6 +105,24 @@ type httpErrorResponse struct {
 // NewHTTPHandler creates the strict HTTP adapter and its default process-local
 // protection components.
 func NewHTTPHandler(config HTTPConfig) (*HTTPHandler, error) {
+	if isNilGatewayValue(config.Dispatcher) {
+		config.Dispatcher = nil
+	}
+	if isNilGatewayValue(config.Authenticator) {
+		config.Authenticator = nil
+	}
+	if isNilGatewayValue(config.Admin) {
+		config.Admin = nil
+	}
+	if isNilGatewayValue(config.AdminAuth) {
+		config.AdminAuth = nil
+	}
+	if isNilGatewayValue(config.WeCom) {
+		config.WeCom = nil
+	}
+	if isNilGatewayValue(config.Observability) {
+		config.Observability = nil
+	}
 	if config.MaxBodyBytes == 0 {
 		config.MaxBodyBytes = defaultHTTPMaxBodyBytes
 	}
@@ -107,9 +138,7 @@ func NewHTTPHandler(config HTTPConfig) (*HTTPHandler, error) {
 	if config.Ready == nil {
 		config.Ready = func() bool { return config.Dispatcher != nil && config.Authenticator != nil }
 	}
-	if config.Observability == nil {
-		config.Observability = observability.NewNoopProvider()
-	}
+	config.Observability = observability.ProtectProvider(config.Observability)
 	handler := &HTTPHandler{
 		dispatcher: config.Dispatcher, authenticator: config.Authenticator, ready: config.Ready,
 		admin:        config.Admin,
@@ -131,9 +160,27 @@ func NewHTTPHandler(config HTTPConfig) (*HTTPHandler, error) {
 		var err error
 		handler.idempotency, err = NewIdempotencyStore(IdempotencyConfig{})
 		if err != nil {
+			_ = handler.Close()
 			return nil, err
 		}
 		handler.ownIdempotency = true
+	}
+	var err error
+	if config.A2A.Enabled {
+		handler.a2aPath = strings.TrimSpace(config.A2A.Path)
+		if handler.a2aPath == "" {
+			handler.a2aPath = "/a2a"
+		}
+	}
+	handler.a2a, handler.a2aCloser, err = newA2AHandler(config.A2A, handler.dispatcher, handler.authenticator, handler.Ready, handler.maxBodyBytes)
+	if err != nil {
+		_ = handler.Close()
+		return nil, err
+	}
+	handler.trpcAgent, handler.trpcAgentCloser, handler.trpcAgentPath, err = newTRPCAgentHandler(config.TRPCAgent, handler.dispatcher, handler.authenticator, handler.Ready, handler.maxBodyBytes)
+	if err != nil {
+		_ = handler.Close()
+		return nil, err
 	}
 	return handler, nil
 }
@@ -143,13 +190,13 @@ func (handler *HTTPHandler) Handler() http.Handler { return handler }
 
 // Ready reports whether the adapter may accept execution requests.
 func (handler *HTTPHandler) Ready() bool {
-	if handler == nil || handler.draining.Load() || handler.dispatcher == nil || handler.authenticator == nil {
+	if handler == nil || handler.draining.Load() || isNilGatewayValue(handler.dispatcher) || isNilGatewayValue(handler.authenticator) {
 		return false
 	}
 	if handler.limiter == nil || !handler.limiter.Ready() || handler.idempotency == nil || !handler.idempotency.Ready() {
 		return false
 	}
-	return handler.ready == nil || handler.ready()
+	return handler.ready == nil || callReady(handler.ready)
 }
 
 // BeginShutdown makes readiness fail and stops new execution requests. The
@@ -176,11 +223,21 @@ func (handler *HTTPHandler) Close() error {
 	if handler.ownIdempotency && handler.idempotency != nil {
 		closeErr = errors.Join(closeErr, handler.idempotency.Close())
 	}
+	if !isNilGatewayValue(handler.a2aCloser) {
+		closeErr = errors.Join(closeErr, safeCloseHTTPComponent(handler.a2aCloser))
+	}
+	if !isNilGatewayValue(handler.trpcAgentCloser) {
+		closeErr = errors.Join(closeErr, safeCloseHTTPComponent(handler.trpcAgentCloser))
+	}
 	return closeErr
 }
 
 func (handler *HTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	if request == nil {
+	if handler == nil || request == nil || isNilGatewayValue(writer) {
+		return
+	}
+	if request.URL == nil {
+		handler.writeError(writer, request, http.StatusBadRequest, "invalid request", "", "")
 		return
 	}
 	started := time.Now()
@@ -189,6 +246,18 @@ func (handler *HTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 	request = request.WithContext(ctx)
 	_ = handler.metrics.Request(ctx, map[string]string{"component": "http", "operation": observability.OperationHTTPRequest, "status": "started"})
 	defer func() {
+		if recover() != nil {
+			// A downstream protocol handler or custom dependency must not
+			// terminate net/http's serving goroutine. If headers are still
+			// writable, return only the stable public error; never serialize the
+			// recovered value.
+			if statusWriter.status == 0 {
+				func() {
+					defer func() { _ = recover() }()
+					handler.writeError(statusWriter, request, http.StatusInternalServerError, "gateway error", "", "")
+				}()
+			}
+		}
 		var outcome error
 		if statusWriter.status >= http.StatusBadRequest {
 			outcome = errors.New("http request failed")
@@ -221,6 +290,14 @@ func (handler *HTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 		handler.admin.ServeHTTP(writer, request)
 		return
 	}
+	if handler.a2a != nil && (request.URL.Path == handler.a2aPath || strings.HasPrefix(request.URL.Path, handler.a2aPath+"/")) {
+		handler.a2a.ServeHTTP(writer, request)
+		return
+	}
+	if handler.trpcAgent != nil && (request.URL.Path == strings.TrimSuffix(handler.trpcAgentPath, "/") || strings.HasPrefix(request.URL.Path, handler.trpcAgentPath)) {
+		handler.trpcAgent.ServeHTTP(writer, request)
+		return
+	}
 	switch request.URL.Path {
 	case "/healthz":
 		handler.health(writer, request)
@@ -230,6 +307,8 @@ func (handler *HTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 		handler.chat(writer, request, false)
 	case "/v1/chat/stream":
 		handler.chat(writer, request, true)
+	case "/v1/chat/completions":
+		handler.openAICompletions(writer, request)
 	default:
 		handler.writeError(writer, request, http.StatusNotFound, "not found", "", "")
 	}
@@ -300,7 +379,7 @@ func (handler *HTTPHandler) chat(writer http.ResponseWriter, request *http.Reque
 		ctx, cancel = context.WithTimeout(ctx, handler.requestTimeout)
 		defer cancel()
 	}
-	authenticated, err := handler.authenticator.Authenticate(ctx, request)
+	authenticated, err := authenticateAPI(ctx, handler.authenticator, request)
 	if err != nil {
 		handler.writeMappedError(writer, request, requestID, traceID, err)
 		return
@@ -344,7 +423,7 @@ func (handler *HTTPHandler) chat(writer http.ResponseWriter, request *http.Reque
 			_ = claim.Fail()
 		}
 	}()
-	dispatchEvents, err := handler.dispatcher.Dispatch(ctx, DispatchRequest{Principal: principal, Message: message, RequestID: requestID, TraceID: traceID})
+	dispatchEvents, err := callDispatch(ctx, handler.dispatcher, DispatchRequest{Principal: principal, Message: message, RequestID: requestID, TraceID: traceID})
 	if err != nil {
 		handler.writeMappedError(writer, request, requestID, traceID, err)
 		return
@@ -384,20 +463,25 @@ func supportsFlush(writer http.ResponseWriter) bool {
 }
 
 func (handler *HTTPHandler) decodeMessage(writer http.ResponseWriter, request *http.Request) (InboundMessage, error) {
+	if request == nil || request.Body == nil {
+		return InboundMessage{}, fmt.Errorf("%w: request body is required", ErrInvalid)
+	}
 	if !isJSONContentType(request.Header.Get("Content-Type")) {
 		return InboundMessage{}, fmt.Errorf("%w: content type must be application/json", ErrInvalid)
 	}
 	body := http.MaxBytesReader(writer, request.Body, handler.maxBodyBytes)
-	defer func() { _ = body.Close() }()
-	decoder := json.NewDecoder(body)
-	decoder.DisallowUnknownFields()
-	var input chatRequest
-	if err := decoder.Decode(&input); err != nil {
+	raw, err := io.ReadAll(body)
+	closeErr := safeCloseProtocolBody(body)
+	if err != nil || closeErr != nil || jsonstrict.Validate(raw, true) != nil {
 		return InboundMessage{}, fmt.Errorf("%w: request JSON is invalid", ErrInvalid)
 	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return InboundMessage{}, fmt.Errorf("%w: request JSON has trailing data", ErrInvalid)
+	request.Body = io.NopCloser(bytes.NewReader(raw))
+	request.ContentLength = int64(len(raw))
+	var input chatRequest
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		return InboundMessage{}, fmt.Errorf("%w: request JSON is invalid", ErrInvalid)
 	}
 	message := InboundMessage{
 		Content: input.Content, ContentType: input.ContentType,
@@ -426,6 +510,9 @@ func isJSONContentType(value string) bool {
 }
 
 func collectHTTPEvents(ctx context.Context, events <-chan DispatchEvent) ([]DispatchEvent, error) {
+	if nilvalue.Is(ctx) || events == nil {
+		return nil, ErrInvalid
+	}
 	collected := make([]DispatchEvent, 0, 4)
 	for {
 		select {
@@ -441,6 +528,9 @@ func collectHTTPEvents(ctx context.Context, events <-chan DispatchEvent) ([]Disp
 }
 
 func (handler *HTTPHandler) writeStream(writer http.ResponseWriter, ctx context.Context, claim *IdempotencyClaim, events <-chan DispatchEvent) bool {
+	if handler == nil || nilvalue.Is(writer) || nilvalue.Is(ctx) || claim == nil || events == nil {
+		return false
+	}
 	var flusher http.Flusher
 	var ok bool
 	if wrapped, wrappedOK := writer.(*httpStatusWriter); wrappedOK {
@@ -462,8 +552,7 @@ func (handler *HTTPHandler) writeStream(writer http.ResponseWriter, ctx context.
 		case event, open := <-events:
 			if !open {
 				if len(collected) > 0 {
-					_ = claim.Complete(collected)
-					return true
+					return claim.Complete(collected) == nil
 				}
 				return false
 			}
@@ -506,6 +595,9 @@ func (handler *HTTPHandler) writeReplayStream(writer http.ResponseWriter, events
 }
 
 func writeSSEEvent(writer io.Writer, event DispatchEvent) error {
+	if isNilGatewayValue(writer) || !validSSEEventType(string(event.Type)) {
+		return ErrInvalid
+	}
 	data, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -514,6 +606,13 @@ func writeSSEEvent(writer io.Writer, event DispatchEvent) error {
 		return err
 	}
 	return nil
+}
+
+func validSSEEventType(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) || !utf8.ValidString(value) || len([]rune(value)) > 128 {
+		return false
+	}
+	return !strings.ContainsAny(value, "\r\n") && !strings.ContainsFunc(value, unicode.IsControl)
 }
 
 func (handler *HTTPHandler) writeFinalResponse(writer http.ResponseWriter, requestID, traceID string, events []DispatchEvent) {
@@ -597,7 +696,22 @@ func (handler *HTTPHandler) writeError(writer http.ResponseWriter, _ *http.Reque
 	handler.writeJSON(writer, status, httpErrorResponse{RequestID: requestID, TraceID: traceID, Error: message})
 }
 
+func safeCloseHTTPComponent(closer io.Closer) (err error) {
+	if isNilGatewayValue(closer) {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrClosed
+		}
+	}()
+	return closer.Close()
+}
+
 func (handler *HTTPHandler) writeJSON(writer http.ResponseWriter, status int, value any) {
+	if isNilGatewayValue(writer) {
+		return
+	}
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
 	_ = json.NewEncoder(writer).Encode(value)

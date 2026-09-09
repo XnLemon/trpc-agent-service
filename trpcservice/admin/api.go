@@ -13,12 +13,18 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/jsonstrict"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
+	knowledgeadmin "github.com/XnLemon/trpc-agent-service/trpcservice/knowledge"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagemysql "github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -41,6 +47,12 @@ type Config struct {
 	// It is intentionally best-effort during shutdown: a closed runtime cannot
 	// admit a new execution with a stale Runner.
 	CacheInvalidator CacheInvalidator
+	// ToolInvocations exposes only the tenant/app-scoped side-effect ledger to
+	// operators. It never exposes raw arguments or provider results.
+	ToolInvocations runtimestorage.ToolInvocationStore
+	// Knowledge manages the tenant/app-scoped upstream corpus. It is optional
+	// when the selected runtime backend does not expose corpus administration.
+	Knowledge knowledgeadmin.Service
 }
 
 // CacheInvalidator receives the smallest control-plane scope whose future
@@ -103,8 +115,20 @@ type firstTenantCreator interface {
 
 // NewHandler validates dependencies and creates an admin HTTP handler.
 func NewHandler(config Config) (*Handler, error) {
-	if config.Tenants == nil || config.Apps == nil || config.Models == nil || config.Backends == nil || config.Bindings == nil || config.Authenticator == nil {
+	if nilvalue.Is(config.Tenants) || nilvalue.Is(config.Apps) || nilvalue.Is(config.Models) || nilvalue.Is(config.Backends) || nilvalue.Is(config.Bindings) || nilvalue.Is(config.Authenticator) {
 		return nil, errors.New("invalid admin handler configuration")
+	}
+	if nilvalue.Is(config.AuditWriter) {
+		config.AuditWriter = nil
+	}
+	if nilvalue.Is(config.CacheInvalidator) {
+		config.CacheInvalidator = nil
+	}
+	if nilvalue.Is(config.ToolInvocations) {
+		config.ToolInvocations = nil
+	}
+	if nilvalue.Is(config.Knowledge) {
+		config.Knowledge = nil
 	}
 	return &Handler{config: config}, nil
 }
@@ -170,7 +194,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) invalidateMutation(parts []string, method string) {
-	if h == nil || h.config.CacheInvalidator == nil || len(parts) < 2 || parts[0] != "tenants" || parts[1] == "" {
+	if h == nil || nilvalue.Is(h.config.CacheInvalidator) || len(parts) < 2 || parts[0] != "tenants" || parts[1] == "" {
 		return
 	}
 	change := CacheInvalidation{TenantID: parts[1]}
@@ -223,8 +247,30 @@ func profileMutation(parts []string, method string) bool {
 	return (len(parts) == 2 && method == http.MethodPatch) || (len(parts) == 3 && parts[2] == "status")
 }
 
+type auditMutationValue struct {
+	value  any
+	reason string
+}
+
+func (value auditMutationValue) MarshalJSON() ([]byte, error) {
+	return json.Marshal(value.value)
+}
+
 func (h *Handler) recordMutation(ctx context.Context, principal Principal, requestID string, value any) error {
-	if h == nil || h.config.AuditWriter == nil || value == nil {
+	if h == nil || nilvalue.Is(h.config.AuditWriter) || nilvalue.Is(value) {
+		return nil
+	}
+	auditReason := ""
+	if wrapped, ok := value.(auditMutationValue); ok {
+		value, auditReason = wrapped.value, wrapped.reason
+		if value == nil {
+			return nil
+		}
+	}
+	// Tool invocation transitions emit their own stable lifecycle audit fact;
+	// do not add a generic control-plane mutation event for the same transition.
+	switch value.(type) {
+	case runtimestorage.ToolInvocation, *runtimestorage.ToolInvocation:
 		return nil
 	}
 	var change any
@@ -232,7 +278,7 @@ func (h *Handler) recordMutation(ctx context.Context, principal Principal, reque
 		change = envelope["event"]
 	}
 	if change == nil {
-		return h.recordRawMutation(ctx, principal, requestID, value)
+		return h.recordRawMutationWithReason(ctx, principal, requestID, value, auditReason)
 	}
 	v := reflect.ValueOf(change)
 	if v.Kind() == reflect.Pointer {
@@ -284,6 +330,10 @@ func (h *Handler) recordMutation(ctx context.Context, principal Principal, reque
 }
 
 func (h *Handler) recordRawMutation(ctx context.Context, principal Principal, requestID string, value any) error {
+	return h.recordRawMutationWithReason(ctx, principal, requestID, value, "")
+}
+
+func (h *Handler) recordRawMutationWithReason(ctx context.Context, principal Principal, requestID string, value any, reason string) error {
 	v := reflect.ValueOf(value)
 	if v.Kind() == reflect.Pointer {
 		if v.IsNil() {
@@ -302,15 +352,20 @@ func (h *Handler) recordRawMutation(ctx context.Context, principal Principal, re
 		return ""
 	}
 	next := int64(1)
+	versionIdentity := fieldString("Version")
 	for _, name := range []string{"Version", "DraftVersion", "Revision"} {
 		fieldVersion := v.FieldByName(name)
 		if fieldVersion.IsValid() && (fieldVersion.Kind() == reflect.Int64 || fieldVersion.Kind() == reflect.Int) && fieldVersion.Int() > 0 {
 			next = fieldVersion.Int()
+			if versionIdentity == "" {
+				versionIdentity = strconv.FormatInt(next, 10)
+			}
 			break
 		}
 	}
 	previous := next - 1
 	tenantID := fieldString("TenantID")
+	appID := fieldString("AppID")
 	if tenantID == "" {
 		return nil
 	}
@@ -318,10 +373,13 @@ func (h *Handler) recordRawMutation(ctx context.Context, principal Principal, re
 	if actorID == "" {
 		actorID = "admin"
 	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "admin mutation"
+	}
 	return audit.NewRecorder(h.config.AuditWriter, tenantID).Record(ctx, audit.Event{
-		EventID:   audit.NewEventID(requestID, tenantID, fieldString("Version"), "raw"),
-		EventType: audit.EventControlPlaneChanged, TenantID: tenantID,
-		ActorType: "admin", ActorID: actorID, Reason: "admin mutation", CorrelationID: requestID,
+		EventID:   audit.NewEventID(requestID, tenantID, appID, versionIdentity, "raw"),
+		EventType: audit.EventControlPlaneChanged, TenantID: tenantID, AgentAppID: appID,
+		ActorType: "admin", ActorID: actorID, Reason: reason, CorrelationID: requestID,
 		PreviousVersion: &previous, NextVersion: &next,
 	})
 }
@@ -431,9 +489,283 @@ func (h *Handler) tenantRoute(ctx context.Context, r *http.Request, p Principal,
 		return h.backends(ctx, r, p, tenantID, parts[2:])
 	case "bindings":
 		return h.bindings(ctx, r, p, tenantID, parts[2:])
+	case "tool-invocations":
+		return h.toolInvocations(ctx, r, p, tenantID, parts[2:])
+	case "knowledge":
+		return h.knowledge(ctx, r, p, tenantID, parts[2:])
 	default:
 		return 0, nil, errNotFound
 	}
+}
+
+func (h *Handler) knowledge(ctx context.Context, r *http.Request, p Principal, tenantID string, parts []string) (int, any, error) {
+	if nilvalue.Is(h.config.Knowledge) {
+		return 0, nil, errListUnsupported
+	}
+	appID, resourceParts, err := knowledgeRouteScope(r, parts)
+	if err != nil {
+		return 0, nil, err
+	}
+	// Knowledge is partitioned by an existing control-plane App. Do not let a
+	// caller probe or create an arbitrary app namespace through the corpus API.
+	appValue, appErr := h.config.Apps.Get(ctx, tenantID, appID)
+	if appErr != nil {
+		if errors.Is(appErr, appmodel.ErrNotFound) {
+			return 0, nil, errNotFound
+		}
+		return 0, nil, appErr
+	}
+	if appValue == nil || appValue.TenantID != tenantID || appValue.AppID != appID {
+		return 0, nil, errNotFound
+	}
+	scope := knowledgeadmin.Scope{TenantID: tenantID, AppID: appID}
+	if len(resourceParts) == 0 {
+		return 0, nil, errNotFound
+	}
+	switch resourceParts[0] {
+	case "documents":
+		return h.knowledgeDocuments(ctx, r, scope, resourceParts[1:])
+	case "import", "imports":
+		if len(resourceParts) != 1 || r.Method != http.MethodPost {
+			return 0, nil, errNotFound
+		}
+		var body knowledgeadmin.ImportInput
+		if err := decodeBody(r, &body); err != nil {
+			return 0, nil, err
+		}
+		value, err := h.config.Knowledge.ImportDocuments(ctx, scope, body)
+		return http.StatusCreated, value, err
+	case "rebuild":
+		if len(resourceParts) != 1 || r.Method != http.MethodPost {
+			return 0, nil, errNotFound
+		}
+		value, err := h.config.Knowledge.Rebuild(ctx, scope)
+		return http.StatusOK, value, err
+	case "versions":
+		if len(resourceParts) == 1 && r.Method == http.MethodGet {
+			value, err := h.config.Knowledge.ListVersions(ctx, scope)
+			return http.StatusOK, map[string]any{"items": value}, err
+		}
+		return 0, nil, errNotFound
+	case "publish":
+		if len(resourceParts) != 1 || r.Method != http.MethodPost {
+			return 0, nil, errNotFound
+		}
+		var body struct {
+			Reason string `json:"reason,omitempty"`
+		}
+		if r.Body != nil {
+			if err := decodeBody(r, &body); err != nil {
+				return 0, nil, err
+			}
+		}
+		if !validAdminReason(body.Reason) {
+			return 0, nil, fmt.Errorf("%w: publish reason is invalid", errInvalidRequest)
+		}
+		value, err := h.config.Knowledge.Publish(ctx, scope, p.SubjectID)
+		// Return the manifest itself so the common mutation audit path can record
+		// its tenant/app/version identity without serializing request content.
+		// The private wrapper preserves the operator reason for audit without
+		// adding request metadata to the public version response.
+		return http.StatusOK, auditMutationValue{value: value, reason: body.Reason}, err
+	default:
+		return 0, nil, errNotFound
+	}
+}
+
+func knowledgeRouteScope(r *http.Request, parts []string) (string, []string, error) {
+	if r == nil {
+		return "", nil, fmt.Errorf("%w: request is required", errInvalidRequest)
+	}
+	rawQueryAppID := r.URL.Query().Get("app_id")
+	if rawQueryAppID != strings.TrimSpace(rawQueryAppID) {
+		return "", nil, fmt.Errorf("%w: knowledge app_id is not normalized", knowledgeadmin.ErrScope)
+	}
+	queryAppID := rawQueryAppID
+	appID := queryAppID
+	if len(parts) > 0 && parts[0] == "apps" {
+		if len(parts) < 2 || parts[1] == "" {
+			return "", nil, fmt.Errorf("%w: knowledge app_id is required", errInvalidRequest)
+		}
+		if parts[1] != strings.TrimSpace(parts[1]) {
+			return "", nil, fmt.Errorf("%w: knowledge app_id is not normalized", knowledgeadmin.ErrScope)
+		}
+		appID = parts[1]
+		parts = parts[2:]
+	} else if len(parts) >= 1 && parts[0] != "documents" && parts[0] != "import" && parts[0] != "imports" && parts[0] != "rebuild" && parts[0] != "versions" && parts[0] != "publish" {
+		if parts[0] != strings.TrimSpace(parts[0]) {
+			return "", nil, fmt.Errorf("%w: knowledge app_id is not normalized", knowledgeadmin.ErrScope)
+		}
+		appID = parts[0]
+		parts = parts[1:]
+	}
+	if appID == "" {
+		return "", nil, fmt.Errorf("%w: knowledge app_id is required", errInvalidRequest)
+	}
+	if queryAppID != "" && queryAppID != appID {
+		return "", nil, fmt.Errorf("%w: knowledge app scope disagrees with app_id", knowledgeadmin.ErrScope)
+	}
+	return appID, parts, nil
+}
+
+type knowledgeDeleteResult struct {
+	TenantID   string `json:"tenant_id"`
+	AppID      string `json:"app_id"`
+	DocumentID string `json:"document_id"`
+}
+
+func (h *Handler) knowledgeDocuments(ctx context.Context, r *http.Request, scope knowledgeadmin.Scope, parts []string) (int, any, error) {
+	if len(parts) == 0 {
+		switch r.Method {
+		case http.MethodGet:
+			o, err := repositoryListOptions(r)
+			if err != nil {
+				return 0, nil, err
+			}
+			if o.Query != "" {
+				return 0, nil, fmt.Errorf("%w: knowledge document query is unsupported", errInvalidRequest)
+			}
+			value, err := h.config.Knowledge.ListDocuments(ctx, scope, o.Cursor, o.Limit)
+			if err != nil {
+				return 0, nil, err
+			}
+			envelope, envelopeErr := newListEnvelope(value.Items, value.NextCursor)
+			return http.StatusOK, envelope, envelopeErr
+		case http.MethodPost:
+			var body knowledgeadmin.DocumentInput
+			if err := decodeBody(r, &body); err != nil {
+				return 0, nil, err
+			}
+			value, err := h.config.Knowledge.CreateDocument(ctx, scope, body)
+			return http.StatusCreated, value, err
+		default:
+			return 0, nil, errNotFound
+		}
+	}
+	if len(parts) != 1 {
+		return 0, nil, errNotFound
+	}
+	id := parts[0]
+	switch r.Method {
+	case http.MethodGet:
+		value, err := h.config.Knowledge.GetDocument(ctx, scope, id)
+		return http.StatusOK, value, err
+	case http.MethodPatch:
+		var body knowledgeadmin.UpdateInput
+		if err := decodeBody(r, &body); err != nil {
+			return 0, nil, err
+		}
+		value, err := h.config.Knowledge.UpdateDocument(ctx, scope, id, body)
+		return http.StatusOK, value, err
+	case http.MethodDelete:
+		if err := h.config.Knowledge.DeleteDocument(ctx, scope, id); err != nil {
+			return 0, nil, err
+		}
+		return http.StatusOK, knowledgeDeleteResult{TenantID: scope.TenantID, AppID: scope.AppID, DocumentID: id}, nil
+	default:
+		return 0, nil, errNotFound
+	}
+}
+
+func (h *Handler) toolInvocations(ctx context.Context, r *http.Request, p Principal, tenantID string, parts []string) (int, any, error) {
+	if nilvalue.Is(h.config.ToolInvocations) {
+		return 0, nil, errListUnsupported
+	}
+	rawAppID := r.URL.Query().Get("app_id")
+	if rawAppID != strings.TrimSpace(rawAppID) {
+		return 0, nil, fmt.Errorf("%w: tool invocation app_id is not normalized", errInvalidRequest)
+	}
+	appID := rawAppID
+	if appID == "" {
+		return 0, nil, fmt.Errorf("%w: tool invocation app_id is required", errInvalidRequest)
+	}
+	appValue, err := h.config.Apps.Get(ctx, tenantID, appID)
+	if err != nil {
+		return 0, nil, err
+	}
+	if appValue == nil || appValue.TenantID != tenantID || appValue.AppID != appID {
+		return 0, nil, errNotFound
+	}
+	if len(parts) == 0 {
+		if r.Method != http.MethodGet {
+			return 0, nil, errNotFound
+		}
+		statusValues := strings.Split(strings.TrimSpace(r.URL.Query().Get("status")), ",")
+		statuses := make([]runtimestorage.ToolInvocationStatus, 0, len(statusValues))
+		if len(statusValues) == 1 && statusValues[0] == "" {
+			statuses = nil
+		} else {
+			for _, status := range statusValues {
+				status = strings.TrimSpace(status)
+				value := runtimestorage.ToolInvocationStatus(status)
+				if !runtimestorage.ValidToolInvocationStatus(value) {
+					return 0, nil, fmt.Errorf("%w: invalid tool invocation status", errInvalidRequest)
+				}
+				statuses = append(statuses, value)
+			}
+		}
+		items, err := h.config.ToolInvocations.ListToolInvocations(ctx, tenantID, appID, statuses)
+		if err != nil {
+			return 0, nil, err
+		}
+		return http.StatusOK, listEnvelope{Items: items}, nil
+	}
+	invocationID := parts[0]
+	if len(parts) == 1 && r.Method == http.MethodGet {
+		value, err := h.config.ToolInvocations.GetToolInvocation(ctx, tenantID, appID, invocationID)
+		return http.StatusOK, value, err
+	}
+	if len(parts) != 2 || parts[1] != "transition" || r.Method != http.MethodPost {
+		return 0, nil, errNotFound
+	}
+	var body struct {
+		From         runtimestorage.ToolInvocationStatus `json:"from"`
+		To           runtimestorage.ToolInvocationStatus `json:"to"`
+		FencingToken int64                               `json:"fencing_token"`
+		ErrorClass   string                              `json:"error_class"`
+		Reason       string                              `json:"reason"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		return 0, nil, err
+	}
+	reviewerID := p.SubjectID
+	if body.To == runtimestorage.ToolInvocationManual {
+		body.ErrorClass = "manual_review"
+	} else if body.To == runtimestorage.ToolInvocationPrepared && body.From == runtimestorage.ToolInvocationManual {
+		// A manual approval is represented by a durable marker on the next
+		// prepared attempt; the reviewer consumes it without trusting request
+		// payload fields supplied by the caller.
+		reviewerID = "approved:" + p.SubjectID
+		body.ErrorClass = ""
+	}
+	value, err := h.config.ToolInvocations.TransitionToolInvocation(ctx, runtimestorage.ToolInvocationTransition{
+		TenantID: tenantID, AppID: appID, InvocationID: invocationID, From: body.From, To: body.To,
+		Owner: p.SubjectID, FencingToken: body.FencingToken, ErrorClass: body.ErrorClass, ReviewerID: reviewerID,
+	})
+	if err != nil {
+		return 0, nil, err
+	}
+	if h.config.AuditWriter != nil {
+		eventType, decision := audit.EventToolApprovalRequired, audit.DecisionApprovalRequired
+		switch value.Status {
+		case runtimestorage.ToolInvocationAccepted, runtimestorage.ToolInvocationSucceeded:
+			eventType, decision = audit.EventToolExecuted, audit.DecisionAccepted
+		case runtimestorage.ToolInvocationDenied, runtimestorage.ToolInvocationFailed, runtimestorage.ToolInvocationUnknown:
+			eventType, decision = audit.EventToolDenied, audit.DecisionDeny
+		}
+		errorType := ""
+		if value.ErrorClass != "" {
+			errorType = string(audit.ErrorTool)
+		}
+		if auditErr := audit.NewRecorder(h.config.AuditWriter, tenantID).Record(ctx, audit.Event{
+			EventType: eventType, EventID: audit.NewEventID(string(eventType), tenantID, value.AppID, invocationID, string(value.Status)),
+			TenantID: tenantID, AgentAppID: value.AppID, ToolName: value.ToolName, RequestID: value.RequestID, TraceID: value.TraceID,
+			Decision: decision, ErrorType: errorType, ActorType: "admin", ActorID: p.SubjectID, Reason: body.Reason,
+		}); auditErr != nil {
+			return 0, nil, auditErr
+		}
+	}
+	return http.StatusOK, value, nil
 }
 
 //nolint:gocyclo // App routes coordinate several independently authorized mutations.
@@ -791,16 +1123,34 @@ func splitPath(path string) []string {
 	return out
 }
 
+func validAdminReason(value string) bool {
+	if value == "" {
+		return true
+	}
+	if !utf8.ValidString(value) || value != strings.TrimSpace(value) || len([]rune(value)) > 1000 {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
 func decodeBody(r *http.Request, dst any) error {
 	if r == nil || r.Body == nil {
 		return fmt.Errorf("%w: request body is required", errInvalidRequest)
 	}
-	data, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
-	if err != nil {
+	data, err := io.ReadAll(io.LimitReader(r.Body, 2<<20+1))
+	if err != nil || len(data) > 2<<20 {
 		return fmt.Errorf("%w: read request body", errInvalidRequest)
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		return fmt.Errorf("%w: request body is required", errInvalidRequest)
+	}
+	if err := jsonstrict.Validate(data, true); err != nil {
+		return fmt.Errorf("%w: request JSON is invalid", errInvalidRequest)
 	}
 	var value any
 	if err := json.Unmarshal(data, &value); err != nil {
@@ -874,8 +1224,10 @@ func toExported(key string) string {
 		"monthly_spend_limit_minor": "MonthlySpendLimitMinor", "billing_currency": "BillingCurrency",
 		"default_agent_app_id": "DefaultAgentAppID", "default_backend_profile_id": "DefaultBackendProfileID",
 		"configuration": "Configuration", "provider": "Provider", "model": "Model",
+		"embedding_text": "EmbeddingText", "metadata": "Metadata", "documents": "Documents", "items": "Items", "document_id": "DocumentID", "document_count": "DocumentCount", "content_digest": "ContentDigest", "actor_id": "ActorID", "version": "Version",
 		"endpoint": "Endpoint", "server_url": "ServerURL", "transport": "Transport", "command": "Command", "args": "Args", "name": "Name", "tool_allow": "ToolAllow", "timeout_seconds": "TimeoutSeconds", "mcp_bindings": "MCPBindings", "options": "Options", "generation": "Generation",
 		"temperature": "Temperature", "top_p": "TopP", "max_output_tokens": "MaxOutputTokens",
+		"fencing_token": "FencingToken", "error_class": "ErrorClass", "tool_call_id": "ToolCallID", "invocation_id": "InvocationID",
 		"binding_key": "BindingKey", "channel": "Channel", "protocol": "Protocol",
 	}
 	if exported, ok := known[key]; ok {
@@ -922,8 +1274,20 @@ func mapError(err error) (int, string) {
 		return http.StatusNotFound, "not_found"
 	case matchesAny(err, tenant.ErrConflict, appmodel.ErrConflict, modelprofile.ErrConflict, backend.ErrConflict, channels.ErrConflict, tenant.ErrDuplicateKey, appmodel.ErrDuplicateKey, modelprofile.ErrDuplicateKey, backend.ErrDuplicateKey, channels.ErrDuplicateKey):
 		return http.StatusConflict, "conflict"
-	case errors.Is(err, postgres.ErrStorage), errors.Is(err, storagemysql.ErrStorage):
+	case errors.Is(err, postgres.ErrStorage), errors.Is(err, storagemysql.ErrStorage), errors.Is(err, runtimestorage.ErrStorage), errors.Is(err, knowledgeadmin.ErrUnavailable):
 		return http.StatusServiceUnavailable, "storage_unavailable"
+	case errors.Is(err, knowledgeadmin.ErrNotFound):
+		return http.StatusNotFound, "not_found"
+	case errors.Is(err, knowledgeadmin.ErrConflict):
+		return http.StatusConflict, "conflict"
+	case errors.Is(err, knowledgeadmin.ErrInvalid), errors.Is(err, knowledgeadmin.ErrScope):
+		return http.StatusBadRequest, "invalid_request"
+	case errors.Is(err, runtimestorage.ErrNotFound):
+		return http.StatusNotFound, "not_found"
+	case errors.Is(err, runtimestorage.ErrConflict), errors.Is(err, runtimestorage.ErrDuplicate):
+		return http.StatusConflict, "conflict"
+	case errors.Is(err, runtimestorage.ErrInvalid):
+		return http.StatusBadRequest, "invalid_request"
 	case matchesAny(err, tenant.ErrInvalid, appmodel.ErrInvalid, modelprofile.ErrInvalid, backend.ErrInvalid, channels.ErrInvalid):
 		return http.StatusBadRequest, "invalid_request"
 	case matchesAny(err, tenant.ErrInvalidTransition, appmodel.ErrInvalidTransition, modelprofile.ErrInvalidTransition, backend.ErrInvalidTransition, channels.ErrInvalidTransition, tenant.ErrDisabled, appmodel.ErrDisabled, modelprofile.ErrDisabled, backend.ErrDisabled, channels.ErrDisabled, appmodel.ErrImmutableRevision):

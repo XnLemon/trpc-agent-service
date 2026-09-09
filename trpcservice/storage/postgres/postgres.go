@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	storageerrors "github.com/XnLemon/trpc-agent-service/trpcservice/storage/errors"
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -32,6 +33,9 @@ type Options struct {
 // Open creates and pings a pgx-backed database/sql pool. The ping is part of
 // bootstrap readiness; it is not repeated by repository constructors.
 func Open(ctx context.Context, dsn string, options Options) (*sql.DB, error) {
+	if nilvalue.Is(ctx) {
+		return nil, ErrStorage
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -64,7 +68,7 @@ func Open(ctx context.Context, dsn string, options Options) (*sql.DB, error) {
 
 // Ping is used by readiness probes and does not disclose the driver error.
 func Ping(ctx context.Context, db *sql.DB) error {
-	if db == nil {
+	if db == nil || nilvalue.Is(ctx) {
 		return ErrStorage
 	}
 	if err := ctx.Err(); err != nil {
@@ -101,7 +105,7 @@ type RowScanner interface{ Scan(...any) error }
 // Begin starts a read-committed transaction and maps unexpected driver errors
 // to ErrStorage without disclosing driver details.
 func Begin(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
-	if db == nil {
+	if db == nil || nilvalue.Is(ctx) {
 		return nil, ErrStorage
 	}
 	if err := ctx.Err(); err != nil {
@@ -126,7 +130,7 @@ func MapError(ctx context.Context, err error, notFound, duplicate, conflict, inv
 	if err == nil {
 		return nil
 	}
-	if ctx != nil {
+	if !nilvalue.Is(ctx) {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
@@ -155,6 +159,10 @@ func MapError(ctx context.Context, err error, notFound, duplicate, conflict, inv
 // behavior used by all PostgreSQL repositories.
 func Commit(ctx context.Context, tx *sql.Tx) error {
 	if tx == nil {
+		return ErrStorage
+	}
+	if nilvalue.Is(ctx) {
+		Rollback(tx)
 		return ErrStorage
 	}
 	if err := ctx.Err(); err != nil {

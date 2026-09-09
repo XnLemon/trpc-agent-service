@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	storage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 )
@@ -28,7 +29,7 @@ type DeliveryStore interface {
 
 // NewProvider creates the durable final-reply adapter for one manager.
 func NewProvider(manager *Manager, store DeliveryStore) (*Provider, error) {
-	if manager == nil || store == nil {
+	if manager == nil || nilvalue.Is(store) {
 		return nil, ErrInvalid
 	}
 	return &Provider{manager: manager, store: store}, nil
@@ -36,7 +37,7 @@ func NewProvider(manager *Manager, store DeliveryStore) (*Provider, error) {
 
 // Deliver sends and acknowledges a durable final reply for its correlated request.
 func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (string, error) {
-	if p == nil || p.manager == nil || p.store == nil || ctx == nil || strings.TrimSpace(value.Payload) == "" || value.ReplyID == "" || value.LeaseOwner == "" || value.FencingToken <= 0 {
+	if p == nil || p.manager == nil || nilvalue.Is(p.store) || nilvalue.Is(ctx) || strings.TrimSpace(value.Payload) == "" || value.ReplyID == "" || value.LeaseOwner == "" || value.FencingToken <= 0 {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
 	}
 	if receipt := strings.TrimSpace(value.ProviderMessageID); receipt != "" {
@@ -66,9 +67,12 @@ func (p *Provider) Deliver(ctx context.Context, value storage.ReplyOutbox) (stri
 }
 
 // Reconcile reports durably acknowledged replies as accepted.
-func (p *Provider) Reconcile(_ context.Context, value storage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
-	if p == nil || p.store == nil {
+func (p *Provider) Reconcile(ctx context.Context, value storage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
+	if p == nil || nilvalue.Is(p.store) || nilvalue.Is(ctx) {
 		return outbox.DeliveryUnknown, "", nil
+	}
+	if err := ctx.Err(); err != nil {
+		return outbox.DeliveryUnknown, "", err
 	}
 	if receipt := strings.TrimSpace(value.ProviderMessageID); receipt != "" {
 		return outbox.DeliveryAccepted, receipt, nil

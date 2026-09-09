@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // ErrWriteFailed identifies a mandatory producer fact that could not be
@@ -39,10 +41,15 @@ func NewRecorder(writer Writer, tenantID string, options ...RecorderOption) Reco
 	recorder := Recorder{writer: writer, tenantID: strings.TrimSpace(tenantID)}
 	for _, option := range options {
 		if option != nil {
-			option(&recorder)
+			applyRecorderOption(option, &recorder)
 		}
 	}
 	return recorder
+}
+
+func applyRecorderOption(option RecorderOption, recorder *Recorder) {
+	defer func() { _ = recover() }()
+	option(recorder)
 }
 
 // WithFixedTime returns a copy whose default event timestamp is captured now.
@@ -54,19 +61,34 @@ func (r Recorder) WithFixedTime() Recorder {
 	return r
 }
 
-func (r Recorder) currentTime() time.Time {
-	if r.now != nil {
-		return r.now().UTC()
+func (r Recorder) currentTime() (value time.Time) {
+	value = time.Now().UTC()
+	if r.now == nil {
+		return value
 	}
-	return time.Now().UTC()
+	defer func() {
+		if recover() != nil || value.IsZero() {
+			value = time.Now().UTC()
+		}
+	}()
+	return r.now().UTC()
 }
+
+// Configured reports whether this recorder has a tenant-scoped writer. A
+// mandatory authorization boundary can use this to fail closed instead of
+// treating the zero recorder as successful audit persistence.
+func (r Recorder) Configured() bool {
+	return !isNilAuditWriter(r.writer) && r.tenantID != ""
+}
+
+func isNilAuditWriter(writer Writer) bool { return nilvalue.Is(writer) }
 
 // Record appends an audit event with the recorder tenant scope.
 func (r Recorder) Record(ctx context.Context, event Event) error {
-	if r.writer == nil {
+	if isNilAuditWriter(r.writer) {
 		return nil
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return ErrWriteFailed
 	}
 	if event.TenantID == "" {
@@ -87,10 +109,23 @@ func (r Recorder) Record(ctx context.Context, event Event) error {
 	if err := event.Validate(); err != nil {
 		return err
 	}
-	if _, err := r.writer.Append(ctx, event); err != nil {
+	if _, err := appendAuditEvent(r.writer, ctx, event); err != nil {
 		return errors.Join(ErrWriteFailed, err)
 	}
 	return nil
+}
+
+func appendAuditEvent(writer Writer, ctx context.Context, event Event) (result AppendResult, err error) {
+	if isNilAuditWriter(writer) {
+		return AppendResult{}, nil
+	}
+	defer func() {
+		if recover() != nil {
+			result = AppendResult{}
+			err = ErrWriteFailed
+		}
+	}()
+	return writer.Append(ctx, event)
 }
 
 // NewEventID returns a deterministic, non-sensitive identifier suitable for
@@ -107,7 +142,7 @@ func NewEventID(parts ...string) string {
 // ToolExecuted records a successful tool execution without persisting its
 // arguments, result, or any provider-specific media metadata.
 func (r Recorder) ToolExecuted(ctx context.Context, requestID, traceID, toolName string) error {
-	return r.Record(ctx, Event{EventType: EventToolExecuted, RequestID: requestID, TraceID: traceID, ToolName: toolName, Decision: DecisionAccepted})
+	return r.Record(ctx, Event{EventType: EventToolExecuted, EventID: NewEventID(string(EventToolExecuted), requestID, traceID, toolName), RequestID: requestID, TraceID: traceID, ToolName: toolName, Decision: DecisionAccepted})
 }
 
 // BudgetRejected records a budget rejection.

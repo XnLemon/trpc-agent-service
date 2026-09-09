@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -104,16 +105,14 @@ type Config struct {
 
 // New creates a reply worker after validating delivery and lease settings.
 func New(config Config) (*Worker, error) {
-	if config.Store == nil || config.MessageStore == nil || config.Provider == nil || runtimestorage.ValidateTenant(config.TenantID) != nil || config.Owner == "" || config.LeaseDuration <= 0 {
+	if nilvalue.Is(config.Store) || nilvalue.Is(config.MessageStore) || nilvalue.Is(config.Provider) || runtimestorage.ValidateTenant(config.TenantID) != nil || config.Owner == "" || config.LeaseDuration <= 0 {
 		return nil, ErrInvalid
 	}
 	retry, err := newRetryPolicy(config)
 	if err != nil {
 		return nil, err
 	}
-	if config.Observability == nil {
-		config.Observability = observability.NewNoopProvider()
-	}
+	config.Observability = observability.ProtectProvider(config.Observability)
 	if config.Channel == "" {
 		config.Channel = "outbox"
 	}
@@ -154,7 +153,7 @@ func (w *Worker) Start(ctx context.Context, pollInterval time.Duration) error {
 }
 
 func (w *Worker) beginRun(ctx context.Context) (context.Context, error) {
-	if w == nil || ctx == nil {
+	if w == nil || nilvalue.Is(ctx) {
 		return nil, ErrInvalid
 	}
 	if err := ctx.Err(); err != nil {
@@ -172,6 +171,9 @@ func (w *Worker) beginRun(ctx context.Context) (context.Context, error) {
 }
 
 func (w *Worker) runLoop(runCtx context.Context, pollInterval time.Duration) error {
+	if w == nil || nilvalue.Is(runCtx) {
+		return ErrInvalid
+	}
 	if pollInterval <= 0 {
 		pollInterval = time.Second
 	}
@@ -211,9 +213,11 @@ func (w *Worker) Close() error {
 	w.mu.Lock()
 	cancel, done := w.runCancel, w.runDone
 	w.mu.Unlock()
-	if cancel != nil {
+	if cancel != nil && done != nil {
 		cancel()
 		<-done
+	} else if cancel != nil {
+		cancel()
 	}
 	return nil
 }
@@ -222,7 +226,7 @@ func (w *Worker) Close() error {
 // expected under competing workers and are skipped; provider errors are stored
 // only as stable classes, never as raw error text.
 func (w *Worker) RunOnce(ctx context.Context) (int, error) {
-	if ctx == nil {
+	if w == nil || nilvalue.Is(ctx) {
 		return 0, ErrInvalid
 	}
 	candidates, err := observeStorage(w, ctx, func(operationCtx context.Context) ([]runtimestorage.ReplyOutbox, error) {
@@ -333,7 +337,7 @@ func (w *Worker) processClaimed(ctx context.Context, candidate, claimed runtimes
 		}
 		return nil
 	}
-	providerID, deliveryErr := w.provider.Deliver(operationCtx, claimed)
+	providerID, deliveryErr := deliverSafely(w.provider, operationCtx, claimed)
 	operationErr = deliveryErr
 	if deliveryErr == nil {
 		return w.acceptDelivery(ctx, operationCtx, claimed, providerID)
@@ -343,11 +347,14 @@ func (w *Worker) processClaimed(ctx context.Context, candidate, claimed runtimes
 
 func restoreCorrelationContext(ctx context.Context, store runtimestorage.ReplyStore, value runtimestorage.ReplyOutbox) context.Context {
 	ctx = observability.ContextWithoutTraceParent(ctx)
-	correlations, ok := store.(runtimestorage.ReplyCorrelationStore)
-	if !ok {
+	if nilvalue.Is(store) {
 		return ctx
 	}
-	correlation, err := correlations.GetReplyCorrelation(ctx, value.TenantID, value.EventID)
+	correlations, ok := store.(runtimestorage.ReplyCorrelationStore)
+	if !ok || nilvalue.Is(correlations) {
+		return ctx
+	}
+	correlation, err := getReplyCorrelationSafely(correlations, ctx, value.TenantID, value.EventID)
 	if err != nil {
 		return ctx
 	}
@@ -356,6 +363,19 @@ func restoreCorrelationContext(ctx context.Context, store runtimestorage.ReplySt
 	}
 	ctx = observability.ContextWithTraceParent(ctx, correlation.TraceParent)
 	return observability.WithCorrelation(ctx, correlation.RequestID, correlation.TraceID)
+}
+
+func getReplyCorrelationSafely(store runtimestorage.ReplyCorrelationStore, ctx context.Context, tenantID, eventID string) (correlation runtimestorage.ReplyCorrelation, err error) {
+	if nilvalue.Is(store) || nilvalue.Is(ctx) {
+		return runtimestorage.ReplyCorrelation{}, ErrProvider
+	}
+	defer func() {
+		if recover() != nil {
+			correlation = runtimestorage.ReplyCorrelation{}
+			err = ErrProvider
+		}
+	}()
+	return store.GetReplyCorrelation(ctx, tenantID, eventID)
 }
 
 func (w *Worker) acceptDelivery(ctx, operationCtx context.Context, claimed runtimestorage.ReplyOutbox, providerID string) error {
@@ -399,16 +419,24 @@ func (w *Worker) rejectDelivery(ctx, operationCtx context.Context, claimed runti
 	return err
 }
 
-func (w *Worker) recordDelivery(ctx context.Context, eventType audit.EventType, value runtimestorage.ReplyOutbox, class string) error {
+func (w *Worker) recordDelivery(ctx context.Context, eventType audit.EventType, value runtimestorage.ReplyOutbox, class string) (err error) {
+	if w == nil || nilvalue.Is(ctx) {
+		return audit.ErrWriteFailed
+	}
+	defer func() {
+		if recover() != nil {
+			err = audit.ErrWriteFailed
+		}
+	}()
 	decision := audit.DecisionAccepted
 	if eventType != audit.EventIMDeliverySent {
 		decision = audit.DecisionRejected
 	}
 	requestID, traceID := value.ReplyID, ""
-	if correlations, ok := w.store.(runtimestorage.ReplyCorrelationStore); ok {
-		if correlation, err := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.ReplyCorrelation, error) {
-			return correlations.GetReplyCorrelation(operationCtx, value.TenantID, value.EventID)
-		}); err == nil {
+	if correlations, ok := w.store.(runtimestorage.ReplyCorrelationStore); ok && !nilvalue.Is(correlations) {
+		if correlation, correlationErr := observeStorage(w, ctx, func(operationCtx context.Context) (runtimestorage.ReplyCorrelation, error) {
+			return getReplyCorrelationSafely(correlations, operationCtx, value.TenantID, value.EventID)
+		}); correlationErr == nil {
 			requestID, traceID = correlation.RequestID, correlation.TraceID
 		}
 	}
@@ -433,7 +461,7 @@ func eligible(value runtimestorage.ReplyOutbox) bool {
 }
 
 func (w *Worker) advanceEvent(ctx context.Context, eventID string) {
-	if w == nil || w.messageStore == nil || eventID == "" {
+	if w == nil || nilvalue.Is(w.messageStore) || eventID == "" {
 		return
 	}
 	candidates, err := observeStorage(w, ctx, func(operationCtx context.Context) ([]runtimestorage.ReplyOutbox, error) {
@@ -476,9 +504,37 @@ func (w *Worker) advanceEvent(ctx context.Context, eventID string) {
 	}
 }
 
+func deliverSafely(provider Provider, ctx context.Context, value runtimestorage.ReplyOutbox) (providerID string, err error) {
+	if nilvalue.Is(provider) || nilvalue.Is(ctx) {
+		return "", &DeliveryError{Class: "provider_error", Retryable: true}
+	}
+	defer func() {
+		if recover() != nil {
+			providerID = ""
+			err = &DeliveryError{Class: "provider_error", Retryable: true}
+		}
+	}()
+	return provider.Deliver(ctx, value)
+}
+
+func reconcileSafely(provider Provider, ctx context.Context, value runtimestorage.ReplyOutbox) (status DeliveryStatus, providerID string, err error) {
+	if nilvalue.Is(provider) || nilvalue.Is(ctx) {
+		return DeliveryUnknown, "", ErrProvider
+	}
+	defer func() {
+		if recover() != nil {
+			status, providerID, err = DeliveryUnknown, "", ErrProvider
+		}
+	}()
+	return provider.Reconcile(ctx, value)
+}
+
 func (w *Worker) reconcile(ctx context.Context, claimed runtimestorage.ReplyOutbox) bool {
-	status, providerID, err := w.provider.Reconcile(ctx, claimed)
-	if err != nil || status == DeliveryUnknown {
+	if w == nil || nilvalue.Is(ctx) || nilvalue.Is(w.provider) {
+		return false
+	}
+	status, providerID, err := reconcileSafely(w.provider, ctx, claimed)
+	if err != nil || (status != DeliveryAccepted && status != DeliveryRejected) {
 		return false
 	}
 	to := runtimestorage.ReplySent
@@ -493,16 +549,22 @@ func (w *Worker) reconcile(ctx context.Context, claimed runtimestorage.ReplyOutb
 	return transitionErr == nil
 }
 
-func observeStorage[T any](worker *Worker, ctx context.Context, operation func(context.Context) (T, error)) (T, error) {
+func observeStorage[T any](worker *Worker, ctx context.Context, operation func(context.Context) (T, error)) (value T, err error) {
 	var zero T
-	if worker == nil || operation == nil {
+	if worker == nil || nilvalue.Is(ctx) || operation == nil || nilvalue.Is(worker.store) {
 		return zero, ErrInvalid
 	}
+	defer func() {
+		if recover() != nil {
+			value = zero
+			err = ErrProvider
+		}
+	}()
 	started := time.Now()
 	operationCtx, _, finish := observability.StartOperation(ctx, worker.telemetry, observability.OperationStorageOperation, "storage")
 	provider := worker.providerName
 	_ = worker.metrics.Request(operationCtx, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": provider, "status": "started"})
-	value, err := operation(operationCtx)
+	value, err = operation(operationCtx)
 	finish(err)
 	_ = worker.metrics.Operation(operationCtx, started, map[string]string{"component": "storage", "operation": observability.OperationStorageOperation, "provider": provider}, err)
 	status := "success"

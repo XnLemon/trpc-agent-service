@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	storagepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
@@ -17,7 +18,7 @@ import (
 // List filters and orders tenant roots in SQL before applying offset pagination.
 // Cursors are numeric offsets, not snapshots: concurrent changes may shift a page.
 func (r *TenantRepository) List(ctx context.Context, scopes []string, query, status, cursor string, limit int) ([]*tenant.Tenant, string, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, "", ErrStorage
 	}
 	if err := ctx.Err(); err != nil {
@@ -134,9 +135,16 @@ var _ tenant.Repository = (*TenantRepository)(nil)
 // NewRepository creates a Tenant repository over an owned or borrowed pool.
 func NewRepository(db *sql.DB) *TenantRepository { return &TenantRepository{db: db} }
 
+func checkContext(ctx context.Context) error {
+	if nilvalue.Is(ctx) {
+		return ErrStorage
+	}
+	return ctx.Err()
+}
+
 // Create persists a tenant root after validating its configuration.
 func (r *TenantRepository) Create(ctx context.Context, input tenant.CreateInput) (*tenant.Tenant, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	value, err := tenant.NewTenant(input)
@@ -182,7 +190,7 @@ func (r *TenantRepository) Create(ctx context.Context, input tenant.CreateInput)
 // a transaction-scoped advisory lock, so multiple service processes cannot all
 // observe an empty control plane and create competing roots.
 func (r *TenantRepository) CreateFirst(ctx context.Context, input tenant.CreateInput) (*tenant.Tenant, bool, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, false, err
 	}
 	value, err := tenant.NewTenant(input)
@@ -229,7 +237,7 @@ func (r *TenantRepository) CreateFirst(ctx context.Context, input tenant.CreateI
 
 // Get loads a tenant by its stable identifier.
 func (r *TenantRepository) Get(ctx context.Context, tenantID string) (*tenant.Tenant, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	if r == nil || r.db == nil {
@@ -251,6 +259,9 @@ func (r *TenantRepository) Get(ctx context.Context, tenantID string) (*tenant.Te
 // Count returns the durable tenant count used by the first-tenant admin
 // authorization boundary.
 func (r *TenantRepository) Count(ctx context.Context) (int, error) {
+	if err := checkContext(ctx); err != nil {
+		return 0, err
+	}
 	if r == nil || r.db == nil {
 		return 0, storagepostgres.ErrStorage
 	}
@@ -263,7 +274,7 @@ func (r *TenantRepository) Count(ctx context.Context) (int, error) {
 
 // UpdateConfiguration applies an expected-version tenant configuration update.
 func (r *TenantRepository) UpdateConfiguration(ctx context.Context, input tenant.UpdateConfigurationInput) (*tenant.Tenant, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	if input.AuditRetentionDays == 0 {
@@ -273,6 +284,9 @@ func (r *TenantRepository) UpdateConfiguration(ctx context.Context, input tenant
 		input.LogMaskingLevel = tenant.MaskingBasic
 	}
 	if err := tenant.ValidateConfiguration(input.DisplayName, input.RateLimitRPM, input.MaxConcurrentExecutions, input.MonthlyTokenBudget, input.MonthlySpendLimitMinor, input.BillingCurrency, input.AuditRetentionDays, input.LogMaskingLevel, input.TraceSamplingRate); err != nil {
+		return nil, err
+	}
+	if err := tenant.ValidateDefaultReferences(input.DefaultAgentAppID, input.DefaultBackendProfileID); err != nil {
 		return nil, err
 	}
 	if r == nil || r.db == nil {
@@ -292,6 +306,9 @@ func (r *TenantRepository) UpdateConfiguration(ctx context.Context, input tenant
 	}
 	if current.Version != input.ExpectedVersion {
 		return nil, fmt.Errorf("%w: expected %d, got %d", tenant.ErrConflict, input.ExpectedVersion, current.Version)
+	}
+	if err := validateTenantDefaults(ctx, tx, input); err != nil {
+		return nil, err
 	}
 	var nextVersion int64
 	err = tx.QueryRowContext(ctx, `
@@ -317,9 +334,27 @@ func (r *TenantRepository) UpdateConfiguration(ctx context.Context, input tenant
 	return updated, nil
 }
 
+// validateTenantDefaults checks cross-domain default references inside the
+// same transaction used for the tenant update.
+func validateTenantDefaults(ctx context.Context, tx *sql.Tx, input tenant.UpdateConfigurationInput) error {
+	if input.DefaultAgentAppID != nil && strings.TrimSpace(*input.DefaultAgentAppID) != "" {
+		var status string
+		if err := tx.QueryRowContext(ctx, "SELECT status FROM public.agent_app WHERE tenant_id = $1 AND app_id = $2 FOR UPDATE", input.TenantID, *input.DefaultAgentAppID).Scan(&status); err != nil || status != "active" {
+			return fmt.Errorf("%w: default agent app must exist in the tenant and be active", tenant.ErrInvalid)
+		}
+	}
+	if input.DefaultBackendProfileID != nil && strings.TrimSpace(*input.DefaultBackendProfileID) != "" {
+		var status string
+		if err := tx.QueryRowContext(ctx, "SELECT status FROM public.backend_profile WHERE tenant_id = $1 AND profile_id = $2 FOR UPDATE", input.TenantID, *input.DefaultBackendProfileID).Scan(&status); err != nil || status != "active" {
+			return fmt.Errorf("%w: default backend profile must exist in the tenant and be active", tenant.ErrInvalid)
+		}
+	}
+	return nil
+}
+
 // TransitionStatus changes a tenant status with optimistic concurrency.
 func (r *TenantRepository) TransitionStatus(ctx context.Context, input tenant.TransitionStatusInput) (*tenant.Tenant, tenant.StatusChangeEvent, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, tenant.StatusChangeEvent{}, err
 	}
 	if err := validateTenantMetadata(input.Metadata); err != nil {

@@ -7,11 +7,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	serviceagent "github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
@@ -112,9 +114,25 @@ type DispatchConfig struct {
 	// contains attachment references. Text-only dispatches remain independent of it.
 	Attachments     attachment.Reader
 	AttachmentStore runtimestorage.AttachmentStore
+	// ToolInvocations persists runner-side tool side-effect state for recovery
+	// and manual reconciliation. It is optional for explicitly local mode.
+	ToolInvocations runtimestorage.ToolInvocationStore
 	// Budget reserves tenant monthly capacity before execution and settles
 	// provider-reported token/cost usage after the event stream closes.
 	Budget *runtimebudget.Controller
+}
+
+func callDispatch(ctx context.Context, dispatcher DispatchService, request DispatchRequest) (events <-chan DispatchEvent, err error) {
+	if isNilGatewayValue(ctx) || isNilGatewayValue(dispatcher) {
+		return nil, ErrNotReady
+	}
+	defer func() {
+		if recover() != nil {
+			events = nil
+			err = ErrExecution
+		}
+	}()
+	return dispatcher.Dispatch(ctx, request)
 }
 
 // Dispatcher resolves a fixed plan, prepares the Gateway execution context,
@@ -130,6 +148,7 @@ type Dispatcher struct {
 	handoffStore    audit.HandoffStore
 	attachments     attachment.Reader
 	attachmentStore runtimestorage.AttachmentStore
+	toolInvocations runtimestorage.ToolInvocationStore
 	budget          *runtimebudget.Controller
 }
 
@@ -253,7 +272,7 @@ func resolveDispatchAttachments(config DispatchConfig) (attachment.Reader, runti
 }
 
 func newDispatchStore(capabilities dispatchCapabilities) dispatchStore {
-	if capabilities.sessions != nil && capabilities.messages != nil {
+	if !nilvalue.Is(capabilities.sessions) && !nilvalue.Is(capabilities.messages) {
 		return dispatchStoreView{sessions: capabilities.sessions, messages: capabilities.messages}
 	}
 	return nil
@@ -263,7 +282,7 @@ func newDispatchMaterializer(config DispatchConfig, batchStore runtimestorage.Re
 	if config.Materializer != nil {
 		return config.Materializer, nil
 	}
-	if batchStore == nil {
+	if nilvalue.Is(batchStore) {
 		return nil, nil
 	}
 	return outbox.NewMaterializer(outbox.MaterializerConfig{
@@ -272,7 +291,7 @@ func newDispatchMaterializer(config DispatchConfig, batchStore runtimestorage.Re
 }
 
 func validateDispatchCapabilities(config DispatchConfig, capabilities dispatchCapabilities) error {
-	if config.Materializer == nil && capabilities.sessions != nil && capabilities.messages != nil && capabilities.replyBatches == nil {
+	if config.Materializer == nil && !nilvalue.Is(capabilities.sessions) && !nilvalue.Is(capabilities.messages) && nilvalue.Is(capabilities.replyBatches) {
 		return fmt.Errorf("%w: durable dispatch requires reply materialization capability", ErrInvalid)
 	}
 	return nil
@@ -283,15 +302,40 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if config.Resolver == nil || config.Registry == nil {
 		return nil, fmt.Errorf("%w: dispatcher dependencies are required", ErrInvalid)
 	}
+	if nilvalue.Is(config.Observability) {
+		config.Observability = nil
+	}
+	if nilvalue.Is(config.SessionStore) {
+		config.SessionStore = nil
+	}
+	if nilvalue.Is(config.MessageStore) {
+		config.MessageStore = nil
+	}
+	if nilvalue.Is(config.ReplyBatchStore) {
+		config.ReplyBatchStore = nil
+	}
+	if nilvalue.Is(config.AuditWriter) {
+		config.AuditWriter = nil
+	}
+	if nilvalue.Is(config.HandoffStore) {
+		config.HandoffStore = nil
+	}
+	if nilvalue.Is(config.Attachments) {
+		config.Attachments = nil
+	}
+	if nilvalue.Is(config.AttachmentStore) {
+		config.AttachmentStore = nil
+	}
+	if nilvalue.Is(config.ToolInvocations) {
+		config.ToolInvocations = nil
+	}
 	if config.DrainTimeout == 0 {
 		config.DrainTimeout = defaultDispatchDrainTimeout
 	}
 	if config.DrainTimeout < 0 {
 		return nil, fmt.Errorf("%w: dispatch drain timeout cannot be negative", ErrInvalid)
 	}
-	if config.Observability == nil {
-		config.Observability = observability.NewNoopProvider()
-	}
+	config.Observability = observability.ProtectProvider(config.Observability)
 	capabilities := resolveDispatchCapabilities(config)
 	if err := validateDispatchCapabilities(config, capabilities); err != nil {
 		return nil, err
@@ -308,7 +352,7 @@ func NewDispatcher(config DispatchConfig) (*Dispatcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Dispatcher{resolver: config.Resolver, executor: executor, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: newDispatchStore(capabilities), materializer: materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore, attachments: config.Attachments, attachmentStore: config.AttachmentStore, budget: config.Budget}, nil
+	return &Dispatcher{resolver: config.Resolver, executor: executor, telemetry: config.Observability, metrics: metrics.New(config.Observability), runtimeStore: newDispatchStore(capabilities), materializer: materializer, auditWriter: config.AuditWriter, handoffStore: config.HandoffStore, attachments: config.Attachments, attachmentStore: config.AttachmentStore, toolInvocations: config.ToolInvocations, budget: config.Budget}, nil
 }
 
 // Ready reports whether both plan resolution and Runner acquisition are ready.
@@ -330,8 +374,11 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		return nil, err
 	}
 	metadata := dispatchMetadata{principal: request.Principal, message: message, requestID: requestID, traceID: traceID}
-	ctx, span := dispatcher.telemetry.Tracer("trpcservice.gateway").Start(observability.WithCorrelation(ctx, requestID, traceID), observability.OperationGatewayDispatch,
+	telemetry := observability.ProtectProvider(dispatcher.telemetry)
+	operationCtx, span := telemetry.Tracer("trpcservice.gateway").Start(observability.WithCorrelation(ctx, requestID, traceID), observability.OperationGatewayDispatch,
 		observability.Attribute{Key: "component", Value: "gateway"}, observability.Attribute{Key: "operation", Value: observability.OperationGatewayDispatch})
+	ctx = operationCtx
+	span = observability.ProtectSpan(span)
 	started := time.Now()
 	_ = dispatcher.metrics.Request(ctx, map[string]string{"component": "gateway", "operation": observability.OperationGatewayDispatch, "status": "started"})
 	finishWithError := func(cause error) {
@@ -423,26 +470,41 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, request DispatchRequ
 		finishWithError(err)
 		return nil, auditWriteFailure()
 	}
+	executionEventID := requestID
+	if attachmentEventID != "" {
+		executionEventID = attachmentEventID
+	}
 	if request.Accepted != nil {
 		select {
 		case request.Accepted <- struct{}{}:
 		default:
 		}
 	}
-	runnerCtx := ctx
+	runnerCtx := serviceagent.WithExecutionMetadata(ctx, serviceagent.ExecutionMetadata{
+		TenantID: request.Principal.TenantID(), AppID: request.Principal.AppID(), Revision: planSnapshot.Revision().Revision,
+		PrincipalKind: string(request.Principal.Kind()), PrincipalID: request.Principal.SubjectID(),
+		UserID: identity.UserID, SessionID: identity.SessionID, EventID: executionEventID, RequestID: requestID, TraceID: traceID,
+	})
 	mediaReplies := servicetool.NewReplyCollector()
-	if durable != nil {
-		toolBudget, budgetErr := servicetool.NewToolCallBudget(plan.AgentSnapshot().Revision().Runtime.MaxToolCalls)
-		if budgetErr != nil {
-			releaseBudget()
-			finishWithError(budgetErr)
-			return nil, budgetErr
+	if durable != nil || dispatcher.toolInvocations != nil {
+		var toolBudget *servicetool.ToolCallBudget
+		if maxToolCalls := plan.AgentSnapshot().Revision().Runtime.MaxToolCalls; maxToolCalls > 0 {
+			toolBudget, err = servicetool.NewToolCallBudget(maxToolCalls)
+			if err != nil {
+				releaseBudget()
+				finishWithError(err)
+				return nil, err
+			}
+		}
+		eventID := requestID
+		if durable != nil {
+			eventID = durable.eventID
 		}
 		runnerCtx = servicetool.WithExecutionContext(runnerCtx, servicetool.ExecutionContext{
 			TenantID: request.Principal.TenantID(), AppID: request.Principal.AppID(), UserID: identity.UserID, SessionID: identity.SessionID,
-			EventID: durable.eventID, RequestID: requestID, TraceID: traceID,
+			EventID: eventID, RequestID: requestID, TraceID: traceID,
 			Attachments: dispatcher.attachmentStore, Replies: mediaReplies,
-			Audit: audit.NewRecorder(dispatcher.auditWriter, request.Principal.TenantID()), ToolBudget: toolBudget,
+			Audit: audit.NewRecorder(dispatcher.auditWriter, request.Principal.TenantID()), ToolBudget: toolBudget, ToolInvocations: dispatcher.toolInvocations,
 		})
 	}
 	if usageAccumulator != nil {
@@ -492,7 +554,7 @@ func normalizeCorrelationID(value string, generate bool) (string, error) {
 	if value == "" {
 		return "", nil
 	}
-	if strings.TrimSpace(value) == "" || hasControl(value) || len([]rune(value)) > maxPrincipalIDRunes {
+	if !utf8.ValidString(value) || strings.TrimSpace(value) != value || value == "" || hasControl(value) || len([]rune(value)) > maxPrincipalIDRunes {
 		return "", fmt.Errorf("%w: correlation ID is invalid", ErrInvalid)
 	}
 	return value, nil

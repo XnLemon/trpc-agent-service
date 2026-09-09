@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
@@ -39,7 +41,7 @@ func loadEnvironment() (environmentConfig, error) {
 		demoMode:       demoMode,
 		telemetry:      observability.NewNoopProvider(),
 	}
-	loaders := []func() error{config.loadDatabase, config.loadIdentities, config.loadAdmin, config.loadModel, config.loadRuntime, config.loadWeCom, config.loadWeComAIBots}
+	loaders := []func() error{config.loadDatabase, config.loadIdentities, config.loadAdmin, config.loadModel, config.loadKnowledgeEmbedding, config.loadRuntime, config.loadSkills, config.loadProtocols, config.loadWeCom, config.loadWeComAIBots}
 	for _, load := range loaders {
 		if err := load(); err != nil {
 			return environmentConfig{}, err
@@ -219,27 +221,84 @@ func (config *environmentConfig) loadModel() error {
 	return err
 }
 
+// loadKnowledgeEmbedding loads the embedding credential independently from
+// the model credential. The embedding provider is used by Knowledge
+// administration and is registered per tenant in the same temporary Secret
+// registry; neither the value nor the SecretRef enters a plan or API result.
+func (config *environmentConfig) loadKnowledgeEmbedding() error {
+	// The current MySQL control-plane wiring intentionally has no durable
+	// PostgreSQL Knowledge management provider. Do not require or register an
+	// unused embedding credential there.
+	if config.driver == ControlPlaneDriverMySQL {
+		config.knowledgeEmbeddingAPIKey = ""
+		config.knowledgeEmbeddingAPIKeys = nil
+		config.knowledgeEmbeddingSecretRef = ""
+		return nil
+	}
+	if config.demoMode {
+		config.knowledgeEmbeddingAPIKey = ""
+		config.knowledgeEmbeddingAPIKeys = nil
+		config.knowledgeEmbeddingSecretRef = ""
+		return nil
+	}
+	config.knowledgeEmbeddingSecretRef = strings.TrimSpace(environmentOrDefault(envKnowledgeEmbeddingSecretRef, defaultKnowledgeEmbeddingSecretRef))
+	if config.knowledgeEmbeddingSecretRef == "" {
+		return fmt.Errorf("%w: %s is required", ErrInvalidConfig, envKnowledgeEmbeddingSecretRef)
+	}
+	for _, identity := range config.apiIdentities {
+		if err := (modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.knowledgeEmbeddingSecretRef}).Validate(); err != nil {
+			return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envKnowledgeEmbeddingSecretRef)
+		}
+	}
+	mapped := strings.TrimSpace(os.Getenv(envKnowledgeEmbeddingAPIKeys))
+	if mapped != "" {
+		var err error
+		config.knowledgeEmbeddingAPIKeys, err = parseEnvironmentTenantAPIKeys(envKnowledgeEmbeddingAPIKeys, mapped)
+		if err != nil {
+			return err
+		}
+		for _, identity := range config.apiIdentities {
+			if config.knowledgeEmbeddingAPIKeys[identity.TenantID] == "" {
+				return fmt.Errorf("%w: %s has no key for tenant", ErrInvalidConfig, envKnowledgeEmbeddingAPIKeys)
+			}
+		}
+		return nil
+	}
+	if len(config.apiIdentities) > 1 {
+		return fmt.Errorf("%w: %s is required for multi-tenant bootstrap", ErrInvalidConfig, envKnowledgeEmbeddingAPIKeys)
+	}
+	config.knowledgeEmbeddingAPIKey = strings.TrimSpace(os.Getenv(envKnowledgeEmbeddingAPIKey))
+	if config.knowledgeEmbeddingAPIKey == "" {
+		return fmt.Errorf("%w: %s is required", ErrInvalidConfig, envKnowledgeEmbeddingAPIKey)
+	}
+	return nil
+}
+
 func parseEnvironmentModelAPIKeys(value string) (map[string]string, error) {
+	return parseEnvironmentTenantAPIKeys(envModelAPIKeys, value)
+}
+
+func parseEnvironmentTenantAPIKeys(name, value string) (map[string]string, error) {
 	if strings.TrimSpace(value) == "" {
-		return nil, fmt.Errorf("%w: %s is required", ErrInvalidConfig, envModelAPIKeys)
+		return nil, fmt.Errorf("%w: %s is required", ErrInvalidConfig, name)
 	}
 	keys := make(map[string]string)
 	for _, item := range strings.Split(value, ",") {
 		item = strings.TrimSpace(item)
 		if item == "" || strings.ContainsAny(item, "\r\n") {
-			return nil, fmt.Errorf("%w: %s contains an empty entry", ErrInvalidConfig, envModelAPIKeys)
+			return nil, fmt.Errorf("%w: %s contains an empty entry", ErrInvalidConfig, name)
 		}
 		separator := strings.IndexByte(item, '=')
 		if separator < 1 || separator == len(item)-1 {
-			return nil, fmt.Errorf("%w: %s entries must be tenant_id=api_key", ErrInvalidConfig, envModelAPIKeys)
+			return nil, fmt.Errorf("%w: %s entries must be tenant_id=api_key", ErrInvalidConfig, name)
 		}
 		tenantID := strings.TrimSpace(item[:separator])
 		apiKey := strings.TrimSpace(item[separator+1:])
 		if tenantID == "" || strings.ContainsAny(tenantID, "\r\n") || apiKey == "" {
-			return nil, fmt.Errorf("%w: %s contains an invalid tenant entry", ErrInvalidConfig, envModelAPIKeys)
+			return nil, fmt.Errorf("%w: %s contains an invalid tenant entry", ErrInvalidConfig, name)
 		}
 		if _, exists := keys[tenantID]; exists {
-			return nil, fmt.Errorf("%w: %s contains duplicate tenant entries", ErrInvalidConfig, envModelAPIKeys)
+			return nil, fmt.Errorf("%w: %s contains duplicate tenant entries", ErrInvalidConfig, name)
 		}
 		keys[tenantID] = apiKey
 	}
@@ -338,6 +397,76 @@ func environmentDuration(name string) (time.Duration, error) {
 	}
 	return parsed, nil
 }
+
+func (config *environmentConfig) loadSkills() error {
+	root := strings.TrimSpace(os.Getenv(envSkillsRoot))
+	if root == "" {
+		return nil
+	}
+	if strings.ContainsAny(root, "\x00\r\n") {
+		return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envSkillsRoot)
+	}
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envSkillsRoot)
+	}
+	absolute = filepath.Clean(absolute)
+	info, err := os.Stat(absolute)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("%w: %s must point to an existing directory", ErrInvalidConfig, envSkillsRoot)
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envSkillsRoot)
+	}
+	config.skillsRoot = filepath.Clean(resolved)
+	return nil
+}
+
+func (config *environmentConfig) loadProtocols() error {
+	a2aEnabled, err := environmentBool(envA2AEnabled)
+	if err != nil {
+		return err
+	}
+	nativeEnabled, err := environmentBool(envTRPCAgentEnabled)
+	if err != nil {
+		return err
+	}
+	if a2aEnabled {
+		host, err := requiredEnvironment(envA2AHost)
+		if err != nil {
+			return err
+		}
+		if strings.ContainsAny(host, "\x00\r\n") {
+			return fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, envA2AHost)
+		}
+		path := environmentOrDefault(envA2APath, "/a2a")
+		name := environmentOrDefault(envA2AAgentName, "trpc-agent")
+		if !validEnvironmentPath(path) || !validEnvironmentName(name) {
+			return fmt.Errorf("%w: A2A endpoint configuration is invalid", ErrInvalidConfig)
+		}
+		config.http.A2A = gateway.A2AConfig{Enabled: true, Host: host, Path: path, AgentName: name, RequestTimeout: defaultEnvironmentProtocolTimeout}
+	}
+	if nativeEnabled {
+		basePath := environmentOrDefault(envTRPCAgentBasePath, "/trpc-agent/v1/apps")
+		appName := environmentOrDefault(envTRPCAgentAppName, "trpc-agent")
+		if !validEnvironmentPath(basePath) || !validEnvironmentName(appName) {
+			return fmt.Errorf("%w: tRPC-Agent endpoint configuration is invalid", ErrInvalidConfig)
+		}
+		config.http.TRPCAgent = gateway.TRPCAgentConfig{Enabled: true, BasePath: basePath, AppName: appName, RequestTimeout: defaultEnvironmentProtocolTimeout}
+	}
+	return nil
+}
+
+func validEnvironmentPath(value string) bool {
+	return strings.HasPrefix(value, "/") && !strings.HasSuffix(value, "/") && !strings.Contains(value, "//") && !strings.Contains(value, "..") && !strings.ContainsAny(value, "\x00\r\n")
+}
+
+func validEnvironmentName(value string) bool {
+	return strings.TrimSpace(value) != "" && len([]rune(value)) <= 256 && !strings.ContainsAny(value, "/\\\x00\r\n")
+}
+
+const defaultEnvironmentProtocolTimeout = 30 * time.Second
 
 func (config *environmentConfig) loadWeCom() error {
 	values := []string{strings.TrimSpace(os.Getenv(envWeComCallbackToken)), strings.TrimSpace(os.Getenv(envWeComEncodingAESKey)), strings.TrimSpace(os.Getenv(envWeComAppSecret)), strings.TrimSpace(os.Getenv(envWeComSecretRef))}
@@ -455,7 +584,7 @@ func environmentRedisRuntimeStore(ctx context.Context, config environmentConfig)
 }
 
 func environmentPing(ctx context.Context, driver ControlPlaneDriver, db *sql.DB, runtimePinger interface{ Ping(context.Context) error }) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return ErrInvalidConfig
 	}
 	if err := ctx.Err(); err != nil {
@@ -468,7 +597,7 @@ func environmentPing(ctx context.Context, driver ControlPlaneDriver, db *sql.DB,
 	} else if err := postgres.Ping(ctx, db); err != nil {
 		return err
 	}
-	if runtimePinger != nil {
+	if !nilvalue.Is(runtimePinger) {
 		return runtimePinger.Ping(ctx)
 	}
 	return nil

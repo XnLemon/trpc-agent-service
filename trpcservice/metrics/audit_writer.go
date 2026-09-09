@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 )
 
@@ -18,10 +19,16 @@ type AuditWriter struct {
 // WrapAuditWriter adds usage/cost telemetry to delegate. A nil writer or
 // provider is returned unchanged, and an already wrapped writer is not nested.
 func WrapAuditWriter(delegate audit.Writer, provider observability.Provider) audit.Writer {
-	if delegate == nil || provider == nil {
+	if isNilAuditValue(delegate) {
+		return nil
+	}
+	if isNilAuditValue(provider) {
 		return delegate
 	}
-	if _, ok := delegate.(*AuditWriter); ok {
+	if wrapped, ok := delegate.(*AuditWriter); ok {
+		if wrapped == nil {
+			return nil
+		}
 		return delegate
 	}
 	return &AuditWriter{delegate: delegate, catalog: New(provider)}
@@ -31,7 +38,7 @@ func WrapAuditWriter(delegate audit.Writer, provider observability.Provider) aud
 // event's cost/token delta. Telemetry errors are deliberately ignored so they
 // cannot turn a successful mandatory audit append into a business failure.
 func (writer *AuditWriter) Append(ctx context.Context, event audit.Event) (audit.AppendResult, error) {
-	if writer == nil || writer.delegate == nil {
+	if writer == nil || isNilAuditValue(writer.delegate) {
 		return audit.AppendResult{}, audit.ErrInvalid
 	}
 	result, err := writer.delegate.Append(ctx, event)
@@ -71,3 +78,5 @@ func (writer *AuditWriter) Append(ctx context.Context, event audit.Event) (audit
 	}
 	return result, err
 }
+
+func isNilAuditValue(value any) bool { return nilvalue.Is(value) }

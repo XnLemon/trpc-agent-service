@@ -17,6 +17,9 @@ var ErrInvalidMCPBinding = errors.New("invalid MCP binding")
 const (
 	defaultMCPTimeoutSeconds = 30
 	maxMCPTimeoutSeconds     = 300
+	maxMCPAllowedTools       = 128
+	maxMCPArgs               = 64
+	maxMCPURLRunes           = 2048
 )
 
 func invalidMCP(format string, args ...any) error {
@@ -27,8 +30,9 @@ func invalidMCP(format string, args ...any) error {
 type MCPToolPolicy string
 
 const (
-	// MCPToolPolicyAuto uses the tool's MCP metadata: destructive tools require
-	// approval while explicitly read-only tools may run without a review.
+	// MCPToolPolicyAuto uses the tool's MCP metadata: destructive or open-world
+	// tools require approval while explicitly local read-only tools may run
+	// without a review.
 	MCPToolPolicyAuto MCPToolPolicy = "auto"
 	// MCPToolPolicyRequireApproval always sends the call to a Reviewer.
 	MCPToolPolicyRequireApproval MCPToolPolicy = "require_approval"
@@ -70,6 +74,12 @@ func (binding MCPBinding) Normalize() (MCPBinding, error) {
 	}
 	if value.TimeoutSeconds < 1 || value.TimeoutSeconds > maxMCPTimeoutSeconds {
 		return MCPBinding{}, invalidMCP("MCP timeout must be between 1 and %d seconds", maxMCPTimeoutSeconds)
+	}
+	if len(value.ToolAllow) > maxMCPAllowedTools || len(value.Args) > maxMCPArgs || len([]rune(value.ServerURL)) > maxMCPURLRunes || !utf8.ValidString(value.ServerURL) || strings.IndexFunc(value.ServerURL, unicode.IsControl) >= 0 {
+		return MCPBinding{}, invalidMCP("MCP binding contains an oversized or invalid value")
+	}
+	if len(value.ToolPolicies) > maxMCPAllowedTools {
+		return MCPBinding{}, invalidMCP("MCP tool policy set is too large")
 	}
 	allow, err := normalizeMCPNames(value.ToolAllow)
 	if err != nil {
@@ -223,6 +233,9 @@ func sameStrings(left, right []string) bool {
 }
 
 func normalizeMCPNames(values []string) ([]string, error) {
+	if len(values) > maxMCPAllowedTools {
+		return nil, invalidMCP("MCP tool allowlist is too large")
+	}
 	seen := make(map[string]struct{}, len(values))
 	result := make([]string, 0, len(values))
 	for _, value := range values {
@@ -256,7 +269,7 @@ func validMCPText(value string) bool {
 		return false
 	}
 	for _, char := range value {
-		if char < 0x20 || char == 0x7f {
+		if unicode.IsControl(char) {
 			return false
 		}
 	}
@@ -265,10 +278,19 @@ func validMCPText(value string) bool {
 
 func validateMCPHTTPURL(raw string) error {
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || !utf8.ValidString(raw) || parsed.Scheme != "https" || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Opaque != "" {
 		return invalidMCP("MCP endpoint must be an HTTPS URL without credentials, query, or fragment")
 	}
+	if !validMCPHTTPPath(parsed) || !validMCPHTTPPort(parsed.Port()) {
+		return invalidMCP("MCP endpoint path or port is invalid")
+	}
 	host := strings.ToLower(parsed.Hostname())
+	if !validMCPHTTPHostname(host) {
+		return invalidMCP("MCP endpoint host is invalid")
+	}
+	if strings.Contains(host, "%") {
+		return invalidMCP("MCP endpoint host zones are not allowed")
+	}
 	if host == "localhost" || strings.HasSuffix(host, ".localhost") || host == "local" || host == "0.0.0.0" || host == "::" {
 		return invalidMCP("MCP endpoint targets a local host")
 	}
@@ -278,6 +300,96 @@ func validateMCPHTTPURL(raw string) error {
 	return nil
 }
 
+func validMCPHTTPPath(value *url.URL) bool {
+	if value == nil {
+		return false
+	}
+	path := value.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	decoded, err := url.PathUnescape(path)
+	if err != nil || !utf8.ValidString(decoded) || !strings.HasPrefix(path, "/") || strings.Contains(decoded, "\\") || strings.IndexFunc(decoded, unicode.IsControl) >= 0 {
+		return false
+	}
+	for _, segment := range strings.Split(decoded, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return len(path) <= 4096
+}
+
+func validMCPHTTPPort(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) > 1 && value[0] == '0' || len(value) > 5 {
+		return false
+	}
+	var port int
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+		port = port*10 + int(character-'0')
+	}
+	return port > 0 && port <= 65535
+}
+
+func validMCPHTTPHostname(value string) bool {
+	if value == "" || strings.HasSuffix(value, ".") || len(value) > 253 {
+		return false
+	}
+	if ip := net.ParseIP(value); ip != nil {
+		return true
+	}
+	for _, label := range strings.Split(value, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func restrictedMCPIP(ip net.IP) bool {
-	return ip == nil || !ip.IsGlobalUnicast() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast()
+	if ip == nil {
+		return true
+	}
+	if ipv4 := ip.To4(); ipv4 != nil {
+		ip = ipv4
+	}
+	if !ip.IsGlobalUnicast() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return true
+	}
+	for _, network := range mcpRestrictedNetworks {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+var mcpRestrictedNetworks = mustMCPRestrictedNetworks()
+
+func mustMCPRestrictedNetworks() []*net.IPNet {
+	values := []string{
+		"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24",
+		"192.88.99.0/24", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
+		"2001:0::/32", "2001:2::/48", "2001:10::/28", "2001:db8::/32",
+	}
+	networks := make([]*net.IPNet, 0, len(values))
+	for _, cidr := range values {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			panic("invalid MCP restricted network: " + cidr)
+		}
+		networks = append(networks, network)
+	}
+	return networks
 }

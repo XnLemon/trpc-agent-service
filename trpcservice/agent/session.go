@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/session"
@@ -31,7 +32,7 @@ func NewTenantSessionService(root tenant.Tenant, delegate session.Service) (*Ten
 	if err := root.Validate(); err != nil || !root.CanAcceptExecution() {
 		return nil, fmt.Errorf("%w: tenant must be a valid active root", ErrTenantSessionScope)
 	}
-	if delegate == nil {
+	if nilvalue.Is(delegate) {
 		return nil, fmt.Errorf("%w: session service is required", ErrTenantSessionScope)
 	}
 	prefix := "tenant:" + base64.RawURLEncoding.EncodeToString([]byte(root.TenantID)) + ":"
@@ -172,9 +173,17 @@ func (service *TenantSessionService) GetSessionSummaryText(ctx context.Context, 
 }
 
 // Close closes the borrowed delegate when the caller explicitly closes the adapter.
-func (service *TenantSessionService) Close() error { return service.delegate.Close() }
+func (service *TenantSessionService) Close() error {
+	if service == nil || nilvalue.Is(service.delegate) {
+		return nil
+	}
+	return service.delegate.Close()
+}
 
 func (service *TenantSessionService) scopeKey(key session.Key, requireSessionID bool) (session.Key, error) {
+	if service == nil || nilvalue.Is(service.delegate) {
+		return session.Key{}, ErrTenantSessionScope
+	}
 	if err := key.CheckUserKey(); err != nil {
 		return session.Key{}, err
 	}
@@ -194,6 +203,9 @@ func (service *TenantSessionService) scopeKey(key session.Key, requireSessionID 
 }
 
 func (service *TenantSessionService) scopeUserKey(key session.UserKey) (session.UserKey, error) {
+	if service == nil || nilvalue.Is(service.delegate) {
+		return session.UserKey{}, ErrTenantSessionScope
+	}
 	if err := key.CheckUserKey(); err != nil {
 		return session.UserKey{}, err
 	}
@@ -210,6 +222,9 @@ func (service *TenantSessionService) scopeUserKey(key session.UserKey) (session.
 }
 
 func (service *TenantSessionService) scopeIdentifier(value string) (string, error) {
+	if service == nil || nilvalue.Is(service.delegate) {
+		return "", ErrTenantSessionScope
+	}
 	if value == "" {
 		return "", session.ErrAppNameRequired
 	}
@@ -226,8 +241,16 @@ func (service *TenantSessionService) scopeIdentifierUnchecked(value string) stri
 	return service.prefix + base64.RawURLEncoding.EncodeToString([]byte(value))
 }
 
+// tenantScopedIdentifier is the canonical identifier used when an upstream
+// capability has no tenant field of its own. Keeping this encoding shared by
+// Session, Memory, and Artifact prevents a raw user/app key from becoming a
+// cross-tenant storage key.
+func tenantScopedIdentifier(tenantID, value string) string {
+	return "tenant:" + base64.RawURLEncoding.EncodeToString([]byte(tenantID)) + ":" + base64.RawURLEncoding.EncodeToString([]byte(value))
+}
+
 func (service *TenantSessionService) isScoped(value string) bool {
-	return strings.HasPrefix(value, service.prefix)
+	return service != nil && strings.HasPrefix(value, service.prefix)
 }
 
 func hasTenantScopePrefix(value string) bool {
@@ -235,7 +258,7 @@ func hasTenantScopePrefix(value string) bool {
 }
 
 func (service *TenantSessionService) validateSession(sess *session.Session) error {
-	if sess == nil || !service.isScoped(sess.AppName) || !service.isScoped(sess.UserID) || sess.ID == "" {
+	if service == nil || nilvalue.Is(service.delegate) || sess == nil || !service.isScoped(sess.AppName) || !service.isScoped(sess.UserID) || sess.ID == "" {
 		return ErrTenantSessionScope
 	}
 	return nil

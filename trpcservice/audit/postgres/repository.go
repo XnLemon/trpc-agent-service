@@ -11,6 +11,7 @@ import (
 	"unicode"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // Store is permanently bound to one tenant. It cannot be retargeted after
@@ -38,7 +39,7 @@ func New(db *sql.DB, tenantID string) (*Store, error) {
 func NewRepository(db *sql.DB, tenantID string) (*Store, error) { return New(db, tenantID) }
 
 func (s *Store) check(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return audit.ErrInvalid
 	}
 	if err := ctx.Err(); err != nil {
@@ -320,7 +321,7 @@ func validGroup(group audit.GroupBy) bool {
 }
 func validEventType(value audit.EventType) bool {
 	switch value {
-	case audit.EventControlPlaneChanged, audit.EventExecutionStarted, audit.EventExecutionCompleted, audit.EventExecutionFailed, audit.EventExecutionCanceled, audit.EventExecutionTimedOut, audit.EventExecutionFallback, audit.EventCanarySelected, audit.EventToolAllowed, audit.EventToolDenied, audit.EventToolApprovalRequired, audit.EventToolExecuted, audit.EventIMAuthorizationAllowed, audit.EventIMAuthorizationDenied, audit.EventIMIngressAccepted, audit.EventIMIngressDuplicate, audit.EventIMDeliverySent, audit.EventIMDeliveryRetryScheduled, audit.EventIMDeliveryDeadLettered, audit.EventIMDeliveryReconciled, audit.EventBudgetRejected, audit.EventContentRedacted, audit.EventAuditIncomplete:
+	case audit.EventControlPlaneChanged, audit.EventExecutionStarted, audit.EventExecutionCompleted, audit.EventExecutionFailed, audit.EventExecutionCanceled, audit.EventExecutionTimedOut, audit.EventExecutionFallback, audit.EventCanarySelected, audit.EventToolAllowed, audit.EventToolDenied, audit.EventToolApprovalRequired, audit.EventToolExecuted, audit.EventToolReconciliationRequired, audit.EventIMAuthorizationAllowed, audit.EventIMAuthorizationDenied, audit.EventIMIngressAccepted, audit.EventIMIngressDuplicate, audit.EventIMDeliverySent, audit.EventIMDeliveryRetryScheduled, audit.EventIMDeliveryDeadLettered, audit.EventIMDeliveryReconciled, audit.EventBudgetRejected, audit.EventContentRedacted, audit.EventAuditIncomplete:
 		return true
 	}
 	return false

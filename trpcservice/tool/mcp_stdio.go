@@ -1,26 +1,50 @@
 package tool
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/jsonstrict"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-const (
-	stdioMCPReconnectAttempts = 2
-	stdioMCPCloseWait         = 2 * time.Second
-)
+const stdioMCPCloseWait = 2 * time.Second
+
+// isolatedMCPEnvironment deliberately excludes inherited credentials, proxy
+// settings, loader hooks, and other process-global secrets. The command is
+// already validated as an absolute executable path, so it does not need the
+// caller's PATH to resolve itself.
+func isolatedMCPEnvironment() []string {
+	if runtime.GOOS == "windows" {
+		return []string{
+			"PATH=C:\\Windows\\System32;C:\\Windows",
+			"SystemRoot=C:\\Windows",
+			"SYSTEMROOT=C:\\Windows",
+			"LANG=C",
+			"LC_ALL=C",
+		}
+	}
+	return []string{
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"LANG=C",
+		"LC_ALL=C",
+	}
+}
 
 // stdioMCPToolSet is the platform lifecycle boundary for command-backed MCP.
 // It deliberately does not use a shell or inherit a caller context for the
@@ -41,7 +65,7 @@ type stdioMCPToolSet struct {
 }
 
 func newStdioMCPToolSet(ctx context.Context, binding MCPBinding) (*stdioMCPToolSet, error) {
-	if ctx == nil || ctx.Err() != nil {
+	if nilvalue.Is(ctx) || ctx.Err() != nil {
 		return nil, fmt.Errorf("%w: active context is required", ErrInvalidMCPBinding)
 	}
 	allowed := make(map[string]struct{}, len(binding.ToolAllow))
@@ -86,7 +110,9 @@ func (set *stdioMCPToolSet) Tools(ctx context.Context) []trpctool.Tool {
 	set.requestMu.Lock()
 	defer set.requestMu.Unlock()
 	if err := set.ensureConnectedLocked(ctx); err != nil {
-		return set.cachedTools()
+		// Do not advertise stale declarations after a failed reconnect. A
+		// caller may make a later explicit refresh attempt.
+		return nil
 	}
 	return set.cachedTools()
 }
@@ -111,6 +137,24 @@ func (set *stdioMCPToolSet) Close() error {
 		return nil
 	}
 	return process.close()
+}
+
+// resetMCPConnection is intentionally independent of requestMu. It is called
+// after a failed tools/call while the caller may still hold that mutex; it
+// drops only the broken child and leaves the ToolSet available for the next
+// explicit invocation.
+func (set *stdioMCPToolSet) resetMCPConnection() {
+	if set == nil {
+		return
+	}
+	set.mu.Lock()
+	process := set.process
+	set.process = nil
+	closed := set.closed
+	set.mu.Unlock()
+	if process != nil && !closed {
+		_ = process.close()
+	}
 }
 
 func (set *stdioMCPToolSet) cachedTools() []trpctool.Tool {
@@ -163,7 +207,7 @@ func (tool *stdioMCPTool) ToolMetadata() trpctool.ToolMetadata {
 }
 
 func (tool *stdioMCPTool) Call(ctx context.Context, args []byte) (any, error) {
-	if tool == nil || tool.owner == nil {
+	if tool == nil || tool.owner == nil || !validMCPName(tool.remoteName) {
 		return nil, fmt.Errorf("%w: MCP stdio tool is unavailable", ErrInvalidMCPBinding)
 	}
 	return tool.owner.callTool(ctx, tool.remoteName, args)
@@ -178,7 +222,7 @@ func cloneToolDeclaration(declaration *trpctool.Declaration) *trpctool.Declarati
 }
 
 func (set *stdioMCPToolSet) ensureConnectedLocked(ctx context.Context) error {
-	if ctx == nil || ctx.Err() != nil {
+	if nilvalue.Is(ctx) || ctx.Err() != nil {
 		return fmt.Errorf("active context is required")
 	}
 	set.mu.RLock()
@@ -242,6 +286,9 @@ func (set *stdioMCPToolSet) initializeProcess(ctx context.Context, process *stdi
 }
 
 func parseStdioMCPTools(raw json.RawMessage, allowed map[string]struct{}) (map[string]stdioMCPToolDefinition, error) {
+	if !utf8.Valid(raw) {
+		return nil, errMCPWireInvalidUTF8
+	}
 	var result struct {
 		Tools []struct {
 			Name         string          `json:"name"`
@@ -255,19 +302,35 @@ func parseStdioMCPTools(raw json.RawMessage, allowed map[string]struct{}) (map[s
 			} `json:"annotations"`
 		} `json:"tools"`
 	}
+	if err := jsonstrict.Validate(raw, true); err != nil {
+		return nil, fmt.Errorf("decode MCP tools/list: %w", err)
+	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, fmt.Errorf("decode MCP tools/list: %w", err)
 	}
 	definitions := make(map[string]stdioMCPToolDefinition, len(result.Tools))
+	seen := make(map[string]struct{}, len(result.Tools))
 	for _, remote := range result.Tools {
+		if !validMCPName(remote.Name) {
+			return nil, fmt.Errorf("MCP tools/list returned an invalid tool name")
+		}
+		if _, duplicate := seen[remote.Name]; duplicate {
+			return nil, fmt.Errorf("MCP tools/list returned duplicate tool %q", remote.Name)
+		}
+		seen[remote.Name] = struct{}{}
 		if _, ok := allowed[remote.Name]; !ok {
 			continue
 		}
-		if remote.Name == "" {
-			return nil, fmt.Errorf("MCP tools/list returned an unnamed allowed tool")
+		inputSchema, schemaErr := decodeStdioSchema(remote.InputSchema)
+		if schemaErr != nil || inputSchema == nil {
+			return nil, fmt.Errorf("MCP tools/list returned an invalid input schema for %q", remote.Name)
 		}
-		if _, duplicate := definitions[remote.Name]; duplicate {
-			return nil, fmt.Errorf("MCP tools/list returned duplicate tool %q", remote.Name)
+		if !validMCPText(remote.Description) {
+			return nil, fmt.Errorf("MCP tools/list returned an invalid description for %q", remote.Name)
+		}
+		outputSchema, schemaErr := decodeStdioSchema(remote.OutputSchema)
+		if schemaErr != nil {
+			return nil, fmt.Errorf("MCP tools/list returned an invalid output schema for %q", remote.Name)
 		}
 		metadata := trpctool.ToolMetadata{}
 		if remote.Annotations.ReadOnlyHint != nil {
@@ -282,7 +345,7 @@ func parseStdioMCPTools(raw json.RawMessage, allowed map[string]struct{}) (map[s
 		definitions[remote.Name] = stdioMCPToolDefinition{
 			declaration: &trpctool.Declaration{
 				Name: remote.Name, Description: remote.Description,
-				InputSchema: decodeStdioSchema(remote.InputSchema), OutputSchema: decodeStdioSchema(remote.OutputSchema),
+				InputSchema: inputSchema, OutputSchema: outputSchema,
 			}, metadata: metadata,
 		}
 	}
@@ -294,71 +357,83 @@ func parseStdioMCPTools(raw json.RawMessage, allowed map[string]struct{}) (map[s
 	return definitions, nil
 }
 
-func decodeStdioSchema(raw json.RawMessage) *trpctool.Schema {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil
+func decodeStdioSchema(raw json.RawMessage) (*trpctool.Schema, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	if err := jsonstrict.Validate(raw, false); err != nil {
+		return nil, err
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+	if err := jsonstrict.Validate(raw, true); err != nil {
+		return nil, err
 	}
 	var schema trpctool.Schema
 	if err := json.Unmarshal(raw, &schema); err != nil {
-		return nil
+		return nil, err
 	}
-	return &schema
+	return &schema, nil
 }
 
 func (set *stdioMCPToolSet) callTool(ctx context.Context, name string, args []byte) (any, error) {
-	if ctx == nil || ctx.Err() != nil {
+	if set == nil {
+		return nil, fmt.Errorf("%w: MCP stdio ToolSet is unavailable", ErrInvalidMCPBinding)
+	}
+	if nilvalue.Is(ctx) || ctx.Err() != nil {
 		return nil, contextError(ctx)
+	}
+	if !validMCPArguments(args) {
+		return nil, ErrMCPInvalidArguments
 	}
 	var arguments map[string]any
 	if len(bytes.TrimSpace(args)) == 0 {
 		arguments = map[string]any{}
 	} else if err := json.Unmarshal(args, &arguments); err != nil {
-		return nil, fmt.Errorf("invalid MCP tool arguments: %w", err)
+		return nil, ErrMCPInvalidArguments
 	}
 
 	set.requestMu.Lock()
 	defer set.requestMu.Unlock()
-	var lastErr error
-	for attempt := 0; attempt <= stdioMCPReconnectAttempts; attempt++ {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if err := set.ensureConnectedLocked(ctx); err != nil {
-			lastErr = err
-			if !mcpConnectionFailure(err) || attempt == stdioMCPReconnectAttempts {
-				return nil, err
-			}
-			continue
-		}
-		set.mu.RLock()
-		process := set.process
-		_, allowed := set.allowed[name]
-		set.mu.RUnlock()
-		if !allowed {
-			return nil, fmt.Errorf("MCP tool %q is not authorized", name)
-		}
-		result, err := process.request(ctx, set.timeout, "tools/call", map[string]any{"name": name, "arguments": arguments})
-		if err == nil {
-			var value any
-			if len(result) == 0 || bytes.Equal(bytes.TrimSpace(result), []byte("null")) {
-				return nil, nil
-			}
-			if decodeErr := json.Unmarshal(result, &value); decodeErr != nil {
-				return nil, fmt.Errorf("decode MCP tools/call result: %w", decodeErr)
-			}
-			return value, nil
-		}
-		lastErr = err
-		if ctx.Err() != nil || !mcpConnectionFailure(err) || attempt == stdioMCPReconnectAttempts {
-			return nil, err
-		}
-		set.dropProcess(process)
+	if err := contextError(ctx); err != nil {
+		return nil, err
 	}
-	return nil, lastErr
+	if err := set.ensureConnectedLocked(ctx); err != nil {
+		return nil, err
+	}
+	set.mu.RLock()
+	process := set.process
+	_, allowed := set.allowed[name]
+	set.mu.RUnlock()
+	if !allowed || process == nil {
+		return nil, fmt.Errorf("MCP tool %q is not authorized", name)
+	}
+	result, err := process.request(ctx, set.timeout, "tools/call", map[string]any{"name": name, "arguments": arguments})
+	if err != nil {
+		// Close a broken transport, but never send tools/call again here. The
+		// lifecycle wrapper may refresh it for a later explicit call.
+		if ctx.Err() == nil && mcpConnectionFailure(err) {
+			set.dropProcess(process)
+		}
+		return nil, err
+	}
+	var value any
+	if len(result) == 0 || bytes.Equal(bytes.TrimSpace(result), []byte("null")) {
+		return nil, nil
+	}
+	if err := jsonstrict.Validate(result, false); err != nil {
+		return nil, fmt.Errorf("decode MCP tools/call result: %w", err)
+	}
+	if decodeErr := json.Unmarshal(result, &value); decodeErr != nil {
+		return nil, fmt.Errorf("decode MCP tools/call result: %w", decodeErr)
+	}
+	return value, nil
 }
 
 func contextError(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return errors.New("context is required")
 	}
 	return ctx.Err()
@@ -385,6 +460,7 @@ type stdioMCPProcess struct {
 
 	ctx         context.Context
 	cancel      context.CancelFunc
+	workDir     string
 	done        chan struct{}
 	doneOnce    sync.Once
 	finishErrMu sync.RWMutex
@@ -408,15 +484,25 @@ type stdioMCPError struct {
 
 func newStdioMCPProcess(command string, args []string) (*stdioMCPProcess, error) {
 	ctx, cancel := context.WithCancel(context.Background())
+	workDir, err := os.MkdirTemp("", "trpc-mcp-")
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("create MCP stdio work directory: %w", err)
+	}
 	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Dir = workDir
+	cmd.Env = isolatedMCPEnvironment()
+	configureMCPProcess(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		_ = os.RemoveAll(workDir)
 		cancel()
 		return nil, fmt.Errorf("create MCP stdio stdin: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
+		_ = os.RemoveAll(workDir)
 		cancel()
 		return nil, fmt.Errorf("create MCP stdio stdout: %w", err)
 	}
@@ -424,6 +510,7 @@ func newStdioMCPProcess(command string, args []string) (*stdioMCPProcess, error)
 	if err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
+		_ = os.RemoveAll(workDir)
 		cancel()
 		return nil, fmt.Errorf("create MCP stdio stderr: %w", err)
 	}
@@ -431,12 +518,13 @@ func newStdioMCPProcess(command string, args []string) (*stdioMCPProcess, error)
 		_ = stdin.Close()
 		_ = stdout.Close()
 		_ = stderr.Close()
+		_ = os.RemoveAll(workDir)
 		cancel()
 		return nil, fmt.Errorf("start MCP stdio process: %w", err)
 	}
 	process := &stdioMCPProcess{
 		cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, enc: json.NewEncoder(stdin),
-		ctx: ctx, cancel: cancel, done: make(chan struct{}), pending: make(map[string]chan stdioMCPResponse),
+		ctx: ctx, cancel: cancel, workDir: workDir, done: make(chan struct{}), pending: make(map[string]chan stdioMCPResponse),
 	}
 	go process.readLoop()
 	go process.stderrLoop()
@@ -445,6 +533,9 @@ func newStdioMCPProcess(command string, args []string) (*stdioMCPProcess, error)
 }
 
 func (process *stdioMCPProcess) doneNow() bool {
+	if process == nil || process.done == nil {
+		return true
+	}
 	select {
 	case <-process.done:
 		return true
@@ -454,7 +545,10 @@ func (process *stdioMCPProcess) doneNow() bool {
 }
 
 func (process *stdioMCPProcess) request(ctx context.Context, timeout time.Duration, method string, params any) (json.RawMessage, error) {
-	if ctx == nil || ctx.Err() != nil {
+	if process == nil {
+		return nil, errors.New("MCP stdio process is unavailable")
+	}
+	if nilvalue.Is(ctx) || ctx.Err() != nil {
 		return nil, contextError(ctx)
 	}
 	requestCtx, cancel := withMCPTimeout(ctx, timeout)
@@ -497,7 +591,10 @@ func (process *stdioMCPProcess) request(ctx context.Context, timeout time.Durati
 }
 
 func (process *stdioMCPProcess) notify(ctx context.Context, notification any) error {
-	if ctx == nil || ctx.Err() != nil {
+	if process == nil {
+		return errors.New("MCP stdio process is unavailable")
+	}
+	if nilvalue.Is(ctx) || ctx.Err() != nil {
 		return contextError(ctx)
 	}
 	process.writeMu.Lock()
@@ -522,16 +619,45 @@ func withMCPTimeout(ctx context.Context, timeout time.Duration) (context.Context
 }
 
 func (process *stdioMCPProcess) readLoop() {
-	decoder := json.NewDecoder(process.stdout)
+	reader := bufio.NewReaderSize(process.stdout, 64<<10)
 	for {
-		var envelope struct {
-			ID     json.RawMessage `json:"id"`
-			Result json.RawMessage `json:"result"`
-			Error  *stdioMCPError  `json:"error"`
-		}
-		if err := decoder.Decode(&envelope); err != nil {
+		line, err := readMCPStdioLine(reader)
+		if err != nil {
 			if !process.doneNow() {
 				process.finish(fmt.Errorf("read MCP stdio response: %w", err))
+			}
+			return
+		}
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		if !utf8.Valid(line) {
+			if !process.doneNow() {
+				process.finish(fmt.Errorf("decode MCP stdio response: %w", errMCPWireInvalidUTF8))
+			}
+			return
+		}
+		if err := jsonstrict.Validate(line, true); err != nil {
+			if !process.doneNow() {
+				process.finish(fmt.Errorf("decode MCP stdio response: %w", err))
+			}
+			return
+		}
+		var envelope struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      json.RawMessage `json:"id"`
+			Result  json.RawMessage `json:"result"`
+			Error   *stdioMCPError  `json:"error"`
+		}
+		if err := json.Unmarshal(line, &envelope); err != nil {
+			if !process.doneNow() {
+				process.finish(fmt.Errorf("decode MCP stdio response: %w", err))
+			}
+			return
+		}
+		if envelope.JSONRPC != "2.0" || (len(bytes.TrimSpace(envelope.Result)) == 0 && envelope.Error == nil) || (len(bytes.TrimSpace(envelope.Result)) > 0 && envelope.Error != nil) {
+			if !process.doneNow() {
+				process.finish(errors.New("MCP stdio response has an invalid JSON-RPC envelope"))
 			}
 			return
 		}
@@ -547,11 +673,37 @@ func (process *stdioMCPProcess) readLoop() {
 		}
 		response := stdioMCPResponse{result: append(json.RawMessage(nil), envelope.Result...)}
 		if envelope.Error != nil {
-			response.err = fmt.Errorf("MCP JSON-RPC error %d: %s", envelope.Error.Code, envelope.Error.Message)
+			// Provider-controlled error messages can contain credentials or
+			// arbitrary payloads. Keep the protocol-facing error stable; the
+			// governed adapter redacts it further for the model.
+			response.err = fmt.Errorf("MCP JSON-RPC error %d", envelope.Error.Code)
 		}
 		select {
 		case responseCh <- response:
 		default:
+		}
+	}
+}
+
+func readMCPStdioLine(reader *bufio.Reader) ([]byte, error) {
+	if reader == nil {
+		return nil, errors.New("MCP stdio reader is unavailable")
+	}
+	line := make([]byte, 0, 256)
+	for {
+		part, isPrefix, err := reader.ReadLine()
+		if len(line)+len(part) > int(maxMCPWireBytes) {
+			return nil, errMCPWireTooLarge
+		}
+		line = append(line, part...)
+		if err != nil {
+			if errors.Is(err, io.EOF) && len(line) > 0 {
+				return line, nil
+			}
+			return nil, err
+		}
+		if !isPrefix {
+			return line, nil
 		}
 	}
 }
@@ -563,6 +715,9 @@ func (process *stdioMCPProcess) stderrLoop() {
 func (process *stdioMCPProcess) waitLoop() {
 	err := process.cmd.Wait()
 	process.finish(err)
+	if process.workDir != "" {
+		_ = os.RemoveAll(process.workDir)
+	}
 }
 
 func (process *stdioMCPProcess) failure() error {
@@ -614,7 +769,7 @@ func (process *stdioMCPProcess) close() error {
 	}
 	process.cancel()
 	if process.cmd != nil && process.cmd.Process != nil {
-		_ = process.cmd.Process.Kill()
+		killMCPProcess(process.cmd)
 	}
 	select {
 	case <-process.done:

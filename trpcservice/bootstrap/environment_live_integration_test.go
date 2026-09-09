@@ -234,5 +234,5 @@ func backendBindingForLiveCOS(endpoint string) backend.CapabilityBinding {
 }
 
 func backendStorageInput(_ string) backend.StorageFactoryInput {
-	return backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000"}
+	return backend.StorageFactoryInput{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000"}
 }

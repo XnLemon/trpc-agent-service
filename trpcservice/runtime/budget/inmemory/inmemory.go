@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
 )
 
@@ -54,7 +55,7 @@ type Ledger struct {
 
 // Snapshot returns the current monthly counters.
 func (store *Store) Snapshot(ctx context.Context, tenantID string, periodStart time.Time) (Ledger, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return Ledger{}, errors.New("budget snapshot context is required")
 	}
 	if err := ctx.Err(); err != nil {
@@ -185,7 +186,7 @@ func (store *Store) Release(ctx context.Context, tenantID, reservationID string)
 }
 
 func validContext(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return budget.ErrInvalid
 	}
 	return ctx.Err()

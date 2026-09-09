@@ -5,6 +5,7 @@ import appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 type storedGenerationConfig struct {
 	appmodel.GenerationConfig
 	MCPBindings []appmodel.MCPBinding        `json:"mcp_bindings,omitempty"`
+	Skills      []string                     `json:"skills,omitempty"`
 	Chain       *appmodel.ChainConfiguration `json:"chain,omitempty"`
 }
 
@@ -12,6 +13,7 @@ func encodeAgentRevisionParts(revision appmodel.Revision) ([]byte, []byte, []byt
 	generation, err := encodeJSON(storedGenerationConfig{
 		GenerationConfig: revision.Generation,
 		MCPBindings:      cloneMCPBindings(revision.MCPBindings),
+		Skills:           append([]string(nil), revision.Skills...),
 		Chain:            revision.Chain.Clone(),
 	})
 	if err != nil {
@@ -48,6 +50,7 @@ func decodeAgentRevisionParts(generation, runtime []byte, revision *appmodel.Rev
 	}
 	revision.Generation = stored.GenerationConfig
 	revision.MCPBindings = cloneMCPBindings(stored.MCPBindings)
+	revision.Skills = append([]string(nil), stored.Skills...)
 	revision.Chain = stored.Chain.Clone()
 	return decodeJSON(runtime, &revision.Runtime)
 }

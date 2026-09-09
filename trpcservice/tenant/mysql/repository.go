@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	storagemysql "github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
@@ -24,7 +25,7 @@ var _ tenant.Repository = (*TenantRepository)(nil)
 //
 //nolint:gocyclo // Collection listing coordinates scope, filter, and paging boundaries.
 func (r *TenantRepository) List(ctx context.Context, scopes []string, query, status, cursor string, limit int) ([]*tenant.Tenant, string, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, "", err
 	}
 	if r == nil || r.db == nil {
@@ -130,9 +131,16 @@ func decodeListCursor(cursor string) (int, error) {
 // NewRepository creates a Tenant repository over an owned or borrowed pool.
 func NewRepository(db *sql.DB) *TenantRepository { return &TenantRepository{db: db} }
 
+func checkContext(ctx context.Context) error {
+	if nilvalue.Is(ctx) {
+		return ErrStorage
+	}
+	return ctx.Err()
+}
+
 // Create persists a tenant root after validating its configuration.
 func (r *TenantRepository) Create(ctx context.Context, input tenant.CreateInput) (*tenant.Tenant, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	value, err := tenant.NewTenant(input)
@@ -181,7 +189,7 @@ func (r *TenantRepository) Create(ctx context.Context, input tenant.CreateInput)
 // a transaction-scoped advisory lock, so multiple service processes cannot all
 // observe an empty control plane and create competing roots.
 func (r *TenantRepository) CreateFirst(ctx context.Context, input tenant.CreateInput) (*tenant.Tenant, bool, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, false, err
 	}
 	value, err := tenant.NewTenant(input)
@@ -239,7 +247,7 @@ func (r *TenantRepository) CreateFirst(ctx context.Context, input tenant.CreateI
 
 // Get loads a tenant by its stable identifier.
 func (r *TenantRepository) Get(ctx context.Context, tenantID string) (*tenant.Tenant, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	if r == nil || r.db == nil {
@@ -261,7 +269,7 @@ func (r *TenantRepository) Get(ctx context.Context, tenantID string) (*tenant.Te
 // Count returns the durable tenant count used by the first-tenant admin
 // authorization boundary.
 func (r *TenantRepository) Count(ctx context.Context) (int, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return 0, ErrStorage
 	}
 	if err := ctx.Err(); err != nil {
@@ -279,7 +287,7 @@ func (r *TenantRepository) Count(ctx context.Context) (int, error) {
 
 // UpdateConfiguration applies an expected-version tenant configuration update.
 func (r *TenantRepository) UpdateConfiguration(ctx context.Context, input tenant.UpdateConfigurationInput) (*tenant.Tenant, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	normalized, err := normalizeTenantConfigurationInput(input)
@@ -348,6 +356,9 @@ func normalizeTenantConfigurationInput(input tenant.UpdateConfigurationInput) (t
 	if err := tenant.ValidateConfiguration(input.DisplayName, input.RateLimitRPM, input.MaxConcurrentExecutions, input.MonthlyTokenBudget, input.MonthlySpendLimitMinor, input.BillingCurrency, input.AuditRetentionDays, input.LogMaskingLevel, input.TraceSamplingRate); err != nil {
 		return tenant.UpdateConfigurationInput{}, err
 	}
+	if err := tenant.ValidateDefaultReferences(input.DefaultAgentAppID, input.DefaultBackendProfileID); err != nil {
+		return tenant.UpdateConfigurationInput{}, err
+	}
 	return input, nil
 }
 
@@ -369,7 +380,7 @@ func validateTenantDefaults(ctx context.Context, tx *sql.Tx, input tenant.Update
 
 // TransitionStatus changes a tenant status with optimistic concurrency.
 func (r *TenantRepository) TransitionStatus(ctx context.Context, input tenant.TransitionStatusInput) (*tenant.Tenant, tenant.StatusChangeEvent, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, tenant.StatusChangeEvent{}, err
 	}
 	if err := validateTenantMetadata(input.Metadata); err != nil {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -60,6 +61,7 @@ type LLMAgentFactoryInput struct {
 	Runtime           appmodel.RuntimePolicy
 	Tools             []appmodel.ToolAuthorization
 	MCPBindings       []appmodel.MCPBinding
+	Skills            []string
 	Chain             *appmodel.ChainConfiguration
 }
 
@@ -67,8 +69,10 @@ type LLMAgentFactoryInput struct {
 func (input LLMAgentFactoryInput) Clone() LLMAgentFactoryInput {
 	clone := input
 	clone.Generation = cloneGenerationConfig(input.Generation)
+	clone.Runtime = cloneRuntimePolicy(input.Runtime)
 	clone.Tools = cloneTools(input.Tools)
 	clone.MCPBindings = cloneMCPBindings(input.MCPBindings)
+	clone.Skills = append([]string(nil), input.Skills...)
 	clone.Chain = input.Chain.Clone()
 	return clone
 }
@@ -171,14 +175,17 @@ func (snapshot AgentExecutionSnapshot) FactoryInput() (LLMAgentFactoryInput, err
 		ContentDigest: snapshot.revision.ContentDigest, Kind: snapshot.revision.Kind,
 		SchemaVersion: snapshot.revision.SchemaVersion, Instruction: snapshot.revision.Instruction,
 		GlobalInstruction: snapshot.revision.GlobalInstruction, ModelProfileID: snapshot.revision.ModelProfileID,
-		Generation: cloneGenerationConfig(snapshot.revision.Generation), Runtime: snapshot.revision.Runtime,
-		Tools: cloneTools(snapshot.revision.Tools), MCPBindings: cloneMCPBindings(snapshot.revision.MCPBindings), Chain: snapshot.revision.Chain.Clone(),
+		Generation: cloneGenerationConfig(snapshot.revision.Generation), Runtime: cloneRuntimePolicy(snapshot.revision.Runtime),
+		Tools: cloneTools(snapshot.revision.Tools), MCPBindings: cloneMCPBindings(snapshot.revision.MCPBindings), Skills: append([]string(nil), snapshot.revision.Skills...), Chain: snapshot.revision.Chain.Clone(),
 	}, nil
 }
 
 // WithAgentExecutionSnapshot carries a defensive snapshot copy for one
 // execution. Invalid or zero snapshots overwrite the key with an empty value.
 func WithAgentExecutionSnapshot(ctx context.Context, snapshot AgentExecutionSnapshot) context.Context {
+	if nilvalue.Is(ctx) {
+		return nil
+	}
 	if err := snapshot.validate(); err != nil {
 		return context.WithValue(ctx, executionSnapshotContextKey{}, AgentExecutionSnapshot{})
 	}
@@ -187,6 +194,9 @@ func WithAgentExecutionSnapshot(ctx context.Context, snapshot AgentExecutionSnap
 
 // AgentExecutionSnapshotFromContext returns a validated defensive copy.
 func AgentExecutionSnapshotFromContext(ctx context.Context) (AgentExecutionSnapshot, bool) {
+	if nilvalue.Is(ctx) {
+		return AgentExecutionSnapshot{}, false
+	}
 	snapshot, ok := ctx.Value(executionSnapshotContextKey{}).(AgentExecutionSnapshot)
 	if !ok || snapshot.validate() != nil {
 		return AgentExecutionSnapshot{}, false
@@ -244,5 +254,15 @@ func cloneTools(tools []appmodel.ToolAuthorization) []appmodel.ToolAuthorization
 	}
 	clone := make([]appmodel.ToolAuthorization, len(tools))
 	copy(clone, tools)
+	return clone
+}
+
+func cloneRuntimePolicy(policy appmodel.RuntimePolicy) appmodel.RuntimePolicy {
+	clone := policy
+	if policy.Guardrail != nil {
+		guardrail := *policy.Guardrail
+		guardrail.ApprovalTools = append([]string(nil), policy.Guardrail.ApprovalTools...)
+		clone.Guardrail = &guardrail
+	}
 	return clone
 }

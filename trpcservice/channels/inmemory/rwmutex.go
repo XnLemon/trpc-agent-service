@@ -3,6 +3,9 @@ package inmemory
 import (
 	"context"
 	"sync"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // contextRWMutex is a fair-enough read/write lock whose wait path observes
@@ -106,21 +109,20 @@ func (m *contextRWMutex) wakeLocked() {
 }
 
 func waitContext(ctx context.Context, wait <-chan struct{}) error {
-	if ctx == nil {
-		<-wait
-		return nil
+	if nilvalue.Is(ctx) {
+		return context.Canceled
 	}
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return checkContext(ctx)
 	case <-wait:
 		return nil
 	}
 }
 
 func checkContext(ctx context.Context) error {
-	if ctx == nil {
-		return nil
+	if nilvalue.Is(ctx) {
+		return channels.ErrInvalid
 	}
 	select {
 	case <-ctx.Done():

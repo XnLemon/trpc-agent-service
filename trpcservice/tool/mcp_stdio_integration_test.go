@@ -41,7 +41,7 @@ func TestMCPStdioToolSetRunsAndClosesAnIndependentProcess(t *testing.T) {
 		Name: "local", Transport: "stdio", Command: command,
 		Args: stdioProbeArgs(), ToolAllow: []string{"echo", "pid"}, TimeoutSeconds: 2,
 	}
-	set, err := newMCPToolSet(context.Background(), "tenant-a", binding, nil, mcpNetworkOptions{})
+	set, err := newMCPToolSet(context.Background(), mcpTestTenantID, binding, nil, mcpNetworkOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestMCPStdioToolSetRunsAndClosesAnIndependentProcess(t *testing.T) {
 		t.Fatal("stdio pid result is empty")
 	}
 
-	secondSet, err := newMCPToolSet(context.Background(), "tenant-a", binding, nil, mcpNetworkOptions{})
+	secondSet, err := newMCPToolSet(context.Background(), mcpTestTenantID, binding, nil, mcpNetworkOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestMCPStdioToolSetHonorsCancellationAndReconnectsAfterProcessExit(t *testi
 		Name: "slow", Transport: "stdio", Command: command,
 		Args: stdioProbeArgs(), ToolAllow: []string{"slow"}, TimeoutSeconds: 1,
 	}
-	slowSet, err := newMCPToolSet(context.Background(), "tenant-a", slowBinding, nil, mcpNetworkOptions{})
+	slowSet, err := newMCPToolSet(context.Background(), mcpTestTenantID, slowBinding, nil, mcpNetworkOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestMCPStdioToolSetHonorsCancellationAndReconnectsAfterProcessExit(t *testi
 		Name: "restart", Transport: "stdio", Command: command,
 		Args: stdioProbeArgs("exit-marker=" + marker), ToolAllow: []string{"echo"}, TimeoutSeconds: 2,
 	}
-	reconnectSet, err := newMCPToolSet(context.Background(), "tenant-a", reconnectBinding, nil, mcpNetworkOptions{})
+	reconnectSet, err := newMCPToolSet(context.Background(), mcpTestTenantID, reconnectBinding, nil, mcpNetworkOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,12 @@ func TestMCPStdioToolSetHonorsCancellationAndReconnectsAfterProcessExit(t *testi
 	}
 	waitForFile(t, marker)
 	if _, err := echo.Call(context.Background(), []byte(`{"value":"second"}`)); err != nil {
-		t.Fatalf("stdio reconnect call error = %v", err)
+		// The marker can be written just before the wait goroutine observes
+		// process exit. The failed call is deliberately not replayed; this
+		// second explicit invocation is the only permitted reconnect attempt.
+		if _, retryErr := echo.Call(context.Background(), []byte(`{"value":"second"}`)); retryErr != nil {
+			t.Fatalf("stdio explicit reconnect call error = %v (initial error: %v)", retryErr, err)
+		}
 	}
 }
 

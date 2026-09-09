@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/XnLemon/trpc-agent-service/internal/nilvalue"
 )
 
 // Files is the ordered, immutable migration set owned by bootstrap.
@@ -70,7 +72,7 @@ func orderedFiles() ([]file, error) {
 // Apply runs every missing migration while holding a database-wide advisory
 // lock. A digest mismatch or history gap fails closed.
 func Apply(ctx context.Context, db *sql.DB) error {
-	if ctx == nil || db == nil {
+	if nilvalue.Is(ctx) || db == nil {
 		return ErrMigration
 	}
 	if err := ctx.Err(); err != nil {
@@ -134,7 +136,7 @@ func Apply(ctx context.Context, db *sql.DB) error {
 
 // Verify checks the embedded migration history without mutating the database.
 func Verify(ctx context.Context, db *sql.DB) error {
-	if ctx == nil || db == nil {
+	if nilvalue.Is(ctx) || db == nil {
 		return ErrMigration
 	}
 	files, err := orderedFiles()

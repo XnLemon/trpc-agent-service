@@ -8,6 +8,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 var (
@@ -135,7 +137,7 @@ type Worker struct {
 
 // New validates configuration and creates a Worker.
 func New(config Config) (*Worker, error) {
-	if config.Store == nil || config.Handler == nil || config.Owner == "" || config.LeaseDuration <= 0 {
+	if nilvalue.Is(config.Store) || config.Handler == nil || config.Owner == "" || config.LeaseDuration <= 0 {
 		return nil, ErrInvalid
 	}
 	if config.PollInterval <= 0 {
@@ -159,7 +161,7 @@ func New(config Config) (*Worker, error) {
 // RunOnce claims and processes at most one task. It returns false when no task
 // is currently eligible.
 func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
-	if w == nil || ctx == nil {
+	if w == nil || nilvalue.Is(ctx) || nilvalue.Is(w.store) || w.handler == nil {
 		return false, ErrInvalid
 	}
 	w.mu.Lock()
@@ -201,7 +203,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 
 // Start starts one owned run loop. Calling Start twice is an error.
 func (w *Worker) Start(ctx context.Context) error {
-	if w == nil || ctx == nil {
+	if w == nil || nilvalue.Is(ctx) {
 		return ErrInvalid
 	}
 	w.mu.Lock()
@@ -298,10 +300,16 @@ type tenantContextKey struct{}
 
 // WithTenant scopes a shared Store claim to one tenant for a single call.
 func WithTenant(ctx context.Context, tenantID string) context.Context {
+	if nilvalue.Is(ctx) {
+		return nil
+	}
 	return context.WithValue(ctx, tenantContextKey{}, tenantID)
 }
 
 func taskTenantHint(ctx context.Context) string {
+	if nilvalue.Is(ctx) {
+		return ""
+	}
 	value, _ := ctx.Value(tenantContextKey{}).(string)
 	return value
 }
@@ -500,7 +508,7 @@ func (s *MemoryStore) Close() error {
 }
 
 func contextErr(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return ErrInvalid
 	}
 	return ctx.Err()

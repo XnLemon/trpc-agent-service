@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -304,6 +305,9 @@ func capabilityRank(capability Capability) int {
 }
 
 func normalizeMetadata(displayName, description string) (string, string, error) {
+	if !utf8.ValidString(displayName) || !utf8.ValidString(description) || hasControl(displayName) || hasControl(description) {
+		return "", "", fmt.Errorf("%w: profile metadata contains invalid text", ErrInvalid)
+	}
 	displayName = strings.TrimSpace(displayName)
 	description = strings.TrimSpace(description)
 	if n := len([]rune(displayName)); n < 1 || n > 200 {
@@ -662,6 +666,9 @@ func (spec compiledProviderSpec) normalizeBinding(capability Capability, endpoin
 }
 
 func normalizeEndpoint(endpoint string, policy FieldPolicy, schemes map[string]struct{}) (string, error) {
+	if !utf8.ValidString(endpoint) {
+		return "", fmt.Errorf("%w: endpoint is invalid", ErrInvalid)
+	}
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
 		if policy == FieldRequired {
@@ -825,6 +832,9 @@ func validZone(zone string) bool {
 }
 
 func normalizeSecretRef(secretRef string, policy FieldPolicy) (string, error) {
+	if !utf8.ValidString(secretRef) {
+		return "", fmt.Errorf("%w: secret reference is invalid", ErrInvalid)
+	}
 	secretRef = strings.TrimSpace(secretRef)
 	if secretRef == "" {
 		if policy == FieldRequired {
@@ -842,6 +852,9 @@ func normalizeSecretRef(secretRef string, policy FieldPolicy) (string, error) {
 }
 
 func normalizeOptionValue(value string, spec OptionSpec) (string, error) {
+	if !utf8.ValidString(value) {
+		return "", fmt.Errorf("%w: option value is invalid", ErrInvalid)
+	}
 	value = strings.TrimSpace(value)
 	if value == "" || len(value) > maxOptionValueLength || hasControl(value) {
 		return "", fmt.Errorf("%w: option value is invalid", ErrInvalid)

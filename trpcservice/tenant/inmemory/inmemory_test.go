@@ -62,7 +62,7 @@ func TestRepositoryRejectsDuplicateIdentity(t *testing.T) {
 func TestRepositoryReturnsDeepCopies(t *testing.T) {
 	r := inmemory.NewRepository()
 	rate := int64(2)
-	appID := "app-1"
+	appID := "app_01J1K9ZQTVE4PAWF1TSB2WMHNP"
 	input := createInput("copies")
 	input.RateLimitRPM = &rate
 	input.DefaultAgentAppID = &appID
@@ -76,7 +76,7 @@ func TestRepositoryReturnsDeepCopies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *got.RateLimitRPM != 2 || *got.DefaultAgentAppID != "app-1" {
+	if *got.RateLimitRPM != 2 || *got.DefaultAgentAppID != "app_01J1K9ZQTVE4PAWF1TSB2WMHNP" {
 		t.Fatalf("repository leaked nested pointers: %+v", got)
 	}
 }

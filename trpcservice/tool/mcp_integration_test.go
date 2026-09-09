@@ -21,8 +21,8 @@ func TestNewMCPToolSetInitializesFiltersAndCallsUpstreamServer(t *testing.T) {
 		Name: "files", Transport: "streamable", ServerURL: "https://mcp.example.test/tools",
 		SecretRef: "secret://tenant/mcp", ToolAllow: []string{"read_file"},
 	}
-	set, err := newMCPToolSet(context.Background(), "tenant-a", binding, mcpProbeSecrets{}, mcpNetworkOptions{
-		resolver:       mcpProbeResolver{addresses: []net.IPAddr{{IP: net.ParseIP("192.0.2.10")}}},
+	set, err := newMCPToolSet(context.Background(), mcpTestTenantID, binding, mcpProbeSecrets{}, mcpNetworkOptions{
+		resolver:       mcpProbeResolver{addresses: []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}},
 		requestHandler: handler,
 		clientOptions:  []trpcmcp.ClientOption{trpcmcp.WithClientGetSSEEnabled(false)},
 	})
@@ -60,9 +60,9 @@ func TestNewMCPToolSetRejectsPrivateDNSBeforeConnecting(t *testing.T) {
 	}
 	for _, addresses := range [][]net.IPAddr{
 		{{IP: net.ParseIP("10.0.0.8")}},
-		{{IP: net.ParseIP("192.0.2.10")}, {IP: net.ParseIP("fd00::8")}},
+		{{IP: net.ParseIP("93.184.216.34")}, {IP: net.ParseIP("fd00::8")}},
 	} {
-		_, err := newMCPToolSet(context.Background(), "tenant-a", binding, mcpProbeSecrets{}, mcpNetworkOptions{
+		_, err := newMCPToolSet(context.Background(), mcpTestTenantID, binding, mcpProbeSecrets{}, mcpNetworkOptions{
 			resolver: mcpProbeResolver{addresses: addresses},
 		})
 		if err == nil {
@@ -111,7 +111,7 @@ func (handler *mcpProbeHandler) Handle(_ context.Context, _ *http.Client, reques
 	}
 	handler.mu.Unlock()
 	if envelope.ID == nil {
-		return &http.Response{StatusCode: http.StatusAccepted, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
+		return &http.Response{StatusCode: http.StatusAccepted, Request: request, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(""))}, nil
 	}
 	var result any
 	switch envelope.Method {
@@ -131,7 +131,7 @@ func (handler *mcpProbeHandler) Handle(_ context.Context, _ *http.Client, reques
 	if err != nil {
 		return nil, err
 	}
-	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(encoded)))}, nil
+	return &http.Response{StatusCode: http.StatusOK, Request: request, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(encoded)))}, nil
 }
 
 func (handler *mcpProbeHandler) count(method string) int {

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
@@ -50,10 +51,10 @@ func New(tenantID string, delegate session.Service, store Persistence) (*Service
 // actual persistence operation latency under the supplied provider. The
 // optional backend name is normalized to the bounded metric provider bucket.
 func NewWithObservability(tenantID string, delegate session.Service, store Persistence, telemetry observability.Provider, backendName ...string) (*Service, error) {
-	if sessionstorage.ValidateTenant(tenantID) != nil || delegate == nil || store == nil {
+	if sessionstorage.ValidateTenant(tenantID) != nil || nilvalue.Is(delegate) || nilvalue.Is(store) {
 		return nil, sessionstorage.ErrInvalid
 	}
-	if telemetry == nil {
+	if nilvalue.Is(telemetry) {
 		telemetry = observability.NewNoopProvider()
 	}
 	backend := "other"

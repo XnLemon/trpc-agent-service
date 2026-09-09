@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode"
+	"unicode/utf8"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
@@ -46,17 +48,18 @@ var (
 // ExecutionContext contains the server-owned state available while a tool is
 // executing. It is deliberately absent from model-visible tool results.
 type ExecutionContext struct {
-	TenantID    string
-	AppID       string
-	UserID      string
-	SessionID   string
-	EventID     string
-	RequestID   string
-	TraceID     string
-	Attachments runtimestorage.AttachmentStore
-	Replies     *ReplyCollector
-	Audit       audit.Recorder
-	ToolBudget  *ToolCallBudget
+	TenantID        string
+	AppID           string
+	UserID          string
+	SessionID       string
+	EventID         string
+	RequestID       string
+	TraceID         string
+	Attachments     runtimestorage.AttachmentStore
+	Replies         *ReplyCollector
+	Audit           audit.Recorder
+	ToolBudget      *ToolCallBudget
+	ToolInvocations runtimestorage.ToolInvocationStore
 }
 
 // ToolCallBudget is request-local admission state for tool calls. It is never
@@ -96,18 +99,54 @@ type executionContextKey struct{}
 
 // WithExecutionContext attaches one durable execution boundary to ctx.
 func WithExecutionContext(ctx context.Context, execution ExecutionContext) context.Context {
-	if ctx == nil {
+	if isNilMCPValue(ctx) {
 		return nil
 	}
 	return context.WithValue(ctx, executionContextKey{}, execution)
 }
 
+// RawExecutionContextFromContext reports whether a caller attached an
+// execution boundary, without treating malformed fields as absence. The
+// policy Runner uses this distinction to reject attempted retargeting rather
+// than silently replacing a malformed cross-scope value.
+func RawExecutionContextFromContext(ctx context.Context) (ExecutionContext, bool) {
+	if isNilMCPValue(ctx) {
+		return ExecutionContext{}, false
+	}
+	execution, ok := ctx.Value(executionContextKey{}).(ExecutionContext)
+	return execution, ok
+}
+
+// ExecutionContextFromContext returns the validated server-owned execution
+// boundary for plugins and tool adapters. It accepts a context with only the
+// invocation store populated, unlike media tools which require attachments and
+// replies as well.
+func ExecutionContextFromContext(ctx context.Context) (ExecutionContext, error) {
+	execution, ok := RawExecutionContextFromContext(ctx)
+	if !ok || isNilMCPValue(execution.ToolInvocations) || !ValidExecutionContextIdentity(execution) || runtimestorage.ValidateTenant(execution.TenantID) != nil || execution.EventID == "" || execution.RequestID == "" {
+		return ExecutionContext{}, ErrUnavailable
+	}
+	return execution, nil
+}
+
+// ValidExecutionContextIdentity checks only the textual execution identity.
+// Optional fields may be empty because direct Runner calls fill them from the
+// sealed Runner scope; a present malformed value is never silently replaced.
+func ValidExecutionContextIdentity(execution ExecutionContext) bool {
+	for _, value := range []string{execution.TenantID, execution.AppID, execution.UserID, execution.SessionID, execution.EventID, execution.RequestID, execution.TraceID} {
+		if !utf8.ValidString(value) || value != strings.TrimSpace(value) || strings.Contains(value, "://") || strings.IndexFunc(value, unicode.IsControl) >= 0 || len([]rune(value)) > 256 {
+			return false
+		}
+	}
+	return true
+}
+
 func executionContextFromContext(ctx context.Context) (ExecutionContext, error) {
-	if ctx == nil {
+	if isNilMCPValue(ctx) {
 		return ExecutionContext{}, ErrUnavailable
 	}
 	execution, ok := ctx.Value(executionContextKey{}).(ExecutionContext)
-	if !ok || runtimestorage.ValidateTenant(execution.TenantID) != nil || execution.EventID == "" || execution.Attachments == nil || execution.Replies == nil {
+	if !ok || isNilMCPValue(execution.Attachments) || isNilMCPValue(execution.Replies) || !ValidExecutionContextIdentity(execution) || runtimestorage.ValidateTenant(execution.TenantID) != nil || execution.EventID == "" || execution.Attachments == nil || execution.Replies == nil {
 		return ExecutionContext{}, ErrUnavailable
 	}
 	return execution, nil
@@ -203,10 +242,10 @@ type Registry struct {
 func NewRegistry(factories ...Factory) (*Registry, error) {
 	registry := &Registry{factories: make(map[string]Factory, len(factories))}
 	for _, factory := range factories {
-		if factory == nil || strings.TrimSpace(factory.ID()) == "" {
+		id, ok := safeFactoryID(factory)
+		if !ok {
 			return nil, ErrUnavailable
 		}
-		id := strings.TrimSpace(factory.ID())
 		if _, ok := registry.factories[id]; ok {
 			return nil, ErrUnavailable
 		}
@@ -234,17 +273,19 @@ func (registry *Registry) ResolveWith(authorizations []appmodel.ToolAuthorizatio
 	}
 	available := make(map[string]trpctool.Tool, len(registry.factories)+len(candidates))
 	for id, factory := range registry.factories {
-		tool := factory.New()
-		if tool == nil || tool.Declaration() == nil || tool.Declaration().Name != id {
+		tool, ok := safeFactoryNew(factory)
+		declaration, declarationOK := safeToolDeclaration(tool)
+		if !ok || !declarationOK || declaration.Name != id {
 			return nil, ErrUnavailable
 		}
 		available[id] = tool
 	}
 	for _, candidate := range candidates {
-		if candidate == nil || candidate.Declaration() == nil {
+		declaration, ok := safeToolDeclaration(candidate)
+		if !ok {
 			return nil, ErrUnavailable
 		}
-		id := strings.TrimSpace(candidate.Declaration().Name)
+		id := strings.TrimSpace(declaration.Name)
 		if id == "" {
 			return nil, ErrUnavailable
 		}
@@ -271,6 +312,45 @@ func (registry *Registry) ResolveWith(authorizations []appmodel.ToolAuthorizatio
 // Resolve retains the platform-only convenience API.
 func (registry *Registry) Resolve(authorizations []appmodel.ToolAuthorization) ([]trpctool.Tool, error) {
 	return registry.ResolveWith(authorizations)
+}
+
+func safeFactoryID(factory Factory) (id string, ok bool) {
+	if isNilMCPValue(factory) {
+		return "", false
+	}
+	defer func() {
+		if recover() != nil {
+			id, ok = "", false
+		}
+	}()
+	id = strings.TrimSpace(factory.ID())
+	return id, id != ""
+}
+
+func safeFactoryNew(factory Factory) (tool trpctool.Tool, ok bool) {
+	if isNilMCPValue(factory) {
+		return nil, false
+	}
+	defer func() {
+		if recover() != nil {
+			tool, ok = nil, false
+		}
+	}()
+	tool = factory.New()
+	return tool, !isNilMCPValue(tool)
+}
+
+func safeToolDeclaration(candidate trpctool.Tool) (declaration *trpctool.Declaration, ok bool) {
+	if isNilMCPValue(candidate) {
+		return nil, false
+	}
+	defer func() {
+		if recover() != nil {
+			declaration, ok = nil, false
+		}
+	}()
+	declaration = candidate.Declaration()
+	return declaration, declaration != nil
 }
 
 type exportArtifactFactory struct{}

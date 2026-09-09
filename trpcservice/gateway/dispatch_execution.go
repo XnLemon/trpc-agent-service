@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/execution"
@@ -63,7 +64,11 @@ func (state *executionForwardState) skip(event execution.Event) bool {
 }
 
 func (state *executionForwardState) markSendFailure(ctx context.Context) {
-	state.terminalErr = ctx.Err()
+	if nilvalue.Is(ctx) {
+		state.terminalErr = context.Canceled
+	} else {
+		state.terminalErr = ctx.Err()
+	}
 	if state.terminalErr == nil {
 		state.terminalErr = context.Canceled
 	}
@@ -75,7 +80,7 @@ func (state *executionForwardState) ensureTerminal(ctx context.Context) {
 	if state.terminalSeen || state.terminalErr != nil {
 		return
 	}
-	if ctx.Err() != nil {
+	if !nilvalue.Is(ctx) && ctx.Err() != nil {
 		state.terminalErr = ctx.Err()
 		state.terminalEventType, state.terminalErrorType = audit.EventExecutionCanceled, string(audit.ErrorCanceled)
 		return
@@ -84,7 +89,18 @@ func (state *executionForwardState) ensureTerminal(ctx context.Context) {
 }
 
 func (dispatcher *Dispatcher) forwardExecution(ctx context.Context, run *dispatchExecution) {
-	defer close(run.output)
+	if dispatcher == nil || run == nil {
+		return
+	}
+	if nilvalue.Is(ctx) {
+		ctx = context.Background()
+	}
+	defer func() {
+		if run.output != nil {
+			close(run.output)
+		}
+	}()
+	run.span = observability.ProtectSpan(run.span)
 
 	state := executionForwardState{}
 	for event := range run.executionEvents {
@@ -186,7 +202,7 @@ func (dispatcher *Dispatcher) finalizeForward(ctx context.Context, run *dispatch
 	if run.auditUsage != nil {
 		run.auditUsage.ExecutionResult = executionAuditResult(eventType)
 	}
-	if dispatcher.handoffStore != nil {
+	if !nilvalue.Is(dispatcher.handoffStore) {
 		result := audit.ResultSuccess
 		if terminalErr != nil {
 			result = audit.ResultFailure
@@ -194,7 +210,7 @@ func (dispatcher *Dispatcher) finalizeForward(ctx context.Context, run *dispatch
 				result = audit.ResultCanceled
 			}
 		}
-		if _, err := dispatcher.handoffStore.Finalize(detachedCorrelationContext(ctx, run.metadata.requestID, run.metadata.traceID), audit.ExecutionHandoff{TenantID: run.metadata.principal.TenantID(), HandoffID: audit.NewEventID(run.metadata.requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType}); err != nil && (terminalErr == nil || IsContextCancellation(terminalErr)) {
+		if _, err := finalizeHandoffSafely(dispatcher.handoffStore, detachedCorrelationContext(ctx, run.metadata.requestID, run.metadata.traceID), audit.ExecutionHandoff{TenantID: run.metadata.principal.TenantID(), HandoffID: audit.NewEventID(run.metadata.requestID, "handoff"), State: audit.HandoffFinalized, Result: result, ErrorType: errorType}); err != nil && (terminalErr == nil || IsContextCancellation(terminalErr)) {
 			terminalErr = auditWriteFailure()
 		}
 	}
@@ -214,6 +230,19 @@ func (dispatcher *Dispatcher) finalizeExecutionAudit(ctx context.Context, run *d
 		run.auditFinalized = true
 	}
 	return err
+}
+
+func appendAuditEventSafely(writer audit.Writer, ctx context.Context, event audit.Event) (result audit.AppendResult, err error) {
+	if nilvalue.Is(writer) || nilvalue.Is(ctx) {
+		return audit.AppendResult{}, audit.ErrWriteFailed
+	}
+	defer func() {
+		if recover() != nil {
+			result = audit.AppendResult{}
+			err = audit.ErrWriteFailed
+		}
+	}()
+	return writer.Append(ctx, event)
 }
 
 func auditWriteFailure() error {
@@ -246,7 +275,7 @@ func (dispatcher *Dispatcher) writeExecutionAuditWithCost(ctx context.Context, m
 }
 
 func (dispatcher *Dispatcher) writeExecutionAuditRevisionWithCost(ctx context.Context, metadata dispatchMetadata, eventType audit.EventType, errorType string, revision *int64, cost *audit.Usage) error {
-	if dispatcher.auditWriter == nil {
+	if nilvalue.Is(dispatcher.auditWriter) {
 		return nil
 	}
 	channel := string(metadata.principal.Kind())
@@ -254,7 +283,7 @@ func (dispatcher *Dispatcher) writeExecutionAuditRevisionWithCost(ctx context.Co
 		channel = string(target.Channel)
 	}
 	event := audit.Event{SchemaVersion: audit.SchemaVersion, EventID: audit.NewEventID(metadata.requestID, string(eventType)), EventType: eventType, TenantID: metadata.principal.TenantID(), Channel: channel, UserID: metadata.message.ExternalUserID, SessionID: metadata.identity.SessionID, AgentAppID: metadata.principal.AppID(), Revision: revision, ModelProfileID: metadata.modelProfileID, ErrorType: errorType, Cost: cost, RequestID: metadata.requestID, TraceID: metadata.traceID, ActorType: string(metadata.principal.Kind()), ActorID: metadata.principal.SubjectID(), OccurredAt: time.Now().UTC()}
-	if _, err := dispatcher.auditWriter.Append(ctx, event); err != nil {
+	if _, err := appendAuditEventSafely(dispatcher.auditWriter, ctx, event); err != nil {
 		return err
 	}
 	return nil
@@ -272,14 +301,14 @@ func executionAuditResult(eventType audit.EventType) audit.ExecutionResult {
 }
 
 func cancellationStatus(ctx context.Context) string {
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if !nilvalue.Is(ctx) && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "deadline_exceeded"
 	}
 	return "canceled"
 }
 
 func sendDispatchEvent(ctx context.Context, output chan<- DispatchEvent, event DispatchEvent) bool {
-	if ctx == nil || ctx.Err() != nil {
+	if nilvalue.Is(ctx) || nilvalue.Is(output) || ctx.Err() != nil {
 		return false
 	}
 	select {

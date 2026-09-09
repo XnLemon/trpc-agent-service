@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // List returns a stable page of Backend Profiles in one tenant.
@@ -226,8 +227,8 @@ func cloneProfile(profile *backend.Profile) *backend.Profile {
 }
 
 func checkContext(ctx context.Context) error {
-	if ctx == nil {
-		return nil
+	if nilvalue.Is(ctx) {
+		return fmt.Errorf("%w: context is required", backend.ErrInvalid)
 	}
 	select {
 	case <-ctx.Done():

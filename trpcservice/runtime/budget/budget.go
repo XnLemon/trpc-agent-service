@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -164,12 +165,15 @@ type Controller struct {
 // every tenant has no budget limit; limited tenants fail closed with
 // ErrUnavailable.
 func NewController(store Store) *Controller {
+	if nilvalue.Is(store) {
+		store = nil
+	}
 	return &Controller{store: store, now: time.Now}
 }
 
 // Reserve atomically admits one execution for the tenant's current UTC month.
 func (controller *Controller) Reserve(ctx context.Context, value tenant.Tenant, reservationID string, estimate Estimate) (Reservation, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return Reservation{}, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
 	if err := ctx.Err(); err != nil {
@@ -185,7 +189,7 @@ func (controller *Controller) Reserve(ctx context.Context, value tenant.Tenant, 
 	if !limits.enabled() {
 		return Reservation{TenantID: value.TenantID, ReservationID: reservationID, PeriodStart: monthStart(controller.clock()), State: ReservationStateDisabled}, nil
 	}
-	if controller == nil || controller.store == nil {
+	if controller == nil || nilvalue.Is(controller.store) {
 		return Reservation{}, ErrUnavailable
 	}
 	if err := limits.Validate(); err != nil {
@@ -204,10 +208,16 @@ func (controller *Controller) Reserve(ctx context.Context, value tenant.Tenant, 
 // in-flight counter. A second identical call is safe and returns the settled
 // row from the store.
 func (controller *Controller) Settle(ctx context.Context, reservation Reservation, usage Usage) (Reservation, error) {
+	if nilvalue.Is(ctx) {
+		return Reservation{}, fmt.Errorf("%w: context is required", ErrInvalid)
+	}
+	if err := ctx.Err(); err != nil {
+		return Reservation{}, err
+	}
 	if reservation.State == ReservationStateDisabled {
 		return reservation, nil
 	}
-	if controller == nil || controller.store == nil {
+	if controller == nil || nilvalue.Is(controller.store) {
 		return Reservation{}, ErrUnavailable
 	}
 	if err := usage.validate(); err != nil {
@@ -218,10 +228,16 @@ func (controller *Controller) Settle(ctx context.Context, reservation Reservatio
 
 // Release returns an unused reservation to the monthly available capacity.
 func (controller *Controller) Release(ctx context.Context, reservation Reservation) (Reservation, error) {
+	if nilvalue.Is(ctx) {
+		return Reservation{}, fmt.Errorf("%w: context is required", ErrInvalid)
+	}
+	if err := ctx.Err(); err != nil {
+		return Reservation{}, err
+	}
 	if reservation.State == ReservationStateDisabled {
 		return reservation, nil
 	}
-	if controller == nil || controller.store == nil {
+	if controller == nil || nilvalue.Is(controller.store) {
 		return Reservation{}, ErrUnavailable
 	}
 	return controller.store.Release(ctx, reservation.TenantID, reservation.ReservationID)

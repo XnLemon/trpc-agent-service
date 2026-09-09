@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -151,7 +152,7 @@ func NewOTLPProvider(ctx context.Context, config OTLPConfig) (Provider, error) {
 	if err := validateOTLPEndpoint(config.Endpoint); err != nil {
 		return NewNoopProvider(), err
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		ctx = context.Background()
 	}
 	options := otlpTraceEndpointOptions(config.Endpoint)
@@ -261,24 +262,272 @@ type provider struct {
 	closeErr error
 }
 
+// ErrProviderFailure is the stable result of a telemetry provider callback
+// that panics. Telemetry must never be allowed to take down request handling.
+var ErrProviderFailure = errors.New("observability provider failed")
+
+// ProtectProvider turns an optional process telemetry provider into a
+// panic-isolated provider. Provider implementations are commonly backed by
+// third-party SDKs, so every callback (including instrument construction and
+// shutdown) is treated as an untrusted boundary. A typed-nil provider selects
+// the no-op implementation.
+func ProtectProvider(value Provider) Provider {
+	if nilvalue.Is(value) {
+		return NewNoopProvider()
+	}
+	if _, protected := value.(protectedProvider); protected {
+		return value
+	}
+	return protectedProvider{delegate: value}
+}
+
+type protectedProvider struct{ delegate Provider }
+
+func (provider protectedProvider) Tracer(name string) (tracer Tracer) {
+	defer func() {
+		if recover() != nil {
+			tracer = noopTracer{}
+		}
+	}()
+	tracer = protectTracer(provider.delegate.Tracer(name))
+	return tracer
+}
+
+func (provider protectedProvider) Meter(name string) (meter Meter) {
+	defer func() {
+		if recover() != nil {
+			meter = noopMeter{}
+		}
+	}()
+	meter = protectMeter(provider.delegate.Meter(name))
+	return meter
+}
+
+func (provider protectedProvider) Logger() (logger Logger) {
+	defer func() {
+		if recover() != nil {
+			logger = noopLogger{}
+		}
+	}()
+	logger = protectLogger(provider.delegate.Logger())
+	return logger
+}
+
+func (provider protectedProvider) Shutdown(ctx context.Context) (err error) {
+	if nilvalue.Is(ctx) {
+		ctx = context.Background()
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrProviderFailure
+		}
+	}()
+	return provider.delegate.Shutdown(ctx)
+}
+
+type noopSpan struct{}
+
+func (noopSpan) End()                       {}
+func (noopSpan) SetAttributes(...Attribute) {}
+func (noopSpan) SetStatus(Status, string)   {}
+func (noopSpan) RecordError(error)          {}
+
+type noopTracer struct{}
+
+func (noopTracer) Start(ctx context.Context, _ string, _ ...Attribute) (context.Context, Span) {
+	if nilvalue.Is(ctx) {
+		ctx = context.Background()
+	}
+	return ctx, noopSpan{}
+}
+
+type noopCounter struct{}
+
+func (noopCounter) Add(context.Context, int64, ...Attribute) {}
+
+type noopHistogram struct{}
+
+func (noopHistogram) Record(context.Context, float64, ...Attribute) {}
+
+type noopUpDownCounter struct{}
+
+func (noopUpDownCounter) Add(context.Context, int64, ...Attribute) {}
+
+type noopMeter struct{}
+
+func (noopMeter) Counter(string) Counter             { return noopCounter{} }
+func (noopMeter) Histogram(string) Histogram         { return noopHistogram{} }
+func (noopMeter) UpDownCounter(string) UpDownCounter { return noopUpDownCounter{} }
+
+type noopLogger struct{}
+
+func (noopLogger) Log(context.Context, Level, string, ...Attribute) {}
+
+type protectedTracer struct{ delegate Tracer }
+
+func protectTracer(value Tracer) Tracer {
+	if nilvalue.Is(value) {
+		return noopTracer{}
+	}
+	return protectedTracer{delegate: value}
+}
+
+func (tracer protectedTracer) Start(ctx context.Context, name string, attrs ...Attribute) (started context.Context, span Span) {
+	if nilvalue.Is(ctx) {
+		ctx = context.Background()
+	}
+	started = ctx
+	span = noopSpan{}
+	defer func() {
+		if recover() != nil {
+			started, span = ctx, noopSpan{}
+		}
+	}()
+	started, span = tracer.delegate.Start(ctx, name, attrs...)
+	if nilvalue.Is(started) {
+		started = ctx
+	}
+	span = protectSpan(span)
+	return started, span
+}
+
+type protectedSpan struct{ delegate Span }
+
+func protectSpan(value Span) Span {
+	if nilvalue.Is(value) {
+		return noopSpan{}
+	}
+	return protectedSpan{delegate: value}
+}
+
+// ProtectSpan makes a span safe to use even when it came from a provider that
+// is not itself constructed by this package. A nil or typed-nil span becomes a
+// no-op span, and SDK panics are contained at each span operation.
+func ProtectSpan(value Span) Span { return protectSpan(value) }
+
+func (span protectedSpan) End() {
+	defer func() { _ = recover() }()
+	span.delegate.End()
+}
+func (span protectedSpan) SetAttributes(attrs ...Attribute) {
+	defer func() { _ = recover() }()
+	span.delegate.SetAttributes(attrs...)
+}
+func (span protectedSpan) SetStatus(status Status, description string) {
+	defer func() { _ = recover() }()
+	span.delegate.SetStatus(status, description)
+}
+func (span protectedSpan) RecordError(err error) {
+	defer func() { _ = recover() }()
+	span.delegate.RecordError(err)
+}
+
+type protectedMeter struct{ delegate Meter }
+
+func protectMeter(value Meter) Meter {
+	if nilvalue.Is(value) {
+		return noopMeter{}
+	}
+	return protectedMeter{delegate: value}
+}
+
+func (meter protectedMeter) Counter(name string) (counter Counter) {
+	defer func() {
+		if recover() != nil {
+			counter = noopCounter{}
+		}
+	}()
+	return protectCounter(meter.delegate.Counter(name))
+}
+func (meter protectedMeter) Histogram(name string) (histogram Histogram) {
+	defer func() {
+		if recover() != nil {
+			histogram = noopHistogram{}
+		}
+	}()
+	return protectHistogram(meter.delegate.Histogram(name))
+}
+func (meter protectedMeter) UpDownCounter(name string) (counter UpDownCounter) {
+	defer func() {
+		if recover() != nil {
+			counter = noopUpDownCounter{}
+		}
+	}()
+	return protectUpDownCounter(meter.delegate.UpDownCounter(name))
+}
+
+type protectedCounter struct{ delegate Counter }
+
+func protectCounter(value Counter) Counter {
+	if nilvalue.Is(value) {
+		return noopCounter{}
+	}
+	return protectedCounter{delegate: value}
+}
+func (counter protectedCounter) Add(ctx context.Context, value int64, attrs ...Attribute) {
+	defer func() { _ = recover() }()
+	counter.delegate.Add(ctx, value, attrs...)
+}
+
+type protectedHistogram struct{ delegate Histogram }
+
+func protectHistogram(value Histogram) Histogram {
+	if nilvalue.Is(value) {
+		return noopHistogram{}
+	}
+	return protectedHistogram{delegate: value}
+}
+func (histogram protectedHistogram) Record(ctx context.Context, value float64, attrs ...Attribute) {
+	defer func() { _ = recover() }()
+	histogram.delegate.Record(ctx, value, attrs...)
+}
+
+type protectedUpDownCounter struct{ delegate UpDownCounter }
+
+func protectUpDownCounter(value UpDownCounter) UpDownCounter {
+	if nilvalue.Is(value) {
+		return noopUpDownCounter{}
+	}
+	return protectedUpDownCounter{delegate: value}
+}
+func (counter protectedUpDownCounter) Add(ctx context.Context, value int64, attrs ...Attribute) {
+	defer func() { _ = recover() }()
+	counter.delegate.Add(ctx, value, attrs...)
+}
+
+type protectedLogger struct{ delegate Logger }
+
+func protectLogger(value Logger) Logger {
+	if nilvalue.Is(value) {
+		return noopLogger{}
+	}
+	return protectedLogger{delegate: value}
+}
+func (logger protectedLogger) Log(ctx context.Context, level Level, message string, attrs ...Attribute) {
+	defer func() { _ = recover() }()
+	logger.delegate.Log(ctx, level, message, attrs...)
+}
+
 // NewProvider creates a provider using configured or process-default SDKs.
 func NewProvider(config Config) Provider {
 	if config.ServiceName == "" {
 		config.ServiceName = "trpc-agent-service"
 	}
 	tp := config.TracerProvider
-	if tp == nil {
+	if nilvalue.Is(tp) {
 		tp = otel.GetTracerProvider()
 	}
 	mp := config.MeterProvider
-	if mp == nil {
+	if nilvalue.Is(mp) {
 		mp = otel.GetMeterProvider()
 	}
 	logger := config.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
-	p := &provider{tracer: otelTracer{tracer: tp.Tracer(config.ServiceName)}, meter: otelMeter{meter: mp.Meter(config.ServiceName)}, logger: slogLogger{logger: logger}}
+	tracer := safeOTelTracer(tp, config.ServiceName)
+	meter := safeOTelMeter(mp, config.ServiceName)
+	p := &provider{tracer: protectTracer(otelTracer{tracer: tracer}), meter: protectMeter(otelMeter{meter: meter}), logger: protectLogger(slogLogger{logger: logger})}
 	if config.Shutdown != nil {
 		p.shutdown = config.Shutdown
 	} else {
@@ -292,12 +541,69 @@ func NewNoopProvider() Provider {
 	return NewProvider(Config{TracerProvider: tracenoop.NewTracerProvider(), MeterProvider: metricnoop.NewMeterProvider(), Logger: slog.New(slog.NewTextHandler(discardWriter{}, nil))})
 }
 
-func (p *provider) Tracer(string) Tracer { return p.tracer }
-func (p *provider) Meter(string) Meter   { return p.meter }
-func (p *provider) Logger() Logger       { return p.logger }
-func (p *provider) Shutdown(ctx context.Context) error {
-	p.once.Do(func() { p.closeErr = p.shutdown(ctx) })
+func (p *provider) Tracer(string) Tracer {
+	if p == nil {
+		return noopTracer{}
+	}
+	return protectTracer(p.tracer)
+}
+func (p *provider) Meter(string) Meter {
+	if p == nil {
+		return noopMeter{}
+	}
+	return protectMeter(p.meter)
+}
+func (p *provider) Logger() Logger {
+	if p == nil {
+		return noopLogger{}
+	}
+	return protectLogger(p.logger)
+}
+func (p *provider) Shutdown(ctx context.Context) (err error) {
+	if p == nil {
+		return nil
+	}
+	if nilvalue.Is(ctx) {
+		ctx = context.Background()
+	}
+	p.once.Do(func() {
+		defer func() {
+			if recover() != nil {
+				p.closeErr = ErrProviderFailure
+			}
+		}()
+		if p.shutdown == nil {
+			return
+		}
+		p.closeErr = p.shutdown(ctx)
+	})
 	return p.closeErr
+}
+
+func safeOTelTracer(provider trace.TracerProvider, name string) (tracer trace.Tracer) {
+	tracer = tracenoop.NewTracerProvider().Tracer(name)
+	if nilvalue.Is(provider) {
+		return tracer
+	}
+	defer func() {
+		if recover() != nil || nilvalue.Is(tracer) {
+			tracer = tracenoop.NewTracerProvider().Tracer(name)
+		}
+	}()
+	return provider.Tracer(name)
+}
+
+func safeOTelMeter(provider metric.MeterProvider, name string) (meter metric.Meter) {
+	meter = metricnoop.NewMeterProvider().Meter(name)
+	if nilvalue.Is(provider) {
+		return meter
+	}
+	defer func() {
+		if recover() != nil || nilvalue.Is(meter) {
+			meter = metricnoop.NewMeterProvider().Meter(name)
+		}
+	}()
+	return provider.Meter(name)
 }
 
 type discardWriter struct{}
@@ -486,7 +792,7 @@ const (
 
 // WithCorrelation adds request and trace identifiers to ctx.
 func WithCorrelation(ctx context.Context, requestID, traceID string) context.Context {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		ctx = context.Background()
 	}
 	ctx = context.WithValue(ctx, requestIDKey, requestID)
@@ -495,7 +801,7 @@ func WithCorrelation(ctx context.Context, requestID, traceID string) context.Con
 
 // RequestID returns the request identifier stored in ctx.
 func RequestID(ctx context.Context) string {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return ""
 	}
 	value, _ := ctx.Value(requestIDKey).(string)
@@ -504,7 +810,7 @@ func RequestID(ctx context.Context) string {
 
 // TraceID returns the trace identifier stored in ctx.
 func TraceID(ctx context.Context) string {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return ""
 	}
 	value, _ := ctx.Value(traceIDKey).(string)
@@ -514,7 +820,7 @@ func TraceID(ctx context.Context) string {
 // TraceParentFromContext returns a valid W3C traceparent carrier value, or an
 // empty string when ctx has no valid remote/local span context.
 func TraceParentFromContext(ctx context.Context) string {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return ""
 	}
 	carrier := propagation.MapCarrier{}
@@ -529,7 +835,7 @@ func TraceParentFromContext(ctx context.Context) string {
 // ContextWithTraceParent restores a valid W3C traceparent without retaining
 // baggage. Invalid values leave ctx unchanged.
 func ContextWithTraceParent(ctx context.Context, value string) context.Context {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		ctx = context.Background()
 	}
 	if !validTraceParent(value) {
@@ -547,7 +853,7 @@ func NormalizeTraceParent(value string) string {
 // ContextWithoutTraceParent preserves cancellation and values while removing
 // any ambient span, so a subsequent operation starts a new root trace.
 func ContextWithoutTraceParent(ctx context.Context) context.Context {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		ctx = context.Background()
 	}
 	return trace.ContextWithSpanContext(ctx, trace.SpanContext{})
@@ -584,13 +890,16 @@ func DurationMilliseconds(start time.Time) float64 {
 // adapters. The returned finish function records a stable status/error class
 // and always ends the span; it never exposes provider error text.
 func StartOperation(ctx context.Context, provider Provider, operation, component string) (context.Context, Span, func(error)) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		ctx = context.Background()
 	}
-	if provider == nil {
-		provider = NewNoopProvider()
+	provider = ProtectProvider(provider)
+	tracer := provider.Tracer("trpcservice.operations")
+	started, span := tracer.Start(ctx, operation, Attribute{Key: "component", Value: component}, Attribute{Key: "operation", Value: operation})
+	if nilvalue.Is(started) {
+		started = ctx
 	}
-	started, span := provider.Tracer("trpcservice.operations").Start(ctx, operation, Attribute{Key: "component", Value: component}, Attribute{Key: "operation", Value: operation})
+	span = protectSpan(span)
 	var once sync.Once
 	finish := func(err error) {
 		once.Do(func() {

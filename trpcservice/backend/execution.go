@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -29,7 +30,11 @@ type FactoryCacheKey struct {
 // StorageFactoryInput is the provider-neutral, secret-free configuration
 // boundary consumed by later storage adapters and a trusted Secret Resolver.
 type StorageFactoryInput struct {
-	TenantID       string
+	TenantID string
+	// AppID is the immutable execution App scope. Backend profiles remain
+	// tenant-owned, but app-aware capabilities (Knowledge, Memory, Artifact)
+	// receive this value so they cannot materialize an unpartitioned client.
+	AppID          string
 	TenantVersion  int64
 	ProfileID      string
 	ProfileKey     string
@@ -130,6 +135,9 @@ func (snapshot BackendExecutionSnapshot) FactoryInput() (StorageFactoryInput, er
 // WithBackendExecutionSnapshot carries a validated defensive copy for one
 // execution. Invalid or zero snapshots overwrite the key with an empty value.
 func WithBackendExecutionSnapshot(ctx context.Context, snapshot BackendExecutionSnapshot) context.Context {
+	if nilvalue.Is(ctx) {
+		return nil
+	}
 	if err := snapshot.validate(); err != nil {
 		return context.WithValue(ctx, executionSnapshotContextKey{}, BackendExecutionSnapshot{})
 	}
@@ -138,6 +146,9 @@ func WithBackendExecutionSnapshot(ctx context.Context, snapshot BackendExecution
 
 // BackendExecutionSnapshotFromContext returns a validated defensive copy.
 func BackendExecutionSnapshotFromContext(ctx context.Context) (BackendExecutionSnapshot, bool) {
+	if nilvalue.Is(ctx) {
+		return BackendExecutionSnapshot{}, false
+	}
 	snapshot, ok := ctx.Value(executionSnapshotContextKey{}).(BackendExecutionSnapshot)
 	if !ok || snapshot.validate() != nil {
 		return BackendExecutionSnapshot{}, false

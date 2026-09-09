@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,6 +31,8 @@ import (
 	channelmysql "github.com/XnLemon/trpc-agent-service/trpcservice/channels/mysql"
 	channelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/channels/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
+	knowledgeadmin "github.com/XnLemon/trpc-agent-service/trpcservice/knowledge"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelmemory "github.com/XnLemon/trpc-agent-service/trpcservice/model/inmemory"
@@ -46,6 +49,8 @@ import (
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	runtimestoragemysql "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/mysql"
+	runtimestoragepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
@@ -55,11 +60,12 @@ import (
 	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
 	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
-	"trpc.group/trpc-go/trpc-agent-go/plugin"
-	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
-	"trpc.group/trpc-go/trpc-agent-go/plugin/identity"
+	approvalreview "trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
+	promptreview "trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/promptinjection/review"
+	unsafereview "trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/unsafeintent/review"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/skill"
 )
 
 var (
@@ -113,9 +119,20 @@ type Config struct {
 	// ToolSetFactory materializes runner-owned ToolSets from sealed revisions.
 	// A nil value uses the built-in sealed MCP factory.
 	ToolSetFactory agentrunnerfactory.ToolSetFactory
+	// SkillRepositoryProvider resolves tenant/app-scoped upstream skill
+	// repositories. Skills are never loaded from process-global filesystem roots.
+	SkillRepositoryProvider skill.RepositoryProvider
+	// ToolInvocations is the durable tool side-effect ledger. A nil value is
+	// filled with PostgreSQL or an explicitly local in-memory implementation.
+	ToolInvocations runtimestorage.ToolInvocationStore
+	// KnowledgeAdmin exposes tenant/app-scoped corpus administration. It is
+	// optional for deployments whose selected backend has no management path.
+	KnowledgeAdmin knowledgeadmin.Service
 	// ApprovalReviewer authorizes MCP calls whose published policy or remote
 	// metadata requires review. A nil reviewer keeps those calls fail-closed.
-	ApprovalReviewer review.Reviewer
+	ApprovalReviewer        approvalreview.Reviewer
+	PromptInjectionReviewer promptreview.Reviewer
+	UnsafeIntentReviewer    unsafereview.Reviewer
 	// SessionStore is the session-state capability used by durable dispatch.
 	SessionStore sessionstorage.SessionStateStore
 	// EventHistoryStore is the immutable upstream event history capability used
@@ -151,6 +168,15 @@ type Config struct {
 	// caller constructs its task handler; Bootstrap only owns its lifecycle and
 	// closes it before the Runner Registry.
 	ExecutionQueue *runtimequeue.Worker
+	// ToolInvocationRecoveryInterval controls the process-level scan for
+	// provider hand-offs left by crashed workers. Zero uses the production
+	// default when the configured ledger supports recovery; a negative value
+	// disables the scanner explicitly.
+	ToolInvocationRecoveryInterval time.Duration
+	// ToolInvocationRecoveryStaleAfter is the minimum age before a
+	// dispatching/accepted row is fenced as unknown. Zero uses the production
+	// default.
+	ToolInvocationRecoveryStaleAfter time.Duration
 	// AuditWriter receives execution and configured channel delivery facts.
 	AuditWriter        audit.Writer
 	Authenticator      gateway.APIAuthenticator
@@ -178,17 +204,19 @@ type Config struct {
 // before the HTTP server is drained; Close then closes the Runner Registry and
 // only after that resources explicitly owned by this graph.
 type Runtime struct {
-	Handler        *gateway.HTTPHandler
-	Resolver       *gateway.PlanResolver
-	Registry       *runtimerunner.RunnerRegistry
-	Dispatcher     *gateway.Dispatcher
-	OutboxWorker   *outbox.Worker
-	ExecutionQueue *runtimequeue.Worker
-	wecomLifecycle callbackLifecycle
-	wecomHandler   http.Handler
-	wecomAIBots    []channels.PollingAdapter
-	aiBotDone      []chan struct{}
-	aiBotCancel    context.CancelFunc
+	Handler            *gateway.HTTPHandler
+	Resolver           *gateway.PlanResolver
+	Registry           *runtimerunner.RunnerRegistry
+	Dispatcher         *gateway.Dispatcher
+	OutboxWorker       *outbox.Worker
+	ExecutionQueue     *runtimequeue.Worker
+	wecomLifecycle     callbackLifecycle
+	wecomHandler       http.Handler
+	wecomAIBots        []channels.PollingAdapter
+	aiBotDone          []chan struct{}
+	aiBotCancel        context.CancelFunc
+	toolRecoveryCancel context.CancelFunc
+	toolRecoveryDone   chan struct{}
 
 	db               *sql.DB
 	ownDB            bool
@@ -197,6 +225,7 @@ type Runtime struct {
 	verifyMigrations func(context.Context, *sql.DB) error
 	closeDeps        func() error
 	telemetry        observability.Provider
+	auditWriter      audit.Writer
 	closing          atomic.Bool
 	closeOnce        sync.Once
 	closeErr         error
@@ -234,12 +263,14 @@ func NewWithDatabaseDriver(ctx context.Context, db *sql.DB, driver ControlPlaneD
 // New assembles the real PlanResolver, Runtime RunnerRegistry, Dispatcher and
 // HTTPHandler from explicit dependencies.
 func New(ctx context.Context, config Config) (*Runtime, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, ErrInvalidConfig
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	normalizeConfigInterfaces(&config)
+	config.Observability = observability.ProtectProvider(config.Observability)
 	if err := prepareDatabaseConfig(ctx, &config); err != nil {
 		return nil, err
 	}
@@ -270,6 +301,9 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 		return nil, err
 	}
 	if err := startExecutionQueue(runtimeGraph); err != nil {
+		return nil, err
+	}
+	if err := startToolInvocationRecovery(runtimeGraph, config); err != nil {
 		return nil, err
 	}
 	if err := startAIBots(runtimeGraph); err != nil {
@@ -313,12 +347,16 @@ func resolveControlPlaneDriver(config *Config) (ControlPlaneDriver, error) {
 
 func prepareMySQLDatabaseConfig(ctx context.Context, config *Config) error {
 	if config.Migrate != nil {
-		if err := config.Migrate(ctx, config.DB); err != nil {
+		if err := callBootstrapMigration(func(callbackCtx context.Context, database any) error {
+			return config.Migrate(callbackCtx, database.(*sql.DB))
+		}, ctx, config.DB); err != nil {
 			return ErrInvalidConfig
 		}
 	}
 	if config.VerifyMigrations != nil {
-		if err := config.VerifyMigrations(ctx, config.DB); err != nil {
+		if err := callBootstrapMigration(func(callbackCtx context.Context, database any) error {
+			return config.VerifyMigrations(callbackCtx, database.(*sql.DB))
+		}, ctx, config.DB); err != nil {
 			return ErrInvalidConfig
 		}
 	}
@@ -345,7 +383,9 @@ func prepareMySQLDatabaseConfig(ctx context.Context, config *Config) error {
 
 func preparePostgresDatabaseConfig(ctx context.Context, config *Config) error {
 	if config.Migrate != nil {
-		if err := config.Migrate(ctx, config.DB); err != nil {
+		if err := callBootstrapMigration(func(callbackCtx context.Context, database any) error {
+			return config.Migrate(callbackCtx, database.(*sql.DB))
+		}, ctx, config.DB); err != nil {
 			return ErrInvalidConfig
 		}
 	}
@@ -374,14 +414,111 @@ func validateConfig(config Config) error {
 		config.Authenticator,
 	}
 	for _, dependency := range dependencies {
-		if dependency == nil {
+		if nilvalue.Is(dependency) {
 			return ErrInvalidConfig
 		}
 	}
-	if config.Sessions == nil && config.StorageFactory == nil {
+	if nilvalue.Is(config.Sessions) && nilvalue.Is(config.StorageFactory) {
 		return ErrInvalidConfig
 	}
 	return nil
+}
+
+// normalizeConfigInterfaces turns typed-nil interface values into ordinary nil
+// values before optional defaults and required-dependency checks run. Without
+// this pass a typed nil can suppress a safe default and panic much later in a
+// protocol or lifecycle goroutine.
+func normalizeConfigInterfaces(config *Config) {
+	if config == nil {
+		return
+	}
+	if nilvalue.Is(config.Observability) {
+		config.Observability = nil
+	}
+	if nilvalue.Is(config.Tenants) {
+		config.Tenants = nil
+	}
+	if nilvalue.Is(config.Apps) {
+		config.Apps = nil
+	}
+	if nilvalue.Is(config.Models) {
+		config.Models = nil
+	}
+	if nilvalue.Is(config.Backends) {
+		config.Backends = nil
+	}
+	if nilvalue.Is(config.Channels) {
+		config.Channels = nil
+	}
+	if nilvalue.Is(config.SecretResolver) {
+		config.SecretResolver = nil
+	}
+	if nilvalue.Is(config.ModelFactory) {
+		config.ModelFactory = nil
+	}
+	if nilvalue.Is(config.StorageFactory) {
+		config.StorageFactory = nil
+	}
+	if nilvalue.Is(config.Sessions) {
+		config.Sessions = nil
+	}
+	if nilvalue.Is(config.ToolSetFactory) {
+		config.ToolSetFactory = nil
+	}
+	if nilvalue.Is(config.SkillRepositoryProvider) {
+		config.SkillRepositoryProvider = nil
+	}
+	if nilvalue.Is(config.ToolInvocations) {
+		config.ToolInvocations = nil
+	}
+	if nilvalue.Is(config.KnowledgeAdmin) {
+		config.KnowledgeAdmin = nil
+	}
+	if nilvalue.Is(config.ApprovalReviewer) {
+		config.ApprovalReviewer = nil
+	}
+	if nilvalue.Is(config.PromptInjectionReviewer) {
+		config.PromptInjectionReviewer = nil
+	}
+	if nilvalue.Is(config.UnsafeIntentReviewer) {
+		config.UnsafeIntentReviewer = nil
+	}
+	if nilvalue.Is(config.SessionStore) {
+		config.SessionStore = nil
+	}
+	if nilvalue.Is(config.EventHistoryStore) {
+		config.EventHistoryStore = nil
+	}
+	if nilvalue.Is(config.MessageStore) {
+		config.MessageStore = nil
+	}
+	if nilvalue.Is(config.ReplyBatchStore) {
+		config.ReplyBatchStore = nil
+	}
+	if nilvalue.Is(config.BudgetStore) {
+		config.BudgetStore = nil
+	}
+	if nilvalue.Is(config.Attachments) {
+		config.Attachments = nil
+	}
+	if nilvalue.Is(config.AttachmentStore) {
+		config.AttachmentStore = nil
+	}
+	if nilvalue.Is(config.AuditWriter) {
+		config.AuditWriter = nil
+	}
+	if nilvalue.Is(config.Authenticator) {
+		config.Authenticator = nil
+	}
+	if nilvalue.Is(config.AdminAuthenticator) {
+		config.AdminAuthenticator = nil
+	}
+	if nilvalue.Is(config.AdminHandler) {
+		config.AdminHandler = nil
+	}
+	if nilvalue.Is(config.WeComHandler) {
+		config.WeComHandler = nil
+	}
 }
 
 func prepareRuntimeConfig(config *Config) error {
@@ -390,6 +527,16 @@ func prepareRuntimeConfig(config *Config) error {
 	}
 	if config.BudgetStore == nil {
 		config.BudgetStore = runtimebudgetinmemory.New()
+	}
+	if config.ToolInvocations == nil {
+		switch {
+		case config.DB != nil && config.ControlPlaneDriver == ControlPlaneDriverPostgres:
+			config.ToolInvocations = runtimestoragepostgres.New(config.DB)
+		case config.DB != nil && config.ControlPlaneDriver == ControlPlaneDriverMySQL:
+			config.ToolInvocations = runtimestoragemysql.New(config.DB)
+		default:
+			config.ToolInvocations = runtimestorageinmemory.NewToolInvocationStore()
+		}
 	}
 	if config.SessionStore == nil && config.EventHistoryStore == nil && config.MessageStore == nil && config.ReplyBatchStore == nil {
 		store := runtimestorageinmemory.New()
@@ -446,19 +593,24 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	if err != nil {
 		return nil, ErrInvalidConfig
 	}
+	approvalReviewer := config.ApprovalReviewer
+	if approvalReviewer == nil && config.ToolInvocations != nil {
+		approvalReviewer = servicetool.NewDurableApprovalReviewer(config.ToolInvocations)
+	}
 	toolSetFactory := config.ToolSetFactory
 	if toolSetFactory == nil {
-		toolSetFactory = agentrunnerfactory.NewMCPToolSetFactory(config.SecretResolver, config.ApprovalReviewer)
+		toolSetFactory = agentrunnerfactory.NewMCPToolSetFactory(config.SecretResolver, approvalReviewer)
 	}
 	registry, err := agentrunnerfactory.NewRuntimeRunnerRegistry(agentrunnerfactory.Config{
 		Registry: config.Registry, SecretResolver: config.SecretResolver,
 		ModelFactory: config.ModelFactory, Sessions: config.Sessions, StorageFactory: config.StorageFactory,
 		Observability: config.Observability, ToolRegistry: config.ToolRegistry, ToolSetFactory: toolSetFactory, EnableUsageCallbacks: config.BudgetStore != nil,
-		PluginFactory: func(_ context.Context, _ runtime.ExecutionPlan) ([]plugin.Plugin, error) {
-			return []plugin.Plugin{identity.NewPlugin(identity.ProviderFunc(func(_ context.Context, userID, _ string) (*identity.Identity, error) {
-				return &identity.Identity{UserID: userID}, nil
-			}))}, nil
-		},
+		SkillRepositoryProvider: config.SkillRepositoryProvider, ToolInvocationStore: config.ToolInvocations,
+		ApprovalReviewer: approvalReviewer, PromptInjectionReviewer: config.PromptInjectionReviewer, UnsafeIntentReviewer: config.UnsafeIntentReviewer,
+		PluginFactory: agentrunnerfactory.NewDefaultPluginFactory(agentrunnerfactory.Config{
+			SkillRepositoryProvider: config.SkillRepositoryProvider, ToolInvocationStore: config.ToolInvocations,
+			ApprovalReviewer: approvalReviewer, PromptInjectionReviewer: config.PromptInjectionReviewer, UnsafeIntentReviewer: config.UnsafeIntentReviewer,
+		}),
 	})
 	if err != nil {
 		return nil, ErrInvalidConfig
@@ -467,7 +619,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 		Resolver: resolver, Registry: registry,
 		SessionStore: config.SessionStore,
 		MessageStore: config.MessageStore, ReplyBatchStore: config.ReplyBatchStore,
-		Attachments: config.Attachments, AttachmentStore: config.AttachmentStore,
+		Attachments: config.Attachments, AttachmentStore: config.AttachmentStore, ToolInvocations: config.ToolInvocations,
 		DrainTimeout: config.DrainTimeout, AuditWriter: config.AuditWriter, Observability: config.Observability,
 		Budget: runtimebudget.NewController(config.BudgetStore),
 	})
@@ -495,7 +647,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 		wecomHandler:   config.WeComHandler,
 		db:             config.DB, ownDB: config.OwnDB, readyGate: readyGate,
 		ping: ping, verifyMigrations: config.VerifyMigrations, closeDeps: config.CloseDependencies,
-		telemetry:   config.Observability,
+		telemetry: config.Observability, auditWriter: config.AuditWriter,
 		wecomAIBots: aiBots,
 	}
 	if lifecycle, ok := config.WeComHandler.(callbackLifecycle); ok {
@@ -505,12 +657,18 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 }
 
 func configureRuntimeChannels(config *Config, dispatcher gateway.DispatchService) ([]channels.PollingAdapter, error) {
+	if config == nil {
+		return nil, ErrInvalidConfig
+	}
+	if nilvalue.Is(config.WeComHandler) {
+		config.WeComHandler = nil
+	}
 	if config.WeComHandler != nil && config.WeComHandlerFactory != nil {
 		return nil, ErrInvalidConfig
 	}
 	if config.WeComHandlerFactory != nil {
-		handler, err := config.WeComHandlerFactory(dispatcher)
-		if err != nil || handler == nil {
+		handler, err := callBootstrapHandlerFactory(config.WeComHandlerFactory, dispatcher)
+		if err != nil || nilvalue.Is(handler) {
 			return nil, ErrInvalidConfig
 		}
 		config.WeComHandler = handler
@@ -528,7 +686,7 @@ func configureRuntimeChannels(config *Config, dispatcher gateway.DispatchService
 	if config.OutboxWorkerFactory == nil {
 		return aiBots, nil
 	}
-	worker, err := config.OutboxWorkerFactory(aiBots)
+	worker, err := callBootstrapWorkerFactory(config.OutboxWorkerFactory, aiBots)
 	if err != nil || worker == nil {
 		if worker != nil {
 			_ = worker.Close()
@@ -551,8 +709,8 @@ func newWeComAIBots(factories []func(gateway.DispatchService) (channels.PollingA
 		if factory == nil {
 			return invalid(ErrInvalidConfig)
 		}
-		aiBot, err := factory(dispatcher)
-		if err != nil || aiBot == nil || aiBot.Channel() != channels.ChannelWeComAIBot {
+		aiBot, err := callBootstrapPollingFactory(factory, dispatcher)
+		if err != nil || nilvalue.Is(aiBot) || callPollingChannel(aiBot) != channels.ChannelWeComAIBot {
 			return invalid(ErrInvalidConfig)
 		}
 		if _, ok := aiBot.(pollingHealth); !ok {
@@ -565,15 +723,18 @@ func newWeComAIBots(factories []func(gateway.DispatchService) (channels.PollingA
 
 func closePollingAdapters(adapters []channels.PollingAdapter) {
 	for _, adapter := range adapters {
-		if adapter != nil {
-			_ = adapter.Close()
+		if !nilvalue.Is(adapter) {
+			_ = closePollingAdapter(adapter)
 		}
 	}
 }
 
 func closeCallbackHandler(handler http.Handler) {
-	if lifecycle, ok := handler.(callbackLifecycle); ok {
-		_ = lifecycle.Close()
+	if nilvalue.Is(handler) {
+		return
+	}
+	if lifecycle, ok := handler.(callbackLifecycle); ok && !nilvalue.Is(lifecycle) {
+		_ = closeLifecycleSafely(lifecycle)
 	}
 }
 
@@ -589,7 +750,7 @@ func startAIBots(runtimeGraph *Runtime) error {
 		runtimeGraph.aiBotDone = append(runtimeGraph.aiBotDone, done)
 		go func(adapter channels.PollingAdapter, done chan struct{}) {
 			defer close(done)
-			if err := adapter.Run(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			if err := callPollingRun(adapter, ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				logPollingAdapterStopped(adapter, err)
 			}
 		}(adapter, done)
@@ -609,8 +770,10 @@ func configureAdmin(config *Config, registry *runtimerunner.RunnerRegistry) erro
 	adminHandler, err := admin.NewHandler(admin.Config{
 		Tenants: config.Tenants, Apps: config.Apps, Models: config.Models,
 		Backends: config.Backends, Bindings: bindingRepository,
-		Authenticator: config.AdminAuthenticator,
-		ModelCatalog:  config.ModelCatalog, BackendCatalog: config.BackendCatalog,
+		ToolInvocations: config.ToolInvocations,
+		Knowledge:       config.KnowledgeAdmin,
+		Authenticator:   config.AdminAuthenticator,
+		ModelCatalog:    config.ModelCatalog, BackendCatalog: config.BackendCatalog,
 		CacheInvalidator: admin.CacheInvalidatorFunc(func(change admin.CacheInvalidation) {
 			invalidateRuntimeCache(registry, change)
 		}),
@@ -653,6 +816,7 @@ func configureHandler(runtimeGraph *Runtime, config Config) error {
 		Dispatcher: runtimeGraph.Dispatcher, Authenticator: config.Authenticator, Admin: adminHandler, AdminAuth: config.HTTP.AdminAuth, WeCom: runtimeGraph.wecomHandler,
 		Ready: runtimeGraph.Ready, Limiter: config.HTTP.Limiter, Idempotency: config.HTTP.Idempotency,
 		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout, Observability: config.Observability,
+		A2A: config.HTTP.A2A, TRPCAgent: config.HTTP.TRPCAgent,
 	})
 	if err != nil {
 		return ErrInvalidConfig
@@ -681,16 +845,123 @@ func startExecutionQueue(runtimeGraph *Runtime) error {
 	return nil
 }
 
+const (
+	defaultToolInvocationRecoveryInterval   = time.Minute
+	defaultToolInvocationRecoveryStaleAfter = 5 * time.Minute
+)
+
+func startToolInvocationRecovery(runtimeGraph *Runtime, config Config) error {
+	if runtimeGraph == nil || nilvalue.Is(config.ToolInvocations) {
+		return nil
+	}
+	recovery, ok := config.ToolInvocations.(runtimestorage.ToolInvocationRecoveryStore)
+	if !ok || nilvalue.Is(recovery) || config.ToolInvocationRecoveryInterval < 0 {
+		return nil
+	}
+	interval := config.ToolInvocationRecoveryInterval
+	if interval == 0 {
+		interval = defaultToolInvocationRecoveryInterval
+	}
+	staleAfter := config.ToolInvocationRecoveryStaleAfter
+	if staleAfter == 0 {
+		staleAfter = defaultToolInvocationRecoveryStaleAfter
+	}
+	if interval <= 0 || staleAfter <= 0 {
+		return ErrInvalidConfig
+	}
+	reconcile := func(ctx context.Context) error {
+		if nilvalue.Is(runtimeGraph.auditWriter) {
+			return nil
+		}
+		values, err := recoverStaleSafely(recovery, ctx, time.Now().UTC().Add(-staleAfter))
+		if err != nil {
+			return err
+		}
+		// Recovery and audit are deliberately separate durable boundaries. If
+		// the audit writer fails after the state fence commits, list the still
+		// unresolved rows on the next tick and retry the same deterministic fact.
+		if lister, ok := config.ToolInvocations.(runtimestorage.ToolInvocationReconciliationStore); ok && !nilvalue.Is(lister) {
+			pending, listErr := listReconciliationSafely(lister, ctx)
+			if listErr != nil {
+				return listErr
+			}
+			values = append(values, pending...)
+		}
+		if lister, ok := config.ToolInvocations.(runtimestorage.ToolInvocationAuditStore); ok && !nilvalue.Is(lister) {
+			pending, listErr := listAuditCandidatesSafely(lister, ctx)
+			if listErr != nil {
+				return listErr
+			}
+			values = append(values, pending...)
+		}
+		unique := make(map[string]runtimestorage.ToolInvocation, len(values))
+		for _, value := range values {
+			if value.TenantID == "" || value.AppID == "" || value.InvocationID == "" {
+				continue
+			}
+			// Invocation IDs are app-derived today, but retain the explicit app
+			// component here so reconciliation cannot collapse two app scopes if
+			// a legacy/imported ledger row ever reuses an ID.
+			unique[value.TenantID+"\x00"+value.AppID+"\x00"+value.InvocationID] = value
+		}
+		values = values[:0]
+		for _, value := range unique {
+			values = append(values, value)
+		}
+		sort.Slice(values, func(i, j int) bool {
+			if !values[i].CreatedAt.Equal(values[j].CreatedAt) {
+				return values[i].CreatedAt.Before(values[j].CreatedAt)
+			}
+			if values[i].TenantID != values[j].TenantID {
+				return values[i].TenantID < values[j].TenantID
+			}
+			if values[i].AppID != values[j].AppID {
+				return values[i].AppID < values[j].AppID
+			}
+			return values[i].InvocationID < values[j].InvocationID
+		})
+		for _, value := range values {
+			if err := servicetool.RecordToolInvocationAudit(ctx, audit.NewRecorder(runtimeGraph.auditWriter, value.TenantID), value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	// Do not perform a database round trip synchronously on the bootstrap path.
+	// Readiness owns startup ping/migration checks; the asynchronous scan below
+	// runs after the graph is returned and therefore cannot block serving.
+	ctx, cancel := context.WithCancel(context.Background())
+	runtimeGraph.toolRecoveryCancel = cancel
+	runtimeGraph.toolRecoveryDone = make(chan struct{})
+	go func() {
+		defer close(runtimeGraph.toolRecoveryDone)
+		// Reconcile rows left by a previous process as soon as the worker is
+		// scheduled; the interval then provides retry for audit failures.
+		_ = callBootstrapError(func() error { return reconcile(ctx) })
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = callBootstrapError(func() error { return reconcile(ctx) })
+			}
+		}
+	}()
+	return nil
+}
+
 // Ready is the single readiness gate used by HTTPHandler. It checks the
 // database on demand (when present) and never returns true after shutdown has
 // started.
 func (graph *Runtime) Ready() bool {
-	if graph == nil || graph.closing.Load() || graph.readyGate == nil || !graph.readyGate() {
+	if graph == nil || graph.closing.Load() || graph.readyGate == nil || !callBootstrapBool(graph.readyGate) {
 		return false
 	}
 	if graph.ping != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-		err := graph.ping(ctx)
+		err := callBootstrapContextError(graph.ping, ctx)
 		cancel()
 		if err != nil {
 			return false
@@ -698,14 +969,17 @@ func (graph *Runtime) Ready() bool {
 	}
 	if graph.verifyMigrations != nil && graph.db != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-		err := graph.verifyMigrations(ctx, graph.db)
+		err := callBootstrapMigration(func(callbackCtx context.Context, database any) error {
+			return graph.verifyMigrations(callbackCtx, database.(*sql.DB))
+		}, ctx, graph.db)
 		cancel()
 		if err != nil {
 			return false
 		}
 	}
 	for _, adapter := range graph.wecomAIBots {
-		if !adapter.(pollingHealth).Ready() {
+		health, ok := adapter.(pollingHealth)
+		if !ok || nilvalue.Is(health) || !callPollingReady(health) {
 			return false
 		}
 	}
@@ -722,12 +996,12 @@ func (graph *Runtime) BeginShutdown() {
 	if graph.Handler != nil {
 		graph.Handler.BeginShutdown()
 	}
-	if graph.wecomLifecycle != nil {
-		graph.wecomLifecycle.BeginShutdown()
+	if !nilvalue.Is(graph.wecomLifecycle) {
+		beginShutdownSafely(graph.wecomLifecycle)
 	}
 	for _, adapter := range graph.wecomAIBots {
-		if lifecycle, ok := adapter.(interface{ BeginShutdown() }); ok {
-			lifecycle.BeginShutdown()
+		if lifecycle, ok := adapter.(interface{ BeginShutdown() }); ok && !nilvalue.Is(lifecycle) {
+			callBootstrapBeginShutdown(lifecycle)
 		}
 	}
 }
@@ -741,39 +1015,45 @@ func (graph *Runtime) Close() error {
 	graph.closeOnce.Do(func() {
 		graph.BeginShutdown()
 		var closeErr error
-		if graph.Handler != nil {
-			closeErr = errors.Join(closeErr, graph.Handler.Close())
+		if !nilvalue.Is(graph.Handler) {
+			closeErr = errors.Join(closeErr, closeHandlerSafely(graph.Handler))
 		}
-		if graph.wecomLifecycle != nil {
-			closeErr = errors.Join(closeErr, graph.wecomLifecycle.Close())
+		if !nilvalue.Is(graph.wecomLifecycle) {
+			closeErr = errors.Join(closeErr, closeLifecycleSafely(graph.wecomLifecycle))
 		}
 		if graph.aiBotCancel != nil {
 			graph.aiBotCancel()
 		}
 		for _, adapter := range graph.wecomAIBots {
-			closeErr = errors.Join(closeErr, adapter.Close())
+			closeErr = errors.Join(closeErr, closePollingAdapter(adapter))
 		}
 		for _, done := range graph.aiBotDone {
 			<-done
 		}
-		if graph.ExecutionQueue != nil {
-			closeErr = errors.Join(closeErr, graph.ExecutionQueue.Close())
+		if graph.toolRecoveryCancel != nil {
+			graph.toolRecoveryCancel()
 		}
-		if graph.Registry != nil {
-			closeErr = errors.Join(closeErr, graph.Registry.Close())
+		if graph.toolRecoveryDone != nil {
+			<-graph.toolRecoveryDone
 		}
-		if graph.OutboxWorker != nil {
-			closeErr = errors.Join(closeErr, graph.OutboxWorker.Close())
+		if !nilvalue.Is(graph.ExecutionQueue) {
+			closeErr = errors.Join(closeErr, closeWorkerSafely(graph.ExecutionQueue))
+		}
+		if !nilvalue.Is(graph.Registry) {
+			closeErr = errors.Join(closeErr, closeWorkerSafely(graph.Registry))
+		}
+		if !nilvalue.Is(graph.OutboxWorker) {
+			closeErr = errors.Join(closeErr, closeWorkerSafely(graph.OutboxWorker))
 		}
 		if graph.closeDeps != nil {
-			closeErr = errors.Join(closeErr, graph.closeDeps())
+			closeErr = errors.Join(closeErr, callBootstrapError(graph.closeDeps))
 		}
 		if graph.ownDB && graph.db != nil {
 			closeErr = errors.Join(closeErr, graph.db.Close())
 		}
-		if graph.telemetry != nil {
+		if !nilvalue.Is(graph.telemetry) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			closeErr = errors.Join(closeErr, graph.telemetry.Shutdown(ctx))
+			closeErr = errors.Join(closeErr, safeTelemetryShutdown(graph.telemetry, ctx))
 			cancel()
 		}
 		graph.closeErr = closeErr

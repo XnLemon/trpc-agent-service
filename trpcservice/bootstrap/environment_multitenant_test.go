@@ -77,6 +77,8 @@ func TestLoadEnvironmentSupportsIdentityListWithoutFixedTenantFields(t *testing.
 	t.Setenv(envAppID, "")
 	t.Setenv(envModelAPIKey, "")
 	t.Setenv(envModelAPIKeys, "t_00000000000000000000000000=key-a,t_00000000000000000000000001=key-b")
+	t.Setenv(envKnowledgeEmbeddingAPIKey, "")
+	t.Setenv(envKnowledgeEmbeddingAPIKeys, "t_00000000000000000000000000=embedding-a,t_00000000000000000000000001=embedding-b")
 	t.Setenv(envAPIIdentities, "token-a|t_00000000000000000000000000|app_00000000000000000000000000|service-a,token-b|t_00000000000000000000000001|app_00000000000000000000000001|service-b")
 	config, err := loadEnvironment()
 	if err != nil || len(config.apiIdentities) != 2 {
@@ -98,6 +100,8 @@ func TestLoadEnvironmentUsesTenantModelAPIKeysForMultipleIdentities(t *testing.T
 	t.Setenv(envAppID, "")
 	t.Setenv(envModelAPIKey, "")
 	t.Setenv(envModelAPIKeys, "t_00000000000000000000000000=key-a,t_00000000000000000000000001=key-b")
+	t.Setenv(envKnowledgeEmbeddingAPIKey, "")
+	t.Setenv(envKnowledgeEmbeddingAPIKeys, "t_00000000000000000000000000=embedding-a,t_00000000000000000000000001=embedding-b")
 	config, err := loadEnvironment()
 	if err != nil {
 		t.Fatal(err)
@@ -486,24 +490,24 @@ func TestEnvironmentRedisCatalogAndRegistryBoundaries(t *testing.T) {
 	if _, err := secrets.Resolve(context.Background(), modelprofile.SecretScope{TenantID: tenantA, SecretRef: "env/other"}); err == nil {
 		t.Fatal("foreign redis secret reference was accepted")
 	}
-	provider, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis"})
+	provider, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: tenantA, AppID: "app_00000000000000000000000000"}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis"})
 	if err != nil || provider == nil {
 		t.Fatalf("tenant redis provider = %v", err)
 	}
-	if _, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySummary, Provider: "redis"}); !errors.Is(err, storagefactory.ErrProviderUnavailable) {
+	if _, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: tenantA, AppID: "app_00000000000000000000000000"}, backend.CapabilityBinding{Capability: backend.CapabilitySummary, Provider: "redis"}); !errors.Is(err, storagefactory.ErrProviderUnavailable) {
 		t.Fatalf("unsupported redis provider capability = %v", err)
 	}
-	if _, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000002"}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis"}); !errors.Is(err, storagefactory.ErrProviderUnavailable) {
+	if _, err := providers.Resolve(context.Background(), backend.StorageFactoryInput{TenantID: "t_00000000000000000000000002", AppID: "app_00000000000000000000000000"}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis"}); !errors.Is(err, storagefactory.ErrProviderUnavailable) {
 		t.Fatalf("unregistered tenant redis provider = %v", err)
 	}
-	value, err := provider.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: "redis://other:6379"}, secret)
+	value, err := provider.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantA, AppID: "app_00000000000000000000000000"}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: "redis://other:6379"}, secret)
 	if !errors.Is(err, storagefactory.ErrStorageFactory) || value != nil {
 		t.Fatalf("mismatched redis endpoint = %T, %v", value, err)
 	}
 	if strings.Contains(err.Error(), "redis://other:6379") {
 		t.Fatal("redis endpoint leaked in provider error")
 	}
-	value, err = provider.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantA}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: config.redisEndpoint, SecretRef: "env/other"}, secret)
+	value, err = provider.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantA, AppID: "app_00000000000000000000000000"}, backend.CapabilityBinding{Capability: backend.CapabilitySession, Provider: "redis", Endpoint: config.redisEndpoint, SecretRef: "env/other"}, secret)
 	if !errors.Is(err, storagefactory.ErrStorageFactory) || value != nil {
 		t.Fatalf("mismatched redis secret reference = %T, %v", value, err)
 	}
@@ -557,12 +561,12 @@ func TestEnvironmentRedisProfilesUseSeparateInMemoryProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	redisCapabilities, err := factory.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantA, Bindings: redisProfile.Bindings})
+	redisCapabilities, err := factory.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantA, AppID: "app_00000000000000000000000000", Bindings: redisProfile.Bindings})
 	if err != nil {
 		t.Fatalf("redis capabilities = %v", err)
 	}
 	t.Cleanup(func() { _ = redisCapabilities.Close() })
-	inMemoryCapabilities, err := factory.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantB, Bindings: inMemoryProfile.Bindings})
+	inMemoryCapabilities, err := factory.New(context.Background(), backend.StorageFactoryInput{TenantID: tenantB, AppID: "app_00000000000000000000000001", Bindings: inMemoryProfile.Bindings})
 	if err != nil {
 		t.Fatalf("in-memory capabilities = %v", err)
 	}

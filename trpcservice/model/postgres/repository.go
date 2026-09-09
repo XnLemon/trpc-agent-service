@@ -8,11 +8,15 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/model"
 )
 
 // List returns a stable page of Model Profiles belonging to one tenant.
 func (r *ModelRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*model.Profile, string, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, "", err
+	}
 	if r == nil || r.db == nil {
 		return nil, "", ErrStorage
 	}
@@ -80,9 +84,16 @@ func NewRepository(db *sql.DB, catalog *model.ProviderCatalog) *ModelRepository 
 	return &ModelRepository{db: db, catalog: catalog}
 }
 
+func checkContext(ctx context.Context) error {
+	if nilvalue.Is(ctx) {
+		return ErrStorage
+	}
+	return ctx.Err()
+}
+
 // Create persists a model profile and returns its creation event.
 func (r *ModelRepository) Create(ctx context.Context, input model.CreateInput) (*model.Profile, model.ChangeEvent, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, model.ChangeEvent{}, err
 	}
 	if r == nil || r.db == nil {
@@ -136,7 +147,7 @@ func (r *ModelRepository) Create(ctx context.Context, input model.CreateInput) (
 
 // Get loads a model profile within a tenant.
 func (r *ModelRepository) Get(ctx context.Context, tenantID, profileID string) (*model.Profile, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	if r == nil || r.db == nil {
@@ -154,7 +165,7 @@ func (r *ModelRepository) Get(ctx context.Context, tenantID, profileID string) (
 
 // UpdateConfiguration applies an expected-version model configuration update.
 func (r *ModelRepository) UpdateConfiguration(ctx context.Context, input model.UpdateConfigurationInput) (*model.Profile, model.ChangeEvent, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, model.ChangeEvent{}, err
 	}
 	if r == nil || r.db == nil {
@@ -211,7 +222,7 @@ func (r *ModelRepository) UpdateConfiguration(ctx context.Context, input model.U
 
 // TransitionStatus changes a model profile status with optimistic concurrency.
 func (r *ModelRepository) TransitionStatus(ctx context.Context, input model.TransitionStatusInput) (*model.Profile, model.ChangeEvent, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, model.ChangeEvent{}, err
 	}
 	if r == nil || r.db == nil {

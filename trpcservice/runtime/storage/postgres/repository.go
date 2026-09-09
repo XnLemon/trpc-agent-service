@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	pgstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
@@ -661,7 +662,7 @@ func checkStore(ctx context.Context, store *Store) error {
 }
 
 func check(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return runtimestorage.ErrInvalid
 	}
 	return ctx.Err()

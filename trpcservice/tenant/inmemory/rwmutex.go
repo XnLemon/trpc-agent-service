@@ -105,13 +105,12 @@ func (m *contextRWMutex) wakeLocked() {
 }
 
 func waitContext(ctx context.Context, wait <-chan struct{}) error {
-	if ctx == nil {
-		<-wait
-		return nil
+	if err := checkContext(ctx); err != nil {
+		return err
 	}
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return checkContext(ctx)
 	case <-wait:
 		return nil
 	}
