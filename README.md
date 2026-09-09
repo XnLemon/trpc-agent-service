@@ -79,6 +79,30 @@ IM / HTTP -> Channel Adapter -> Gateway -> Queue/Outbox -> Agent Worker
   <img src="docs/docs/assets/channel-integrations/wecom-aibot-live-integration.gif" alt="企业微信 AI Bot 真实对话收发验证" width="720">
 </p>
 
+## 前端多租户渠道验收
+
+下面的步骤验证两个租户分别使用各自 Agent，通过 Telegram 和企业微信 AI Bot 完成真实会话。完整的命令、日志证据和故障排查见[多租户多 Agent Telegram / WeCom 验收链路](docs/docs/multitenant-telegram-acceptance.md)。
+
+### Telegram
+
+1. 使用 `deploy/service.env` 启动服务，并确认 `http://localhost:8080/readyz` 返回 `ready`。
+2. 打开 `http://localhost:8080`，以管理员账号登录，选择目标租户并确认 Agent 已发布且为 active。
+3. 选择 **Telegram**，填写 BotFather 提供的 Bot ID 和 Bot Token，点击 **Connect channel**。
+4. 页面显示 `Your agent is connected` 后，打开 Telegram 向该 Bot 发送唯一 marker，例如 `tenant-a-session-001`。
+5. 确认 Bot 回复，并检查服务日志中的 `tenant_id`、`app_id` 与所选租户/Agent 一致。
+6. 切换到第二个租户，使用第二个 Telegram Bot 重复步骤 2–5；确认两边的消息和会话不会串用。
+
+### WeCom AI Bot
+
+1. 在 WebUI 选择已配置并发布 Agent 的租户，选择 **WeCom** channel。
+2. 填写企业微信 **AI Bot ID** 和同一个 Bot 的 **AI Bot Secret**，点击 **Connect channel**。
+3. 不要填写 Corp ID、Agent ID、应用 Secret、回调 Token 或 EncodingAESKey；此入口使用 `wss://openws.work.weixin.qq.com` AI Bot 长连接。
+4. 页面显示 `Your agent is connected` 后，打开企业微信客户端找到该 AI Bot，发送唯一 marker，例如 `wecom-tenant-b-session-001`。
+5. 确认 Bot 在同一会话回复，并检查日志中的认证状态、`tenant_id`、`app_id` 与所选租户/Agent 一致。
+6. 为第二个租户连接它自己的 AI Bot，重复步骤 1–5，确认两个租户的会话和 Agent 行为保持隔离。
+
+服务重启会清除进程内保存的 Telegram/AI Bot Secret；重启后需在前端重新连接对应 Bot，再发送新 marker 验收。
+
 ## 快速开始：离线 Golden Path
 
 该路径使用 PostgreSQL、fake model 和固定响应验证从空数据库到第一条对话，不需要 OpenAI、IM 或 Secret Manager 凭据。
@@ -222,6 +246,7 @@ CI 在 push/PR 时执行格式、静态检查、测试、覆盖率、race 和部
 - [部署、配置与快速开始](docs/docs/deployment.md)：Compose、Kubernetes、环境变量和 GHCR 镜像
 - [首次运行初始化](docs/docs/issue-67-first-run-init.md)：`trpc-service init` 与幂等边界
 - [Gateway、Execution Plan 与 HTTP/SSE](docs/docs/gateway.md)：请求契约、鉴权、限流和流式响应
+- [多租户多 Agent Telegram / WeCom 验收链路](docs/docs/multitenant-telegram-acceptance.md)：前端配置、双渠道连接、真实会话验证和故障排查
 - [PostgreSQL 控制面与启动装配](docs/docs/postgresql-control-plane.md)：migration、repository 和 bootstrap
 - [原始任务书](docs/docs/project-brief.md)：项目最初的背景、要求、交付物和验收标准
 - [完整文档站](https://xnlemon.github.io/trpc-agent-service/)

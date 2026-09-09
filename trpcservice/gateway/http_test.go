@@ -72,6 +72,27 @@ func TestHTTPHandlerAdminRouteBoundary(t *testing.T) {
 	}
 }
 
+func TestHTTPHandlerDelegatesBrowserRoutesToWeb(t *testing.T) {
+	admin := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	web := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "web:"+r.URL.Path) })
+	handler, err := NewHTTPHandler(HTTPConfig{Admin: admin, Web: web, Ready: func() bool { return true }})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "web:/" {
+		t.Fatalf("browser route status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/admin/v1/tenants", nil))
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("admin route status=%d", recorder.Code)
+	}
+}
+
 func TestHTTPHandlerAdminAuthRouteBoundary(t *testing.T) {
 	auth := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	handler, err := NewHTTPHandler(HTTPConfig{AdminAuth: auth, Ready: func() bool { return true }})

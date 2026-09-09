@@ -100,6 +100,9 @@ type Config struct {
 
 	ModelCatalog   *modelprofile.ProviderCatalog
 	BackendCatalog *backend.ProviderCatalog
+	// TenantRuntime lazily materializes tenant-scoped runtime capabilities.
+	// When provided, newly created tenants can execute without a restart.
+	TenantRuntime  runtime.TenantRuntime
 	SecretResolver modelprofile.SecretResolver
 	ModelFactory   modelprofile.ModelFactory
 	StorageFactory storagefactory.StorageFactory
@@ -146,8 +149,10 @@ type Config struct {
 	AuditWriter        audit.Writer
 	Authenticator      gateway.APIAuthenticator
 	AdminAuthenticator admin.Authenticator
-	AdminHandler       http.Handler
-	WeComHandler       http.Handler
+	// EnableWebConnections enables process-owned channel onboarding through Admin.
+	EnableWebConnections bool
+	AdminHandler         http.Handler
+	WeComHandler         http.Handler
 	// WeComHandlerFactory is called after Dispatcher construction so a callback
 	// handler cannot receive an uninitialized execution dependency.
 	WeComHandlerFactory func(gateway.DispatchService) (http.Handler, error)
@@ -169,17 +174,19 @@ type Config struct {
 // before the HTTP server is drained; Close then closes the Runner Registry and
 // only after that resources explicitly owned by this graph.
 type Runtime struct {
-	Handler        *gateway.HTTPHandler
-	Resolver       *gateway.PlanResolver
-	Registry       *runtimerunner.RunnerRegistry
-	Dispatcher     *gateway.Dispatcher
-	OutboxWorker   *outbox.Worker
-	ExecutionQueue *runtimequeue.Worker
-	wecomLifecycle callbackLifecycle
-	wecomHandler   http.Handler
-	wecomAIBots    []channels.PollingAdapter
-	aiBotDone      []chan struct{}
-	aiBotCancel    context.CancelFunc
+	Handler          *gateway.HTTPHandler
+	Resolver         *gateway.PlanResolver
+	Registry         *runtimerunner.RunnerRegistry
+	Dispatcher       *gateway.Dispatcher
+	OutboxWorker     *outbox.Worker
+	ExecutionQueue   *runtimequeue.Worker
+	wecomLifecycle   callbackLifecycle
+	wecomHandler     http.Handler
+	wecomAIBots      []channels.PollingAdapter
+	connections      admin.ChannelConnections
+	connectionsClose func() error
+	aiBotDone        []chan struct{}
+	aiBotCancel      context.CancelFunc
 
 	db               *sql.DB
 	ownDB            bool
@@ -251,7 +258,7 @@ func New(ctx context.Context, config Config) (*Runtime, error) {
 			_ = runtimeGraph.Close()
 		}
 	}()
-	if err := configureAdmin(&config, runtimeGraph.Registry); err != nil {
+	if err := configureAdmin(&config, runtimeGraph.Registry, runtimeGraph.connections); err != nil {
 		return nil, err
 	}
 	if err := configureHandler(runtimeGraph, config); err != nil {
@@ -433,6 +440,7 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 	resolver, err := gateway.NewPlanResolver(runtime.PlanResolverConfig{
 		Tenants: config.Tenants, Apps: config.Apps, Models: config.Models, Backends: config.Backends,
 		ModelCatalog: config.ModelCatalog, BackendCatalog: config.BackendCatalog,
+		TenantRuntime: config.TenantRuntime,
 	})
 	if err != nil {
 		return nil, ErrInvalidConfig
@@ -479,6 +487,17 @@ func newRuntimeGraph(config Config) (*Runtime, error) {
 		ping: ping, verifyMigrations: config.VerifyMigrations, closeDeps: config.CloseDependencies,
 		telemetry:   config.Observability,
 		wecomAIBots: aiBots,
+	}
+	if config.EnableWebConnections && config.AdminAuthenticator != nil {
+		connections, factoryErr := newWebChannelConnections(config, runtimeGraph)
+		if factoryErr != nil || connections == nil {
+			_ = runtimeGraph.Close()
+			return nil, ErrInvalidConfig
+		}
+		runtimeGraph.connections = connections
+		if lifecycle, ok := connections.(interface{ Close() error }); ok {
+			runtimeGraph.connectionsClose = lifecycle.Close
+		}
 	}
 	if lifecycle, ok := config.WeComHandler.(callbackLifecycle); ok {
 		runtimeGraph.wecomLifecycle = lifecycle
@@ -579,7 +598,7 @@ func startAIBots(runtimeGraph *Runtime) error {
 	return nil
 }
 
-func configureAdmin(config *Config, registry *runtimerunner.RunnerRegistry) error {
+func configureAdmin(config *Config, registry *runtimerunner.RunnerRegistry, connections admin.ChannelConnections) error {
 	if config.AdminAuthenticator == nil {
 		config.HTTP.AdminAuth = nil
 		return nil
@@ -592,9 +611,10 @@ func configureAdmin(config *Config, registry *runtimerunner.RunnerRegistry) erro
 		Tenants: config.Tenants, Apps: config.Apps, Models: config.Models,
 		Backends: config.Backends, Bindings: bindingRepository,
 		Authenticator: config.AdminAuthenticator,
+		Connections:   connections,
 		ModelCatalog:  config.ModelCatalog, BackendCatalog: config.BackendCatalog,
 		CacheInvalidator: admin.CacheInvalidatorFunc(func(change admin.CacheInvalidation) {
-			invalidateRuntimeCache(registry, change)
+			invalidateRuntimeCacheWithTenant(registry, config.TenantRuntime, change)
 		}),
 	})
 	if err != nil {
@@ -608,6 +628,10 @@ func configureAdmin(config *Config, registry *runtimerunner.RunnerRegistry) erro
 }
 
 func invalidateRuntimeCache(registry *runtimerunner.RunnerRegistry, change admin.CacheInvalidation) {
+	invalidateRuntimeCacheWithTenant(registry, nil, change)
+}
+
+func invalidateRuntimeCacheWithTenant(registry *runtimerunner.RunnerRegistry, tenantRuntime runtime.TenantRuntime, change admin.CacheInvalidation) {
 	// A closed registry cannot admit a future execution. Other errors are
 	// impossible for Admin-derived non-empty IDs, so a committed control-
 	// plane mutation remains successful during shutdown.
@@ -624,6 +648,9 @@ func invalidateRuntimeCache(registry *runtimerunner.RunnerRegistry, change admin
 		// Bindings are resolved and verified on every channel request. They
 		// do not key a Runner or provider cache in this process.
 	}
+	if invalidator, ok := tenantRuntime.(runtime.TenantRuntimeInvalidator); ok {
+		invalidator.InvalidateTenant(change.TenantID)
+	}
 }
 
 func configureHandler(runtimeGraph *Runtime, config Config) error {
@@ -633,6 +660,7 @@ func configureHandler(runtimeGraph *Runtime, config Config) error {
 	}
 	handler, err := gateway.NewHTTPHandler(gateway.HTTPConfig{
 		Dispatcher: runtimeGraph.Dispatcher, Authenticator: config.Authenticator, Admin: adminHandler, AdminAuth: config.HTTP.AdminAuth, WeCom: runtimeGraph.wecomHandler,
+		Web:   config.HTTP.Web,
 		Ready: runtimeGraph.Ready, Limiter: config.HTTP.Limiter, Idempotency: config.HTTP.Idempotency,
 		MaxBodyBytes: config.HTTP.MaxBodyBytes, RequestTimeout: config.HTTP.RequestTimeout, Observability: config.Observability,
 	})
@@ -728,6 +756,9 @@ func (graph *Runtime) Close() error {
 		}
 		if graph.wecomLifecycle != nil {
 			closeErr = errors.Join(closeErr, graph.wecomLifecycle.Close())
+		}
+		if graph.connectionsClose != nil {
+			closeErr = errors.Join(closeErr, graph.connectionsClose())
 		}
 		if graph.aiBotCancel != nil {
 			graph.aiBotCancel()

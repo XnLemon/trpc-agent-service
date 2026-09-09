@@ -66,6 +66,20 @@ func TestManagerAuthenticatesAndMapsDirectAndGroupCallbacks(t *testing.T) {
 	connection.reads <- ackFrame(t, readFrame(t, connection.writes).Headers.ReqID, 0)
 }
 
+func TestManagerAcceptsCommandedAuthenticationAcknowledgement(t *testing.T) {
+	connection := newTestConn()
+	manager, stop := startTestManager(t, connection, &testDispatcher{}, 2)
+	defer stop()
+	auth := readFrame(t, connection.writes)
+	code := 0
+	data, err := encodeFrame(Frame{Cmd: cmdSubscribe, Headers: auth.Headers, ErrCode: &code})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection.reads <- data
+	waitReady(t, manager)
+}
+
 func TestProviderWaitsForCorrelatedFinalReplyAcknowledgement(t *testing.T) {
 	connection := newTestConn()
 	manager, stop := startTestManager(t, connection, &testDispatcher{}, 2)

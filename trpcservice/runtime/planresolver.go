@@ -32,6 +32,7 @@ type PlanResolverConfig struct {
 	Backends       backend.Repository
 	ModelCatalog   *modelprofile.ProviderCatalog
 	BackendCatalog *backend.ProviderCatalog
+	TenantRuntime  TenantRuntime
 }
 
 // PlanRequest identifies the tenant and App whose published configuration
@@ -60,6 +61,7 @@ type PlanResolver struct {
 	backends       backend.Repository
 	modelCatalog   *modelprofile.ProviderCatalog
 	backendCatalog *backend.ProviderCatalog
+	tenantRuntime  TenantRuntime
 }
 
 type resolvedPlanInputs struct {
@@ -79,6 +81,7 @@ func NewPlanResolver(config PlanResolverConfig) (*PlanResolver, error) {
 	return &PlanResolver{
 		tenants: config.Tenants, apps: config.Apps, models: config.Models, backends: config.Backends,
 		modelCatalog: config.ModelCatalog, backendCatalog: config.BackendCatalog,
+		tenantRuntime: config.TenantRuntime,
 	}, nil
 }
 
@@ -102,6 +105,14 @@ func (resolver *PlanResolver) Resolve(ctx context.Context, request PlanRequest) 
 	}
 	if err := request.Validate(); err != nil {
 		return ExecutionPlan{}, err
+	}
+	if resolver.tenantRuntime != nil {
+		if err := resolver.tenantRuntime.Ensure(ctx, request.TenantID); err != nil {
+			if ctx.Err() != nil {
+				return ExecutionPlan{}, ctx.Err()
+			}
+			return ExecutionPlan{}, ErrPlanUnavailable
+		}
 	}
 	inputs, err := resolver.resolveInputs(ctx, request)
 	if err != nil {

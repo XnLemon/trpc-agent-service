@@ -23,6 +23,7 @@ func logDispatchFailure(principal Principal, requestID, traceID string, err erro
 		zap.String("app_id", principal.AppID()),
 		zap.String("error_class", observability.ErrorClass(err)),
 		zap.String("error_type", dispatchErrorType(err)),
+		zap.String("error_detail", err.Error()),
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		packageLog.Warn("dispatch timed out", fields...)

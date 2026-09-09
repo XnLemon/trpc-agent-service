@@ -16,6 +16,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
 )
 
 const (
@@ -218,6 +219,7 @@ func (m *Manager) Run(ctx context.Context) error {
 		}
 		conn, err := m.dialer.DialContext(runCtx, m.wsURL, nil)
 		if err != nil {
+			packageLog.Warn("AI Bot websocket dial failed", zap.String("error_type", "websocket_dial"), zap.String("error_detail", err.Error()))
 			if !sleepBackoff(runCtx, m.reconnectBase, m.reconnectMax, attempt) {
 				return runCtx.Err()
 			}
@@ -226,6 +228,9 @@ func (m *Manager) Run(ctx context.Context) error {
 		}
 		attempt = 0
 		if err := m.serveConnection(runCtx, conn); err != nil {
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				packageLog.Warn("AI Bot connection stopped", zap.String("error_type", "connection_stopped"), zap.String("error_detail", err.Error()))
+			}
 			_ = conn.Close()
 			if errors.Is(err, errConnectionReplaced) {
 				return nil
@@ -329,6 +334,7 @@ func (m *Manager) serveConnection(ctx context.Context, conn Conn) error {
 	case err := <-writeErr:
 		return err
 	case <-authTimer.C:
+		packageLog.Warn("AI Bot authentication timed out", zap.String("bot_id", m.botID), zap.String("error_type", "authentication_timeout"))
 		return ErrAuthentication
 	case <-connCtx.Done():
 		return connCtx.Err()
@@ -573,7 +579,11 @@ func sendHeartbeat(queue chan<- outboundFrame, reqID string) error {
 }
 
 func (m *Manager) handleInboundFrame(ctx context.Context, frame Frame) error {
-	if frame.Cmd == "" && m.isAuthResponse(frame.Headers.ReqID) {
+	// The AI Bot protocol's subscribe acknowledgement is a response frame. In
+	// deployments it may echo the request command or omit it; the request ID is
+	// the authoritative correlation key. Handle it before command dispatch so
+	// either wire representation can complete authentication.
+	if m.isAuthResponse(frame.Headers.ReqID) {
 		return m.acceptAuthentication(frame)
 	}
 	if frame.Cmd == "" && m.acknowledgeHeartbeat(frame) {
@@ -604,6 +614,14 @@ func (m *Manager) handleEventCallback(frame Frame) error {
 
 func (m *Manager) acceptAuthentication(frame Frame) error {
 	if frame.ErrCode == nil || *frame.ErrCode != 0 {
+		fields := []zap.Field{zap.String("bot_id", m.botID), zap.String("error_type", "authentication_rejected")}
+		if frame.ErrCode != nil {
+			fields = append(fields, zap.Int("remote_code", *frame.ErrCode))
+		}
+		if strings.TrimSpace(frame.ErrMsg) != "" {
+			fields = append(fields, zap.String("remote_message", frame.ErrMsg))
+		}
+		packageLog.Warn("AI Bot authentication rejected", fields...)
 		return ErrAuthentication
 	}
 	m.mu.Lock()
