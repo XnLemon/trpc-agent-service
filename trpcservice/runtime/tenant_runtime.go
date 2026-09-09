@@ -8,14 +8,21 @@ import (
 )
 
 var (
+	// ErrInvalidTenantRuntime reports invalid tenant runtime registry input.
 	ErrInvalidTenantRuntime = errors.New("invalid tenant runtime")
-	ErrTenantRuntimeClosed  = errors.New("tenant runtime registry is closed")
+	// ErrTenantRuntimeClosed reports that the tenant runtime registry is closed.
+	ErrTenantRuntimeClosed = errors.New("tenant runtime registry is closed")
 )
 
+// TenantRuntime materializes and owns one tenant's runtime resources.
 type TenantRuntime interface {
 	Ensure(context.Context, string) error
 }
+
+// TenantRuntimeInvalidator invalidates tenant-scoped runtime resources.
 type TenantRuntimeInvalidator interface{ InvalidateTenant(string) }
+
+// TenantRuntimeMaterializer constructs a tenant runtime on demand.
 type TenantRuntimeMaterializer func(context.Context, string) error
 
 type tenantRuntimeState struct {
@@ -24,6 +31,8 @@ type tenantRuntimeState struct {
 	invalidated bool
 	err         error
 }
+
+// TenantRuntimeRegistry lazily materializes and tracks tenant runtimes.
 type TenantRuntimeRegistry struct {
 	mu          sync.Mutex
 	materialize TenantRuntimeMaterializer
@@ -31,6 +40,7 @@ type TenantRuntimeRegistry struct {
 	closed      bool
 }
 
+// NewTenantRuntimeRegistry creates a tenant runtime registry.
 func NewTenantRuntimeRegistry(materialize TenantRuntimeMaterializer) (*TenantRuntimeRegistry, error) {
 	if materialize == nil {
 		return nil, ErrInvalidTenantRuntime
@@ -38,6 +48,7 @@ func NewTenantRuntimeRegistry(materialize TenantRuntimeMaterializer) (*TenantRun
 	return &TenantRuntimeRegistry{materialize: materialize, states: make(map[string]*tenantRuntimeState)}, nil
 }
 
+// Ensure materializes tenantID if it is not already active.
 func (registry *TenantRuntimeRegistry) Ensure(ctx context.Context, tenantID string) error {
 	if registry == nil || ctx == nil || strings.TrimSpace(tenantID) == "" {
 		return ErrInvalidTenantRuntime
@@ -104,6 +115,7 @@ func (registry *TenantRuntimeRegistry) materializeOne(ctx context.Context, tenan
 	return stateErr
 }
 
+// InvalidateTenant removes tenantID from the active registry.
 func (registry *TenantRuntimeRegistry) InvalidateTenant(tenantID string) {
 	if registry == nil || strings.TrimSpace(tenantID) == "" {
 		return
@@ -122,6 +134,7 @@ func (registry *TenantRuntimeRegistry) InvalidateTenant(tenantID string) {
 	}
 }
 
+// Close stops all active tenant runtimes and releases registry resources.
 func (registry *TenantRuntimeRegistry) Close() error {
 	if registry == nil {
 		return nil

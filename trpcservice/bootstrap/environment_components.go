@@ -71,6 +71,7 @@ func environmentBackendRepository(config environmentConfig, db *sql.DB, catalog 
 	return backendpostgres.NewRepository(db, catalog)
 }
 
+//nolint:gocyclo // Materialization validates and wires all tenant-scoped providers atomically.
 func newEnvironmentTenantMaterializer(o environmentTenantRuntimeOptions) (runtime.TenantRuntimeMaterializer, error) {
 	providers, err := environmentRuntimeProviders(o.config, o.runtimeStores)
 	if err != nil {

@@ -67,6 +67,7 @@ func newWebChannelConnections(config Config, graph *Runtime) (admin.ChannelConne
 	return &webChannelConnections{config: config, telegramDispatcher: telegramDispatcher, tenants: config.Tenants, apps: config.Apps, bindings: bindings, candidates: candidates, secrets: secrets, dispatcher: graph.Dispatcher, active: make(map[string]webChannelConnection)}, nil
 }
 
+//nolint:gocyclo // Connection setup owns the ordered binding, secret, adapter, and worker lifecycle.
 func (c *webChannelConnections) Connect(ctx context.Context, tenantID string, input admin.ConnectInput, metadata channels.ChangeMetadata) (admin.Connection, error) {
 	if ctx == nil || c == nil || strings.TrimSpace(input.BotID) == "" || strings.TrimSpace(input.Secret) == "" || (input.Channel != channels.ChannelTelegram && input.Channel != channels.ChannelWeComAIBot) {
 		return admin.Connection{}, admin.ErrConnectionFailed

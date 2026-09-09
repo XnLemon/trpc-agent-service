@@ -240,6 +240,8 @@ func environmentAdminAuthenticator(config environmentConfig) (admin.Authenticato
 // NewFromEnvironment assembles the production bootstrap graph from explicit
 // process configuration. It fails before binding an HTTP server when the
 // durable control plane or required credentials are not configured.
+//
+//nolint:gocyclo // Bootstrap coordinates independent control-plane and runtime dependencies.
 func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	if ctx == nil {
 		return nil, ErrInvalidConfig
