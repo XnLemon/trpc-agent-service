@@ -23,6 +23,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway/replies"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -125,10 +126,10 @@ type telegramMediaDownloader struct {
 }
 
 func (downloader telegramMediaDownloader) Download(ctx context.Context, fileID string) (io.ReadCloser, error) {
-	if ctx == nil || downloader.client == nil || downloader.httpClient == nil || fileID == "" || downloader.maximum < 1 {
+	if nilvalue.Is(ctx) || nilvalue.Is(downloader.client) || nilvalue.Is(downloader.httpClient) || fileID == "" || downloader.maximum < 1 {
 		return nil, ErrAttachment
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	file, err := downloader.client.GetFile(ctx, &bot.GetFileParams{FileID: fileID})
@@ -166,7 +167,7 @@ func (downloader telegramMediaDownloader) fileDownloadURL(file *models.File) (*u
 }
 
 func readTelegramMediaResponse(ctx context.Context, response *http.Response, maximum int64) ([]byte, error) {
-	if response == nil || response.Body == nil {
+	if nilvalue.Is(ctx) || response == nil || response.Body == nil {
 		return nil, ErrAttachment
 	}
 	defer response.Body.Close()
@@ -184,8 +185,8 @@ func readTelegramMediaResponse(ctx context.Context, response *http.Response, max
 }
 
 func telegramAttachmentError(ctx context.Context) error {
-	if ctx != nil {
-		if err := ctx.Err(); err != nil {
+	if !nilvalue.Is(ctx) {
+		if err := nilvalue.ContextErr(ctx); err != nil {
 			return err
 		}
 	}
@@ -226,6 +227,43 @@ func (factory BotFactoryFunc) New(token string, config BotFactoryConfig) (BotCli
 		return nil, ErrInvalid
 	}
 	return factory(token, config)
+}
+
+func callBotFactory(factory BotFactory, token string, config BotFactoryConfig) (client BotClient, err error) {
+	if nilvalue.Is(factory) {
+		return nil, ErrInvalid
+	}
+	defer func() {
+		if recover() != nil {
+			client, err = nil, ErrInitialization
+		}
+	}()
+	return factory.New(token, config)
+}
+
+func callBotGetMe(client BotClient, ctx context.Context) (user *models.User, err error) {
+	if nilvalue.Is(client) || nilvalue.Is(ctx) {
+		return nil, ErrInitialization
+	}
+	defer func() {
+		if recover() != nil {
+			user, err = nil, ErrInitialization
+		}
+	}()
+	return client.GetMe(ctx)
+}
+
+func startBot(client BotClient, ctx context.Context) (err error) {
+	if nilvalue.Is(client) || nilvalue.Is(ctx) {
+		return ErrPolling
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrPolling
+		}
+	}()
+	client.Start(ctx)
+	return nil
 }
 
 // Config defines one tenant-scoped Telegram Binding adapter. BotToken is a
@@ -320,7 +358,7 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 		ownIdempotency = true
 	}
 	factory := config.Factory
-	if factory == nil {
+	if nilvalue.Is(factory) {
 		factory = sdkBotFactory{}
 	}
 	adapter := &Adapter{
@@ -329,12 +367,12 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 		audit:       audit.NewRecorder(config.AuditWriter, normalized.target.TenantID),
 		attachments: config.Attachments, maxAttachmentBytes: normalized.maxAttachmentBytes,
 	}
-	if config.Observability == nil {
+	if nilvalue.Is(config.Observability) {
 		config.Observability = observability.NewNoopProvider()
 	}
 	adapter.telemetry = config.Observability
 	adapter.metrics = metrics.New(config.Observability)
-	client, err := factory.New(normalized.token, BotFactoryConfig{
+	client, err := callBotFactory(factory, normalized.token, BotFactoryConfig{
 		Handler:        adapter.sdkHandler(),
 		APIBaseURL:     normalized.apiBaseURL,
 		HTTPClient:     config.HTTPClient,
@@ -342,7 +380,7 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 		Workers:        normalized.workers,
 		OnPollingError: func() { adapter.report(ErrorOperationPolling, ErrPolling) },
 	})
-	if err != nil || client == nil {
+	if err != nil || nilvalue.Is(client) {
 		adapter.report(ErrorOperationInitialization, ErrInitialization)
 		_ = adapter.closeOwnedIdempotency()
 		return nil, ErrInitialization
@@ -353,8 +391,8 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 		return nil, err
 	}
 	adapter.mediaDownloader = config.MediaDownloader
-	if adapter.mediaDownloader == nil {
-		if fileClient, ok := client.(telegramFileClient); ok && config.Attachments != nil {
+	if nilvalue.Is(adapter.mediaDownloader) {
+		if fileClient, ok := client.(telegramFileClient); ok && !nilvalue.Is(config.Attachments) {
 			adapter.mediaDownloader = telegramMediaDownloader{client: fileClient, httpClient: configuredHTTPClient(config.HTTPClient, normalized.pollTimeout), maximum: normalized.maxAttachmentBytes}
 		}
 	}
@@ -362,10 +400,10 @@ func New(ctx context.Context, config Config) (*Adapter, error) {
 }
 
 func normalizeConfig(ctx context.Context, config Config) (normalizedConfig, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return normalizedConfig{}, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return normalizedConfig{}, err
 	}
 	token, err := normalizeToken(config.BotToken)
@@ -382,7 +420,7 @@ func normalizeConfig(ctx context.Context, config Config) (normalizedConfig, erro
 	if err != nil || providerAccountID <= 0 || strconv.FormatInt(providerAccountID, 10) != config.Target.ProviderAccountID {
 		return normalizedConfig{}, fmt.Errorf("%w: Telegram provider account ID is not canonical", ErrInvalid)
 	}
-	if config.Dispatcher == nil {
+	if nilvalue.Is(config.Dispatcher) {
 		return normalizedConfig{}, fmt.Errorf("%w: dispatcher is required", ErrInvalid)
 	}
 	apiBaseURL, err := normalizeAPIBaseURL(config.APIBaseURL)
@@ -409,9 +447,12 @@ func normalizeConfig(ctx context.Context, config Config) (normalizedConfig, erro
 }
 
 func (adapter *Adapter) verifyIdentity(ctx context.Context, providerAccountID string) error {
-	me, err := adapter.client.GetMe(ctx)
+	if adapter == nil || nilvalue.Is(ctx) || nilvalue.Is(adapter.client) {
+		return ErrInitialization
+	}
+	me, err := callBotGetMe(adapter.client, ctx)
 	if err != nil {
-		if contextErr := ctx.Err(); contextErr != nil {
+		if contextErr := nilvalue.ContextErr(ctx); contextErr != nil {
 			return contextErr
 		}
 		adapter.report(ErrorOperationInitialization, ErrInitialization)
@@ -426,11 +467,11 @@ func (adapter *Adapter) verifyIdentity(ctx context.Context, providerAccountID st
 
 // Run starts blocking Telegram long polling and returns after ctx is canceled
 // or Close cancels the run. The SDK owns its polling and worker goroutines.
-func (adapter *Adapter) Run(ctx context.Context) error {
-	if ctx == nil {
+func (adapter *Adapter) Run(ctx context.Context) (err error) {
+	if nilvalue.Is(ctx) {
 		return fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	if adapter == nil {
@@ -442,7 +483,7 @@ func (adapter *Adapter) Run(ctx context.Context) error {
 		adapter.mu.Unlock()
 		return ErrClosed
 	}
-	if client == nil {
+	if nilvalue.Is(client) {
 		adapter.mu.Unlock()
 		return ErrNotReady
 	}
@@ -459,7 +500,9 @@ func (adapter *Adapter) Run(ctx context.Context) error {
 		adapter.mu.Unlock()
 		cancel()
 	}()
-	client.Start(runContext)
+	if err := startBot(client, runContext); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -493,7 +536,7 @@ func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update)
 	if adapter == nil {
 		return ErrNotReady
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		err := fmt.Errorf("%w: context is required", ErrInvalid)
 		adapter.report(ErrorOperationUpdate, ErrInvalid)
 		return err
@@ -506,7 +549,7 @@ func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update)
 		_ = adapter.metrics.Operation(operationCtx, started, map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "telegram"}, err)
 	}()
 	ctx = operationCtx
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	adapter.mu.RLock()
@@ -515,7 +558,7 @@ func (adapter *Adapter) HandleUpdate(ctx context.Context, update *models.Update)
 	if closed {
 		return ErrClosed
 	}
-	if client == nil || adapter.idempotency == nil {
+	if nilvalue.Is(client) || adapter.idempotency == nil {
 		return ErrNotReady
 	}
 	message, err := adapter.normalizeUpdate(ctx, update)
@@ -622,7 +665,15 @@ func (adapter *Adapter) sdkHandler() bot.HandlerFunc {
 	}
 }
 
-func (adapter *Adapter) dispatch(ctx context.Context, message gateway.InboundMessage) ([]gateway.DispatchEvent, error) {
+func (adapter *Adapter) dispatch(ctx context.Context, message gateway.InboundMessage) (events []gateway.DispatchEvent, err error) {
+	if nilvalue.Is(ctx) || adapter == nil || nilvalue.Is(adapter.dispatcher) {
+		return nil, ErrInvalid
+	}
+	defer func() {
+		if recover() != nil {
+			events, err = nil, ErrDispatch
+		}
+	}()
 	stream, err := adapter.dispatcher.Dispatch(ctx, gateway.DispatchRequest{
 		Principal: adapter.principal, Message: message, RequestID: message.ExternalMessageID,
 	})
@@ -635,13 +686,17 @@ func (adapter *Adapter) dispatch(ctx context.Context, message gateway.InboundMes
 	if stream == nil {
 		return nil, ErrDispatch
 	}
-	events := make([]gateway.DispatchEvent, 0, 4)
+	events = make([]gateway.DispatchEvent, 0, 4)
 	done := false
 	failed := false
+	contextDone, contextDoneErr := nilvalue.ContextDone(ctx)
+	if contextDoneErr != nil {
+		return nil, contextDoneErr
+	}
 	for {
 		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		case <-contextDone:
+			return nil, nilvalue.ContextErr(ctx)
 		case event, ok := <-stream:
 			if !ok {
 				if !done || failed {
@@ -669,19 +724,22 @@ func (adapter *Adapter) sendText(ctx context.Context, message *models.Message, t
 	if message == nil {
 		return ErrInvalidUpdate
 	}
-	if adapter == nil || adapter.client == nil {
+	if adapter == nil || nilvalue.Is(adapter.client) || nilvalue.Is(ctx) {
 		return ErrNotReady
 	}
 	started := time.Now()
 	operationCtx, _, finish := observability.StartOperation(ctx, adapter.telemetry, observability.OperationChannelSend, "channel")
 	defer func() {
+		if recover() != nil {
+			err = ErrSendMessage
+		}
 		finish(err)
 		_ = adapter.metrics.Operation(operationCtx, started, map[string]string{"component": "channel", "operation": observability.OperationChannelSend, "channel": "telegram", "provider": "other"}, err)
 	}()
 	ctx = operationCtx
 	chunks := splitText(text, maximumReplyRunes)
 	for _, chunk := range chunks {
-		if err := ctx.Err(); err != nil {
+		if err := nilvalue.ContextErr(ctx); err != nil {
 			return err
 		}
 		_, err := adapter.client.SendMessage(ctx, &bot.SendMessageParams{
@@ -743,8 +801,11 @@ func normalizeUpdate(target channels.RoutingTarget, update *models.Update) (gate
 }
 
 func (adapter *Adapter) normalizeUpdate(ctx context.Context, update *models.Update) (gateway.InboundMessage, error) {
+	if adapter == nil || nilvalue.Is(ctx) {
+		return gateway.InboundMessage{}, ErrInvalidUpdate
+	}
 	inbound, err := normalizeUpdate(adapter.target, update)
-	if err != nil || adapter.attachments == nil || adapter.mediaDownloader == nil || update == nil || update.Message == nil {
+	if err != nil || nilvalue.Is(adapter.attachments) || nilvalue.Is(adapter.mediaDownloader) || update == nil || update.Message == nil {
 		return inbound, err
 	}
 	references, err := adapter.ingestAttachments(ctx, inbound.ExternalMessageID, update.Message)
@@ -766,14 +827,22 @@ type telegramAttachment struct {
 	name     string
 }
 
-func (adapter *Adapter) ingestAttachments(ctx context.Context, externalMessageID string, message *models.Message) ([]attachment.Reference, error) {
+func (adapter *Adapter) ingestAttachments(ctx context.Context, externalMessageID string, message *models.Message) (references []attachment.Reference, err error) {
+	if adapter == nil || nilvalue.Is(ctx) || nilvalue.Is(adapter.mediaDownloader) || nilvalue.Is(adapter.attachments) || message == nil {
+		return nil, ErrAttachment
+	}
+	defer func() {
+		if recover() != nil {
+			references, err = nil, ErrAttachment
+		}
+	}()
 	descriptors := nativeAttachments(message)
 	if len(descriptors) == 0 {
 		return nil, nil
 	}
-	references := make([]attachment.Reference, 0, len(descriptors))
+	references = make([]attachment.Reference, 0, len(descriptors))
 	for index, descriptor := range descriptors {
-		if err := ctx.Err(); err != nil {
+		if err := nilvalue.ContextErr(ctx); err != nil {
 			return nil, err
 		}
 		reader, err := adapter.mediaDownloader.Download(ctx, descriptor.fileID)
@@ -783,13 +852,13 @@ func (adapter *Adapter) ingestAttachments(ctx context.Context, externalMessageID
 			}
 			return nil, ErrAttachment
 		}
-		if reader == nil {
+		if nilvalue.Is(reader) {
 			return nil, ErrAttachment
 		}
 		data, readErr := io.ReadAll(io.LimitReader(reader, adapter.maxAttachmentBytes+1))
 		closeErr := reader.Close()
 		if readErr != nil || closeErr != nil {
-			if contextErr := ctx.Err(); contextErr != nil {
+			if contextErr := nilvalue.ContextErr(ctx); contextErr != nil {
 				return nil, contextErr
 			}
 			return nil, ErrAttachment
@@ -1167,7 +1236,7 @@ func (sdkBotFactory) New(token string, config BotFactoryConfig) (BotClient, erro
 }
 
 func configuredHTTPClient(client bot.HttpClient, pollTimeout time.Duration) bot.HttpClient {
-	if client != nil {
+	if !nilvalue.Is(client) {
 		return client
 	}
 	return &http.Client{Timeout: pollTimeout + 5*time.Second}

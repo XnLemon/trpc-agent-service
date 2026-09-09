@@ -14,6 +14,7 @@ import (
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
@@ -50,6 +51,9 @@ type Dialer interface {
 type websocketDialer struct{ dialer websocket.Dialer }
 
 func (d websocketDialer) DialContext(ctx context.Context, url string, header http.Header) (Conn, error) {
+	if nilvalue.Is(ctx) {
+		return nil, ErrInvalid
+	}
 	c, _, err := d.dialer.DialContext(ctx, url, header)
 	return c, err
 }
@@ -120,7 +124,7 @@ func New(config Config) (*Manager, error) {
 }
 
 func normalizeConfig(config Config) (Config, error) {
-	if strings.TrimSpace(config.BotID) == "" || strings.TrimSpace(config.Secret) == "" || config.Dispatcher == nil {
+	if strings.TrimSpace(config.BotID) == "" || strings.TrimSpace(config.Secret) == "" || nilvalue.Is(config.Dispatcher) {
 		return Config{}, ErrInvalid
 	}
 	if err := config.Target.Validate(); err != nil || config.Target.Channel != channels.ChannelWeComAIBot {
@@ -155,7 +159,7 @@ func withDefaults(config Config) Config {
 	if config.ExecutionTimeout <= 0 {
 		config.ExecutionTimeout = 4 * time.Minute
 	}
-	if config.Dialer == nil {
+	if nilvalue.Is(config.Dialer) {
 		config.Dialer = websocketDialer{dialer: websocket.Dialer{HandshakeTimeout: 10 * time.Second}}
 	}
 	return config
@@ -185,7 +189,7 @@ func (m *Manager) Ready() bool {
 
 // Run reconnects and serves the AI Bot connection until the context is canceled.
 func (m *Manager) Run(ctx context.Context) error {
-	if m == nil || ctx == nil {
+	if m == nil || nilvalue.Is(ctx) {
 		return ErrInvalid
 	}
 	m.mu.Lock()
@@ -197,7 +201,15 @@ func (m *Manager) Run(ctx context.Context) error {
 		m.mu.Unlock()
 		return ErrClosed
 	}
-	runCtx, cancel := context.WithCancel(ctx)
+	if nilvalue.Is(m.dialer) {
+		m.mu.Unlock()
+		return ErrInvalid
+	}
+	runCtx, cancel, contextErr := withCancelSafely(ctx)
+	if contextErr != nil {
+		m.mu.Unlock()
+		return contextErr
+	}
 	m.runCancel, m.runDone = cancel, make(chan struct{})
 	m.mu.Unlock()
 	defer func() {
@@ -213,47 +225,59 @@ func (m *Manager) Run(ctx context.Context) error {
 	}()
 	var attempt int
 	for {
-		if err := runCtx.Err(); err != nil {
+		if err := nilvalue.ContextErr(runCtx); err != nil {
 			return err
 		}
 		conn, err := m.dialer.DialContext(runCtx, m.wsURL, nil)
+		if err == nil && nilvalue.Is(conn) {
+			err = ErrClosed
+		}
 		if err != nil {
 			if !sleepBackoff(runCtx, m.reconnectBase, m.reconnectMax, attempt) {
-				return runCtx.Err()
+				return nilvalue.ContextErr(runCtx)
 			}
 			attempt++
 			continue
 		}
 		attempt = 0
 		if err := m.serveConnection(runCtx, conn); err != nil {
-			_ = conn.Close()
+			if !nilvalue.Is(conn) {
+				_ = conn.Close()
+			}
 			if errors.Is(err, errConnectionReplaced) {
 				return nil
 			}
-			if runCtx.Err() != nil {
-				return runCtx.Err()
+			if nilvalue.ContextErr(runCtx) != nil {
+				return nilvalue.ContextErr(runCtx)
 			}
 			if !sleepBackoff(runCtx, m.reconnectBase, m.reconnectMax, attempt) {
-				return runCtx.Err()
+				return nilvalue.ContextErr(runCtx)
 			}
 			attempt++
 		}
-		if runCtx.Err() != nil {
-			return runCtx.Err()
+		if nilvalue.ContextErr(runCtx) != nil {
+			return nilvalue.ContextErr(runCtx)
 		}
 	}
 }
 
 func sleepBackoff(ctx context.Context, base, max time.Duration, attempt int) bool {
+	if nilvalue.Is(ctx) {
+		return false
+	}
 	d := base * time.Duration(1<<min(attempt, 6))
 	if d > max {
 		d = max
 	}
 	jitter := randomizedJitter(d / 4)
+	done, doneErr := nilvalue.ContextDone(ctx)
+	if doneErr != nil {
+		return false
+	}
 	timer := time.NewTimer(d - d/8 + jitter)
 	defer timer.Stop()
 	select {
-	case <-ctx.Done():
+	case <-done:
 		return false
 	case <-timer.C:
 		return true
@@ -278,7 +302,7 @@ func min(a, b int) int {
 }
 
 func (m *Manager) serveConnection(ctx context.Context, conn Conn) error {
-	if conn == nil {
+	if nilvalue.Is(ctx) || nilvalue.Is(conn) {
 		return ErrClosed
 	}
 	m.mu.Lock()
@@ -300,8 +324,15 @@ func (m *Manager) serveConnection(ctx context.Context, conn Conn) error {
 		}
 		m.mu.Unlock()
 	}()
-	connCtx, cancel := context.WithCancel(ctx)
+	connCtx, cancel, contextErr := withCancelSafely(ctx)
+	if contextErr != nil {
+		return contextErr
+	}
 	defer cancel()
+	connDone, connDoneErr := nilvalue.ContextDone(connCtx)
+	if connDoneErr != nil {
+		return connDoneErr
+	}
 	queue := make(chan outboundFrame, m.queueSize)
 	m.mu.Lock()
 	m.queue = queue
@@ -330,29 +361,40 @@ func (m *Manager) serveConnection(ctx context.Context, conn Conn) error {
 		return err
 	case <-authTimer.C:
 		return ErrAuthentication
-	case <-connCtx.Done():
-		return connCtx.Err()
+	case <-connDone:
+		return nilvalue.ContextErr(connCtx)
 	}
 	select {
 	case err := <-readErr:
 		return err
 	case err := <-writeErr:
 		return err
-	case <-connCtx.Done():
-		return connCtx.Err()
+	case <-connDone:
+		return nilvalue.ContextErr(connCtx)
 	}
 }
 
 func (m *Manager) sendReply(ctx context.Context, reqID string, body StreamReply) error {
-	if ctx == nil || strings.TrimSpace(reqID) == "" {
+	if m == nil || nilvalue.Is(ctx) || strings.TrimSpace(reqID) == "" {
 		return ErrInvalid
 	}
 	data, err := encodeFrame(Frame{Cmd: cmdRespond, Headers: Headers{ReqID: reqID}, Body: mustJSON(body)})
 	if err != nil {
 		return err
 	}
-	replyCtx, cancel := context.WithTimeout(ctx, m.replyAcknowledgementTimeout())
+	replyCtx, cancel, contextErr := withTimeoutSafely(ctx, m.replyAcknowledgementTimeout())
+	if contextErr != nil {
+		return contextErr
+	}
 	defer cancel()
+	replyDone, replyDoneErr := nilvalue.ContextDone(replyCtx)
+	if replyDoneErr != nil {
+		return replyDoneErr
+	}
+	parentDone, parentDoneErr := nilvalue.ContextDone(ctx)
+	if parentDoneErr != nil {
+		return parentDoneErr
+	}
 	m.mu.Lock()
 	queue, closing := m.queue, m.closing
 	if closing || queue == nil {
@@ -360,23 +402,23 @@ func (m *Manager) sendReply(ctx context.Context, reqID string, body StreamReply)
 		return ErrNotReady
 	}
 	ack := make(chan error, 1)
-	done := make(chan struct{})
+	pendingDone := make(chan struct{})
 	select {
-	case queue <- outboundFrame{context: replyCtx, data: data, replyReqID: reqID, ack: ack, done: done}:
+	case queue <- outboundFrame{context: replyCtx, data: data, replyReqID: reqID, ack: ack, done: pendingDone}:
 		m.mu.Unlock()
 		select {
 		case err := <-ack:
 			return err
-		case <-replyCtx.Done():
+		case <-replyDone:
 			m.clearPendingReplyFor(reqID, ErrAcknowledgementTimeout)
-			if ctx.Err() != nil {
-				return ctx.Err()
+			if nilvalue.ContextErr(ctx) != nil {
+				return nilvalue.ContextErr(ctx)
 			}
 			return ErrAcknowledgementTimeout
 		}
-	case <-ctx.Done():
+	case <-parentDone:
 		m.mu.Unlock()
-		return ctx.Err()
+		return nilvalue.ContextErr(ctx)
 	default:
 		m.mu.Unlock()
 		return ErrQueueFull
@@ -398,13 +440,24 @@ func (m *Manager) authenticationTimeout() time.Duration {
 }
 
 func (m *Manager) writePump(ctx context.Context, conn Conn, queue <-chan outboundFrame, errs chan<- error) {
+	if m == nil || nilvalue.Is(ctx) || nilvalue.Is(conn) || queue == nil || errs == nil {
+		if errs != nil {
+			errs <- ErrInvalid
+		}
+		return
+	}
+	done, doneErr := nilvalue.ContextDoneChannel(ctx)
+	if doneErr != nil {
+		errs <- ErrInvalid
+		return
+	}
 	defer func() {
 		m.clearPendingReply(ErrClosed)
 		drainOutboundReplies(queue, ErrClosed)
 	}()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-done:
 			errs <- ErrClosed
 			return
 		case outbound := <-queue:
@@ -412,7 +465,7 @@ func (m *Manager) writePump(ctx context.Context, conn Conn, queue <-chan outboun
 				errs <- nil
 				return
 			}
-			if outbound.context != nil && outbound.context.Err() != nil {
+			if !nilvalue.Is(outbound.context) && nilvalue.ContextErr(outbound.context) != nil {
 				if outbound.ack != nil {
 					outbound.ack <- ErrAcknowledgementTimeout
 				}
@@ -424,7 +477,7 @@ func (m *Manager) writePump(ctx context.Context, conn Conn, queue <-chan outboun
 					continue
 				}
 			}
-			if outbound.context != nil && outbound.context.Err() != nil {
+			if !nilvalue.Is(outbound.context) && nilvalue.ContextErr(outbound.context) != nil {
 				m.clearPendingReplyFor(outbound.replyReqID, ErrAcknowledgementTimeout)
 				continue
 			}
@@ -441,7 +494,7 @@ func (m *Manager) writePump(ctx context.Context, conn Conn, queue <-chan outboun
 			}
 			if outbound.replyReqID != "" {
 				select {
-				case <-ctx.Done():
+				case <-done:
 					m.clearPendingReply(ErrClosed)
 					errs <- ErrClosed
 					return
@@ -466,6 +519,9 @@ func drainOutboundReplies(queue <-chan outboundFrame, err error) {
 }
 
 func (m *Manager) enqueueAuth(ctx context.Context, queue chan<- outboundFrame) error {
+	if m == nil || nilvalue.Is(ctx) || queue == nil {
+		return ErrInvalid
+	}
 	reqID := cmdSubscribe + "-" + uuid.NewString()
 	data, err := encodeFrame(Frame{Cmd: cmdSubscribe, Headers: Headers{ReqID: reqID}, Body: mustJSON(struct {
 		BotID  string `json:"bot_id"`
@@ -477,23 +533,34 @@ func (m *Manager) enqueueAuth(ctx context.Context, queue chan<- outboundFrame) e
 	m.mu.Lock()
 	m.authReqID = reqID
 	m.mu.Unlock()
+	done, doneErr := nilvalue.ContextDoneChannel(ctx)
+	if doneErr != nil {
+		return doneErr
+	}
 	select {
 	case queue <- outboundFrame{data: data}:
 		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-done:
+		return nilvalue.ContextErr(ctx)
 	}
 }
 
 func (m *Manager) readPump(ctx context.Context, conn Conn, queue chan<- outboundFrame) error {
+	if m == nil || nilvalue.Is(ctx) || nilvalue.Is(conn) || queue == nil {
+		return ErrInvalid
+	}
+	done, doneErr := nilvalue.ContextDoneChannel(ctx)
+	if doneErr != nil {
+		return doneErr
+	}
 	reads := make(chan inboundReadResult, 1)
 	go readInboundFrames(ctx, conn, reads)
 	heartbeats := time.NewTicker(m.heartbeat)
 	defer heartbeats.Stop()
 	for {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-done:
+			return nilvalue.ContextErr(ctx)
 		case <-heartbeats.C:
 			if err := m.scheduleHeartbeat(conn, queue); err != nil {
 				return err
@@ -519,11 +586,18 @@ type inboundReadResult struct {
 }
 
 func readInboundFrames(ctx context.Context, conn Conn, reads chan<- inboundReadResult) {
+	if nilvalue.Is(ctx) || nilvalue.Is(conn) || reads == nil {
+		return
+	}
+	done, doneErr := nilvalue.ContextDoneChannel(ctx)
+	if doneErr != nil {
+		return
+	}
 	for {
 		_, data, err := conn.ReadMessage()
 		select {
 		case reads <- inboundReadResult{data: data, err: err}:
-		case <-ctx.Done():
+		case <-done:
 			return
 		}
 		if err != nil {
@@ -573,6 +647,9 @@ func sendHeartbeat(queue chan<- outboundFrame, reqID string) error {
 }
 
 func (m *Manager) handleInboundFrame(ctx context.Context, frame Frame) error {
+	if m == nil || nilvalue.Is(ctx) {
+		return ErrInvalid
+	}
 	if frame.Cmd == "" && m.isAuthResponse(frame.Headers.ReqID) {
 		return m.acceptAuthentication(frame)
 	}
@@ -653,7 +730,7 @@ func (m *Manager) acknowledgeHeartbeat(frame Frame) bool {
 	m.missedHeartbeats = 0
 	conn := m.conn
 	m.mu.Unlock()
-	if conn != nil {
+	if !nilvalue.Is(conn) {
 		_ = conn.Close()
 	}
 	return true
@@ -674,6 +751,9 @@ func (m *Manager) isAuthResponse(reqID string) bool {
 }
 
 func (m *Manager) handleCallback(parent context.Context, frame Frame) {
+	if m == nil || nilvalue.Is(parent) || nilvalue.Is(m.dispatcher) {
+		return
+	}
 	var message Message
 	if jsonErr := unmarshalBody(frame.Body, &message); jsonErr != nil || message.MsgID == "" || message.AIBotID != m.botID || message.MsgType != "text" || strings.TrimSpace(message.From.UserID) == "" || strings.TrimSpace(message.Text.Content) == "" {
 		return
@@ -684,7 +764,10 @@ func (m *Manager) handleCallback(parent context.Context, frame Frame) {
 		inbound.ExternalChatID = message.ChatID
 		inbound.ExternalPeerID = ""
 	}
-	ctx, cancel := context.WithTimeout(parent, m.executionTimeout)
+	ctx, cancel, contextErr := withTimeoutSafely(parent, m.executionTimeout)
+	if contextErr != nil {
+		return
+	}
 	defer cancel()
 	stream, err := m.dispatcher.Dispatch(ctx, gateway.DispatchRequest{Principal: mustPrincipal(m.target), RequestID: frame.Headers.ReqID, Message: inbound})
 	if err != nil {
@@ -770,6 +853,42 @@ func (m *Manager) clearPendingReplyFor(reqID string, err error) {
 	close(pending.done)
 }
 
+func withCancelSafely(parent context.Context) (ctx context.Context, cancel context.CancelFunc, err error) {
+	if nilvalue.Is(parent) {
+		return nil, func() {}, nilvalue.ErrInvalidContext
+	}
+	if _, err := nilvalue.ContextDone(parent); err != nil {
+		return nil, func() {}, err
+	}
+	defer func() {
+		if recover() != nil {
+			ctx = nil
+			cancel = func() {}
+			err = nilvalue.ErrInvalidContext
+		}
+	}()
+	ctx, cancel = context.WithCancel(parent)
+	return ctx, cancel, nil
+}
+
+func withTimeoutSafely(parent context.Context, timeout time.Duration) (ctx context.Context, cancel context.CancelFunc, err error) {
+	if nilvalue.Is(parent) {
+		return nil, func() {}, nilvalue.ErrInvalidContext
+	}
+	if _, err := nilvalue.ContextDone(parent); err != nil {
+		return nil, func() {}, err
+	}
+	defer func() {
+		if recover() != nil {
+			ctx = nil
+			cancel = func() {}
+			err = nilvalue.ErrInvalidContext
+		}
+	}()
+	ctx, cancel = context.WithTimeout(parent, timeout)
+	return ctx, cancel, nil
+}
+
 func mustJSON(v any) []byte { data, _ := json.Marshal(v); return data }
 func unmarshalBody(data []byte, out any) error {
 	if len(data) == 0 {
@@ -795,7 +914,7 @@ func (m *Manager) BeginShutdown() {
 	if cancel != nil {
 		cancel()
 	}
-	if conn != nil {
+	if !nilvalue.Is(conn) {
 		_ = conn.Close()
 	}
 	m.clearPendingReply(ErrClosed)

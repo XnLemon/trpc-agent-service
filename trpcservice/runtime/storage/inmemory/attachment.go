@@ -51,11 +51,7 @@ func (s *Store) PutAttachment(ctx context.Context, tenantID string, upload attac
 		}
 		return existing.reference, nil
 	}
-	if object, ok := s.objects[key]; ok && (object.ContentType != reference.MIMEType || object.Size != reference.Size || object.ETag != reference.SHA256) {
-		return attachment.Reference{}, runtimestorage.ErrConflict
-	}
-	s.objectData[key] = append([]byte(nil), data...)
-	s.objects[key] = runtimestorage.ObjectInfo{TenantID: tenantID, ObjectKey: reference.ID, ContentType: reference.MIMEType, Size: reference.Size, ETag: reference.SHA256, CreatedAt: time.Now().UTC()}
+	s.attachmentData[key] = append([]byte(nil), data...)
 	s.attachments[key] = storedAttachment{reference: reference, expiresAt: normalized.ExpiresAt}
 	return reference, nil
 }
@@ -109,7 +105,7 @@ func (s *Store) Load(ctx context.Context, tenantID, eventID string, reference at
 	}
 	s.mu.RLock()
 	stored, ok := s.attachments[key(tenantID, normalized.ID)]
-	data := append([]byte(nil), s.objectData[key(tenantID, normalized.ID)]...)
+	data := append([]byte(nil), s.attachmentData[key(tenantID, normalized.ID)]...)
 	s.mu.RUnlock()
 	if !ok || stored.reference != normalized || stored.eventID != eventID || !stored.expiresAt.After(time.Now().UTC()) {
 		return attachment.Content{}, runtimestorage.ErrNotFound
@@ -138,8 +134,7 @@ func (s *Store) CleanupAttachments(ctx context.Context, tenantID string, before 
 		terminal := value.eventID == "" || found && (event.Status == runtimestorage.EventCompleted || event.Status == runtimestorage.EventFailed)
 		if terminal && !value.expiresAt.After(before) && strings.HasPrefix(storageKey, key(tenantID)) {
 			delete(s.attachments, storageKey)
-			delete(s.objects, storageKey)
-			delete(s.objectData, storageKey)
+			delete(s.attachmentData, storageKey)
 			removed++
 		}
 	}

@@ -1,7 +1,9 @@
 # Tenant 运行时持久化契约（Issue #48）
 
 > 本页记录 Issue #48 的通用运行时存储能力契约，以及 Issue #108 的 Redis 实现边界。
-> 代码、测试和部署示例只把已经验证的能力标为已实现；未覆盖的外部后端仍属于后续工作。
+> Agent Memory/Artifact 已迁移到上游 `memory.Service`/`artifact.Service`；本页的平台 RuntimeStore
+> 不把这些 provider 的内部数据复制成第二份事实。代码、测试和部署示例只把已经验证的能力标为已实现；
+> 未覆盖的外部后端仍属于后续工作。
 
 > 状态补充：预算账本现由 `trpcservice/runtime/budget` 独立持有，PostgreSQL 实现支持执行前
 > 原子预占、执行后结算、失败释放和幂等重试；它不属于 Session/Reply RuntimeStore 的事务接口。
@@ -16,7 +18,8 @@ Session/Runner 使用的命名空间只用于防碰撞，不能替代数据库�
 - `reply_outbox` 分段回复、租约/fencing、重试和供应商回执。
 
 Issue #48 不实现 Memory/Knowledge/Artifact 的其他生产适配、AuditEvent/usage/cost 的通用存储（预算账本另由
-`runtime/budget` 提供）、
+`runtime/budget` 提供）；生产 Memory/Artifact provider 由 Backend Profile 选择，平台只负责同租户
+SecretRef 解析、Revision/ExecutionPlan 绑定和生命周期，不在 RuntimeStore 内重实现上游存储。
 完整 IM webhook/media、分布式调度、KMS/Vault 或告警平台。API principal 继续由
 Gateway HTTP 层的进程内幂等存储保护；跨进程 durable inbound claim 只在已验证
 Channel principal 上启用，因为 `message_event.binding_id` 必须引用真实的控制面 Binding。
@@ -186,62 +189,21 @@ Redis provider 通过 Backend Profile 的 `Provider: "redis"` 选择，只注册
 
 默认前缀为 `trpc:runtime:v1`。key 的 tenant 部分使用 UTF-8 字节 hex 编码，避免简单拼接造成
 边界碰撞。value 是版本化 JSON 状态文档，当前 `version` 为 `1`，包含 Session、Event、
-event history、Reply Outbox、correlation、Memory 和 index handoff 集合。写入使用
-`WATCH/MULTI` CAS；event 序号、重复消息 claim、lease/fencing 和完整 reply batch 在一次原子
-状态更新中提交。
+event history、Reply Outbox 和 correlation。写入使用 `WATCH/MULTI` CAS；event 序号、重复消息
+claim、lease/fencing 和完整 reply batch 在一次原子状态更新中提交。
 
-Redis key 没有隐式 TTL。Session、事件、历史、Memory 和 Outbox 不会因为连接池或重启自动过期；
-保留、归档和删除必须由显式业务操作或后续运维工具完成。当前没有 Redis/PostgreSQL 迁移、
-双写、shadow read 或自动 cutover 工具；迁移方案仍按 Backend Profile 版本切换另行设计。
+Redis key 没有隐式 TTL。Session、事件、历史和 Outbox 不会因为连接池或重启自动过期；
+保留、归档和删除必须由显式业务操作或运维工具完成。Agent Memory 不再存入该平台状态文档，
+由 Backend Profile 选择的上游 Memory Service 负责。
 
-### S3 Artifact provider（Issue #113）
+### 上游 Artifact provider
 
-S3 provider 只注册 `artifact` capability，不替换 Session、Memory、Summary、Knowledge 或
-Audit provider。Backend Profile 的 binding 形状为：`Provider: "s3"`、HTTPS（本地 MinIO
-可显式允许 HTTP）endpoint、`bucket` option 和 tenant-scoped `SecretRef`。支持 AWS S3、MinIO
-以及暴露 S3-compatible endpoint 的 OSS；原生 OSS API 差异不在本 issue 范围内。
+Agent Artifact 使用 `tRPC-Agent-Go` 原生 `artifact.Service`。本地/demo 使用上游 InMemory
+实现，生产可绑定上游 COS provider；平台不再提供 S3-compatible Artifact/Object provider。
+IM 入站附件继续使用平台 `AttachmentStore`，与 Agent Artifact 的 app/user/session/filename/version
+语义分离。
 
-对象 key 使用稳定且不透明的 tenant 与业务 ID 编码，并按 `objects`/`artifacts` 分隔，等价 ID 在不同
-tenant 间不会碰撞。Provider 在每次 materialize 时固定 tenant、校验 endpoint/bucket/SecretRef，
-创建后以 bounded `HeadBucket` probe 作为 readiness；失败不会回退到 InMemory。Secret 值只在
-Resolver 到 provider 的短路径中使用，推荐格式为 `access-key-id:secret-access-key`，不会进入
-Profile、Execution Plan、日志、审计 payload 或错误文本。
-
-S3 用户 metadata 受远端 header 大小限制；Artifact 的 metadata 在写入前会按保守的 1.8 KiB
-预算校验，超限请求返回 `ErrInvalid`，不会产生远端写入。所有业务 ID 也会在 S3 编码后的
-1,024-byte key 上限处 fail closed，避免把本地合法输入延迟为远端存储错误。
-
-`PutObject`/`GetObject` 受 `max_bytes` 和读写 deadline 限制，使用 SHA-256 元数据校验并返回
-防御性 reader；重复写入相同内容幂等，删除缺失对象返回 `ErrNotFound`。Artifact 元数据（名称、
-MIME、session、版本、创建/更新时间和 digest）与内容一起校验；损坏或不完整元数据 fail closed。
-写入会先在本地 bounded buffer 中完成，再发起单请求 S3 PUT；取消、超时或 PUT 失败不会向调用方提交
-元数据，provider 不执行盲目删除，依赖 S3 单请求 PUT 的原子提交语义避免留下可见的部分对象。
-`CapabilitySet.Close` 拥有并关闭 materialized S3 Store，关闭后不再接受操作。
-
-本地可用 Compose 的 `s3` profile 启动 MinIO：
-
-```bash
-docker compose --profile s3 --env-file deploy/example.env -f deploy/docker-compose.yml up -d minio
-```
-
-然后把 Artifact binding 的 endpoint 设为 `http://minio:9000`，`path_style=true`、
-`allow_insecure=true`，bucket 设为已创建的 bucket，并让 `SecretRef` 匹配
-`TRPC_S3_SECRET_REF`。默认 Compose 和默认 CI 不启动 MinIO，也不要求 S3 凭据。
-
-首次启动后可用 MinIO 客户端创建与 binding 相同的 bucket（下面示例使用宿主机端口和示例凭据）：
-
-```bash
-docker run --rm --network host --env-file deploy/example.env minio/mc:RELEASE.2024-12-13T22-19-12Z \
-  sh -c 'mc alias set local "http://127.0.0.1:${TRPC_MINIO_PORT:-9000}" \
-    "${TRPC_S3_ACCESS_KEY_ID:-minio-local-access}" "${TRPC_S3_SECRET_KEY:-minio-local-secret}" \
-    && mc mb --ignore-existing local/artifact-bucket'
-```
-
-可选 live conformance 测试读取 `S3_RUNTIME_TEST_ENDPOINT`、`S3_RUNTIME_TEST_BUCKET`、
-`S3_RUNTIME_TEST_ACCESS_KEY`、`S3_RUNTIME_TEST_SECRET_KEY` 和 `S3_RUNTIME_TEST_REGION`；未配置
-时显式 skip。测试会关闭并重建 provider，验证 Artifact/Object 以及附件 reader 在重启后仍可恢复。
-
-主要环境变量如下：
+主要环境变量如下:
 
 | 变量 | 必需/默认 | 说明 |
 | --- | --- | --- |
@@ -254,13 +216,12 @@ docker run --rm --network host --env-file deploy/example.env minio/mc:RELEASE.20
 | `TRPC_REDIS_READ_TIMEOUT` | 否 | Go duration，例如 `500ms` |
 | `TRPC_REDIS_WRITE_TIMEOUT` | 否 | Go duration，例如 `500ms` |
 | `TRPC_REDIS_POOL_SIZE` | 否 | 大于 `0` 时覆盖客户端连接池大小 |
-| `TRPC_S3_ACCESS_KEY_ID` | 否 | 本地 Compose/Secret 示例使用的 S3 access key |
-| `TRPC_S3_SECRET_KEY` | 否 | 本地 Compose/Secret 示例使用的 S3 secret key |
-| `TRPC_S3_SECRET_REF` | 否，`env/trpc-s3-credentials` | S3 Backend Profile 必须匹配的 tenant SecretRef |
 
 本地 Compose 已包含带 AOF 的 Redis 7 服务；生产/Kubernetes 仍应使用外部 Redis，并通过 Secret
 Manager 注入密码。可选 live conformance/reconnect 测试读取 `REDIS_RUNTIME_TEST_ADDR`；未设置
-时显式 skip，不把本地 miniredis 测试冒充生产 Redis 证据。
+时显式 skip，不把本地 miniredis 测试冒充生产 Redis 证据。ChromaDB Memory 和 COS Artifact 的
+双 Worker 并发/重启测试由 `TRPC_LIVE_INTEGRATION=1` 保护，分别读取 `TRPC_CHROMA_LIVE_*` 与
+`TRPC_COS_LIVE_*`；未配置外部服务时显式 skip，deterministic CI 不把 skip 计作 live 证据。
 真实验收测试使用可选的 `POSTGRES_RUNTIME_TEST_DSN`，并要求该 DSN 已有可写的
 `POSTGRES_RUNTIME_TEST_TENANT_ID` 与 `POSTGRES_RUNTIME_TEST_BINDING_ID`；测试会执行
 完整运行时存储能力操作、关闭连接、重新打开连接并验证 Session/Event/History/Outbox
@@ -278,8 +239,9 @@ Manager 注入密码。可选 live conformance/reconnect 测试读取 `REDIS_RUN
 | durable Event payload/history 与完整 Event 状态生命周期 | 4 | `runtime_event_history`、fresh delegate replay、状态迁移测试 | ✅ |
 | Outbox worker/reconciliation/provider delivery | 5 | fenced worker、重试/死信/过期 lease 与 provider 测试 | ✅ |
 | Redis Session/Memory capability 与 tenant-scoped bootstrap | Issue #108 | `runtime/storage/redis` miniredis conformance、配置/Catalog 边界、Compose 服务与可选 live reconnect 测试 | ✅* |
-| S3 Artifact/Object provider 与 tenant-scoped bootstrap | Issue #113 | `runtime/storage/s3` contract tests、S3 Catalog/Secret/Probe 边界、可选 MinIO live conformance | ✅* |
+| 上游 Artifact provider 与 tenant-scoped bootstrap | 本次重构 | 上游 InMemory/COS `artifact.Service`、Runner 注入和租户 SecretRef 边界 | ✅ |
 | 真实 PostgreSQL/InMemory conformance 与 fresh-process restart | 6 | `POSTGRES_RUNTIME_TEST_DSN` 可选 live suite 与 reopen 证据 | ✅* |
+| 上游 ChromaDB Memory/COS Artifact 双 Worker 并发与重启 | 6 | `bootstrap/environment_live_integration_test.go` 受保护 live suite | ✅* |
 | verified Channel duplicate Runner suppression | 6 | MessageStore claim + 并发 Gateway Runner invocation-count 测试 | ✅ |
 | 租户越权、取消、脱敏和防御性返回 | 1–6 | 双租户 conformance 与错误边界测试 | ✅ |
 | `go test`、race、vet、build、MkDocs strict | 最终 | PR 验证记录与 CI | ✅ |

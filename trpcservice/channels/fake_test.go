@@ -409,8 +409,8 @@ func assertFakeResolverEnforcesCapacityAndPrimitiveBoundaries(t *testing.T, setu
 		t.Fatal("zero clock skew accepted a verification request")
 	}
 	var nilContext context.Context
-	if checkFakeContext(nilContext) != nil {
-		t.Fatal("nil context should be accepted by the offline fake")
+	if !errors.Is(checkFakeContext(nilContext), ErrVerificationFailed) {
+		t.Fatalf("nil context error = %v", checkFakeContext(nilContext))
 	}
 	canceledContext, cancelContext := context.WithCancel(context.Background())
 	cancelContext()

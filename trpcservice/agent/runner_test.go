@@ -10,7 +10,10 @@ import (
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
+	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
@@ -121,6 +124,63 @@ func TestNewRunnerCarriesPublishedRuntimePolicy(t *testing.T) {
 		t.Fatalf("MaxRunDuration = %v, want %v", runOptions.MaxRunDuration, time.Duration(policy.ExecutionTimeoutSeconds)*time.Second)
 	}
 }
+
+func TestPolicyRunnerSealsDirectRunScopeAndLedger(t *testing.T) {
+	const (
+		tenantID = "t_00000000000000000000000000"
+		appID    = "app_00000000000000000000000000"
+	)
+	fixedLedger := storagefactoryToolInvocationStore(t)
+	callerLedger := storagefactoryToolInvocationStore(t)
+	delegate := &capturingRunner{}
+	runner := &policyRunner{delegate: delegate, tenantID: tenantID, appID: appID, revision: 3, toolInvocations: fixedLedger}
+	ctx := WithExecutionMetadata(context.Background(), ExecutionMetadata{
+		TenantID: tenantID, AppID: appID, Revision: 3, UserID: "user", SessionID: "session", RequestID: "platform-request",
+	})
+	ctx = servicetool.WithExecutionContext(ctx, servicetool.ExecutionContext{
+		TenantID: tenantID, AppID: appID, UserID: "user", SessionID: "session", EventID: "event", RequestID: "platform-request", ToolInvocations: callerLedger,
+	})
+	if _, err := runner.Run(ctx, "user", "session", trpcmodel.NewUserMessage("hello"), trpcagent.WithRequestID("forged-request"), trpcagent.WithAppName("forged-app")); err != nil {
+		t.Fatal(err)
+	}
+	if delegate.options.RequestID != "platform-request" || delegate.options.AppName != appID {
+		t.Fatalf("fixed run options = %+v", delegate.options)
+	}
+	captured, err := servicetool.ExecutionContextFromContext(delegate.ctx)
+	if err != nil || captured.ToolInvocations != fixedLedger || captured.AppID != appID || captured.UserID != "user" || captured.SessionID != "session" {
+		t.Fatalf("fixed execution context = %+v, error = %v", captured, err)
+	}
+	forged := WithExecutionMetadata(context.Background(), ExecutionMetadata{
+		TenantID: tenantID, AppID: appID, Revision: 3, UserID: "other-user", SessionID: "session", RequestID: "other-request",
+	})
+	if _, err := runner.Run(forged, "user", "session", trpcmodel.NewUserMessage("hello")); !errors.Is(err, ErrKnowledgeScope) {
+		t.Fatalf("forged metadata error = %v", err)
+	}
+}
+
+func storagefactoryToolInvocationStore(t *testing.T) runtimestorage.ToolInvocationStore {
+	t.Helper()
+	return runtimestorageinmemory.NewToolInvocationStore()
+}
+
+type capturingRunner struct {
+	ctx     context.Context
+	options trpcagent.RunOptions
+}
+
+func (runner *capturingRunner) Run(ctx context.Context, _ string, _ string, _ trpcmodel.Message, options ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
+	runner.ctx = ctx
+	for _, option := range options {
+		if option != nil {
+			option(&runner.options)
+		}
+	}
+	output := make(chan *trpcevent.Event)
+	close(output)
+	return output, nil
+}
+
+func (runner *capturingRunner) Close() error { return nil }
 
 func agentRuntimeFixtureWithPolicy(t *testing.T, tenantID, appID, modelProfileID string, policy appmodel.RuntimePolicy) (*appmodel.App, *appmodel.Revision) {
 	t.Helper()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 
@@ -21,17 +22,21 @@ func (model deterministicModel) Info() trpcmodel.Info {
 }
 
 func (model deterministicModel) GenerateContent(ctx context.Context, request *trpcmodel.Request) (<-chan *trpcmodel.Response, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, errors.New("deterministic model context is required")
 	}
 	if request == nil {
 		return nil, errors.New("deterministic model request is required")
 	}
+	done, doneErr := nilvalue.ContextDoneChannel(ctx)
+	if doneErr != nil {
+		return nil, errors.New("deterministic model context is unavailable")
+	}
 	responses := make(chan *trpcmodel.Response, 1)
 	go func() {
 		defer close(responses)
 		select {
-		case <-ctx.Done():
+		case <-done:
 			return
 		default:
 		}
@@ -41,7 +46,7 @@ func (model deterministicModel) GenerateContent(ctx context.Context, request *tr
 			Choices: []trpcmodel.Choice{{Message: trpcmodel.NewAssistantMessage(deterministicDemoResponse)}},
 			Done:    true,
 		}:
-		case <-ctx.Done():
+		case <-done:
 		}
 	}()
 	return responses, nil

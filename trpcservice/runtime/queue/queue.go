@@ -8,6 +8,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 var (
@@ -135,7 +137,7 @@ type Worker struct {
 
 // New validates configuration and creates a Worker.
 func New(config Config) (*Worker, error) {
-	if config.Store == nil || config.Handler == nil || config.Owner == "" || config.LeaseDuration <= 0 {
+	if nilvalue.Is(config.Store) || config.Handler == nil || config.Owner == "" || config.LeaseDuration <= 0 {
 		return nil, ErrInvalid
 	}
 	if config.PollInterval <= 0 {
@@ -159,7 +161,7 @@ func New(config Config) (*Worker, error) {
 // RunOnce claims and processes at most one task. It returns false when no task
 // is currently eligible.
 func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
-	if w == nil || ctx == nil {
+	if w == nil || nilvalue.Is(ctx) || nilvalue.Is(w.store) || w.handler == nil {
 		return false, ErrInvalid
 	}
 	w.mu.Lock()
@@ -168,7 +170,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	if closed {
 		return false, ErrClosed
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return false, err
 	}
 	tenantID := w.tenantID
@@ -182,7 +184,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		}
 		return false, err
 	}
-	err = w.handler(ctx, cloneTask(task))
+	err = callHandlerSafely(w.handler, ctx, cloneTask(task))
 	if err == nil {
 		_, completeErr := w.store.Complete(ctx, task.TenantID, task.TaskID, w.owner, task.FencingToken)
 		return true, completeErr
@@ -201,7 +203,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 
 // Start starts one owned run loop. Calling Start twice is an error.
 func (w *Worker) Start(ctx context.Context) error {
-	if w == nil || ctx == nil {
+	if w == nil || nilvalue.Is(ctx) {
 		return ErrInvalid
 	}
 	w.mu.Lock()
@@ -209,7 +211,13 @@ func (w *Worker) Start(ctx context.Context) error {
 	if w.closed || w.started {
 		return ErrClosed
 	}
-	workerCtx, cancel := context.WithCancel(ctx)
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		return err
+	}
+	workerCtx, cancel, contextErr := withCancelSafely(ctx)
+	if contextErr != nil {
+		return contextErr
+	}
 	w.cancel = cancel
 	w.started = true
 	go func() {
@@ -220,8 +228,44 @@ func (w *Worker) Start(ctx context.Context) error {
 	return nil
 }
 
+func callHandlerSafely(handler Handler, ctx context.Context, task Task) (err error) {
+	if handler == nil || nilvalue.Is(ctx) {
+		return ErrInvalid
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrInvalid
+		} else if nilvalue.Is(err) {
+			err = nil
+		}
+	}()
+	return handler(ctx, task)
+}
+
+func withCancelSafely(parent context.Context) (ctx context.Context, cancel context.CancelFunc, err error) {
+	if nilvalue.Is(parent) {
+		return nil, func() {}, nilvalue.ErrInvalidContext
+	}
+	if _, err := nilvalue.ContextDone(parent); err != nil {
+		return nil, func() {}, err
+	}
+	defer func() {
+		if recover() != nil {
+			ctx = nil
+			cancel = func() {}
+			err = nilvalue.ErrInvalidContext
+		}
+	}()
+	ctx, cancel = context.WithCancel(parent)
+	return ctx, cancel, nil
+}
+
 func (w *Worker) loop(ctx context.Context) error {
 	defer close(w.done)
+	done, doneErr := nilvalue.ContextDone(ctx)
+	if doneErr != nil {
+		return doneErr
+	}
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 	for {
@@ -229,8 +273,8 @@ func (w *Worker) loop(ctx context.Context) error {
 			return err
 		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-done:
+			return nilvalue.ContextErr(ctx)
 		case <-ticker.C:
 		}
 	}
@@ -298,11 +342,21 @@ type tenantContextKey struct{}
 
 // WithTenant scopes a shared Store claim to one tenant for a single call.
 func WithTenant(ctx context.Context, tenantID string) context.Context {
+	if nilvalue.Is(ctx) {
+		return nil
+	}
 	return context.WithValue(ctx, tenantContextKey{}, tenantID)
 }
 
 func taskTenantHint(ctx context.Context) string {
-	value, _ := ctx.Value(tenantContextKey{}).(string)
+	if nilvalue.Is(ctx) {
+		return ""
+	}
+	raw, err := nilvalue.ContextValue(ctx, tenantContextKey{})
+	if err != nil {
+		return ""
+	}
+	value, _ := raw.(string)
 	return value
 }
 
@@ -500,10 +554,10 @@ func (s *MemoryStore) Close() error {
 }
 
 func contextErr(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return ErrInvalid
 	}
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
 }
 
 var _ Store = (*MemoryStore)(nil)

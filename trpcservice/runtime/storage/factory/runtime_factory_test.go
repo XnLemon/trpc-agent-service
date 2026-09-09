@@ -3,6 +3,7 @@ package factory
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -10,8 +11,11 @@ import (
 	modelruntime "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/model"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimeinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/knowledge"
+	memoryinmemory "trpc.group/trpc-go/trpc-agent-go/memory/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/session"
-	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
+	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
 func TestRegistryStorageFactoryMaterializesTenantSession(t *testing.T) {
@@ -26,7 +30,7 @@ func TestRegistryStorageFactoryMaterializesTenantSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}}
+	input := StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}}
 	set, err := storageFactory.New(context.Background(), input)
 	if err != nil {
 		t.Fatal(err)
@@ -57,10 +61,10 @@ func TestCapabilitySetMaterializesExplicitSummary(t *testing.T) {
 
 func TestCapabilitySetSummaryRequiresExplicitCapability(t *testing.T) {
 	const tenantID = "t_00000000000000000000000000"
-	store := runtimeinmemory.New()
-	set, err := NewCapabilitySet(tenantID, map[Capability]any{CapabilityMemory: store})
+	service := memoryinmemory.NewMemoryService()
+	set, err := NewCapabilitySet(tenantID, map[Capability]any{CapabilityMemory: service})
 	if err != nil {
-		_ = store.Close()
+		_ = service.Close()
 		t.Fatal(err)
 	}
 	defer set.Close()
@@ -73,11 +77,11 @@ func TestCapabilitySetTypedAccessors(t *testing.T) {
 	const tenantID = "t_00000000000000000000000000"
 	store := runtimeinmemory.New()
 	set, err := NewCapabilitySet(tenantID, map[Capability]any{
-		CapabilitySession:   inmemory.NewSessionService(),
-		CapabilityMemory:    store,
+		CapabilitySession:   sessioninmemory.NewSessionService(),
+		CapabilityMemory:    memoryinmemory.NewMemoryService(),
 		CapabilitySummary:   store,
-		CapabilityKnowledge: store,
-		CapabilityArtifact:  store,
+		CapabilityKnowledge: knowledge.New(),
+		CapabilityArtifact:  inmemory.NewService(),
 		CapabilityAudit:     store,
 	})
 	if err != nil {
@@ -93,8 +97,6 @@ func TestCapabilitySetTypedAccessors(t *testing.T) {
 		{"Knowledge", func() error { _, err := set.Knowledge(); return err }},
 		{"Artifact", func() error { _, err := set.Artifact(); return err }},
 		{"Audit", func() error { _, err := set.Audit(); return err }},
-		{"Vector", func() error { _, err := set.Vector(); return err }},
-		{"Object", func() error { _, err := set.Object(); return err }},
 	}
 	for _, check := range checks {
 		t.Run(check.name, func(t *testing.T) {
@@ -106,7 +108,7 @@ func TestCapabilitySetTypedAccessors(t *testing.T) {
 	if err := set.Close(); err != nil {
 		t.Fatal(err)
 	}
-	missing, err := NewCapabilitySet(tenantID, map[Capability]any{CapabilitySession: inmemory.NewSessionService()})
+	missing, err := NewCapabilitySet(tenantID, map[Capability]any{CapabilitySession: sessioninmemory.NewSessionService()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,8 +135,6 @@ func TestCapabilitySetTypedAccessorsRejectWrongTypes(t *testing.T) {
 		{"Knowledge", CapabilityKnowledge, func(set *CapabilitySet) error { _, err := set.Knowledge(); return err }},
 		{"Artifact", CapabilityArtifact, func(set *CapabilitySet) error { _, err := set.Artifact(); return err }},
 		{"Audit", CapabilityAudit, func(set *CapabilitySet) error { _, err := set.Audit(); return err }},
-		{"Vector", CapabilityKnowledge, func(set *CapabilitySet) error { _, err := set.Vector(); return err }},
-		{"Object", CapabilityArtifact, func(set *CapabilitySet) error { _, err := set.Object(); return err }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,10 +165,12 @@ func TestMatchesCapabilityRejectsUnsupportedAndNilValues(t *testing.T) {
 func TestMatchesCapabilityContracts(t *testing.T) {
 	store := runtimeinmemory.New()
 	t.Cleanup(func() { _ = store.Close() })
-	sessionService := inmemory.NewSessionService()
+	sessionService := sessioninmemory.NewSessionService()
 	t.Cleanup(func() { _ = sessionService.Close() })
-	knowledgeOnly := struct{ runtimestorage.KnowledgeStore }{KnowledgeStore: store}
-	artifactOnly := struct{ runtimestorage.ArtifactStore }{ArtifactStore: store}
+	memoryService := memoryinmemory.NewMemoryService()
+	t.Cleanup(func() { _ = memoryService.Close() })
+	knowledgeService := knowledge.New()
+	artifactService := inmemory.NewService()
 	for _, test := range []struct {
 		name  string
 		kind  Capability
@@ -176,12 +178,10 @@ func TestMatchesCapabilityContracts(t *testing.T) {
 		want  bool
 	}{
 		{name: "session", kind: CapabilitySession, value: sessionService, want: true},
-		{name: "memory", kind: CapabilityMemory, value: store, want: true},
+		{name: "memory", kind: CapabilityMemory, value: memoryService, want: true},
 		{name: "summary", kind: CapabilitySummary, value: store, want: true},
-		{name: "knowledge requires vector", kind: CapabilityKnowledge, value: knowledgeOnly},
-		{name: "knowledge with vector", kind: CapabilityKnowledge, value: store, want: true},
-		{name: "artifact requires object", kind: CapabilityArtifact, value: artifactOnly},
-		{name: "artifact with object", kind: CapabilityArtifact, value: store, want: true},
+		{name: "knowledge", kind: CapabilityKnowledge, value: knowledgeService, want: true},
+		{name: "artifact", kind: CapabilityArtifact, value: artifactService, want: true},
 		{name: "audit", kind: CapabilityAudit, value: store, want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -201,10 +201,10 @@ func TestRegistryStorageFactoryCancellationAndMissingSession(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := factory.New(ctx, StorageFactoryInput{TenantID: "t_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "missing"}}}); !errors.Is(err, context.Canceled) {
+	if _, err := factory.New(ctx, StorageFactoryInput{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "missing"}}}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled New() = %v", err)
 	}
-	if _, err := factory.New(context.Background(), StorageFactoryInput{TenantID: "t_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilityMemory, Provider: "missing"}}}); !errors.Is(err, ErrStorageFactory) {
+	if _, err := factory.New(context.Background(), StorageFactoryInput{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilityMemory, Provider: "missing"}}}); !errors.Is(err, ErrStorageFactory) {
 		t.Fatalf("missing provider New() = %v", err)
 	}
 }
@@ -223,7 +223,7 @@ func TestRegistryStorageFactoryCancellationAfterProviderSuccess(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	provider.cancel = cancel
-	if _, err := factory.New(ctx, StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}}); !errors.Is(err, context.Canceled) {
+	if _, err := factory.New(ctx, StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("provider-success cancellation = %v", err)
 	}
 	select {
@@ -261,7 +261,7 @@ func TestRegistryStorageFactoryBuildsTenantCapabilitiesConcurrently(t *testing.T
 		group.Add(1)
 		go func(tenantID string) {
 			defer group.Done()
-			set, newErr := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}})
+			set, newErr := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}})
 			if newErr != nil {
 				errorsCh <- newErr
 				return
@@ -306,7 +306,7 @@ func TestCapabilitySetOwnsValuesAndAggregatesCloseFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	values[CapabilitySession] = inmemory.NewSessionService()
+	values[CapabilitySession] = sessioninmemory.NewSessionService()
 	if _, ok := set.Capability(CapabilitySession); ok {
 		t.Fatal("capability set retained caller map")
 	}
@@ -368,7 +368,7 @@ func TestRegistryStorageFactoryClosesEarlierCapabilityAndScopesSecrets(t *testin
 		if input.TenantID != tenantID || binding.SecretRef != "secret/session" || secret.Value() != "session-secret" {
 			t.Fatalf("provider input = %+v, %+v, %q", input, binding, secret.Value())
 		}
-		return &closeTrackingSession{Service: inmemory.NewSessionService(), closed: closed}, nil
+		return &closeTrackingSession{Service: sessioninmemory.NewSessionService(), closed: closed}, nil
 	})
 	second := capabilityProviderFunc(func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
 		return nil, errors.New("provider detail")
@@ -383,7 +383,7 @@ func TestRegistryStorageFactoryClosesEarlierCapabilityAndScopesSecrets(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{
+	_, err = factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{
 		{Capability: CapabilitySession, Provider: "session", SecretRef: "secret/session"},
 		{Capability: CapabilityMemory, Provider: "broken"},
 	}})
@@ -402,12 +402,12 @@ func TestRegistryStorageFactoryRejectsDuplicateCapabilities(t *testing.T) {
 	providers := NewProviderRegistry()
 	closed := make(chan struct{})
 	first := capabilityProviderFunc(func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
-		return &closeTrackingSession{Service: inmemory.NewSessionService(), closed: closed}, nil
+		return &closeTrackingSession{Service: sessioninmemory.NewSessionService(), closed: closed}, nil
 	})
 	called := false
 	second := capabilityProviderFunc(func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
 		called = true
-		return inmemory.NewSessionService(), nil
+		return sessioninmemory.NewSessionService(), nil
 	})
 	if err := providers.Register(tenantID, CapabilitySession, "one", first); err != nil {
 		t.Fatal(err)
@@ -419,7 +419,7 @@ func TestRegistryStorageFactoryRejectsDuplicateCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{
+	_, err = factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{
 		{Capability: CapabilitySession, Provider: "one"},
 		{Capability: CapabilitySession, Provider: "two"},
 	}})
@@ -433,6 +433,48 @@ func TestRegistryStorageFactoryRejectsDuplicateCapabilities(t *testing.T) {
 	case <-closed:
 	default:
 		t.Fatal("materialized capability was not closed")
+	}
+}
+
+func TestRegistryStorageFactoryRejectsSensitiveAndMalformedBindingMetadata(t *testing.T) {
+	cases := []StorageFactoryInput{
+		{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory", Options: map[string]string{"api_key": "secret"}}}},
+		{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory", Endpoint: "https://EXAMPLE.test"}}},
+		{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", ProfileID: "bp_bad", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}},
+		{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", ContentDigest: "ABC", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}},
+		{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", TenantVersion: -1, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory"}}},
+		{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilityMemory, Provider: "memory"}, {Capability: CapabilitySession, Provider: "memory"}}},
+	}
+	providers := NewProviderRegistry()
+	if err := providers.Register("t_00000000000000000000000000", CapabilitySession, "memory", &registryCapabilityProvider{}); err != nil {
+		t.Fatal(err)
+	}
+	factory, err := NewRegistryStorageFactory(providers, modelruntime.NewSecretRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, input := range cases {
+		if _, err := factory.New(context.Background(), input); !errors.Is(err, ErrStorageFactory) {
+			t.Fatalf("case %d accepted malformed storage input: %v", index, err)
+		}
+	}
+}
+
+func TestRegistryStorageFactoryRedactsSecretResolverFailure(t *testing.T) {
+	const tenantID = "t_00000000000000000000000000"
+	providers := NewProviderRegistry()
+	if err := providers.Register(tenantID, CapabilitySession, "memory", &registryCapabilityProvider{}); err != nil {
+		t.Fatal(err)
+	}
+	factory, err := NewRegistryStorageFactory(providers, secretResolverFunc(func(context.Context, modelprofile.SecretScope) (modelprofile.SecretValue, error) {
+		return modelprofile.SecretValue{}, errors.New("vault secret-value must not escape")
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "memory", SecretRef: "secret/session"}}})
+	if !errors.Is(err, ErrStorageFactory) || strings.Contains(err.Error(), "secret-value") {
+		t.Fatalf("secret resolver error = %v", err)
 	}
 }
 
@@ -450,22 +492,22 @@ func TestRegistryStorageFactoryValidationAndResolverFailures(t *testing.T) {
 	}
 	const tenantID = "t_00000000000000000000000000"
 	if err := providers.Register(tenantID, CapabilitySession, "session", capabilityProviderFunc(func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error) {
-		return inmemory.NewSessionService(), nil
+		return sessioninmemory.NewSessionService(), nil
 	})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session", SecretRef: "missing"}}}); !errors.Is(err, ErrStorageFactory) {
+	if _, err := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session", SecretRef: "missing"}}}); !errors.Is(err, ErrStorageFactory) {
 		t.Fatalf("missing secret New() = %v", err)
 	}
-	if _, err := factory.New(nil, StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session"}}}); !errors.Is(err, ErrStorageFactory) {
+	if _, err := factory.New(nil, StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session"}}}); !errors.Is(err, ErrStorageFactory) {
 		t.Fatalf("nil context New() = %v", err)
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := factory.New(canceled, StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session"}}}); !errors.Is(err, context.Canceled) {
+	if _, err := factory.New(canceled, StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{Capability: CapabilitySession, Provider: "session"}}}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled New() = %v", err)
 	}
-	if _, err := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, Bindings: []CapabilityBinding{{}}}); !errors.Is(err, ErrStorageFactory) {
+	if _, err := factory.New(context.Background(), StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000", Bindings: []CapabilityBinding{{}}}); !errors.Is(err, ErrStorageFactory) {
 		t.Fatalf("invalid binding New() = %v", err)
 	}
 }
@@ -479,7 +521,7 @@ func (provider *sessionCapabilityProvider) New(context.Context, StorageFactoryIn
 	if provider.cancel != nil {
 		provider.cancel()
 	}
-	service := inmemory.NewSessionService()
+	service := sessioninmemory.NewSessionService()
 	if provider.closed != nil {
 		return &closeTrackingSession{Service: service, closed: provider.closed}, nil
 	}
@@ -509,6 +551,12 @@ func (closer *failingCapabilityCloser) Close() error {
 	return errors.New("close detail")
 }
 
+type secretResolverFunc func(context.Context, modelprofile.SecretScope) (modelprofile.SecretValue, error)
+
+func (resolver secretResolverFunc) Resolve(ctx context.Context, scope modelprofile.SecretScope) (modelprofile.SecretValue, error) {
+	return resolver(ctx, scope)
+}
+
 type capabilityProviderFunc func(context.Context, StorageFactoryInput, CapabilityBinding, modelprofile.SecretValue) (any, error)
 
 type summaryCapabilityStub struct{}
@@ -534,7 +582,7 @@ func (provider *recordingSessionCapabilityProvider) New(_ context.Context, input
 	}
 	provider.calls[input.TenantID]++
 	provider.mu.Unlock()
-	return inmemory.NewSessionService(), nil
+	return sessioninmemory.NewSessionService(), nil
 }
 
 func (provider *recordingSessionCapabilityProvider) Count(tenantID string) int {

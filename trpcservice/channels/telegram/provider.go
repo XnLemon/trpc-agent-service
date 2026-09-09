@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	"github.com/go-telegram/bot"
@@ -42,7 +43,7 @@ type ProviderOption func(*Provider)
 // references. Nil readers are ignored and keep the text-only fallback path.
 func WithAttachmentReader(reader attachment.Reader) ProviderOption {
 	return func(provider *Provider) {
-		if reader != nil {
+		if !nilvalue.Is(reader) {
 			provider.attachments = reader
 		}
 	}
@@ -50,7 +51,7 @@ func WithAttachmentReader(reader attachment.Reader) ProviderOption {
 
 // NewProvider creates a Telegram reply provider for a chat and optional thread.
 func NewProvider(client BotClient, chatID int64, threadID int, options ...ProviderOption) (*Provider, error) {
-	if client == nil || chatID == 0 || threadID < 0 {
+	if nilvalue.Is(client) || chatID == 0 || threadID < 0 {
 		return nil, outbox.ErrInvalid
 	}
 	provider := &Provider{client: client, chatID: chatID, threadID: threadID, receipts: map[string]string{}}
@@ -63,9 +64,17 @@ func NewProvider(client BotClient, chatID int64, threadID int, options ...Provid
 }
 
 // Deliver sends one durable reply segment and returns the provider message ID.
-func (p *Provider) Deliver(ctx context.Context, value runtimestorage.ReplyOutbox) (string, error) {
-	if p == nil || p.client == nil || ctx == nil {
+func (p *Provider) Deliver(ctx context.Context, value runtimestorage.ReplyOutbox) (receipt string, err error) {
+	if p == nil || nilvalue.Is(p.client) || nilvalue.Is(ctx) {
 		return "", &outbox.DeliveryError{Class: "invalid", Retryable: false}
+	}
+	defer func() {
+		if recover() != nil {
+			receipt, err = "", &outbox.DeliveryError{Class: "provider_invalid_receipt", Retryable: false}
+		}
+	}()
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		return "", telegramDeliveryError(ctx, err)
 	}
 	key := deliveryKey(value)
 	p.mu.Lock()
@@ -81,7 +90,7 @@ func (p *Provider) Deliver(ctx context.Context, value runtimestorage.ReplyOutbox
 	if message == nil || message.ID <= 0 {
 		return "", &outbox.DeliveryError{Class: "provider_invalid_receipt", Retryable: false}
 	}
-	receipt := strconv.Itoa(message.ID)
+	receipt = strconv.Itoa(message.ID)
 	p.mu.Lock()
 	p.receipts[key] = receipt
 	p.mu.Unlock()
@@ -108,7 +117,7 @@ func (p *Provider) deliverMessage(ctx context.Context, value runtimestorage.Repl
 
 func (p *Provider) sendPhoto(ctx context.Context, value runtimestorage.ReplyOutbox) (*models.Message, error) {
 	sender, ok := p.client.(telegramPhotoSender)
-	if !ok || p.attachments == nil {
+	if !ok || nilvalue.Is(p.attachments) {
 		return p.sendText(ctx, value.Fallback)
 	}
 	file, ok, err := p.attachmentUpload(ctx, value)
@@ -127,7 +136,7 @@ func (p *Provider) sendPhoto(ctx context.Context, value runtimestorage.ReplyOutb
 
 func (p *Provider) sendDocument(ctx context.Context, value runtimestorage.ReplyOutbox) (*models.Message, error) {
 	sender, ok := p.client.(telegramDocumentSender)
-	if !ok || p.attachments == nil {
+	if !ok || nilvalue.Is(p.attachments) {
 		return p.sendText(ctx, value.Fallback)
 	}
 	file, ok, err := p.attachmentUpload(ctx, value)
@@ -147,10 +156,10 @@ func (p *Provider) sendDocument(ctx context.Context, value runtimestorage.ReplyO
 func (p *Provider) attachmentUpload(ctx context.Context, value runtimestorage.ReplyOutbox) (*models.InputFileUpload, bool, error) {
 	content, err := p.attachments.Load(ctx, value.TenantID, value.EventID, value.Attachment)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		if errors.Is(err, context.Canceled) || (!nilvalue.Is(ctx) && errors.Is(nilvalue.ContextErr(ctx), context.Canceled)) {
 			return nil, false, &outbox.DeliveryError{Class: "canceled", Retryable: true}
 		}
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if errors.Is(err, context.DeadlineExceeded) || (!nilvalue.Is(ctx) && errors.Is(nilvalue.ContextErr(ctx), context.DeadlineExceeded)) {
 			return nil, false, &outbox.DeliveryError{Class: "timeout", Retryable: true}
 		}
 		return nil, false, nil
@@ -174,19 +183,22 @@ func (p *Provider) sendText(ctx context.Context, text string) (*models.Message, 
 }
 
 func telegramDeliveryError(ctx context.Context, err error) error {
-	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+	if errors.Is(err, context.Canceled) || (!nilvalue.Is(ctx) && errors.Is(nilvalue.ContextErr(ctx), context.Canceled)) {
 		return &outbox.DeliveryError{Class: "canceled", Retryable: true}
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if errors.Is(err, context.DeadlineExceeded) || (!nilvalue.Is(ctx) && errors.Is(nilvalue.ContextErr(ctx), context.DeadlineExceeded)) {
 		return &outbox.DeliveryError{Class: "timeout", Retryable: true}
 	}
 	return &outbox.DeliveryError{Class: "provider_error", Retryable: true}
 }
 
 // Reconcile checks whether a previously attempted segment can be confirmed.
-func (p *Provider) Reconcile(_ context.Context, value runtimestorage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
-	if p == nil {
+func (p *Provider) Reconcile(ctx context.Context, value runtimestorage.ReplyOutbox) (outbox.DeliveryStatus, string, error) {
+	if p == nil || nilvalue.Is(ctx) {
 		return outbox.DeliveryUnknown, "", nil
+	}
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		return outbox.DeliveryUnknown, "", err
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()

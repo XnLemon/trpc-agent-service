@@ -10,6 +10,7 @@ import (
 	"time"
 
 	serviceagent "github.com/XnLemon/trpc-agent-service/trpcservice/agent"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
@@ -107,7 +108,7 @@ type executionStream struct {
 
 // NewCoordinator validates and creates a runtime execution coordinator.
 func NewCoordinator(config Config) (*Coordinator, error) {
-	if config.Registry == nil {
+	if nilvalue.Is(config.Registry) {
 		return nil, fmt.Errorf("%w: runner registry is required", ErrInvalid)
 	}
 	if config.DrainTimeout == 0 {
@@ -116,9 +117,7 @@ func NewCoordinator(config Config) (*Coordinator, error) {
 	if config.DrainTimeout < 0 {
 		return nil, fmt.Errorf("%w: drain timeout cannot be negative", ErrInvalid)
 	}
-	if config.Observability == nil {
-		config.Observability = observability.NewNoopProvider()
-	}
+	config.Observability = observability.ProtectProvider(config.Observability)
 	return &Coordinator{
 		registry:     config.Registry,
 		drainTimeout: config.DrainTimeout,
@@ -129,19 +128,31 @@ func NewCoordinator(config Config) (*Coordinator, error) {
 
 // Ready reports whether the coordinator has a usable Runner registry.
 func (coordinator *Coordinator) Ready() bool {
-	return coordinator != nil && coordinator.registry != nil && coordinator.registry.Ready()
+	return coordinator != nil && !nilvalue.Is(coordinator.registry) && registryReady(coordinator.registry)
+}
+
+func registryReady(registry Registry) (ready bool) {
+	if nilvalue.Is(registry) {
+		return false
+	}
+	defer func() {
+		if recover() != nil {
+			ready = false
+		}
+	}()
+	return registry.Ready()
 }
 
 // Execute starts one Runner invocation and returns its protocol-neutral event
 // stream. The stream owns the acquired Runner lease until it closes.
 func (coordinator *Coordinator) Execute(ctx context.Context, request Request) (<-chan Event, error) {
-	if coordinator == nil || coordinator.registry == nil {
+	if coordinator == nil || nilvalue.Is(coordinator.registry) {
 		return nil, ErrNotReady
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	if request.RequestID == "" {
@@ -154,7 +165,7 @@ func (coordinator *Coordinator) Execute(ctx context.Context, request Request) (<
 		return nil, fmt.Errorf("%w: execution plan: %w", ErrInvalid, err)
 	}
 
-	lease, err := coordinator.registry.Acquire(ctx, request.Plan)
+	lease, err := acquireExecutionLease(coordinator.registry, ctx, request.Plan)
 	if err != nil {
 		return nil, err
 	}
@@ -199,6 +210,7 @@ func (coordinator *Coordinator) Execute(ctx context.Context, request Request) (<
 
 func (coordinator *Coordinator) forward(ctx context.Context, stream executionStream) {
 	defer close(stream.output)
+	done, contextErr := executionDone(ctx)
 
 	var terminalState atomic.Uint32
 	terminalState.Store(terminalPending)
@@ -206,7 +218,7 @@ func (coordinator *Coordinator) forward(ctx context.Context, stream executionStr
 	defer close(cancelWatchDone)
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-done:
 			terminalState.CompareAndSwap(terminalPending, terminalCanceled)
 		case <-cancelWatchDone:
 		}
@@ -234,6 +246,13 @@ func (coordinator *Coordinator) forward(ctx context.Context, stream executionStr
 		_ = coordinator.metrics.Lease(ctx, -1, map[string]string{"component": "runner", "status": "active"})
 		_ = coordinator.metrics.Active(ctx, -1, map[string]string{"component": "runner"})
 	}()
+
+	if contextErr != nil {
+		terminalErr = contextErr
+		coordinator.emitCancellation(stream.output, stream.request, contextErr)
+		terminalCommitted = true
+		return
+	}
 
 	for {
 		if coordinator.canceled(ctx, &terminalState) {
@@ -298,7 +317,7 @@ func (coordinator *Coordinator) forward(ctx context.Context, stream executionStr
 				terminalCommitted = true
 				return
 			}
-		case <-ctx.Done():
+		case <-done:
 			terminalErr = cancellationError(ctx)
 			coordinator.emitCancellation(stream.output, stream.request, terminalErr)
 			terminalCommitted = true
@@ -326,7 +345,10 @@ func (coordinator *Coordinator) drain(events <-chan serviceagent.RunnerEvent) {
 }
 
 func (coordinator *Coordinator) canceled(ctx context.Context, state *atomic.Uint32) bool {
-	return state.Load() == terminalCanceled || ctx.Err() != nil
+	if state == nil || state.Load() == terminalCanceled || nilvalue.Is(ctx) {
+		return true
+	}
+	return executionContextErr(ctx) != nil
 }
 
 func (coordinator *Coordinator) emitCancellation(output chan<- Event, request Request, err error) {
@@ -346,10 +368,48 @@ func normalizeRunError(err error) error {
 }
 
 func cancellationError(ctx context.Context) error {
-	if ctx != nil && ctx.Err() != nil {
-		return ctx.Err()
+	if err := executionContextErr(ctx); err != nil && !errors.Is(err, ErrInvalid) {
+		return err
 	}
 	return context.Canceled
+}
+
+func executionDone(ctx context.Context) (done <-chan struct{}, err error) {
+	if nilvalue.Is(ctx) {
+		return nil, ErrInvalid
+	}
+	defer func() {
+		if recover() != nil {
+			done = nil
+			err = ErrInvalid
+		}
+	}()
+	return nilvalue.ContextDoneChannel(ctx)
+}
+
+func executionContextErr(ctx context.Context) (err error) {
+	if nilvalue.Is(ctx) {
+		return ErrInvalid
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrInvalid
+		}
+	}()
+	return nilvalue.ContextErr(ctx)
+}
+
+func acquireExecutionLease(registry Registry, ctx context.Context, plan runtime.ExecutionPlan) (lease *runtimerunner.RunnerLease, err error) {
+	if nilvalue.Is(registry) || nilvalue.Is(ctx) {
+		return nil, ErrNotReady
+	}
+	defer func() {
+		if recover() != nil {
+			lease = nil
+			err = ErrExecution
+		}
+	}()
+	return registry.Acquire(ctx, plan)
 }
 
 func cancellationStatus(err error) string {
@@ -383,18 +443,22 @@ func mapRunnerEvent(event serviceagent.RunnerEvent, requestID, traceID string) (
 }
 
 func sendEvent(ctx context.Context, output chan<- Event, event Event) bool {
-	if ctx == nil || ctx.Err() != nil {
+	if nilvalue.Is(ctx) || nilvalue.ContextErr(ctx) != nil {
+		return false
+	}
+	done, err := executionDone(ctx)
+	if err != nil {
 		return false
 	}
 	select {
-	case <-ctx.Done():
+	case <-done:
 		return false
 	default:
 	}
 	select {
 	case output <- event:
 		return true
-	case <-ctx.Done():
+	case <-done:
 		return false
 	}
 }

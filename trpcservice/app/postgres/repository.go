@@ -10,11 +10,15 @@ import (
 	"time"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // List returns a stable page of Apps belonging to one tenant.
 func (r *AppRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*appmodel.App, string, error) {
 	if err := r.checkList(ctx); err != nil {
+		return nil, "", err
+	}
+	if err := appmodel.ValidateTenantID(tenantID); err != nil {
 		return nil, "", err
 	}
 	if limit <= 0 {
@@ -80,6 +84,9 @@ func (r *AppRepository) List(ctx context.Context, tenantID, query, status, curso
 // ListRevisions returns a stable page of revisions belonging to one App.
 func (r *AppRepository) ListRevisions(ctx context.Context, tenantID, appID, query, status, cursor string, limit int) ([]*appmodel.Revision, string, error) {
 	if err := r.checkList(ctx); err != nil {
+		return nil, "", err
+	}
+	if err := validateAppScope(tenantID, appID); err != nil {
 		return nil, "", err
 	}
 	if limit <= 0 {
@@ -161,7 +168,7 @@ var _ appmodel.Repository = (*AppRepository)(nil)
 func NewAppRepository(db *sql.DB) *AppRepository { return &AppRepository{db: db} }
 
 func (r *AppRepository) checkList(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return err
 	}
 	if r == nil || r.db == nil {
@@ -170,9 +177,16 @@ func (r *AppRepository) checkList(ctx context.Context) error {
 	return nil
 }
 
+func checkContext(ctx context.Context) error {
+	if nilvalue.Is(ctx) {
+		return ErrStorage
+	}
+	return nilvalue.ContextErr(ctx)
+}
+
 // Create persists a new agent application.
 func (r *AppRepository) Create(ctx context.Context, input appmodel.CreateInput) (*appmodel.App, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	if r == nil || r.db == nil {
@@ -206,11 +220,14 @@ func (r *AppRepository) Create(ctx context.Context, input appmodel.CreateInput) 
 
 // Get loads an agent application within a tenant.
 func (r *AppRepository) Get(ctx context.Context, tenantID, appID string) (*appmodel.App, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	if r == nil || r.db == nil {
 		return nil, ErrStorage
+	}
+	if err := validateAppScope(tenantID, appID); err != nil {
+		return nil, err
 	}
 	value, err := loadAgentApp(ctx, r.db, tenantID, appID, false)
 	if err != nil {
@@ -224,11 +241,14 @@ func (r *AppRepository) Get(ctx context.Context, tenantID, appID string) (*appmo
 
 // UpdateMetadata applies an expected-version metadata update.
 func (r *AppRepository) UpdateMetadata(ctx context.Context, input appmodel.UpdateMetadataInput) (*appmodel.App, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	if r == nil || r.db == nil {
 		return nil, ErrStorage
+	}
+	if err := validateAppScope(input.TenantID, input.AppID); err != nil {
+		return nil, err
 	}
 	tx, err := begin(ctx, r.db)
 	if err != nil {
@@ -274,11 +294,14 @@ func (r *AppRepository) UpdateMetadata(ctx context.Context, input appmodel.Updat
 
 // CreateDraft persists a draft revision.
 func (r *AppRepository) CreateDraft(ctx context.Context, input appmodel.CreateDraftInput) (*appmodel.Revision, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	if r == nil || r.db == nil {
 		return nil, ErrStorage
+	}
+	if err := validateAppScope(input.TenantID, input.AppID); err != nil {
+		return nil, err
 	}
 	tx, err := begin(ctx, r.db)
 	if err != nil {
@@ -333,11 +356,14 @@ func (r *AppRepository) CreateDraft(ctx context.Context, input appmodel.CreateDr
 
 // UpdateDraft applies an expected-version draft update.
 func (r *AppRepository) UpdateDraft(ctx context.Context, input appmodel.UpdateDraftInput) (*appmodel.Revision, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	if r == nil || r.db == nil {
 		return nil, ErrStorage
+	}
+	if err := validateAppScope(input.TenantID, input.AppID); err != nil {
+		return nil, err
 	}
 	tx, err := begin(ctx, r.db)
 	if err != nil {
@@ -401,11 +427,17 @@ func (r *AppRepository) UpdateDraft(ctx context.Context, input appmodel.UpdateDr
 
 // GetRevision loads a specific application revision.
 func (r *AppRepository) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (*appmodel.Revision, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	if r == nil || r.db == nil {
 		return nil, ErrStorage
+	}
+	if err := validateAppScope(tenantID, appID); err != nil {
+		return nil, err
+	}
+	if revision < 1 {
+		return nil, fmt.Errorf("%w: revision must be positive", appmodel.ErrInvalid)
 	}
 	value, err := loadAgentRevision(ctx, r.db, tenantID, appID, revision, false)
 	if err != nil {
@@ -419,11 +451,17 @@ func (r *AppRepository) GetRevision(ctx context.Context, tenantID, appID string,
 
 // Publish makes a draft revision active and returns its change event.
 func (r *AppRepository) Publish(ctx context.Context, input appmodel.PublishInput) (*appmodel.App, *appmodel.Revision, appmodel.ChangeEvent, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, nil, appmodel.ChangeEvent{}, err
 	}
 	if r == nil || r.db == nil {
 		return nil, nil, appmodel.ChangeEvent{}, ErrStorage
+	}
+	if err := validateAppScope(input.TenantID, input.AppID); err != nil {
+		return nil, nil, appmodel.ChangeEvent{}, err
+	}
+	if input.Revision < 1 {
+		return nil, nil, appmodel.ChangeEvent{}, fmt.Errorf("%w: revision must be positive", appmodel.ErrInvalid)
 	}
 	if err := validatePublishInput(input); err != nil {
 		return nil, nil, appmodel.ChangeEvent{}, err
@@ -529,11 +567,17 @@ func loadPublishState(ctx context.Context, tx *sql.Tx, input appmodel.PublishInp
 
 // Rollback restores an earlier published revision.
 func (r *AppRepository) Rollback(ctx context.Context, input appmodel.RollbackInput) (*appmodel.App, appmodel.ChangeEvent, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
 	}
 	if r == nil || r.db == nil {
 		return nil, appmodel.ChangeEvent{}, ErrStorage
+	}
+	if err := validateAppScope(input.TenantID, input.AppID); err != nil {
+		return nil, appmodel.ChangeEvent{}, err
+	}
+	if input.TargetRevision < 1 {
+		return nil, appmodel.ChangeEvent{}, fmt.Errorf("%w: revision must be positive", appmodel.ErrInvalid)
 	}
 	if err := validateAgentMetadata(input.Metadata); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
@@ -608,11 +652,14 @@ func (r *AppRepository) Rollback(ctx context.Context, input appmodel.RollbackInp
 //
 //nolint:gocyclo // The transaction validates and persists one complete control-plane mutation.
 func (r *AppRepository) SetCanary(ctx context.Context, input appmodel.SetCanaryInput) (*appmodel.App, appmodel.ChangeEvent, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
 	}
 	if r == nil || r.db == nil {
 		return nil, appmodel.ChangeEvent{}, ErrStorage
+	}
+	if err := validateAppScope(input.TenantID, input.AppID); err != nil {
+		return nil, appmodel.ChangeEvent{}, err
 	}
 	if err := validateAgentMetadata(input.Metadata); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
@@ -698,7 +745,7 @@ func (r *AppRepository) SetCanary(ctx context.Context, input appmodel.SetCanaryI
 	if err := commit(ctx, tx); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
 	}
 	return stored, committed, nil
@@ -713,11 +760,14 @@ func sameAgentRevision(left, right *int64) bool {
 
 // TransitionStatus changes an application status with optimistic concurrency.
 func (r *AppRepository) TransitionStatus(ctx context.Context, input appmodel.TransitionStatusInput) (*appmodel.App, appmodel.ChangeEvent, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
 	}
 	if r == nil || r.db == nil {
 		return nil, appmodel.ChangeEvent{}, ErrStorage
+	}
+	if err := validateAppScope(input.TenantID, input.AppID); err != nil {
+		return nil, appmodel.ChangeEvent{}, err
 	}
 	if err := validateAgentMetadata(input.Metadata); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
@@ -793,6 +843,9 @@ const agentAppSelect = `SELECT tenant_id, app_id, app_key, display_name, descrip
 FROM public.agent_app`
 
 func loadAgentApp(ctx context.Context, q queryer, tenantID, appID string, forUpdate bool) (*appmodel.App, error) {
+	if err := validateAppScope(tenantID, appID); err != nil {
+		return nil, err
+	}
 	query := agentAppSelect + ` WHERE tenant_id = $1 AND app_id = $2`
 	if forUpdate {
 		query += ` FOR UPDATE`
@@ -824,6 +877,12 @@ const agentRevisionSelect = `SELECT tenant_id, app_id, revision, state, draft_ve
 FROM public.agent_app_revision`
 
 func loadAgentRevision(ctx context.Context, q queryer, tenantID, appID string, revision int64, forUpdate bool) (*appmodel.Revision, error) {
+	if err := validateAppScope(tenantID, appID); err != nil {
+		return nil, err
+	}
+	if revision < 1 {
+		return nil, fmt.Errorf("%w: revision must be positive", appmodel.ErrInvalid)
+	}
 	query := agentRevisionSelect + ` WHERE tenant_id = $1 AND app_id = $2 AND revision = $3`
 	if forUpdate {
 		query += ` FOR UPDATE`
@@ -921,6 +980,9 @@ func mutableAgentApp(app *appmodel.App, expected int64) error {
 }
 
 func assertTenantActive(ctx context.Context, q queryer, tenantID string) error {
+	if err := appmodel.ValidateTenantID(tenantID); err != nil {
+		return err
+	}
 	var status string
 	if err := q.QueryRowContext(ctx, `SELECT status FROM public.tenant WHERE tenant_id = $1 FOR SHARE`, tenantID).Scan(&status); err != nil {
 		return mapDBError(ctx, err, appmodel.ErrNotFound, appmodel.ErrDuplicateKey, appmodel.ErrConflict, appmodel.ErrInvalid)
@@ -977,6 +1039,16 @@ func nullableInt64(value sql.NullInt64) *int64 {
 func timePointer(value time.Time) *time.Time {
 	copy := value
 	return &copy
+}
+
+func validateAppScope(tenantID, appID string) error {
+	if err := appmodel.ValidateTenantID(tenantID); err != nil {
+		return err
+	}
+	if err := appmodel.ValidateAppID(appID); err != nil {
+		return err
+	}
+	return nil
 }
 
 func maxTime(left, right time.Time) time.Time {

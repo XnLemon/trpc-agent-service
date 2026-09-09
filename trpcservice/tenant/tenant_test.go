@@ -55,8 +55,8 @@ func TestTenantCloneAndExecutionGate(t *testing.T) {
 	concurrent := int64(2)
 	tokens := int64(100)
 	spend := int64(25)
-	appID := "app-1"
-	backendID := "backend-1"
+	appID := "app_01J1K9ZQTVE4PAWF1TSB2WMHNP"
+	backendID := "bp_01J1K9ZQTVE4PAWF1TSB2WMHNP"
 	tenant, err := NewTenant(CreateInput{
 		TenantKey: "clone", DisplayName: "Clone", RateLimitRPM: &rate, MaxConcurrentExecutions: &concurrent,
 		MonthlyTokenBudget: &tokens, MonthlySpendLimitMinor: &spend, BillingCurrency: "USD",
@@ -69,7 +69,7 @@ func TestTenantCloneAndExecutionGate(t *testing.T) {
 	clone := tenant.Clone()
 	*clone.RateLimitRPM = 99
 	*clone.DefaultAgentAppID = "changed"
-	if *tenant.RateLimitRPM != 10 || *tenant.DefaultAgentAppID != "app-1" {
+	if *tenant.RateLimitRPM != 10 || *tenant.DefaultAgentAppID != "app_01J1K9ZQTVE4PAWF1TSB2WMHNP" {
 		t.Fatal("clone must not share mutable pointer fields")
 	}
 	if !tenant.CanAcceptExecution() {

@@ -89,6 +89,8 @@ func TestAgentRepositoryRevisionSearchIncludesGlobalInstruction(t *testing.T) {
 }
 
 func TestAgentRepositoryListBoundaries(t *testing.T) {
+	const tenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	const appID = "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, _, err := NewAppRepository(nil).List(ctx, "tenant", "", "", "", 50); err == nil {
@@ -106,8 +108,8 @@ func TestAgentRepositoryListBoundaries(t *testing.T) {
 	if _, _, err := repository.List(context.Background(), "tenant", "", "", "bad", 50); err == nil {
 		t.Fatal("invalid app cursor was accepted")
 	}
-	mock.ExpectQuery(`SELECT tenant_id, app_id, app_key, display_name, description, status, current_revision, canary_revision, version, created_at, updated_at FROM agent_app WHERE tenant_id = \? ORDER BY app_id`).WithArgs("tenant").WillReturnError(errors.New("query down"))
-	if _, _, err := repository.List(context.Background(), "tenant", "", "", "", 50); !errors.Is(err, appmodel.ErrNotFound) && !errors.Is(err, ErrStorage) {
+	mock.ExpectQuery(`SELECT tenant_id, app_id, app_key, display_name, description, status, current_revision, canary_revision, version, created_at, updated_at FROM agent_app WHERE tenant_id = \? ORDER BY app_id`).WithArgs(tenantID).WillReturnError(errors.New("query down"))
+	if _, _, err := repository.List(context.Background(), tenantID, "", "", "", 50); !errors.Is(err, appmodel.ErrNotFound) && !errors.Is(err, ErrStorage) {
 		t.Fatalf("app query error = %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -122,8 +124,8 @@ func TestAgentRepositoryListBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = revisionDB.Close() })
-	revisionMock.ExpectQuery(`SELECT revision FROM agent_app_revision WHERE tenant_id = \? AND app_id = \? ORDER BY revision`).WithArgs("tenant", "app").WillReturnError(errors.New("query down"))
-	if _, _, err := NewAppRepository(revisionDB).ListRevisions(context.Background(), "tenant", "app", "", "", "", 50); !errors.Is(err, appmodel.ErrNotFound) && !errors.Is(err, ErrStorage) {
+	revisionMock.ExpectQuery(`SELECT revision FROM agent_app_revision WHERE tenant_id = \? AND app_id = \? ORDER BY revision`).WithArgs(tenantID, appID).WillReturnError(errors.New("query down"))
+	if _, _, err := NewAppRepository(revisionDB).ListRevisions(context.Background(), tenantID, appID, "", "", "", 50); !errors.Is(err, appmodel.ErrNotFound) && !errors.Is(err, ErrStorage) {
 		t.Fatalf("revision query error = %v", err)
 	}
 }
@@ -157,9 +159,10 @@ func TestAgentRepositoryMapsMissingRevisionToNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	mock.ExpectQuery(".*").WithArgs("tenant", "app", int64(1)).WillReturnError(sql.ErrNoRows)
+	tenantID, appID := "t_01ARZ3NDEKTSV4RRFFQ69G5FAW", "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	mock.ExpectQuery(".*").WithArgs(tenantID, appID, int64(1)).WillReturnError(sql.ErrNoRows)
 
-	_, err = NewAppRepository(db).GetRevision(context.Background(), "tenant", "app", 1)
+	_, err = NewAppRepository(db).GetRevision(context.Background(), tenantID, appID, 1)
 	if !errors.Is(err, appmodel.ErrNotFound) {
 		t.Fatalf("missing revision error = %v", err)
 	}
@@ -635,6 +638,8 @@ func TestAgentRepositoryRequiresStorage(t *testing.T) {
 }
 
 func TestAgentRepositoryBeginAndReadErrors(t *testing.T) {
+	const tenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	const appID = "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"
 	newDB := func(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
 		t.Helper()
 		db, mock, err := sqlmock.New()
@@ -652,42 +657,42 @@ func TestAgentRepositoryBeginAndReadErrors(t *testing.T) {
 	}
 	db, mock = newDB(t)
 	mock.ExpectBegin().WillReturnError(errors.New("begin"))
-	if _, err := NewAppRepository(db).UpdateMetadata(context.Background(), appmodel.UpdateMetadataInput{}); !errors.Is(err, ErrStorage) {
+	if _, err := NewAppRepository(db).UpdateMetadata(context.Background(), appmodel.UpdateMetadataInput{TenantID: tenantID, AppID: appID}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("UpdateMetadata begin error = %v", err)
 	}
 	db, mock = newDB(t)
 	mock.ExpectBegin().WillReturnError(errors.New("begin"))
-	if _, err := NewAppRepository(db).CreateDraft(context.Background(), appmodel.CreateDraftInput{}); !errors.Is(err, ErrStorage) {
+	if _, err := NewAppRepository(db).CreateDraft(context.Background(), appmodel.CreateDraftInput{TenantID: tenantID, AppID: appID}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("CreateDraft begin error = %v", err)
 	}
 	db, mock = newDB(t)
 	mock.ExpectBegin().WillReturnError(errors.New("begin"))
-	if _, err := NewAppRepository(db).UpdateDraft(context.Background(), appmodel.UpdateDraftInput{}); !errors.Is(err, ErrStorage) {
+	if _, err := NewAppRepository(db).UpdateDraft(context.Background(), appmodel.UpdateDraftInput{TenantID: tenantID, AppID: appID}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("UpdateDraft begin error = %v", err)
 	}
 	db, mock = newDB(t)
 	mock.ExpectBegin().WillReturnError(errors.New("begin"))
-	if _, _, _, err := NewAppRepository(db).Publish(context.Background(), appmodel.PublishInput{TenantID: "tenant", AppID: "app", Revision: 1, ExpectedAppVersion: 1, ExpectedDraftVersion: 1, TenantActive: true, Metadata: metadata}); !errors.Is(err, ErrStorage) {
+	if _, _, _, err := NewAppRepository(db).Publish(context.Background(), appmodel.PublishInput{TenantID: tenantID, AppID: appID, Revision: 1, ExpectedAppVersion: 1, ExpectedDraftVersion: 1, TenantActive: true, Metadata: metadata}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("Publish begin error = %v", err)
 	}
 	db, mock = newDB(t)
 	mock.ExpectBegin().WillReturnError(errors.New("begin"))
-	if _, _, err := NewAppRepository(db).Rollback(context.Background(), appmodel.RollbackInput{TenantID: "tenant", AppID: "app", TargetRevision: 1, ExpectedAppVersion: 1, Metadata: metadata}); !errors.Is(err, ErrStorage) {
+	if _, _, err := NewAppRepository(db).Rollback(context.Background(), appmodel.RollbackInput{TenantID: tenantID, AppID: appID, TargetRevision: 1, ExpectedAppVersion: 1, Metadata: metadata}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("Rollback begin error = %v", err)
 	}
 	db, mock = newDB(t)
 	mock.ExpectBegin().WillReturnError(errors.New("begin"))
-	if _, _, err := NewAppRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: "tenant", AppID: "app", ExpectedVersion: 1, NextStatus: appmodel.StatusSuspended, Metadata: metadata}); !errors.Is(err, ErrStorage) {
+	if _, _, err := NewAppRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: tenantID, AppID: appID, ExpectedVersion: 1, NextStatus: appmodel.StatusSuspended, Metadata: metadata}); !errors.Is(err, ErrStorage) {
 		t.Fatalf("Transition begin error = %v", err)
 	}
 	db, mock = newDB(t)
 	mock.ExpectQuery(".*").WillReturnError(errors.New("read"))
-	if _, err := NewAppRepository(db).Get(context.Background(), "tenant", "app"); !errors.Is(err, ErrStorage) {
+	if _, err := NewAppRepository(db).Get(context.Background(), tenantID, appID); !errors.Is(err, ErrStorage) {
 		t.Fatalf("Get read error = %v", err)
 	}
 	db, mock = newDB(t)
 	mock.ExpectQuery(".*").WillReturnError(errors.New("read"))
-	if _, err := NewAppRepository(db).GetRevision(context.Background(), "tenant", "app", 1); !errors.Is(err, ErrStorage) {
+	if _, err := NewAppRepository(db).GetRevision(context.Background(), tenantID, appID, 1); !errors.Is(err, ErrStorage) {
 		t.Fatalf("GetRevision read error = %v", err)
 	}
 }

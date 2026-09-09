@@ -186,9 +186,7 @@ type Catalog struct {
 
 // New creates a metric catalog backed by provider.
 func New(provider observability.Provider) Catalog {
-	if provider == nil {
-		provider = observability.NewNoopProvider()
-	}
+	provider = observability.ProtectProvider(provider)
 	meter := provider.Meter("trpcservice.metrics")
 	return Catalog{requests: meter.Counter(RequestsTotal), duration: meter.Histogram(OperationDuration), active: meter.UpDownCounter(ActiveExecutions), leases: meter.UpDownCounter(RunnerLeases), retries: meter.Counter(OperationRetries), usage: meter.Counter(UsageCostTotal), tokens: meter.Counter(TokensTotal), cost: meter.Counter(CostMinorTotal), backend: meter.Histogram(BackendOperationDuration), deliveries: meter.Counter(ChannelDeliveriesTotal), readiness: meter.UpDownCounter(Readiness), shutdown: meter.UpDownCounter(Shutdown)}
 }

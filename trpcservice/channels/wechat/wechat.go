@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // ErrInvalid reports malformed provider configuration or message input.
@@ -60,7 +62,7 @@ type PublicProvider struct {
 
 // NewPublicProvider constructs a public-account provider boundary.
 func NewPublicProvider(config PublicConfig, sender PublicSender) (*PublicProvider, error) {
-	if err := validateConfig(config.AppID, config.AppSecret); err != nil || sender == nil {
+	if err := validateConfig(config.AppID, config.AppSecret); err != nil || nilvalue.Is(sender) {
 		return nil, fmt.Errorf("%w: public account configuration is invalid", ErrInvalid)
 	}
 	return &PublicProvider{config: config, sender: sender}, nil
@@ -70,10 +72,15 @@ func NewPublicProvider(config PublicConfig, sender PublicSender) (*PublicProvide
 func (p *PublicProvider) Product() Product { return ProductPublicAccount }
 
 // Send sends one public-account message.
-func (p *PublicProvider) Send(ctx context.Context, message Message) (string, error) {
-	if p == nil || p.sender == nil || ctx == nil || !validMessage(message) {
+func (p *PublicProvider) Send(ctx context.Context, message Message) (id string, err error) {
+	if p == nil || nilvalue.Is(p.sender) || nilvalue.Is(ctx) || !validMessage(message) {
 		return "", ErrInvalid
 	}
+	defer func() {
+		if recover() != nil {
+			id, err = "", ErrInvalid
+		}
+	}()
 	return p.sender.SendPublic(ctx, message)
 }
 
@@ -85,7 +92,7 @@ type CustomerServiceProvider struct {
 
 // NewCustomerServiceProvider constructs a customer-service provider boundary.
 func NewCustomerServiceProvider(config CustomerServiceConfig, sender CustomerServiceSender) (*CustomerServiceProvider, error) {
-	if err := validateConfig(config.AppID, config.AppSecret); err != nil || sender == nil {
+	if err := validateConfig(config.AppID, config.AppSecret); err != nil || nilvalue.Is(sender) {
 		return nil, fmt.Errorf("%w: customer service configuration is invalid", ErrInvalid)
 	}
 	return &CustomerServiceProvider{config: config, sender: sender}, nil
@@ -95,10 +102,15 @@ func NewCustomerServiceProvider(config CustomerServiceConfig, sender CustomerSer
 func (p *CustomerServiceProvider) Product() Product { return ProductCustomerService }
 
 // Send sends one customer-service message.
-func (p *CustomerServiceProvider) Send(ctx context.Context, message Message) (string, error) {
-	if p == nil || p.sender == nil || ctx == nil || !validMessage(message) {
+func (p *CustomerServiceProvider) Send(ctx context.Context, message Message) (id string, err error) {
+	if p == nil || nilvalue.Is(p.sender) || nilvalue.Is(ctx) || !validMessage(message) {
 		return "", ErrInvalid
 	}
+	defer func() {
+		if recover() != nil {
+			id, err = "", ErrInvalid
+		}
+	}()
 	return p.sender.SendCustomerService(ctx, message)
 }
 

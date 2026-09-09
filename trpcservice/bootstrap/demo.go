@@ -12,6 +12,7 @@ import (
 	apppostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	backendpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/backend/postgres"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	modelpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/model/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
@@ -82,10 +83,10 @@ type DemoResult struct {
 // local demo. It uses the existing domain repositories for every write and
 // fails closed when existing state is partial or incompatible.
 func InitializeDemo(ctx context.Context, db *sql.DB, input DemoConfig) (DemoResult, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return DemoResult{}, ErrInvalidConfig
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return DemoResult{}, err
 	}
 	if db == nil {
@@ -327,7 +328,13 @@ func (config DemoConfig) validateWithCatalogs(loadCatalogs demoCatalogLoader) er
 	if _, err := modelprofile.NewProfile(modelprofile.CreateInput{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", ProfileKey: config.ModelProfileKey, DisplayName: demoModelDisplayName, Configuration: modelprofile.Configuration{Provider: demoModelProvider, Model: demoModelName}}, modelCatalog); err != nil {
 		return fmt.Errorf("%w: invalid demo model configuration", ErrDemoState)
 	}
-	if _, err := backend.NewProfile(backend.CreateInput{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", ProfileKey: config.BackendProfileKey, DisplayName: demoBackendName, Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory"}}}, backendCatalog); err != nil {
+	demoBindings := []backend.CapabilityBinding{
+		{Capability: backend.CapabilitySession, Provider: "inmemory"},
+		{Capability: backend.CapabilityMemory, Provider: "inmemory"},
+		{Capability: backend.CapabilityKnowledge, Provider: "inmemory"},
+		{Capability: backend.CapabilityArtifact, Provider: "inmemory"},
+	}
+	if _, err := backend.NewProfile(backend.CreateInput{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", ProfileKey: config.BackendProfileKey, DisplayName: demoBackendName, Bindings: demoBindings}, backendCatalog); err != nil {
 		return fmt.Errorf("%w: invalid demo backend configuration", ErrDemoState)
 	}
 	return nil
@@ -371,7 +378,15 @@ func ensureDemoBackend(ctx context.Context, db *sql.DB, repo backend.Repository,
 	}
 	metadata := demoBackendMetadata()
 	if !found {
-		value, _, createErr := repo.Create(ctx, backend.CreateInput{TenantID: tenantID, ProfileKey: profileKey, DisplayName: demoBackendName, Status: backend.StatusActive, Bindings: []backend.CapabilityBinding{{Capability: backend.CapabilitySession, Provider: "inmemory"}}, Metadata: metadata})
+		value, _, createErr := repo.Create(ctx, backend.CreateInput{
+			TenantID: tenantID, ProfileKey: profileKey, DisplayName: demoBackendName, Status: backend.StatusActive,
+			Bindings: []backend.CapabilityBinding{
+				{Capability: backend.CapabilitySession, Provider: "inmemory"},
+				{Capability: backend.CapabilityMemory, Provider: "inmemory"},
+				{Capability: backend.CapabilityKnowledge, Provider: "inmemory"},
+				{Capability: backend.CapabilityArtifact, Provider: "inmemory"},
+			}, Metadata: metadata,
+		})
 		if createErr != nil {
 			return "", false, demoDependencyError(createErr)
 		}

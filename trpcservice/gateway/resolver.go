@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 )
 
@@ -43,10 +44,10 @@ func (resolver *PlanResolver) ResolveAuthenticatedAPI(ctx context.Context, authe
 // runtime. Principal proof and route validation are intentionally performed
 // before any repository is consulted.
 func (resolver *PlanResolver) Resolve(ctx context.Context, principal Principal) (runtime.ExecutionPlan, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return runtime.ExecutionPlan{}, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return runtime.ExecutionPlan{}, err
 	}
 	if !resolver.Ready() {

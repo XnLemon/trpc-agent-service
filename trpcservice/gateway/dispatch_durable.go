@@ -10,6 +10,7 @@ import (
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -19,21 +20,47 @@ import (
 )
 
 func (dispatcher *Dispatcher) reserveHandoff(ctx context.Context, metadata dispatchMetadata) error {
-	if dispatcher.handoffStore == nil {
+	if dispatcher == nil || isNilGatewayValue(ctx) || isNilGatewayValue(dispatcher.handoffStore) {
 		return nil
 	}
-	_, err := dispatcher.handoffStore.Reserve(ctx, audit.ExecutionHandoff{
+	_, err := reserveHandoffSafely(dispatcher.handoffStore, ctx, audit.ExecutionHandoff{
 		TenantID: metadata.principal.TenantID(), HandoffID: audit.NewEventID(metadata.requestID, "handoff"),
 		RequestID: metadata.requestID, TraceID: metadata.traceID, EventID: audit.NewEventID(metadata.requestID, string(audit.EventExecutionStarted)), State: audit.HandoffPending,
 	})
 	return err
 }
 
+func reserveHandoffSafely(store audit.HandoffStore, ctx context.Context, value audit.ExecutionHandoff) (handoff audit.ExecutionHandoff, err error) {
+	if isNilGatewayValue(store) || isNilGatewayValue(ctx) {
+		return audit.ExecutionHandoff{}, audit.ErrInvalid
+	}
+	defer func() {
+		if recover() != nil {
+			handoff = audit.ExecutionHandoff{}
+			err = audit.ErrWriteFailed
+		}
+	}()
+	return store.Reserve(ctx, value)
+}
+
+func finalizeHandoffSafely(store audit.HandoffStore, ctx context.Context, value audit.ExecutionHandoff) (handoff audit.ExecutionHandoff, err error) {
+	if isNilGatewayValue(store) || isNilGatewayValue(ctx) {
+		return audit.ExecutionHandoff{}, audit.ErrInvalid
+	}
+	defer func() {
+		if recover() != nil {
+			handoff = audit.ExecutionHandoff{}
+			err = audit.ErrWriteFailed
+		}
+	}()
+	return store.Finalize(ctx, value)
+}
+
 func normalizeDispatchRequest(ctx context.Context, request DispatchRequest) (InboundMessage, string, string, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return InboundMessage{}, "", "", fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return InboundMessage{}, "", "", err
 	}
 	if err := request.Principal.Validate(); err != nil {
@@ -55,7 +82,7 @@ func normalizeDispatchRequest(ctx context.Context, request DispatchRequest) (Inb
 }
 
 func detachedCorrelationContext(parent context.Context, requestID, traceID string) context.Context {
-	if parent == nil {
+	if nilvalue.Is(parent) {
 		parent = context.Background()
 	}
 	return observability.WithCorrelation(context.WithoutCancel(parent), requestID, traceID)
@@ -66,7 +93,7 @@ func (dispatcher *Dispatcher) claimInbound(ctx context.Context, metadata dispatc
 }
 
 func (dispatcher *Dispatcher) claimInboundWithLease(ctx context.Context, metadata dispatchMetadata, leaseDuration time.Duration) (result *durableExecution, err error) {
-	if dispatcher.runtimeStore == nil || metadata.principal.Kind() != PrincipalChannel {
+	if isNilGatewayValue(dispatcher.runtimeStore) || metadata.principal.Kind() != PrincipalChannel {
 		return nil, nil
 	}
 	if leaseDuration <= 0 {

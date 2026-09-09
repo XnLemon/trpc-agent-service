@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 var (
@@ -99,10 +101,10 @@ func (store *IdempotencyStore) Begin(ctx context.Context, principal Principal, m
 	if store == nil {
 		return nil, nil, ErrNotReady
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, nil, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, nil, err
 	}
 	if err := principal.Validate(); err != nil {

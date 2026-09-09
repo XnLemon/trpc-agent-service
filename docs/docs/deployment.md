@@ -192,7 +192,10 @@ curl --fail http://127.0.0.1:8080/readyz
 | `TRPC_MODEL_PROVIDER` | 否，`openai` | 当前 bootstrap 支持的 Provider |
 | `TRPC_MODEL_NAMES` | 否，`gpt-4o-mini` | 逗号分隔模型白名单 |
 | `TRPC_MODEL_ENDPOINT_HOSTS` | 否，`api.openai.com` | 逗号分隔 HTTPS endpoint host 白名单 |
-| `TRPC_MODEL_SECRET_REF` | 否，`env/trpc-model-api-key` | 运行时 Secret 引用，不是 Secret 值 |
+| `TRPC_MODEL_SECRET_REF` | 否，`env/trpc-model-api-key` | 模型运行时 Secret 引用，不是 Secret 值 |
+| `TRPC_KNOWLEDGE_EMBEDDING_API_KEY` | PostgreSQL Knowledge 单租户必需 | Knowledge 管理 embedding 密钥；与模型密钥独立，不能写入计划或响应 |
+| `TRPC_KNOWLEDGE_EMBEDDING_API_KEYS` | PostgreSQL Knowledge 多租户必需 | 逗号分隔 `tenant_id=api_key`，每个 identity 都必须有 key |
+| `TRPC_KNOWLEDGE_EMBEDDING_SECRET_REF` | 否，`env/trpc-knowledge-embedding-api-key` | Knowledge 管理 embedding SecretRef；按 tenant 注册并解析 |
 | `TRPC_SESSION_BACKEND` | 必需，显式 `postgres`/`redis`/`inmemory` | Compose/Kubernetes 示例使用 `postgres`；Redis 模式只提供 Session/Memory，MySQL 控制面当前应使用 `inmemory` |
 | `TRPC_REDIS_ADDR` | Redis 模式必需 | Redis `host:port`；Compose 默认使用 `redis:6379` |
 | `TRPC_REDIS_PASSWORD` | 否 | Redis 认证密码，使用 Secret Manager 注入，不进入日志或快照 |
@@ -201,19 +204,21 @@ curl --fail http://127.0.0.1:8080/readyz
 | `TRPC_REDIS_KEY_PREFIX` | 否，`trpc:runtime:v1` | tenant-scoped key 前缀 |
 | `TRPC_REDIS_DIAL_TIMEOUT` / `TRPC_REDIS_READ_TIMEOUT` / `TRPC_REDIS_WRITE_TIMEOUT` | 否 | Go duration，限制 Redis 客户端 I/O |
 | `TRPC_REDIS_POOL_SIZE` | 否 | 大于 `0` 时覆盖连接池大小 |
-| `TRPC_S3_ACCESS_KEY_ID` | 否 | S3-compatible Artifact provider 的 access key；仅在 materialize S3 binding 时使用 |
-| `TRPC_S3_SECRET_KEY` | 否 | S3-compatible Artifact provider 的 secret key；通过 Secret 注入，不写入日志或快照 |
-| `TRPC_S3_SECRET_REF` | 否，`env/trpc-s3-credentials` | S3 Backend Profile 必须匹配的 tenant SecretRef |
 | `TRPC_DEMO_MODE` | 否，`false` | 仅由 `quickstart.sh --demo` 显式启用；要求 `TRPC_MODEL_PROVIDER=fake`，不读取模型凭据 |
+| `TRPC_LIVE_INTEGRATION` | 否，`0` | 只有显式设置为 `1` 才运行 ChromaDB/COS 等真实外部集成测试；默认测试不访问外部服务 |
 
 模型 API key 只在受信任的 Secret Resolver/Factory 路径中使用，不进入 Execution Plan、缓存、
 日志或数据库。
 
-S3 Artifact provider 是按 Profile 选择的可选能力，不会因为设置上述凭据就改变默认后端。Binding
-需要 `Provider: "s3"`、`artifact` capability、`bucket` option 和匹配的 `SecretRef`；本地 MinIO
-可通过 `docker compose --profile s3` 启动，HTTP endpoint 必须同时设置 `allow_insecure=true`。
-真实部署应使用 HTTPS S3/OSS-compatible endpoint，并将凭据交给 Secret Manager。[runtime-storage.md](runtime-storage.md)
-中的 live conformance 测试只在显式提供测试环境变量时运行。
+Agent Artifact 的生产后端使用上游 COS provider，并通过 Backend Profile 的 tenant-scoped
+`SecretRef` 解析凭据。平台不再提供 S3-compatible Agent Artifact provider；IM 附件由独立的
+`AttachmentStore` 负责。ChromaDB/COS 双 Worker 重启验收需要额外的 `TRPC_CHROMA_LIVE_*`
+或 `TRPC_COS_LIVE_*` 配置，缺少配置时只跳过 live suite，不会回退到外部网络探测。
+
+MCP 绑定、Skill attestation 和 Guardrail 策略均在 Revision/ExecutionPlan 边界校验；MCP
+不会因部署启动而自动连接未声明的远程端点，Skill 未 pin 到 Revision 或未满足可信来源/摘要
+校验时 fail closed。OpenClaw 不属于本 Go 服务的默认 Channel，兼容性限制见[上游 server /
+OpenClaw 兼容性评估](upstream-compatibility.md)。
 
 ### 企业微信与 OpenTelemetry
 

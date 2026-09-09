@@ -2,30 +2,43 @@ package bootstrap
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"errors"
 	"fmt"
-	"net"
-	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
+	"sync"
 
-	awssdk "github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-
+	agentcontext "github.com/XnLemon/trpc-agent-service/trpcservice/agent"
 	agentsessionstore "github.com/XnLemon/trpc-agent-service/trpcservice/agent/sessionstore"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels/wecom_aibot"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
+	knowledgeadmin "github.com/XnLemon/trpc-agent-service/trpcservice/knowledge"
+	knowledgepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/knowledge/postgres"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
-	runtimestorages3 "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/s3"
+	skillsecurity "github.com/XnLemon/trpc-agent-service/trpcservice/skill"
+	"trpc.group/trpc-go/trpc-agent-go/artifact"
+	artifactcos "trpc.group/trpc-go/trpc-agent-go/artifact/cos"
+	artifactinmemory "trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/knowledge"
+	knowledgeembedder "trpc.group/trpc-go/trpc-agent-go/knowledge/embedder"
+	embedderopenai "trpc.group/trpc-go/trpc-agent-go/knowledge/embedder/openai"
+	knowledgevector "trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/memory"
+	memorychromadb "trpc.group/trpc-go/trpc-agent-go/memory/chromadb"
+	memoryinmemory "trpc.group/trpc-go/trpc-agent-go/memory/inmemory"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
+	"trpc.group/trpc-go/trpc-agent-go/skill"
 )
 
 type environmentSecretResolver struct {
@@ -39,10 +52,10 @@ type environmentWeComCredentialResolver struct {
 }
 
 func (resolver environmentWeComCredentialResolver) Resolve(ctx context.Context, scope channels.SecretScope) (wecom.Credentials, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return wecom.Credentials{}, errors.New("wecom credential resolver context is required")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return wecom.Credentials{}, err
 	}
 	if err := scope.Validate(); err != nil || scope.TenantID != resolver.tenantID || scope.SecretRef != resolver.config.secretRef {
@@ -57,10 +70,10 @@ type environmentWeComAIBotCredentialResolver struct {
 }
 
 func (resolver environmentWeComAIBotCredentialResolver) Resolve(ctx context.Context, scope channels.SecretScope) (wecom_aibot.Credentials, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return wecom_aibot.Credentials{}, errors.New("wecom ai bot credential resolver context is required")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return wecom_aibot.Credentials{}, err
 	}
 	if err := scope.Validate(); err != nil || scope.TenantID != resolver.tenantID {
@@ -82,10 +95,10 @@ func environmentWeComOwner() (string, error) {
 }
 
 func (resolver environmentSecretResolver) Resolve(ctx context.Context, scope modelprofile.SecretScope) (modelprofile.SecretValue, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return modelprofile.SecretValue{}, errors.New("secret resolver context is required")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return modelprofile.SecretValue{}, err
 	}
 	if err := scope.Validate(); err != nil {
@@ -115,155 +128,258 @@ type environmentRuntimeCapabilityProvider struct {
 	redisEndpoint         string
 	redisSecretRef        string
 	redisPasswordRequired bool
+	memory                memory.Service
+	artifact              artifact.Service
+	knowledge             knowledge.Knowledge
 }
 
-type environmentS3CapabilityProvider struct {
-	tenantID  string
-	secretRef string
+type environmentNativeCapabilityProvider struct {
+	capability backend.Capability
 }
 
-func (provider environmentS3CapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
-	if ctx == nil {
+func (provider environmentNativeCapabilityProvider) New(ctx context.Context, _ backend.StorageFactoryInput, _ backend.CapabilityBinding, _ modelprofile.SecretValue) (any, error) {
+	if nilvalue.Is(ctx) {
 		return nil, context.Canceled
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
-	if provider.tenantID == "" || input.TenantID != provider.tenantID || binding.Capability != backend.CapabilityArtifact || strings.ToLower(strings.TrimSpace(binding.Provider)) != "s3" || provider.secretRef == "" || binding.SecretRef != provider.secretRef {
+	switch provider.capability {
+	case backend.CapabilityMemory:
+		return memoryinmemory.NewMemoryService(), nil
+	case backend.CapabilityArtifact:
+		return artifactinmemory.NewService(), nil
+	case backend.CapabilityKnowledge:
+		return knowledge.New(
+			knowledge.WithEmbedder(environmentHashEmbedder{}),
+			knowledge.WithVectorStore(knowledgevector.New()),
+		), nil
+	default:
 		return nil, storagefactory.ErrStorageFactory
 	}
-	store, err := newEnvironmentS3Store(ctx, provider.tenantID, binding, secret)
-	if err != nil || store == nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, storagefactory.ErrStorageFactory
-	}
-	if err := store.Probe(ctx); err != nil {
-		_ = store.Close()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, storagefactory.ErrStorageFactory
-	}
-	return store, nil
 }
 
-func newEnvironmentS3StoreFromConfig(ctx context.Context, tenantID string, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (environmentS3Store, error) {
-	if ctx == nil || ctx.Err() != nil || tenantID == "" {
+// environmentHashEmbedder is intentionally deterministic for the local/demo
+// provider. It exercises the upstream indexing and retrieval pipeline without
+// requiring network credentials; production profiles should use an upstream
+// remote embedder provider.
+type environmentHashEmbedder struct{}
+
+var _ knowledgeembedder.Embedder = environmentHashEmbedder{}
+
+func (environmentHashEmbedder) GetEmbedding(ctx context.Context, text string) ([]float64, error) {
+	if nilvalue.Is(ctx) {
+		return nil, context.Canceled
+	}
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		return nil, err
+	}
+	const dimensions = 32
+	var vector [dimensions]float64
+	for _, token := range strings.Fields(strings.ToLower(text)) {
+		digest := sha256.Sum256([]byte(token))
+		index := int(digest[0]) % dimensions
+		vector[index] += 1
+	}
+	return vector[:], nil
+}
+
+func (e environmentHashEmbedder) GetEmbeddingWithUsage(ctx context.Context, text string) ([]float64, map[string]any, error) {
+	vector, err := e.GetEmbedding(ctx, text)
+	return vector, nil, err
+}
+
+func (environmentHashEmbedder) GetDimensions() int { return 32 }
+
+type environmentChromaMemoryProvider struct{}
+
+func (environmentChromaMemoryProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
+	if nilvalue.Is(ctx) || nilvalue.ContextErr(ctx) != nil || input.TenantID == "" || strings.TrimSpace(input.AppID) == "" || binding.Capability != backend.CapabilityMemory || strings.TrimSpace(binding.Endpoint) == "" {
 		return nil, storagefactory.ErrStorageFactory
 	}
-	accessKey, secretKey, err := parseEnvironmentS3Credentials(binding.SecretRef, secret)
+	apiKey := secret.Value()
+	if apiKey == "" {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	embedder := knowledgeembedder.Embedder(embedderopenai.New(embedderopenai.WithAPIKey(apiKey)))
+	switch optionOrDefault(binding.Options, "embedder", "openai") {
+	case "openai":
+	case "hash":
+		embedder = environmentHashEmbedder{}
+	default:
+		return nil, storagefactory.ErrStorageFactory
+	}
+	opts := []memorychromadb.ServiceOpt{
+		memorychromadb.WithBaseURL(binding.Endpoint),
+		memorychromadb.WithAPIKey(apiKey),
+		memorychromadb.WithTenant(input.TenantID),
+		memorychromadb.WithDatabase(optionOrDefault(binding.Options, "database", "default_database")),
+		memorychromadb.WithCollectionName(optionOrDefault(binding.Options, "collection", "memories")),
+		memorychromadb.WithEmbedder(embedder),
+	}
+	if dimension := optionInt(binding.Options, "dimension"); dimension > 0 {
+		opts = append(opts, memorychromadb.WithIndexDimension(dimension))
+	}
+	return memorychromadb.NewService(opts...)
+}
+
+func optionOrDefault(options map[string]string, key, fallback string) string {
+	if value := strings.TrimSpace(options[key]); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func optionInt(options map[string]string, key string) int {
+	value, err := strconv.Atoi(strings.TrimSpace(options[key]))
+	if err != nil || value < 1 {
+		return 0
+	}
+	return value
+}
+
+type environmentPostgresVectorKnowledgeProvider struct {
+	db *sql.DB
+}
+
+func (provider environmentPostgresVectorKnowledgeProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
+	if nilvalue.Is(ctx) || nilvalue.ContextErr(ctx) != nil || provider.db == nil || input.TenantID == "" || strings.TrimSpace(input.AppID) == "" || binding.Capability != backend.CapabilityKnowledge || strings.ToLower(strings.TrimSpace(binding.Provider)) != "postgres_vector" || secret.Value() == "" {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	dimension := optionInt(binding.Options, "dimension")
+	if dimension == 0 {
+		dimension = embedderopenai.DefaultDimensions
+	}
+	store, err := knowledgepostgres.New(provider.db, input.TenantID, knowledgepostgres.WithAppID(input.AppID), knowledgepostgres.WithDimension(dimension))
 	if err != nil {
 		return nil, storagefactory.ErrStorageFactory
 	}
-	endpoint := strings.TrimSpace(binding.Endpoint)
-	options, err := parseEnvironmentS3Options(binding.Options)
-	if err != nil || !validEnvironmentS3Endpoint(endpoint, options.allowInsecure) {
+	embedder := embedderopenai.New(embedderopenai.WithAPIKey(secret.Value()), embedderopenai.WithDimensions(dimension))
+	service := knowledge.New(knowledge.WithVectorStore(store), knowledge.WithEmbedder(embedder))
+	return service, nil
+}
+
+// environmentKnowledgeManagementProvider binds the Admin corpus manager to
+// the tenant-scoped PostgreSQL store and its independent embedding SecretRef.
+// Runtime capability bindings may use a different secret and are never
+// borrowed implicitly by the management path.
+type environmentKnowledgeManagementProvider struct {
+	db        *sql.DB
+	secrets   modelprofile.SecretResolver
+	secretRef string
+	demo      bool
+
+	mu         sync.Mutex
+	demoStores map[string]*knowledgevector.VectorStore
+}
+
+func (provider *environmentKnowledgeManagementProvider) Open(ctx context.Context, scope knowledgeadmin.Scope) (knowledgeadmin.Backend, error) {
+	if nilvalue.Is(ctx) || provider == nil || scope.Validate() != nil {
+		return knowledgeadmin.Backend{}, storagefactory.ErrStorageFactory
+	}
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		return knowledgeadmin.Backend{}, err
+	}
+	if provider.demo {
+		provider.mu.Lock()
+		if provider.demoStores == nil {
+			provider.demoStores = make(map[string]*knowledgevector.VectorStore)
+		}
+		key := scope.TenantID + "\x00" + scope.AppID
+		store := provider.demoStores[key]
+		if store == nil {
+			store = knowledgevector.New()
+			provider.demoStores[key] = store
+		}
+		provider.mu.Unlock()
+		return knowledgeadmin.Backend{Store: store, Embedder: environmentHashEmbedder{}}, nil
+	}
+	if provider.db == nil || nilvalue.Is(provider.secrets) || strings.TrimSpace(provider.secretRef) == "" {
+		return knowledgeadmin.Backend{}, storagefactory.ErrStorageFactory
+	}
+	secret, err := provider.secrets.Resolve(ctx, modelprofile.SecretScope{TenantID: scope.TenantID, SecretRef: provider.secretRef})
+	if err != nil || secret.Value() == "" {
+		return knowledgeadmin.Backend{}, storagefactory.ErrStorageFactory
+	}
+	store, err := knowledgepostgres.New(provider.db, scope.TenantID, knowledgepostgres.WithAppID(scope.AppID), knowledgepostgres.WithDimension(embedderopenai.DefaultDimensions))
+	if err != nil {
+		return knowledgeadmin.Backend{}, storagefactory.ErrStorageFactory
+	}
+	return knowledgeadmin.Backend{
+		Store:    store,
+		Embedder: embedderopenai.New(embedderopenai.WithAPIKey(secret.Value()), embedderopenai.WithDimensions(embedderopenai.DefaultDimensions)),
+		Close:    store.Close,
+	}, nil
+}
+
+var _ knowledgeadmin.Provider = (*environmentKnowledgeManagementProvider)(nil)
+
+// environmentSkillRepositoryProvider maps each trusted tenant and app to
+// a separate upstream FSRepository. The repository is created per request so
+// no live filesystem handle or unscoped global root is retained by a Runner.
+type environmentSkillRepositoryProvider struct {
+	root string
+}
+
+func (provider environmentSkillRepositoryProvider) Repository(ctx context.Context, scope skill.SkillScope) (skill.Repository, error) {
+	if nilvalue.Is(ctx) || nilvalue.ContextErr(ctx) != nil || provider.root == "" {
 		return nil, storagefactory.ErrStorageFactory
 	}
-	cfg := awssdk.Config{
-		Region:      options.region,
-		Credentials: credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
+	metadata, ok := agentcontext.ExecutionMetadataFromContext(ctx)
+	if !ok || strings.TrimSpace(scope.AppName) == "" || scope.AppName != metadata.AppID || scope.UserID != "" {
+		return nil, storagefactory.ErrStorageFactory
 	}
-	return runtimestorages3.NewFromConfig(cfg, options.bucket, tenantID, endpoint, options.pathStyle, options.allowInsecure, runtimestorages3.Options{
-		MaxBytes: options.maxBytes, ConnectTimeout: options.connectTimeout, ReadTimeout: options.readTimeout, WriteTimeout: options.writeTimeout,
-	})
+	if strings.ContainsAny(metadata.TenantID, "/\\\\\x00\r\n") || strings.Contains(metadata.TenantID, "..") {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	parts, err := skill.ScopePathParts(skill.SkillScopeApp, scope)
+	if err != nil {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	pathParts := append([]string{provider.root, "tenants", metadata.TenantID}, parts...)
+	repositoryRoot := filepath.Join(pathParts...)
+	info, err := os.Stat(repositoryRoot)
+	if err != nil || !info.IsDir() {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(repositoryRoot)
+	if err != nil {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	relative, err := filepath.Rel(provider.root, resolvedRoot)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	repository, err := skill.NewFSRepository(resolvedRoot)
+	if err != nil {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	attested, err := skillsecurity.NewFilesystemAttestedRepository(repository, "filesystem")
+	if err != nil {
+		return nil, storagefactory.ErrStorageFactory
+	}
+	return attested, nil
 }
 
-func parseEnvironmentS3Credentials(secretRef string, secret modelprofile.SecretValue) (string, string, error) {
-	if secretRef == "" || secret.Value() == "" {
-		return "", "", storagefactory.ErrStorageFactory
-	}
-	accessKey, secretKey, ok := strings.Cut(secret.Value(), ":")
-	if !ok || strings.TrimSpace(accessKey) == "" || secretKey == "" || strings.ContainsAny(accessKey, "\r\n") || strings.ContainsAny(secretKey, "\r\n") {
-		return "", "", storagefactory.ErrStorageFactory
-	}
-	return accessKey, secretKey, nil
-}
+type environmentCOSCapabilityProvider struct{}
 
-func validEnvironmentS3Endpoint(endpoint string, allowInsecure bool) bool {
-	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
-		return false
+func (environmentCOSCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
+	if nilvalue.Is(ctx) || nilvalue.ContextErr(ctx) != nil || input.TenantID == "" || strings.TrimSpace(input.AppID) == "" || binding.Capability != backend.CapabilityArtifact || strings.ToLower(strings.TrimSpace(binding.Provider)) != "cos" || strings.TrimSpace(binding.Endpoint) == "" {
+		return nil, storagefactory.ErrStorageFactory
 	}
-	return parsed.Scheme == "https" || (parsed.Scheme == "http" && allowInsecure)
-}
-
-type environmentS3Options struct {
-	bucket, region string
-	pathStyle      bool
-	allowInsecure  bool
-	maxBytes       int64
-	connectTimeout time.Duration
-	readTimeout    time.Duration
-	writeTimeout   time.Duration
-}
-
-func parseEnvironmentS3Options(raw map[string]string) (environmentS3Options, error) {
-	for key := range raw {
-		switch key {
-		case "bucket", "region", "path_style", "allow_insecure", "max_bytes", "connect_timeout_ms", "read_timeout_ms", "write_timeout_ms":
-		default:
-			return environmentS3Options{}, storagefactory.ErrStorageFactory
-		}
+	parts := strings.SplitN(secret.Value(), ":", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return nil, storagefactory.ErrStorageFactory
 	}
-	value := func(key, fallback string) string {
-		if item := strings.TrimSpace(raw[key]); item != "" {
-			return item
-		}
-		return fallback
+	service, err := artifactcos.NewService(input.TenantID, binding.Endpoint, artifactcos.WithSecretID(parts[0]), artifactcos.WithSecretKey(parts[1]))
+	if err != nil {
+		return nil, storagefactory.ErrStorageFactory
 	}
-	result := environmentS3Options{bucket: value("bucket", ""), region: value("region", "us-east-1")}
-	if result.bucket == "" || result.region == "" || len(result.region) > 128 || strings.ContainsAny(result.region, "\r\n\t ") || !validS3Bucket(result.bucket) {
-		return environmentS3Options{}, storagefactory.ErrStorageFactory
-	}
-	var err error
-	if result.pathStyle, err = strconv.ParseBool(value("path_style", "false")); err != nil {
-		return environmentS3Options{}, storagefactory.ErrStorageFactory
-	}
-	if result.allowInsecure, err = strconv.ParseBool(value("allow_insecure", "false")); err != nil {
-		return environmentS3Options{}, storagefactory.ErrStorageFactory
-	}
-	maxBytes, err := strconv.ParseInt(value("max_bytes", "33554432"), 10, 64)
-	if err != nil || maxBytes < 1 || maxBytes > 1<<30 {
-		return environmentS3Options{}, storagefactory.ErrStorageFactory
-	}
-	result.maxBytes = maxBytes
-	for key, target := range map[string]*time.Duration{
-		"connect_timeout_ms": &result.connectTimeout,
-		"read_timeout_ms":    &result.readTimeout,
-		"write_timeout_ms":   &result.writeTimeout,
-	} {
-		milliseconds, parseErr := strconv.ParseInt(value(key, "15000"), 10, 64)
-		if parseErr != nil || milliseconds < 1 || milliseconds > 300000 {
-			return environmentS3Options{}, storagefactory.ErrStorageFactory
-		}
-		*target = time.Duration(milliseconds) * time.Millisecond
-	}
-	return result, nil
-}
-
-func validS3Bucket(bucket string) bool {
-	if len(bucket) < 3 || len(bucket) > 63 || strings.ToLower(bucket) != bucket || net.ParseIP(bucket) != nil || strings.Contains(bucket, "..") {
-		return false
-	}
-	for _, label := range strings.Split(bucket, ".") {
-		if label == "" || label[0] == '-' || label[len(label)-1] == '-' {
-			return false
-		}
-		for _, value := range label {
-			if (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') || value == '-' {
-				continue
-			}
-			return false
-		}
-	}
-	return true
+	return service, nil
 }
 
 func (provider environmentRuntimeCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, binding backend.CapabilityBinding, secret modelprofile.SecretValue) (any, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, context.Canceled
 	}
 	if err := provider.validateRedisBinding(binding, secret); err != nil {
@@ -300,40 +416,29 @@ func (provider environmentRuntimeCapabilityProvider) newCapability(ctx context.C
 	// workers when one runner is torn down.
 	switch provider.capability {
 	case backend.CapabilityMemory:
-		store, ok := provider.store.(runtimestorage.MemoryStore)
-		if !ok {
+		if nilvalue.Is(provider.memory) {
 			return nil, storagefactory.ErrStorageFactory
 		}
-		return borrowedMemoryStore{MemoryStore: store}, nil
+		return borrowedMemoryService{Service: provider.memory}, nil
 	case backend.CapabilitySummary:
 		store, ok := provider.store.(runtimestorage.SummaryStore)
-		if !ok {
+		if !ok || nilvalue.Is(store) {
 			return nil, storagefactory.ErrStorageFactory
 		}
 		return borrowedSummaryStore{SummaryStore: store}, nil
 	case backend.CapabilityKnowledge:
-		knowledge, ok := provider.store.(runtimestorage.KnowledgeStore)
-		if !ok {
+		if nilvalue.Is(provider.knowledge) {
 			return nil, storagefactory.ErrStorageFactory
 		}
-		vector, ok := provider.store.(runtimestorage.VectorStore)
-		if !ok {
-			return nil, storagefactory.ErrStorageFactory
-		}
-		return borrowedKnowledgeStore{KnowledgeStore: knowledge, VectorStore: vector}, nil
+		return borrowedKnowledgeService{Knowledge: provider.knowledge}, nil
 	case backend.CapabilityArtifact:
-		artifact, ok := provider.store.(runtimestorage.ArtifactStore)
-		if !ok {
+		if nilvalue.Is(provider.artifact) {
 			return nil, storagefactory.ErrStorageFactory
 		}
-		object, ok := provider.store.(runtimestorage.ObjectStore)
-		if !ok {
-			return nil, storagefactory.ErrStorageFactory
-		}
-		return borrowedArtifactStore{ArtifactStore: artifact, ObjectStore: object}, nil
+		return borrowedArtifactService{Service: provider.artifact}, nil
 	case backend.CapabilityAudit:
 		store, ok := provider.store.(runtimestorage.AuditStore)
-		if !ok {
+		if !ok || nilvalue.Is(store) {
 			return nil, storagefactory.ErrStorageFactory
 		}
 		return borrowedAuditStore{AuditStore: store}, nil
@@ -342,36 +447,30 @@ func (provider environmentRuntimeCapabilityProvider) newCapability(ctx context.C
 	}
 }
 
-type borrowedMemoryStore struct{ runtimestorage.MemoryStore }
+type borrowedMemoryService struct{ memory.Service }
 type borrowedSummaryStore struct{ runtimestorage.SummaryStore }
-type borrowedKnowledgeStore struct {
-	runtimestorage.KnowledgeStore
-	runtimestorage.VectorStore
-}
-type borrowedArtifactStore struct {
-	runtimestorage.ArtifactStore
-	runtimestorage.ObjectStore
-}
 type borrowedAuditStore struct{ runtimestorage.AuditStore }
+type borrowedArtifactService struct{ artifact.Service }
+type borrowedKnowledgeService struct{ knowledge.Knowledge }
 
-func (borrowedMemoryStore) Close() error    { return nil }
-func (borrowedSummaryStore) Close() error   { return nil }
-func (borrowedKnowledgeStore) Close() error { return nil }
-func (borrowedArtifactStore) Close() error  { return nil }
-func (borrowedAuditStore) Close() error     { return nil }
+func (borrowedMemoryService) Close() error    { return nil }
+func (borrowedSummaryStore) Close() error     { return nil }
+func (borrowedAuditStore) Close() error       { return nil }
+func (borrowedArtifactService) Close() error  { return nil }
+func (borrowedKnowledgeService) Close() error { return nil }
 
 func (provider environmentSessionCapabilityProvider) New(ctx context.Context, input backend.StorageFactoryInput, _ backend.CapabilityBinding, _ modelprofile.SecretValue) (any, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, context.Canceled
 	}
 	return agentsessionstore.NewWithObservability(input.TenantID, provider.delegate, provider.store, provider.telemetry, provider.backend)
 }
 
 func (environmentModelFactory) New(ctx context.Context, input modelprofile.ModelFactoryInput, secret modelprofile.SecretValue) (trpcmodel.Model, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, errors.New("model factory context is required")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	provider := strings.ToLower(strings.TrimSpace(input.Provider))

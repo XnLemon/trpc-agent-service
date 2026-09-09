@@ -66,7 +66,7 @@ func assertExecutionPlanIdentity(t *testing.T, plan ExecutionPlan, fixture runti
 	if err != nil {
 		t.Fatal(err)
 	}
-	if agentInput.ModelProfileID != fixture.modelProfile.ProfileID || modelInput.ProfileID != fixture.modelProfile.ProfileID || len(storageInput.Bindings) != 1 {
+	if agentInput.ModelProfileID != fixture.modelProfile.ProfileID || modelInput.ProfileID != fixture.modelProfile.ProfileID || storageInput.AppID != fixture.app.AppID || len(storageInput.Bindings) != 1 {
 		t.Fatalf("plan lost component references: agent=%+v model=%+v storage=%+v", agentInput, modelInput, storageInput)
 	}
 

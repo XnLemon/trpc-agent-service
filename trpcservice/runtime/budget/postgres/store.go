@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
 )
 
@@ -36,6 +37,9 @@ func New(db *sql.DB) (*Store, error) {
 func (store *Store) Reserve(ctx context.Context, input budget.ReserveInput) (budget.Reservation, error) {
 	if err := validateContext(ctx); err != nil {
 		return budget.Reservation{}, err
+	}
+	if store == nil || store.db == nil {
+		return budget.Reservation{}, ErrStorage
 	}
 	if err := validateInput(input); err != nil {
 		return budget.Reservation{}, err
@@ -116,6 +120,9 @@ func (store *Store) Settle(ctx context.Context, tenantID, reservationID string, 
 	if err := validateContext(ctx); err != nil {
 		return budget.Reservation{}, err
 	}
+	if store == nil || store.db == nil {
+		return budget.Reservation{}, ErrStorage
+	}
 	if err := validateUsage(usage); err != nil {
 		return budget.Reservation{}, err
 	}
@@ -188,6 +195,9 @@ func (store *Store) Settle(ctx context.Context, tenantID, reservationID string, 
 func (store *Store) Release(ctx context.Context, tenantID, reservationID string) (budget.Reservation, error) {
 	if err := validateContext(ctx); err != nil {
 		return budget.Reservation{}, err
+	}
+	if store == nil || store.db == nil {
+		return budget.Reservation{}, ErrStorage
 	}
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -302,10 +312,10 @@ func lockReservation(ctx context.Context, tx *sql.Tx, tenantID, reservationID st
 }
 
 func validateContext(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return budget.ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	return nil

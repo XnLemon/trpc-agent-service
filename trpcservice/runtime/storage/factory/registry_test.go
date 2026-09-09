@@ -8,9 +8,24 @@ import (
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 )
 
+func TestProviderRegistryZeroValueInitializesOnRegister(t *testing.T) {
+	var registry ProviderRegistry
+	const tenantID = "t_00000000000000000000000000"
+	input := StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000"}
+	binding := CapabilityBinding{Capability: CapabilitySession, Provider: "inmemory"}
+	provider := &registryCapabilityProvider{}
+	if err := registry.Register(tenantID, binding.Capability, binding.Provider, provider); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := registry.Resolve(context.Background(), input, binding)
+	if err != nil || resolved != provider {
+		t.Fatalf("zero-value Resolve() = %v, %v", resolved, err)
+	}
+}
+
 func TestProviderRegistryIsTenantCapabilityScoped(t *testing.T) {
 	registry := NewProviderRegistry()
-	input := StorageFactoryInput{TenantID: "t_00000000000000000000000000"}
+	input := StorageFactoryInput{TenantID: "t_00000000000000000000000000", AppID: "app_00000000000000000000000000"}
 	binding := CapabilityBinding{Capability: CapabilitySession, Provider: "inmemory"}
 	factory := &registryCapabilityProvider{}
 	if err := registry.Register(input.TenantID, binding.Capability, binding.Provider, factory); err != nil {
@@ -46,7 +61,7 @@ func TestProviderRegistryRemovalAndValidationBoundaries(t *testing.T) {
 	const tenantID = "t_00000000000000000000000000"
 	registry := NewProviderRegistry()
 	binding := CapabilityBinding{Capability: CapabilitySession, Provider: "memory"}
-	input := StorageFactoryInput{TenantID: tenantID}
+	input := StorageFactoryInput{TenantID: tenantID, AppID: "app_00000000000000000000000000"}
 	if err := registry.Register(tenantID, CapabilitySession, "memory", &registryCapabilityProvider{}); err != nil {
 		t.Fatal(err)
 	}

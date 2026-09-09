@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
 )
 
@@ -54,10 +55,13 @@ type Ledger struct {
 
 // Snapshot returns the current monthly counters.
 func (store *Store) Snapshot(ctx context.Context, tenantID string, periodStart time.Time) (Ledger, error) {
-	if ctx == nil {
+	if store == nil {
+		return Ledger{}, budget.ErrUnavailable
+	}
+	if nilvalue.Is(ctx) {
 		return Ledger{}, errors.New("budget snapshot context is required")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return Ledger{}, err
 	}
 	periodStart = normalizePeriod(periodStart)
@@ -72,6 +76,9 @@ func (store *Store) Snapshot(ctx context.Context, tenantID string, periodStart t
 
 // Reserve atomically admits an execution against the in-memory monthly ledger.
 func (store *Store) Reserve(ctx context.Context, input budget.ReserveInput) (budget.Reservation, error) {
+	if store == nil {
+		return budget.Reservation{}, budget.ErrInvalid
+	}
 	if err := validContext(ctx); err != nil {
 		return budget.Reservation{}, err
 	}
@@ -82,6 +89,12 @@ func (store *Store) Reserve(ctx context.Context, input budget.ReserveInput) (bud
 	key := reservationKey{tenantID: input.TenantID, reservationID: input.ReservationID}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if store.ledgers == nil {
+		store.ledgers = make(map[ledgerKey]*ledger)
+	}
+	if store.reservations == nil {
+		store.reservations = make(map[reservationKey]budget.Reservation)
+	}
 	if existing, ok := store.reservations[key]; ok {
 		if existing.PeriodStart != periodStart || existing.EstimatedTokens != input.Estimate.Tokens() || existing.EstimatedSpendMinor != input.Estimate.SpendMinor {
 			return budget.Reservation{}, budget.ErrConflict
@@ -111,6 +124,9 @@ func (store *Store) Reserve(ctx context.Context, input budget.ReserveInput) (bud
 
 // Settle commits actual usage and releases the reservation's held capacity.
 func (store *Store) Settle(ctx context.Context, tenantID, reservationID string, usage budget.Usage) (budget.Reservation, error) {
+	if store == nil {
+		return budget.Reservation{}, budget.ErrInvalid
+	}
 	if err := validContext(ctx); err != nil {
 		return budget.Reservation{}, err
 	}
@@ -157,6 +173,9 @@ func (store *Store) Settle(ctx context.Context, tenantID, reservationID string, 
 
 // Release returns a reserved execution's held capacity to the in-memory ledger.
 func (store *Store) Release(ctx context.Context, tenantID, reservationID string) (budget.Reservation, error) {
+	if store == nil {
+		return budget.Reservation{}, budget.ErrInvalid
+	}
 	if err := validContext(ctx); err != nil {
 		return budget.Reservation{}, err
 	}
@@ -185,10 +204,10 @@ func (store *Store) Release(ctx context.Context, tenantID, reservationID string)
 }
 
 func validContext(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return budget.ErrInvalid
 	}
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
 }
 
 func validateInput(input budget.ReserveInput) error {

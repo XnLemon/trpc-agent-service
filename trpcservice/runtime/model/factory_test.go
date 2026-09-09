@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -45,6 +46,46 @@ func TestResolveAndBuildUsesExplicitConditionalTenantSecretScope(t *testing.T) {
 	}
 }
 
+func TestResolveAndBuildCleansPartiallyBuiltModelsAndFailsClosed(t *testing.T) {
+	input := testModelFactoryInput("secret://tenant/model")
+	secret, err := NewSecretValue("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := &recordingResolver{value: secret}
+	var closed atomic.Int32
+	factory := &recordingFactory{model: &closableFakeModel{closed: &closed}, err: errors.New("provider detail")}
+	if _, err := ResolveAndBuild(context.Background(), input, resolver, factory); !errors.Is(err, ErrModelFactory) {
+		t.Fatalf("factory partial result error = %v", err)
+	}
+	if closed.Load() != 1 {
+		t.Fatalf("partial model close count = %d, want 1", closed.Load())
+	}
+
+	factory = &recordingFactory{panicCall: true}
+	if _, err := ResolveAndBuild(context.Background(), input, resolver, factory); !errors.Is(err, ErrModelFactory) {
+		t.Fatalf("factory panic error = %v", err)
+	}
+	resolver.panicCall = true
+	if _, err := ResolveAndBuild(context.Background(), input, resolver, &recordingFactory{}); !errors.Is(err, ErrSecretResolution) {
+		t.Fatalf("resolver panic error = %v", err)
+	}
+	resolver.panicCall = false
+	resolver.value = SecretValue{}
+	if _, err := ResolveAndBuild(context.Background(), input, resolver, &recordingFactory{}); !errors.Is(err, ErrSecretResolution) {
+		t.Fatalf("empty resolved secret error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	factory = &recordingFactory{model: &closableFakeModel{closed: &closed}, cancel: cancel}
+	if _, err := ResolveAndBuild(ctx, testModelFactoryInput(""), nil, factory); !errors.Is(err, context.Canceled) {
+		t.Fatalf("late cancellation error = %v", err)
+	}
+	if closed.Load() != 2 {
+		t.Fatalf("canceled model close count = %d, want 2", closed.Load())
+	}
+}
+
 func TestResolveAndBuildRedactsErrorsAndHonorsBoundaries(t *testing.T) {
 	input := testModelFactoryInput("secret://tenant/model")
 	resolver := &recordingResolver{err: errors.New("KMS returned super-secret")}
@@ -52,6 +93,7 @@ func TestResolveAndBuildRedactsErrorsAndHonorsBoundaries(t *testing.T) {
 		t.Fatalf("resolver error was not redacted/classified: %v", err)
 	}
 	resolver.err = nil
+	resolver.value, _ = NewSecretValue("super-secret")
 	factory := &recordingFactory{err: errors.New("provider rejected super-secret")}
 	if _, err := ResolveAndBuild(context.Background(), input, resolver, factory); !errors.Is(err, ErrModelFactory) || strings.Contains(err.Error(), "super-secret") {
 		t.Fatalf("factory error was not redacted/classified: %v", err)
@@ -88,14 +130,18 @@ func testModelFactoryInput(secretRef string) ModelFactoryInput {
 }
 
 type recordingResolver struct {
-	calls int
-	scope SecretScope
-	value SecretValue
-	err   error
+	calls     int
+	scope     SecretScope
+	value     SecretValue
+	err       error
+	panicCall bool
 }
 
 func (resolver *recordingResolver) Resolve(_ context.Context, scope SecretScope) (SecretValue, error) {
 	resolver.calls++
+	if resolver.panicCall {
+		panic("resolver panic")
+	}
 	resolver.scope = scope
 	if resolver.err != nil {
 		return SecretValue{}, resolver.err
@@ -109,19 +155,54 @@ type recordingFactory struct {
 	secret    SecretValue
 	err       error
 	returnNil bool
+	model     trpcmodel.Model
+	panicCall bool
+	cancel    context.CancelFunc
 }
 
 func (factory *recordingFactory) New(_ context.Context, input ModelFactoryInput, secret SecretValue) (trpcmodel.Model, error) {
 	factory.calls++
+	if factory.panicCall {
+		panic("factory panic")
+	}
+	if factory.cancel != nil {
+		factory.cancel()
+	}
 	factory.input = input
 	factory.secret = secret
 	if factory.err != nil {
-		return nil, factory.err
+		return factory.model, factory.err
 	}
 	if factory.returnNil {
 		return nil, nil
 	}
+	if factory.model != nil {
+		return factory.model, nil
+	}
 	return fakeModel{}, nil
+}
+
+type closableFakeModel struct {
+	closed     *atomic.Int32
+	panicClose bool
+}
+
+func (model *closableFakeModel) Info() trpcmodel.Info { return trpcmodel.Info{Name: "closable"} }
+
+func (model *closableFakeModel) GenerateContent(ctx context.Context, _ *trpcmodel.Request) (<-chan *trpcmodel.Response, error) {
+	responses := make(chan *trpcmodel.Response)
+	close(responses)
+	return responses, nil
+}
+
+func (model *closableFakeModel) Close() error {
+	if model.closed != nil {
+		model.closed.Add(1)
+	}
+	if model.panicClose {
+		panic("closer panic")
+	}
+	return nil
 }
 
 type fakeModel struct{}

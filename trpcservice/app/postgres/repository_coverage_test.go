@@ -252,11 +252,13 @@ func TestAgentPostgresRollbackErrorBranches(t *testing.T) {
 }
 
 func TestAgentPostgresSetCanaryAndTransitionErrorBranches(t *testing.T) {
+	const tenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	const appID = "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"
 	metadata := appmodel.ChangeMetadata{ActorType: "test", ActorID: "user", Reason: "coverage", CorrelationID: "postgres-control-coverage"}
 
 	t.Run("canary rejects inactive tenant", func(t *testing.T) {
 		db, mock := newPostgresCoverageDB(t)
-		_, _, err := NewAppRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: "tenant", AppID: "app", TenantActive: false, Metadata: metadata})
+		_, _, err := NewAppRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: tenantID, AppID: appID, TenantActive: false, Metadata: metadata})
 		if !errors.Is(err, appmodel.ErrInvalid) {
 			t.Fatalf("inactive tenant error = %v", err)
 		}
@@ -266,7 +268,7 @@ func TestAgentPostgresSetCanaryAndTransitionErrorBranches(t *testing.T) {
 	t.Run("canary begin error", func(t *testing.T) {
 		db, mock := newPostgresCoverageDB(t)
 		mock.ExpectBegin().WillReturnError(errors.New("begin"))
-		_, _, err := NewAppRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: "tenant", AppID: "app", TenantActive: true, Metadata: metadata})
+		_, _, err := NewAppRepository(db).SetCanary(context.Background(), appmodel.SetCanaryInput{TenantID: tenantID, AppID: appID, TenantActive: true, Metadata: metadata})
 		if !errors.Is(err, ErrStorage) {
 			t.Fatalf("canary begin error = %v", err)
 		}
@@ -276,7 +278,7 @@ func TestAgentPostgresSetCanaryAndTransitionErrorBranches(t *testing.T) {
 	t.Run("transition begin error", func(t *testing.T) {
 		db, mock := newPostgresCoverageDB(t)
 		mock.ExpectBegin().WillReturnError(errors.New("begin"))
-		_, _, err := NewAppRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: "tenant", AppID: "app", ExpectedVersion: 1, NextStatus: appmodel.StatusDisabled, Metadata: metadata})
+		_, _, err := NewAppRepository(db).TransitionStatus(context.Background(), appmodel.TransitionStatusInput{TenantID: tenantID, AppID: appID, ExpectedVersion: 1, NextStatus: appmodel.StatusDisabled, Metadata: metadata})
 		if !errors.Is(err, ErrStorage) {
 			t.Fatalf("transition begin error = %v", err)
 		}

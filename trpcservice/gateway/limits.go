@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 const (
@@ -94,10 +96,10 @@ func (limiter *TenantLimiter) Acquire(ctx context.Context, tenantID string) (*Te
 	if limiter == nil {
 		return nil, ErrNotReady
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, fmt.Errorf("%w: context is required", ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	if err := validateScopedID(tenantID, "t_", "tenant"); err != nil {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	pgstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
@@ -149,8 +150,8 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 	if err := checkStore(ctx, s); err != nil {
 		return runtimestorage.MessageEvent{}, false, err
 	}
-	if runtimestorage.ValidateSession(input.TenantID, input.SessionID) != nil || input.BindingID == "" || input.ExternalMessageID == "" || input.EventID == "" || runtimestorage.ValidateReplyTarget(input.ReplyTarget) != nil || (input.ReplyTarget != (runtimestorage.ReplyTarget{}) && input.ReplyTarget.BindingID != input.BindingID) {
-		return runtimestorage.MessageEvent{}, false, runtimestorage.ErrInvalid
+	if err := runtimestorage.ValidateMessageEventInput(input); err != nil {
+		return runtimestorage.MessageEvent{}, false, err
 	}
 	tx, err := begin(ctx, s.db)
 	if err != nil {
@@ -160,7 +161,11 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 	var existing runtimestorage.MessageEvent
 	err = tx.QueryRowContext(ctx, "SELECT "+eventColumns+" FROM public.message_event WHERE tenant_id=$1 AND binding_id=$2 AND external_message_id=$3", input.TenantID, input.BindingID, input.ExternalMessageID).Scan(eventArgs(&existing)...)
 	if err == nil {
-		return cloneEvent(existing), true, nil
+		existing = cloneEvent(existing)
+		if err := runtimestorage.ValidateMessageEvent(existing); err != nil {
+			return runtimestorage.MessageEvent{}, false, runtimestorage.ErrStorage
+		}
+		return existing, true, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return runtimestorage.MessageEvent{}, false, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
@@ -183,7 +188,11 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 	if err := commit(ctx, tx); err != nil {
 		return runtimestorage.MessageEvent{}, false, err
 	}
-	return cloneEvent(existing), false, nil
+	existing = cloneEvent(existing)
+	if err := runtimestorage.ValidateMessageEvent(existing); err != nil {
+		return runtimestorage.MessageEvent{}, false, runtimestorage.ErrStorage
+	}
+	return existing, false, nil
 }
 
 func (s *Store) lookupMessageByExternal(ctx context.Context, tenantID, bindingID, externalID string) (runtimestorage.MessageEvent, error) {
@@ -192,7 +201,11 @@ func (s *Store) lookupMessageByExternal(ctx context.Context, tenantID, bindingID
 	if err != nil {
 		return runtimestorage.MessageEvent{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
-	return cloneEvent(value), nil
+	value = cloneEvent(value)
+	if err := runtimestorage.ValidateMessageEvent(value); err != nil {
+		return runtimestorage.MessageEvent{}, runtimestorage.ErrStorage
+	}
+	return value, nil
 }
 
 // GetMessage loads a tenant-scoped inbound message event.
@@ -216,7 +229,11 @@ func lookupMessage(ctx context.Context, query messageQuerier, tenantID, eventID 
 	if err != nil {
 		return runtimestorage.MessageEvent{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 	}
-	return cloneEvent(value), nil
+	value = cloneEvent(value)
+	if err := runtimestorage.ValidateMessageEvent(value); err != nil {
+		return runtimestorage.MessageEvent{}, runtimestorage.ErrStorage
+	}
+	return value, nil
 }
 
 // TransitionMessage applies a fenced message lifecycle transition.
@@ -246,7 +263,11 @@ func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage
 	}
 	err := s.db.QueryRowContext(ctx, "UPDATE public.message_event SET status=$4,fencing_token=fencing_token+1,lease_owner=CASE WHEN $4='running' THEN $5 ELSE '' END,lease_expires_at=CASE WHEN $6>0 THEN now()+($6 * interval '1 second') ELSE NULL END,updated_at=now() WHERE tenant_id=$1 AND event_id=$2 AND status=$3 AND ($3 <> 'running' OR ($4='execution_reconciling' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()) OR ($4<>'execution_reconciling' AND lease_owner=$5 AND fencing_token=$7 AND lease_expires_at IS NOT NULL AND lease_expires_at > now())) RETURNING "+eventColumns, transition.TenantID, transition.EventID, transition.From, transition.To, transition.Owner, leaseSeconds, transition.FencingToken).Scan(eventArgs(&value)...)
 	if err == nil {
-		return cloneEvent(value), nil
+		value = cloneEvent(value)
+		if err := runtimestorage.ValidateMessageEvent(value); err != nil {
+			return runtimestorage.MessageEvent{}, runtimestorage.ErrStorage
+		}
+		return value, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return runtimestorage.MessageEvent{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
@@ -261,7 +282,11 @@ func (s *Store) transitionMessageWithReply(ctx context.Context, transition runti
 	var value runtimestorage.MessageEvent
 	err := s.db.QueryRowContext(ctx, "UPDATE public.message_event SET status=$4,fencing_token=fencing_token+1,lease_owner=CASE WHEN $4='running' THEN $5 ELSE '' END,lease_expires_at=CASE WHEN $6>0 THEN now()+($6 * interval '1 second') ELSE NULL END,reply_id=COALESCE(NULLIF($8,''),reply_id),segment_count=CASE WHEN $9>0 THEN $9 ELSE segment_count END,updated_at=now() WHERE tenant_id=$1 AND event_id=$2 AND status=$3 AND ($3 <> 'running' OR ($4='execution_reconciling' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()) OR ($4<>'execution_reconciling' AND lease_owner=$5 AND fencing_token=$7 AND lease_expires_at IS NOT NULL AND lease_expires_at > now())) RETURNING "+eventColumns, transition.TenantID, transition.EventID, transition.From, transition.To, transition.Owner, leaseSeconds, transition.FencingToken, transition.ReplyID, transition.SegmentCount).Scan(eventArgs(&value)...)
 	if err == nil {
-		return cloneEvent(value), nil
+		value = cloneEvent(value)
+		if err := runtimestorage.ValidateMessageEvent(value); err != nil {
+			return runtimestorage.MessageEvent{}, runtimestorage.ErrStorage
+		}
+		return value, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return runtimestorage.MessageEvent{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
@@ -334,7 +359,7 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 	if normalizeErr != nil {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
 	}
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil {
+	if runtimestorage.ValidateTenant(value.TenantID) != nil || !validReplyIdentity(value.ReplyID, 256, true) || !validReplyIdentity(value.EventID, 256, true) || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || !runtimestorage.ValidateText(value.Payload, 4<<20, false) || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
 	}
 	if value.Status == "" {
@@ -362,6 +387,9 @@ func (s *Store) EnqueueReply(ctx context.Context, value runtimestorage.ReplyOutb
 			return runtimestorage.ReplyOutbox{}, runtimestorage.ErrConflict
 		}
 		return runtimestorage.ReplyOutbox{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	if err := runtimestorage.ValidateReplyOutbox(result); err != nil {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrStorage
 	}
 	return cloneReply(result), nil
 }
@@ -473,7 +501,7 @@ func validateReplyBatch(values []runtimestorage.ReplyOutbox) error {
 	first := values[0]
 	seen := make(map[int]struct{}, len(values))
 	for _, value := range values {
-		if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || value.Status != "" && value.Status != runtimestorage.ReplyPending || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil || value.TenantID != first.TenantID || value.ReplyID != first.ReplyID || value.EventID != first.EventID || value.SegmentCount != first.SegmentCount || value.ReplyTarget != first.ReplyTarget {
+		if runtimestorage.ValidateTenant(value.TenantID) != nil || !validReplyIdentity(value.ReplyID, 256, true) || !validReplyIdentity(value.EventID, 256, true) || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || value.Status != "" && value.Status != runtimestorage.ReplyPending || !runtimestorage.ValidateText(value.Payload, 4<<20, false) || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil || value.TenantID != first.TenantID || value.ReplyID != first.ReplyID || value.EventID != first.EventID || value.SegmentCount != first.SegmentCount || value.ReplyTarget != first.ReplyTarget {
 			return runtimestorage.ErrInvalid
 		}
 		if _, duplicate := seen[value.SegmentIndex]; duplicate {
@@ -518,6 +546,9 @@ func (s *Store) insertReplySegments(ctx context.Context, tx *sql.Tx, values []ru
 			}
 			return nil, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
 		}
+		if err := runtimestorage.ValidateReplyOutbox(row); err != nil {
+			return nil, runtimestorage.ErrStorage
+		}
 		result = append(result, cloneReply(row))
 	}
 	return result, nil
@@ -535,6 +566,9 @@ func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment 
 	err := s.db.QueryRowContext(ctx, "SELECT "+replyColumns+" FROM public.reply_outbox WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3", tenantID, replyID, segment).Scan(replyArgs(&value)...)
 	if err != nil {
 		return runtimestorage.ReplyOutbox{}, mapError(ctx, err, runtimestorage.ErrNotFound, runtimestorage.ErrDuplicate, runtimestorage.ErrConflict, runtimestorage.ErrInvalid)
+	}
+	if err := runtimestorage.ValidateReplyOutbox(value); err != nil {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrStorage
 	}
 	return cloneReply(value), nil
 }
@@ -556,6 +590,9 @@ func (s *Store) ListReplyCandidates(ctx context.Context, tenantID string) ([]run
 	for rows.Next() {
 		var value runtimestorage.ReplyOutbox
 		if err := rows.Scan(replyArgs(&value)...); err != nil {
+			return nil, runtimestorage.ErrStorage
+		}
+		if err := runtimestorage.ValidateReplyOutbox(value); err != nil {
 			return nil, runtimestorage.ErrStorage
 		}
 		result = append(result, cloneReply(value))
@@ -581,6 +618,9 @@ func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segmen
 	var value runtimestorage.ReplyOutbox
 	err := s.db.QueryRowContext(ctx, "UPDATE public.reply_outbox SET status='sending', attempts=attempts+1, fencing_token=fencing_token+1, lease_owner=$4, lease_expires_at=now()+($5 * interval '1 second'), updated_at=now() WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3 AND (status IN ('pending','retryable') OR (status='sending' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now())) RETURNING "+replyColumns, tenantID, replyID, segment, owner, seconds).Scan(replyArgs(&value)...)
 	if err == nil {
+		if validateErr := runtimestorage.ValidateReplyOutbox(value); validateErr != nil {
+			return runtimestorage.ReplyOutbox{}, runtimestorage.ErrStorage
+		}
 		return cloneReply(value), nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -604,6 +644,9 @@ func (s *Store) RecordReplyReceipt(ctx context.Context, receipt runtimestorage.R
 	var value runtimestorage.ReplyOutbox
 	err := s.db.QueryRowContext(ctx, "UPDATE public.reply_outbox SET provider_message_id=$6, updated_at=now() WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3 AND status='sending' AND lease_owner=$4 AND fencing_token=$5 AND lease_expires_at IS NOT NULL AND lease_expires_at > now() AND (provider_message_id='' OR provider_message_id=$6) RETURNING "+replyColumns, receipt.TenantID, receipt.ReplyID, receipt.SegmentIndex, receipt.Owner, receipt.FencingToken, receipt.ProviderID).Scan(replyArgs(&value)...)
 	if err == nil {
+		if validateErr := runtimestorage.ValidateReplyOutbox(value); validateErr != nil {
+			return runtimestorage.ReplyOutbox{}, runtimestorage.ErrStorage
+		}
 		return cloneReply(value), nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -636,6 +679,9 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 	var value runtimestorage.ReplyOutbox
 	err := s.db.QueryRowContext(ctx, "UPDATE public.reply_outbox SET status=$5, attempts=attempts+CASE WHEN $5='sending' THEN 1 ELSE 0 END, fencing_token=fencing_token+1, lease_owner=$6, lease_expires_at=CASE WHEN $7>0 THEN now()+($7 * interval '1 second') ELSE NULL END, provider_message_id=COALESCE(NULLIF($8,''),provider_message_id), last_error_class=COALESCE(NULLIF($9,''),last_error_class), updated_at=now() WHERE tenant_id=$1 AND reply_id=$2 AND segment_index=$3 AND status=$4 AND (lease_owner='' OR lease_owner=$6) AND ($10=0 OR fencing_token=$10) AND (status <> 'sending' OR lease_expires_at IS NULL OR lease_expires_at > now()) RETURNING "+replyColumns, transition.TenantID, transition.ReplyID, transition.SegmentIndex, transition.From, transition.To, transition.Owner, leaseSeconds, transition.ProviderID, transition.ErrorClass, transition.FencingToken).Scan(replyArgs(&value)...)
 	if err == nil {
+		if validateErr := runtimestorage.ValidateReplyOutbox(value); validateErr != nil {
+			return runtimestorage.ReplyOutbox{}, runtimestorage.ErrStorage
+		}
 		return cloneReply(value), nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -661,10 +707,13 @@ func checkStore(ctx context.Context, store *Store) error {
 }
 
 func check(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return runtimestorage.ErrInvalid
 	}
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
+}
+func validReplyIdentity(value string, max int, required bool) bool {
+	return runtimestorage.ValidateText(value, max, required) && value == strings.TrimSpace(value) && !strings.Contains(value, "://")
 }
 func eventArgs(value *runtimestorage.MessageEvent) []any {
 	return []any{&value.TenantID, &value.EventID, &value.SessionID, &value.BindingID, &value.ExternalMessageID, &value.IdempotencyKey, &value.EventSeq, &value.Status, &value.FencingToken, &value.LeaseOwner, &value.LeaseExpiresAt, &value.ReplyID, &value.SegmentCount, &value.ReplyTarget.ConversationKind, &value.ReplyTarget.ReceiverID, &value.ReplyTarget.ThreadID, &value.CreatedAt, &value.UpdatedAt}

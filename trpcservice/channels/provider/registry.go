@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
 )
 
@@ -49,7 +50,7 @@ func NewRegistry() *Registry {
 // Register installs or replaces one tenant/channel/provider-account factory.
 func (registry *Registry) Register(tenantID string, channel channels.Channel, providerAccountID string, factory Factory) error {
 	providerAccountID = strings.TrimSpace(providerAccountID)
-	if registry == nil || channels.ValidateTenantID(tenantID) != nil || channel.Validate() != nil || providerAccountID == "" || factory == nil {
+	if registry == nil || channels.ValidateTenantID(tenantID) != nil || channel.Validate() != nil || providerAccountID == "" || nilvalue.Is(factory) {
 		return fmt.Errorf("%w: invalid channel provider registration", channels.ErrInvalid)
 	}
 	registry.mu.Lock()
@@ -57,16 +58,19 @@ func (registry *Registry) Register(tenantID string, channel channels.Channel, pr
 	if registry.closed {
 		return ErrProviderRegistryClosed
 	}
+	if registry.factories == nil {
+		registry.factories = make(map[providerKey]Factory)
+	}
 	registry.factories[providerKey{tenantID: tenantID, channel: string(channel), account: providerAccountID}] = factory
 	return nil
 }
 
 // Resolve finds a provider factory without falling back across tenants.
 func (registry *Registry) Resolve(ctx context.Context, binding channels.Binding) (Factory, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, fmt.Errorf("%w: context is required", channels.ErrInvalid)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	if registry == nil || binding.Validate() != nil {
@@ -76,7 +80,7 @@ func (registry *Registry) Resolve(ctx context.Context, binding channels.Binding)
 	factory := registry.factories[providerKey{tenantID: binding.TenantID, channel: string(binding.Channel), account: strings.TrimSpace(binding.ProviderAccountID)}]
 	closed := registry.closed
 	registry.mu.RUnlock()
-	if closed || factory == nil {
+	if closed || nilvalue.Is(factory) {
 		return nil, ErrProviderUnavailable
 	}
 	return factory, nil

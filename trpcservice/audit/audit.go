@@ -14,6 +14,9 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // SchemaVersion identifies the audit event schema.
@@ -58,6 +61,9 @@ const (
 	EventToolApprovalRequired EventType = "tool.approval_required"
 	// EventToolExecuted records a completed tool invocation.
 	EventToolExecuted EventType = "tool.executed"
+	// EventToolReconciliationRequired records a provider hand-off that crossed
+	// a process boundary without a trusted result and needs human review.
+	EventToolReconciliationRequired EventType = "tool.reconciliation_required"
 	// EventIMAuthorizationAllowed records an authorized channel message.
 	EventIMAuthorizationAllowed EventType = "im.authorization_allowed"
 	// EventIMAuthorizationDenied records a rejected channel message.
@@ -213,12 +219,37 @@ func (e Event) Validate() error {
 }
 
 func (e Event) validIdentity() bool {
-	return e.SchemaVersion == SchemaVersion && e.EventID == clean(e.EventID) && e.TenantID == clean(e.TenantID) && clean(e.EventID) != "" && clean(e.TenantID) != "" && validEventType(e.EventType) && !e.OccurredAt.IsZero() && e.OccurredAt.Location() == time.UTC
+	return e.SchemaVersion == SchemaVersion &&
+		validAuditText(e.EventID, 256, true, true) &&
+		validAuditText(e.TenantID, 256, true, true) &&
+		validEventType(e.EventType) &&
+		!e.OccurredAt.IsZero() && e.OccurredAt.Location() == time.UTC
 }
 
 func (e Event) validFields() bool {
-	for _, value := range []string{e.EventID, e.TenantID, e.Channel, e.UserID, e.SessionID, e.AgentAppID, e.ModelProfileID, e.ToolName, e.ErrorType, e.RequestID, e.TraceID, e.CorrelationID, e.ActorType, e.ActorID, e.Reason} {
-		if hasControl(value) {
+	for _, field := range []struct {
+		value      string
+		maxRunes   int
+		required   bool
+		normalized bool
+	}{
+		{e.EventID, 256, true, true},
+		{e.TenantID, 256, true, true},
+		{e.Channel, 128, false, true},
+		{e.UserID, 256, false, true},
+		{e.SessionID, 256, false, true},
+		{e.AgentAppID, 256, false, true},
+		{e.ModelProfileID, 256, false, true},
+		{e.ToolName, 256, false, true},
+		{e.ErrorType, 128, false, true},
+		{e.RequestID, 256, false, true},
+		{e.TraceID, 256, false, true},
+		{e.CorrelationID, 256, false, true},
+		{e.ActorType, 128, false, true},
+		{e.ActorID, 256, false, true},
+		{e.Reason, 1000, false, true},
+	} {
+		if !validAuditText(field.value, field.maxRunes, field.required, field.normalized) {
 			return false
 		}
 	}
@@ -233,11 +264,19 @@ func (e Event) validVersions() bool {
 }
 
 func (e Event) validControlPlaneMetadata() bool {
-	return e.EventType != EventControlPlaneChanged || clean(e.ActorType) != "" && clean(e.ActorID) != "" && clean(e.Reason) != "" && clean(e.CorrelationID) != "" && e.PreviousVersion != nil
+	return e.EventType != EventControlPlaneChanged ||
+		validAuditText(e.ActorType, 128, true, true) &&
+			validAuditText(e.ActorID, 256, true, true) &&
+			validAuditText(e.Reason, 1000, true, true) &&
+			validAuditText(e.CorrelationID, 256, true, true) &&
+			e.PreviousVersion != nil
 }
 
 func (e Event) validMetadata() bool {
-	return len([]rune(strings.TrimSpace(e.Reason))) <= 1000 && (e.Decision == "" || validDecision(e.Decision)) && (e.ErrorType == "" || validErrorType(e.ErrorType)) && !containsSensitive(e.EventID, e.TenantID, e.Channel, e.UserID, e.SessionID, e.AgentAppID, e.ModelProfileID, e.ToolName, e.ErrorType, e.RequestID, e.TraceID, e.CorrelationID, e.ActorType, e.ActorID, e.Reason) && (e.Cost == nil || e.Cost.Validate() == nil)
+	return (e.Decision == "" || validDecision(e.Decision)) &&
+		(e.ErrorType == "" || validErrorType(e.ErrorType)) &&
+		!containsSensitive(e.EventID, e.TenantID, e.Channel, e.UserID, e.SessionID, e.AgentAppID, e.ModelProfileID, e.ToolName, e.ErrorType, e.RequestID, e.TraceID, e.CorrelationID, e.ActorType, e.ActorID, e.Reason) &&
+		(e.Cost == nil || e.Cost.Validate() == nil)
 }
 
 // Validate checks usage values and bounded metadata.
@@ -247,11 +286,20 @@ func (u Usage) Validate() error {
 			return ErrInvalid
 		}
 	}
-	if (u.ModelCostMinor != nil || u.ToolCostMinor != nil || u.BudgetUsedMinor != nil) && !validCurrency(u.Currency) || u.ExecutionResult != "" && !validResult(u.ExecutionResult) {
+	if u.Currency != "" && !validCurrency(u.Currency) ||
+		(u.ModelCostMinor != nil || u.ToolCostMinor != nil || u.BudgetUsedMinor != nil) && !validCurrency(u.Currency) ||
+		u.ExecutionResult != "" && !validResult(u.ExecutionResult) {
 		return ErrInvalid
 	}
-	for _, value := range []string{u.Currency, u.Provider, u.Model} {
-		if hasControl(value) || strings.Contains(value, "://") || containsSensitive(value) {
+	for _, field := range []struct {
+		value    string
+		maxRunes int
+	}{
+		{u.Currency, 3},
+		{u.Provider, 256},
+		{u.Model, 256},
+	} {
+		if !validAuditText(field.value, field.maxRunes, false, true) || containsSensitive(field.value) {
 			return ErrInvalid
 		}
 	}
@@ -363,8 +411,7 @@ func NewInMemory(tenantID string) (*Store, error) {
 
 // NewInMemoryWithBackend creates a store sharing backend ownership.
 func NewInMemoryWithBackend(tenantID string, backend *Backend) (*Store, error) {
-	tenantID = clean(tenantID)
-	if tenantID == "" || hasControl(tenantID) || backend == nil {
+	if !validAuditText(tenantID, 256, true, true) || backend == nil {
 		return nil, ErrInvalid
 	}
 	backend.mu.Lock()
@@ -381,10 +428,10 @@ func (s *Store) scope(tenantID string) error {
 	return nil
 }
 func check(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return ErrInvalid
 	}
-	return ctx.Err()
+	return nilvalue.ContextErr(ctx)
 }
 
 // Append validates and stores an event with idempotent deduplication.
@@ -574,6 +621,17 @@ func aggregateKeyTotal(total UsageTotal, groups []GroupBy) string {
 	return strings.Join(parts, "\x00")
 }
 func clean(value string) string { return strings.TrimSpace(value) }
+
+func validAuditText(value string, maxRunes int, required, normalized bool) bool {
+	if !utf8.ValidString(value) || len([]rune(value)) > maxRunes || hasControl(value) {
+		return false
+	}
+	if required && strings.TrimSpace(value) == "" {
+		return false
+	}
+	return !normalized || value == strings.TrimSpace(value)
+}
+
 func hasControl(value string) bool {
 	for _, r := range value {
 		if unicode.IsControl(r) {
@@ -584,7 +642,7 @@ func hasControl(value string) bool {
 }
 func validEventType(value EventType) bool {
 	switch value {
-	case EventControlPlaneChanged, EventExecutionStarted, EventExecutionCompleted, EventExecutionFailed, EventExecutionCanceled, EventExecutionTimedOut, EventExecutionFallback, EventCanarySelected, EventToolAllowed, EventToolDenied, EventToolApprovalRequired, EventToolExecuted, EventIMAuthorizationAllowed, EventIMAuthorizationDenied, EventIMIngressAccepted, EventIMIngressDuplicate, EventIMDeliverySent, EventIMDeliveryRetryScheduled, EventIMDeliveryDeadLettered, EventIMDeliveryReconciled, EventBudgetRejected, EventContentRedacted, EventAuditIncomplete:
+	case EventControlPlaneChanged, EventExecutionStarted, EventExecutionCompleted, EventExecutionFailed, EventExecutionCanceled, EventExecutionTimedOut, EventExecutionFallback, EventCanarySelected, EventToolAllowed, EventToolDenied, EventToolApprovalRequired, EventToolExecuted, EventToolReconciliationRequired, EventIMAuthorizationAllowed, EventIMAuthorizationDenied, EventIMIngressAccepted, EventIMIngressDuplicate, EventIMDeliverySent, EventIMDeliveryRetryScheduled, EventIMDeliveryDeadLettered, EventIMDeliveryReconciled, EventBudgetRejected, EventContentRedacted, EventAuditIncomplete:
 		return true
 	}
 	return false

@@ -12,6 +12,7 @@ import (
 	appmysql "github.com/XnLemon/trpc-agent-service/trpcservice/app/mysql"
 	apppostgres "github.com/XnLemon/trpc-agent-service/trpcservice/app/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
+	auditmysql "github.com/XnLemon/trpc-agent-service/trpcservice/audit/mysql"
 	auditpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/audit/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
@@ -28,12 +29,22 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 	tenantmysql "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/mysql"
 	tenantpostgres "github.com/XnLemon/trpc-agent-service/trpcservice/tenant/postgres"
+	artifactinmemory "trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/knowledge"
+	memoryinmemory "trpc.group/trpc-go/trpc-agent-go/memory/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 )
 
 func environmentRepositories(config environmentConfig, db *sql.DB) (tenant.Repository, appmodel.Repository, channels.CandidateConsumer, audit.Writer, error) {
 	if config.driver == ControlPlaneDriverMySQL {
-		return tenantmysql.NewRepository(db), appmysql.NewAppRepository(db), channelmysql.NewRepository(db), nil, nil
+		var auditWriter audit.Writer
+		var err error
+		if len(config.apiIdentities) > 1 {
+			auditWriter = auditmysql.NewMultiTenant(db)
+		} else {
+			auditWriter, err = auditmysql.New(db, config.tenantID)
+		}
+		return tenantmysql.NewRepository(db), appmysql.NewAppRepository(db), channelmysql.NewRepository(db), auditWriter, err
 	}
 	tenantRepo := tenantpostgres.NewRepository(db)
 	appRepo := apppostgres.NewAppRepository(db)
@@ -208,6 +219,7 @@ type environmentRuntimeProviderSpec struct {
 	name         string
 	capabilities []backend.Capability
 	store        environmentStorage
+	database     *sql.DB
 }
 
 func environmentRegistriesForStores(config environmentConfig, delegateSessions session.Service, runtimeStores environmentRuntimeStores) (*modelruntime.SecretRegistry, *modelruntime.ModelProviderRegistry, *storagefactory.ProviderRegistry, error) {
@@ -238,16 +250,24 @@ func environmentRegistriesForStores(config environmentConfig, delegateSessions s
 		if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.secretRef}, modelAPIKey); err != nil {
 			return nil, nil, nil, err
 		}
+		embeddingAPIKey := config.knowledgeEmbeddingAPIKey
+		if len(config.knowledgeEmbeddingAPIKeys) != 0 {
+			embeddingAPIKey = config.knowledgeEmbeddingAPIKeys[identity.TenantID]
+		}
+		// loadEnvironment requires this pair for PostgreSQL Knowledge. Keep
+		// the lower-level registry constructor usable by tests and explicitly
+		// local callers that do not enable Knowledge administration; the
+		// management provider itself still fails closed when the pair is absent.
+		if embeddingAPIKey != "" && config.knowledgeEmbeddingSecretRef != "" {
+			if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.knowledgeEmbeddingSecretRef}, embeddingAPIKey); err != nil {
+				return nil, nil, nil, err
+			}
+		}
 		if err := modelRegistry.Register(identity.TenantID, config.modelProvider, environmentModelFactory{}); err != nil {
 			return nil, nil, nil, err
 		}
 		if config.runtimeStorage == "redis" && config.redis.Password != "" {
 			if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.redisSecretRef}, config.redis.Password); err != nil {
-				return nil, nil, nil, err
-			}
-		}
-		if config.s3AccessKeyID != "" {
-			if err := secretRegistry.RegisterValue(modelprofile.SecretScope{TenantID: identity.TenantID, SecretRef: config.s3SecretRef}, config.s3AccessKeyID+":"+config.s3SecretKey); err != nil {
 				return nil, nil, nil, err
 			}
 		}
@@ -264,7 +284,7 @@ func environmentRuntimeProviders(config environmentConfig, stores environmentRun
 	if primary == nil {
 		return nil, fmt.Errorf("%w: primary runtime provider is unavailable", ErrInvalidConfig)
 	}
-	providers := []environmentRuntimeProviderSpec{{name: providerName, capabilities: environmentRuntimeCapabilities(config.runtimeStorage), store: primary}}
+	providers := []environmentRuntimeProviderSpec{{name: providerName, capabilities: environmentRuntimeCapabilities(config.runtimeStorage), store: primary, database: stores.database}}
 	if config.runtimeStorage != "redis" {
 		return providers, nil
 	}
@@ -272,13 +292,20 @@ func environmentRuntimeProviders(config environmentConfig, stores environmentRun
 	if fallback == nil {
 		return nil, fmt.Errorf("%w: in-memory runtime provider is unavailable", ErrInvalidConfig)
 	}
-	return append(providers, environmentRuntimeProviderSpec{name: "inmemory", capabilities: environmentRuntimeCapabilities("inmemory"), store: fallback}), nil
+	return append(providers, environmentRuntimeProviderSpec{name: "inmemory", capabilities: environmentRuntimeCapabilities("inmemory"), store: fallback, database: stores.database}), nil
 }
 
 func registerEnvironmentRuntimeProviders(registry *storagefactory.ProviderRegistry, tenantID string, delegateSessions session.Service, config environmentConfig, runtimeProviders []environmentRuntimeProviderSpec) error {
 	for _, runtimeProvider := range runtimeProviders {
+		sharedMemory := memoryinmemory.NewMemoryService()
+		sharedArtifact := artifactinmemory.NewService()
+		sharedKnowledge := knowledge.New()
 		for _, capability := range runtimeProvider.capabilities {
-			provider := environmentRuntimeCapabilityProvider{capability: capability, delegate: delegateSessions, store: runtimeProvider.store, telemetry: config.telemetry, backend: runtimeProvider.name}
+			provider := environmentRuntimeCapabilityProvider{
+				capability: capability, delegate: delegateSessions, store: runtimeProvider.store,
+				telemetry: config.telemetry, backend: runtimeProvider.name,
+				memory: sharedMemory, artifact: sharedArtifact, knowledge: sharedKnowledge,
+			}
 			if runtimeProvider.name == "redis" {
 				provider.redisEndpoint = config.redisEndpoint
 				provider.redisSecretRef = config.redisSecretRef
@@ -289,8 +316,16 @@ func registerEnvironmentRuntimeProviders(registry *storagefactory.ProviderRegist
 			}
 		}
 	}
-	if err := registry.Register(tenantID, backend.CapabilityArtifact, "s3", environmentS3CapabilityProvider{tenantID: tenantID, secretRef: config.s3SecretRef}); err != nil {
+	if err := registry.Register(tenantID, backend.CapabilityMemory, "chromadb", environmentChromaMemoryProvider{}); err != nil {
 		return err
+	}
+	if err := registry.Register(tenantID, backend.CapabilityArtifact, "cos", environmentCOSCapabilityProvider{}); err != nil {
+		return err
+	}
+	if config.driver != ControlPlaneDriverMySQL && len(runtimeProviders) > 0 && runtimeProviders[0].database != nil {
+		if err := registry.Register(tenantID, backend.CapabilityKnowledge, "postgres_vector", environmentPostgresVectorKnowledgeProvider{db: runtimeProviders[0].database}); err != nil {
+			return err
+		}
 	}
 	return nil
 }

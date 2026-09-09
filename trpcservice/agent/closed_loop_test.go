@@ -9,6 +9,8 @@ import (
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/app/inmemory"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
+	"trpc.group/trpc-go/trpc-agent-go/artifact"
+	artifactinmemory "trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
 )
 
 func TestPublishedRepositoryStateBuildsExecutionSnapshot(t *testing.T) {
@@ -71,6 +73,39 @@ func TestPublishedRepositoryStateBuildsExecutionSnapshot(t *testing.T) {
 	}
 	if _, err := agentruntime.NewAgentExecutionSnapshot(tenantSnapshot, suspended, publishedRevision); !errors.Is(err, agentruntime.ErrInvalid) {
 		t.Fatalf("suspended App admitted a new execution: %v", err)
+	}
+}
+
+func TestUpstreamArtifactVersionsAndSessionIsolation(t *testing.T) {
+	ctx := context.Background()
+	service := artifactinmemory.NewService()
+	first := artifact.SessionInfo{AppName: "app", UserID: "user-a", SessionID: "session-a"}
+	second := artifact.SessionInfo{AppName: "app", UserID: "user-b", SessionID: "session-a"}
+
+	version, err := service.SaveArtifact(ctx, first, "report.txt", &artifact.Artifact{Data: []byte("version-0"), MimeType: "text/plain"})
+	if err != nil || version != 0 {
+		t.Fatalf("first upstream artifact version = %d, %v", version, err)
+	}
+	version, err = service.SaveArtifact(ctx, first, "report.txt", &artifact.Artifact{Data: []byte("version-1"), MimeType: "text/plain"})
+	if err != nil || version != 1 {
+		t.Fatalf("second upstream artifact version = %d, %v", version, err)
+	}
+	versions, err := service.ListVersions(ctx, first, "report.txt")
+	if err != nil || len(versions) != 2 || versions[0] != 0 || versions[1] != 1 {
+		t.Fatalf("upstream artifact versions = %v, %v", versions, err)
+	}
+	for expectedVersion, expectedData := range map[int]string{0: "version-0", 1: "version-1"} {
+		loaded, loadErr := service.LoadArtifact(ctx, first, "report.txt", &expectedVersion)
+		if loadErr != nil || loaded == nil || string(loaded.Data) != expectedData {
+			t.Fatalf("upstream artifact version %d = %#v, %v", expectedVersion, loaded, loadErr)
+		}
+	}
+	other, err := service.LoadArtifact(ctx, second, "report.txt", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other != nil {
+		t.Fatalf("artifact crossed user namespace: %#v", other)
 	}
 }
 

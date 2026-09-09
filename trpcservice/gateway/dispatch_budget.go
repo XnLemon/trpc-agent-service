@@ -19,7 +19,7 @@ type usageAccumulator struct {
 }
 
 func (accumulator *usageAccumulator) Observe(_ context.Context, value budget.Usage) {
-	if accumulator == nil {
+	if accumulator == nil || value.InputTokens < 0 || value.OutputTokens < 0 || value.SpendMinor < 0 {
 		return
 	}
 	accumulator.mu.Lock()
@@ -38,7 +38,10 @@ func (accumulator *usageAccumulator) Snapshot() budget.Usage {
 }
 
 func saturatingAdd(left, right int64) int64 {
-	if right > 0 && left > math.MaxInt64-right {
+	if right < 0 {
+		return left
+	}
+	if left > math.MaxInt64-right {
 		return math.MaxInt64
 	}
 	return left + right

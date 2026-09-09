@@ -17,7 +17,7 @@ CREATE TABLE public.runtime_attachment (
     PRIMARY KEY (tenant_id, attachment_id),
     FOREIGN KEY (tenant_id) REFERENCES public.tenant(tenant_id),
     FOREIGN KEY (tenant_id, attachment_id)
-        REFERENCES public.runtime_object(tenant_id, object_key)
+        REFERENCES public.runtime_attachment_content(tenant_id, attachment_id)
         ON DELETE CASCADE,
     FOREIGN KEY (tenant_id, event_id)
         REFERENCES public.message_event(tenant_id, event_id)

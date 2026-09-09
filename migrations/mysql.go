@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/internal/nilvalue"
 	storage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	driver "github.com/go-sql-driver/mysql"
 )
@@ -42,10 +43,10 @@ type mysqlMigrationHistory struct {
 // advisory lock. MySQL DDL implicitly commits, so each statement is
 // checkpointed and failed versions remain recoverable on restart.
 func ApplyMySQL(ctx context.Context, db *sql.DB) error {
-	if ctx == nil || db == nil {
+	if nilvalue.Is(ctx) || db == nil {
 		return ErrMigration
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	files, err := orderedMySQLFiles()
@@ -137,7 +138,7 @@ func applyMySQLStatement(ctx context.Context, conn *sql.Conn, history map[int]my
 
 // VerifyMySQL checks MySQL migration history without mutating the database.
 func VerifyMySQL(ctx context.Context, db *sql.DB) error {
-	if ctx == nil || db == nil {
+	if nilvalue.Is(ctx) || db == nil {
 		return ErrMigration
 	}
 	files, err := orderedMySQLFiles()
@@ -185,6 +186,8 @@ var requiredMySQLTables = []mysqlSchemaTable{
 	{name: "agent_app_change_outbox"},
 	{name: "channel_binding_change_outbox"},
 	{name: "tenant_configuration_outbox"},
+	{name: "runtime_tool_invocation"},
+	{name: "audit_event"},
 }
 
 type mysqlSchemaIndex struct {
@@ -233,7 +236,7 @@ var requiredMySQLTriggers = []mysqlSchemaTrigger{
 func verifyMySQLSchema(ctx context.Context, conn *sql.Conn) error {
 	rows, err := conn.QueryContext(ctx, `SELECT table_name, engine, table_collation
 		FROM information_schema.tables
-		WHERE table_schema = DATABASE() AND table_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, mysqlTableArgs()...)
+		WHERE table_schema = DATABASE() AND table_name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, mysqlTableArgs()...)
 	if err != nil {
 		return ErrInvalidHistory
 	}

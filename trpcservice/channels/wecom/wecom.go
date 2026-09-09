@@ -28,6 +28,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/gateway"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -172,7 +173,7 @@ var _ channels.WebhookAdapter = (*Handler)(nil)
 //
 //nolint:gocyclo
 func New(config Config) (*Handler, error) {
-	if config.Dispatcher == nil {
+	if nilvalue.Is(config.Dispatcher) {
 		return nil, ErrInvalid
 	}
 	if config.MaxBodyBytes == 0 {
@@ -188,11 +189,11 @@ func New(config Config) (*Handler, error) {
 		return nil, ErrInvalid
 	}
 	maxAttachmentBytes, err := normalizeAttachmentBytes(config.MaxAttachmentBytes)
-	if err != nil || (config.Attachments == nil) != (config.MediaDownloader == nil) {
+	if err != nil || nilvalue.Is(config.Attachments) != nilvalue.Is(config.MediaDownloader) {
 		return nil, ErrInvalid
 	}
 	baseCtx, cancel := context.WithCancel(context.Background())
-	if config.Observability == nil {
+	if nilvalue.Is(config.Observability) {
 		config.Observability = observability.NewNoopProvider()
 	}
 	handler := &Handler{
@@ -202,8 +203,8 @@ func New(config Config) (*Handler, error) {
 		auditWriter: config.AuditWriter, baseCtx: baseCtx, cancel: cancel,
 	}
 	handler.telemetry, handler.metrics = config.Observability, metrics.New(config.Observability)
-	if config.Candidates != nil || config.Tenants != nil || config.Apps != nil || config.Credentials != nil {
-		if config.Candidates == nil || config.Tenants == nil || config.Apps == nil || config.Credentials == nil || handler.routeKey != "" {
+	if !nilvalue.Is(config.Candidates) || !nilvalue.Is(config.Tenants) || !nilvalue.Is(config.Apps) || !nilvalue.Is(config.Credentials) {
+		if nilvalue.Is(config.Candidates) || nilvalue.Is(config.Tenants) || nilvalue.Is(config.Apps) || nilvalue.Is(config.Credentials) || handler.routeKey != "" {
 			cancel()
 			return nil, ErrInvalid
 		}
@@ -215,7 +216,7 @@ func New(config Config) (*Handler, error) {
 		cancel()
 		return nil, ErrInvalid
 	}
-	if config.Attachments != nil && strings.TrimSpace(config.AppSecret) == "" {
+	if !nilvalue.Is(config.Attachments) && strings.TrimSpace(config.AppSecret) == "" {
 		cancel()
 		return nil, ErrInvalid
 	}
@@ -244,7 +245,7 @@ func New(config Config) (*Handler, error) {
 
 // ServeHTTP verifies the URL challenge or accepts one encrypted text message.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h == nil || r == nil || !h.matchesRoute(r.URL.Path) {
+	if h == nil || r == nil || r.URL == nil || r.Body == nil || !h.matchesRoute(r.URL.Path) {
 		http.NotFound(w, r)
 		return
 	}
@@ -298,7 +299,7 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	_ = h.metrics.Request(operationCtx, map[string]string{"component": "channel", "operation": observability.OperationChannelReceive, "channel": "wecom", "status": "started"})
 	defer func() {
 		var outcome error
-		if ctxErr := r.Context().Err(); ctxErr != nil {
+		if ctxErr := nilvalue.ContextErr(r.Context()); ctxErr != nil {
 			outcome = ctxErr
 		} else if capture.status >= http.StatusBadRequest {
 			outcome = errors.New("wecom callback failed")
@@ -346,6 +347,10 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	accepted := make(chan struct{}, 1)
 	result := make(chan error, 1)
 	requestID, traceID := uuid.NewString(), uuid.NewString()
+	requestDone, requestDoneErr := nilvalue.ContextDone(r.Context())
+	if requestDoneErr != nil {
+		return
+	}
 	go func() {
 		defer h.drains.Done()
 		defer cancel()
@@ -382,7 +387,7 @@ func (h *Handler) handleMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
-	case <-r.Context().Done():
+	case <-requestDone:
 	}
 }
 
@@ -398,7 +403,7 @@ func (h *Handler) validateInboundMessage(message inboundXML) error {
 		}
 		return nil
 	case "image", "file", "voice", "video":
-		if h == nil || h.attachments == nil || h.mediaDownloader == nil {
+		if h == nil || nilvalue.Is(h.attachments) || nilvalue.Is(h.mediaDownloader) {
 			return ErrInvalid
 		}
 		_, err := wecomAttachmentDescriptor(message)
@@ -409,6 +414,9 @@ func (h *Handler) validateInboundMessage(message inboundXML) error {
 }
 
 func (h *Handler) buildInboundMessage(ctx context.Context, state callbackState, message inboundXML) (gateway.InboundMessage, error) {
+	if h == nil || nilvalue.Is(ctx) {
+		return gateway.InboundMessage{}, ErrAttachment
+	}
 	inbound := gateway.InboundMessage{
 		ExternalMessageID: strings.TrimSpace(message.MsgID),
 		ExternalUserID:    strings.TrimSpace(message.FromUserName),
@@ -447,7 +455,10 @@ func (h *Handler) ingestAttachment(ctx context.Context, state callbackState, mes
 	if err != nil {
 		return attachment.Reference{}, ErrAttachment
 	}
-	if err := ctx.Err(); err != nil {
+	if nilvalue.Is(ctx) {
+		return attachment.Reference{}, ErrAttachment
+	}
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return attachment.Reference{}, err
 	}
 	download := MediaDownloadRequest{
@@ -473,13 +484,13 @@ func (h *Handler) ingestAttachment(ctx context.Context, state callbackState, mes
 		}
 		return attachment.Reference{}, ErrAttachment
 	}
-	if reader == nil {
+	if nilvalue.Is(reader) {
 		return attachment.Reference{}, ErrAttachment
 	}
 	data, readErr := io.ReadAll(io.LimitReader(reader, h.maxAttachmentBytes+1))
 	closeErr := reader.Close()
 	if readErr != nil || closeErr != nil {
-		if contextErr := ctx.Err(); contextErr != nil {
+		if contextErr := nilvalue.ContextErr(ctx); contextErr != nil {
 			return attachment.Reference{}, contextErr
 		}
 		return attachment.Reference{}, ErrAttachment
@@ -626,7 +637,10 @@ func (h *Handler) writeIngressSuccess(w http.ResponseWriter, ctx context.Context
 }
 
 func (h *Handler) recordIngress(ctx context.Context, principal gateway.Principal, message inboundXML, requestID, traceID string, eventType audit.EventType, decision audit.Decision, errorType string) error {
-	if h == nil || h.auditWriter == nil {
+	if h == nil || nilvalue.Is(ctx) {
+		return ErrInvalid
+	}
+	if nilvalue.Is(h.auditWriter) {
 		return nil
 	}
 	event := audit.Event{SchemaVersion: audit.SchemaVersion, EventID: audit.NewEventID(requestID, string(eventType)), EventType: eventType, TenantID: principal.TenantID(), Channel: string(channels.ChannelWeCom), UserID: message.FromUserName, AgentAppID: principal.AppID(), Decision: decision, ErrorType: errorType, RequestID: requestID, TraceID: traceID, ActorType: string(principal.Kind()), ActorID: principal.SubjectID(), OccurredAt: time.Now().UTC()}
@@ -640,9 +654,9 @@ func (h *Handler) beginDrain(parent context.Context) (context.Context, context.C
 	if h.closing {
 		return nil, nil, false
 	}
-	if parent == nil {
+	if nilvalue.Is(parent) {
 		parent = h.baseCtx
-		if parent == nil {
+		if nilvalue.Is(parent) {
 			parent = context.Background()
 		}
 	}
@@ -651,7 +665,7 @@ func (h *Handler) beginDrain(parent context.Context) (context.Context, context.C
 	// insufficient because Close must join in-flight dispatches immediately.
 	merged, mergeCancel := context.WithCancel(context.WithoutCancel(parent))
 	base := h.baseCtx
-	if base == nil {
+	if nilvalue.Is(base) {
 		base = context.Background()
 	}
 	stopBase := context.AfterFunc(base, mergeCancel)

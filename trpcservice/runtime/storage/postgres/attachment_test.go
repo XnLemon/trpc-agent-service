@@ -34,9 +34,9 @@ func TestPostgresAttachmentLifecycleContracts(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT tenant_id,attachment_id,kind,mime_type,name,size,sha256,provider,provider_id,event_id,expires_at FROM public.runtime_attachment WHERE tenant_id=$1 AND attachment_id=$2 FOR UPDATE")).
 		WithArgs("tenant-a", reference.ID).WillReturnError(sql.ErrNoRows)
-	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO public.runtime_object (tenant_id,object_key,content_type,content,size,etag) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id,object_key) DO NOTHING")).
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO public.runtime_attachment_content (tenant_id,attachment_id,content_type,content,size,etag) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (tenant_id,attachment_id) DO NOTHING")).
 		WithArgs("tenant-a", reference.ID, reference.MIMEType, data, reference.Size, reference.SHA256).WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT content_type,size,etag FROM public.runtime_object WHERE tenant_id=$1 AND object_key=$2")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT content_type,size,etag FROM public.runtime_attachment_content WHERE tenant_id=$1 AND attachment_id=$2")).
 		WithArgs("tenant-a", reference.ID).WillReturnRows(sqlmock.NewRows([]string{"content_type", "size", "etag"}).AddRow(reference.MIMEType, reference.Size, reference.SHA256))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO public.runtime_attachment (tenant_id,attachment_id,kind,mime_type,name,size,sha256,provider,provider_id,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (tenant_id,attachment_id) DO NOTHING")).
 		WithArgs("tenant-a", reference.ID, reference.Kind, reference.MIMEType, reference.Name, reference.Size, reference.SHA256, reference.Provider, reference.ProviderID, sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(1, 1))
@@ -60,7 +60,7 @@ func TestPostgresAttachmentLifecycleContracts(t *testing.T) {
 
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT tenant_id,attachment_id,kind,mime_type,name,size,sha256,provider,provider_id,event_id,expires_at FROM public.runtime_attachment WHERE tenant_id=$1 AND attachment_id=$2")).
 		WithArgs("tenant-a", reference.ID).WillReturnRows(runtimeAttachmentRow(reference, "event-a", when.Add(time.Hour)))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT content FROM public.runtime_object WHERE tenant_id=$1 AND object_key=$2")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT content FROM public.runtime_attachment_content WHERE tenant_id=$1 AND attachment_id=$2")).
 		WithArgs("tenant-a", reference.ID).WillReturnRows(sqlmock.NewRows([]string{"content"}).AddRow(data))
 	content, err := store.Load(context.Background(), "tenant-a", "event-a", reference)
 	if err != nil || string(content.Data) != string(data) {
@@ -70,7 +70,7 @@ func TestPostgresAttachmentLifecycleContracts(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectQuery(regexp.QuoteMeta("DELETE FROM public.runtime_attachment AS a WHERE a.tenant_id=$1 AND a.expires_at <= $2 AND (a.event_id IS NULL OR EXISTS (SELECT 1 FROM public.message_event AS e WHERE e.tenant_id=a.tenant_id AND e.event_id=a.event_id AND e.status IN ('completed','failed'))) RETURNING a.attachment_id")).
 		WithArgs("tenant-a", when).WillReturnRows(sqlmock.NewRows([]string{"attachment_id"}).AddRow(reference.ID))
-	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM public.runtime_object WHERE tenant_id=$1 AND object_key=$2")).WithArgs("tenant-a", reference.ID).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM public.runtime_attachment_content WHERE tenant_id=$1 AND attachment_id=$2")).WithArgs("tenant-a", reference.ID).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	removed, err := store.CleanupAttachments(context.Background(), "tenant-a", when)
 	if err != nil || removed != 1 {
@@ -92,8 +92,8 @@ func TestPostgresAttachmentConcurrentPutKeepsExactReference(t *testing.T) {
 	when := time.Now().UTC().Add(time.Hour)
 	mock.ExpectBegin()
 	mock.ExpectQuery("FROM public.runtime_attachment WHERE tenant_id=\\$1 AND attachment_id=\\$2 FOR UPDATE").WithArgs("tenant-a", reference.ID).WillReturnError(sql.ErrNoRows)
-	mock.ExpectExec("INSERT INTO public.runtime_object").WithArgs("tenant-a", reference.ID, reference.MIMEType, data, reference.Size, reference.SHA256).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery("SELECT content_type,size,etag FROM public.runtime_object").WithArgs("tenant-a", reference.ID).WillReturnRows(sqlmock.NewRows([]string{"content_type", "size", "etag"}).AddRow(reference.MIMEType, reference.Size, reference.SHA256))
+	mock.ExpectExec("INSERT INTO public.runtime_attachment_content").WithArgs("tenant-a", reference.ID, reference.MIMEType, data, reference.Size, reference.SHA256).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT content_type,size,etag FROM public.runtime_attachment_content").WithArgs("tenant-a", reference.ID).WillReturnRows(sqlmock.NewRows([]string{"content_type", "size", "etag"}).AddRow(reference.MIMEType, reference.Size, reference.SHA256))
 	mock.ExpectExec("INSERT INTO public.runtime_attachment").WithArgs("tenant-a", reference.ID, reference.Kind, reference.MIMEType, reference.Name, reference.Size, reference.SHA256, reference.Provider, reference.ProviderID, sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("FROM public.runtime_attachment WHERE tenant_id=\\$1 AND attachment_id=\\$2 FOR UPDATE").WithArgs("tenant-a", reference.ID).WillReturnRows(runtimeAttachmentRow(reference, nil, when))
 	mock.ExpectCommit()
@@ -202,7 +202,7 @@ func TestPostgresAttachmentPutFailureBoundaries(t *testing.T) {
 				mock.ExpectBegin()
 				expectAttachmentLookup(mock, reference.ID, true).WillReturnError(sql.ErrNoRows)
 				expectObjectInsert(mock, reference, data).WillReturnResult(sqlmock.NewResult(0, 0))
-				mock.ExpectQuery("SELECT content_type,size,etag FROM public.runtime_object").
+				mock.ExpectQuery("SELECT content_type,size,etag FROM public.runtime_attachment_content").
 					WithArgs("tenant-a", reference.ID).WillReturnRows(sqlmock.NewRows([]string{"content_type", "size", "etag"}).AddRow("application/json", reference.Size, reference.SHA256))
 				mock.ExpectRollback()
 			},
@@ -445,7 +445,7 @@ func TestPostgresAttachmentLoadFailureBoundaries(t *testing.T) {
 			name: "object read failure", tenant: "tenant-a", eventID: "event-a", reference: reference,
 			prepare: func(mock sqlmock.Sqlmock) {
 				expectAttachmentLookup(mock, reference.ID, false).WillReturnRows(runtimeAttachmentRow(reference, "event-a", expiresAt))
-				mock.ExpectQuery("SELECT content FROM public.runtime_object").WithArgs("tenant-a", reference.ID).WillReturnError(errors.New("object read failed"))
+				mock.ExpectQuery("SELECT content FROM public.runtime_attachment_content").WithArgs("tenant-a", reference.ID).WillReturnError(errors.New("object read failed"))
 			},
 			want: runtimestorage.ErrStorage,
 		},
@@ -453,7 +453,7 @@ func TestPostgresAttachmentLoadFailureBoundaries(t *testing.T) {
 			name: "content digest mismatch", tenant: "tenant-a", eventID: "event-a", reference: reference,
 			prepare: func(mock sqlmock.Sqlmock) {
 				expectAttachmentLookup(mock, reference.ID, false).WillReturnRows(runtimeAttachmentRow(reference, "event-a", expiresAt))
-				mock.ExpectQuery("SELECT content FROM public.runtime_object").WithArgs("tenant-a", reference.ID).WillReturnRows(sqlmock.NewRows([]string{"content"}).AddRow([]byte("mismatch")))
+				mock.ExpectQuery("SELECT content FROM public.runtime_attachment_content").WithArgs("tenant-a", reference.ID).WillReturnRows(sqlmock.NewRows([]string{"content"}).AddRow([]byte("mismatch")))
 			},
 			want: attachment.ErrInvalid,
 		},
@@ -524,7 +524,7 @@ func TestPostgresAttachmentCleanupFailureBoundaries(t *testing.T) {
 			prepare: func(mock sqlmock.Sqlmock) {
 				mock.ExpectBegin()
 				expectAttachmentCleanup(mock, now).WillReturnRows(sqlmock.NewRows([]string{"attachment_id"}).AddRow("attachment-1"))
-				mock.ExpectExec("DELETE FROM public.runtime_object").WithArgs("tenant-a", "attachment-1").WillReturnError(errors.New("object delete failed"))
+				mock.ExpectExec("DELETE FROM public.runtime_attachment_content").WithArgs("tenant-a", "attachment-1").WillReturnError(errors.New("object delete failed"))
 				mock.ExpectRollback()
 			},
 			want: runtimestorage.ErrStorage,
@@ -534,7 +534,7 @@ func TestPostgresAttachmentCleanupFailureBoundaries(t *testing.T) {
 			prepare: func(mock sqlmock.Sqlmock) {
 				mock.ExpectBegin()
 				expectAttachmentCleanup(mock, now).WillReturnRows(sqlmock.NewRows([]string{"attachment_id"}).AddRow("attachment-1"))
-				mock.ExpectExec("DELETE FROM public.runtime_object").WithArgs("tenant-a", "attachment-1").WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectExec("DELETE FROM public.runtime_attachment_content").WithArgs("tenant-a", "attachment-1").WillReturnResult(sqlmock.NewResult(0, 1))
 				mock.ExpectCommit().WillReturnError(errors.New("commit failed"))
 			},
 			want: runtimestorage.ErrStorage,
@@ -598,12 +598,12 @@ func expectAttachmentLookup(mock sqlmock.Sqlmock, id string, lock bool) *sqlmock
 }
 
 func expectObjectInsert(mock sqlmock.Sqlmock, reference attachment.Reference, data []byte) *sqlmock.ExpectedExec {
-	return mock.ExpectExec("INSERT INTO public.runtime_object").WithArgs("tenant-a", reference.ID, reference.MIMEType, data, reference.Size, reference.SHA256)
+	return mock.ExpectExec("INSERT INTO public.runtime_attachment_content").WithArgs("tenant-a", reference.ID, reference.MIMEType, data, reference.Size, reference.SHA256)
 }
 
 func expectObjectPersisted(mock sqlmock.Sqlmock, reference attachment.Reference, data []byte) {
 	expectObjectInsert(mock, reference, data).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery("SELECT content_type,size,etag FROM public.runtime_object").
+	mock.ExpectQuery("SELECT content_type,size,etag FROM public.runtime_attachment_content").
 		WithArgs("tenant-a", reference.ID).
 		WillReturnRows(sqlmock.NewRows([]string{"content_type", "size", "etag"}).AddRow(reference.MIMEType, reference.Size, reference.SHA256))
 }

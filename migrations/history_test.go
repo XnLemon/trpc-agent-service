@@ -15,7 +15,7 @@ func TestOrderedFilesAreContiguousAndDigestable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 17 {
+	if len(files) != 23 {
 		t.Fatalf("migration order = %+v", files)
 	}
 	for index, migration := range files {
@@ -140,7 +140,7 @@ func TestApplyAcceptsReleasedTraceAndRuntimeHistory(t *testing.T) {
 	}
 	const (
 		releasedTraceDigest   = "6022eecd427ab1f6528f77284874ea97f85370f9dba646cd1c9de3ee93975557"
-		releasedRuntimeDigest = "b4cc9f948d2595e5552cfef58c1f6be668f79f783463db006a5123627c95632c"
+		releasedRuntimeDigest = "fba6c88223f1930b3c0315f95ed27bfa71689f4532ff3c78c26b7d20a1aa30db"
 	)
 	if files[10].digest != releasedTraceDigest || files[11].digest != releasedRuntimeDigest {
 		t.Fatalf("released migration digest changed = %q, %q", files[10].digest, files[11].digest)

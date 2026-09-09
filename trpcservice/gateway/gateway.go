@@ -3,12 +3,17 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 var (
@@ -162,6 +167,15 @@ type InboundMessage struct {
 // Normalize validates the message without consulting untrusted route hints.
 func (m InboundMessage) Normalize() (InboundMessage, error) {
 	clone := m
+	if !utf8.ValidString(clone.Content) || hasControl(clone.Content) {
+		return InboundMessage{}, fmt.Errorf("%w: content is invalid", ErrInvalid)
+	}
+	if clone.ContentType != "" {
+		if !utf8.ValidString(clone.ContentType) || clone.ContentType != strings.TrimSpace(clone.ContentType) || hasControl(clone.ContentType) {
+			return InboundMessage{}, fmt.Errorf("%w: content type is invalid", ErrInvalid)
+		}
+		clone.ContentType = strings.ToLower(clone.ContentType)
+	}
 	clone.Content = strings.TrimSpace(clone.Content)
 	clone.Attachments = append([]attachment.Reference(nil), clone.Attachments...)
 	if clone.ContentType == "" {
@@ -220,17 +234,21 @@ func (m InboundMessage) Normalize() (InboundMessage, error) {
 }
 
 func validateExternalID(value, label string) error {
-	if strings.TrimSpace(value) == "" || hasControl(value) || len([]rune(value)) > maxExternalIDRunes {
+	if strings.TrimSpace(value) == "" || value != strings.TrimSpace(value) || !utf8.ValidString(value) || hasControl(value) || strings.Contains(value, "://") || len([]rune(value)) > maxExternalIDRunes {
 		return fmt.Errorf("%w: %s is invalid", ErrInvalid, label)
 	}
 	return nil
 }
 
 func validateScopedID(value, prefix, label string) error {
-	if len(value) != len(prefix)+26 || !strings.HasPrefix(value, prefix) {
+	if !utf8.ValidString(value) || len(value) != len(prefix)+26 || !strings.HasPrefix(value, prefix) {
 		return fmt.Errorf("%w: %s ID is invalid", ErrInvalid, label)
 	}
-	for _, character := range strings.TrimPrefix(value, prefix) {
+	payload := strings.TrimPrefix(value, prefix)
+	if payload[0] > '7' {
+		return fmt.Errorf("%w: %s ID is invalid", ErrInvalid, label)
+	}
+	for _, character := range payload {
 		if !strings.ContainsRune("0123456789ABCDEFGHJKMNPQRSTVWXYZ", character) {
 			return fmt.Errorf("%w: %s ID is invalid", ErrInvalid, label)
 		}
@@ -238,9 +256,43 @@ func validateScopedID(value, prefix, label string) error {
 	return nil
 }
 
+func isNilGatewayValue(value any) bool {
+	return nilvalue.Is(value)
+}
+
+func withGatewayTimeout(parent context.Context, timeout time.Duration) (ctx context.Context, cancel context.CancelFunc, err error) {
+	if nilvalue.Is(parent) {
+		return nil, func() {}, nilvalue.ErrInvalidContext
+	}
+	if _, err := nilvalue.ContextDone(parent); err != nil {
+		return nil, func() {}, err
+	}
+	defer func() {
+		if recover() != nil {
+			ctx = nil
+			cancel = func() {}
+			err = nilvalue.ErrInvalidContext
+		}
+	}()
+	ctx, cancel = context.WithTimeout(parent, timeout)
+	return ctx, cancel, nil
+}
+
+func callReady(check func() bool) (ready bool) {
+	if check == nil {
+		return false
+	}
+	defer func() {
+		if recover() != nil {
+			ready = false
+		}
+	}()
+	return check()
+}
+
 func hasControl(value string) bool {
 	for _, character := range value {
-		if character < 0x20 || character == 0x7f {
+		if unicode.IsControl(character) {
 			return true
 		}
 	}

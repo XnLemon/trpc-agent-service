@@ -40,6 +40,39 @@ func validRevisionInput() CreateRevisionInput {
 	}
 }
 
+func TestRevisionMCPBindingsArePublishedAndDigestCovered(t *testing.T) {
+	input := validRevisionInput()
+	input.Configuration.MCPBindings = []MCPBinding{{
+		Name: "tools", Transport: "stdio", Command: "/usr/local/bin/mcp-tools",
+		Args: []string{"--safe"}, ToolAllow: []string{"search"},
+	}}
+	revision, err := NewRevision(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revision.MCPBindings) != 1 || revision.MCPBindings[0].Name != "tools" {
+		t.Fatalf("MCP bindings were not captured: %+v", revision.MCPBindings)
+	}
+	published, err := revision.Publish(revision.UpdatedAt.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := published.Clone()
+	changed.MCPBindings[0].ToolAllow[0] = "write"
+	changedDigest, err := changed.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedDigest == published.ContentDigest {
+		t.Fatal("MCP binding behavior change did not alter revision digest")
+	}
+	clone := published.Clone()
+	clone.MCPBindings[0].Args[0] = "--mutated"
+	if published.MCPBindings[0].Args[0] == "--mutated" {
+		t.Fatal("MCP binding args leaked through Revision.Clone")
+	}
+}
+
 func TestNewRevisionNormalizesAndMaterializesDefaults(t *testing.T) {
 	revision, err := NewRevision(validRevisionInput())
 	if err != nil {

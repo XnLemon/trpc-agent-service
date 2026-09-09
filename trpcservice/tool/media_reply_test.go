@@ -14,6 +14,9 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/agent"
+	"trpc.group/trpc-go/trpc-agent-go/artifact"
+	artifactinmemory "trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -28,6 +31,74 @@ func TestMediaReplyToolRespectsRevisionAuthorization(t *testing.T) {
 	}
 	if _, err := registry.Resolve([]appmodel.ToolAuthorization{{ToolID: "unknown", Required: true}}); !errors.Is(err, ErrRequiredUnavailable) {
 		t.Fatalf("required unknown tool error = %v", err)
+	}
+	tools, err = registry.Resolve([]appmodel.ToolAuthorization{{ToolID: ExportArtifactID, Required: true}})
+	if err != nil || len(tools) != 1 || tools[0].Declaration().Name != ExportArtifactID {
+		t.Fatalf("artifact export authorization = %#v, err=%v", tools, err)
+	}
+}
+
+func TestExportArtifactToolUsesInvocationIdentityAndHidesPrivateSource(t *testing.T) {
+	ctx := context.Background()
+	artifactService := artifactinmemory.NewService()
+	scope := artifact.SessionInfo{AppName: "app-a", UserID: "user-a", SessionID: "session-a"}
+	if version, err := artifactService.SaveArtifact(ctx, scope, "report.txt", &artifact.Artifact{Data: []byte("version-zero"), MimeType: "text/plain", Name: "report.txt", URL: "https://private.invalid/zero"}); err != nil || version != 0 {
+		t.Fatalf("save artifact = %d, %v", version, err)
+	}
+	if version, err := artifactService.SaveArtifact(ctx, scope, "report.txt", &artifact.Artifact{Data: []byte("version-one"), MimeType: "text/plain", Name: "report.txt", URL: "https://private.invalid/one"}); err != nil || version != 1 {
+		t.Fatalf("save artifact version = %d, %v", version, err)
+	}
+
+	store := runtimestorageinmemory.New()
+	if _, err := store.CreateSession(ctx, "tenant-a", "session-a", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-a", EventID: "event-artifact", SessionID: "session-a", BindingID: "binding-a", ExternalMessageID: "message-artifact"}); err != nil {
+		t.Fatal(err)
+	}
+	collector := NewReplyCollector()
+	executionCtx := WithExecutionContext(ctx, ExecutionContext{
+		TenantID: "tenant-a", AppID: "app-a", UserID: "user-a", SessionID: "session-a",
+		EventID: "event-artifact", RequestID: "request-artifact", TraceID: "trace-artifact",
+		Attachments: store, Replies: collector,
+	})
+	executionCtx = agent.NewInvocationContext(executionCtx, &agent.Invocation{ArtifactService: artifactService})
+	tools, err := DefaultRegistry().Resolve([]appmodel.ToolAuthorization{{ToolID: ExportArtifactID, Required: true}})
+	if err != nil || len(tools) != 1 {
+		t.Fatalf("resolve artifact export = %#v, %v", tools, err)
+	}
+	callable := tools[0].(trpctool.CallableTool)
+	result, err := callable.Call(executionCtx, []byte(`{"filename":"report.txt","version":0}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, ok := result.(exportArtifactResult)
+	if !ok || queued.Status != "queued" {
+		t.Fatalf("export result = %#v", result)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intents := collector.Intents()
+	if len(intents) != 1 || intents[0].Kind != runtimestorage.ReplyKindDocument {
+		t.Fatalf("artifact intents = %#v", intents)
+	}
+	if bytes.Contains(encoded, []byte(intents[0].Attachment.ID)) || bytes.Contains(encoded, []byte("private.invalid")) || bytes.Contains(encoded, []byte(intents[0].Attachment.ProviderID)) {
+		t.Fatalf("artifact export leaked private metadata: %s", encoded)
+	}
+	content, err := store.Load(ctx, "tenant-a", "event-artifact", intents[0].Attachment)
+	if err != nil || string(content.Data) != "version-zero" {
+		t.Fatalf("exported artifact = %q, %v", content.Data, err)
+	}
+
+	wrongIdentity := WithExecutionContext(ctx, ExecutionContext{
+		TenantID: "tenant-a", AppID: "app-a", UserID: "user-b", SessionID: "session-a",
+		EventID: "event-artifact", RequestID: "request-cross-user", Attachments: store, Replies: NewReplyCollector(),
+	})
+	wrongIdentity = agent.NewInvocationContext(wrongIdentity, &agent.Invocation{ArtifactService: artifactService})
+	if _, err := callable.Call(wrongIdentity, []byte(`{"filename":"report.txt"}`)); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("cross-user export error = %v", err)
 	}
 }
 

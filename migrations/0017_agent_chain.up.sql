@@ -4,7 +4,7 @@ ALTER TABLE public.agent_app_revision
 
 ALTER TABLE public.agent_app_revision
     ADD CONSTRAINT agent_app_revision_agent_kind_check
-    CHECK (agent_kind IN ('llm', 'chain'));
+    CHECK (agent_kind IN ('llm', 'chain', 'parallel', 'cycle', 'graph'));
 
 -- The budget ledger is runtime state: application workers may reserve and
 -- settle it, while direct control-plane table writes remain unavailable to

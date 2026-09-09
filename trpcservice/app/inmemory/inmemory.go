@@ -5,15 +5,17 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // List returns a stable page of Apps belonging to one tenant.
 func (r *InMemoryRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*appmodel.App, string, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, "", err
 	}
 	if limit <= 0 {
@@ -30,10 +32,23 @@ func (r *InMemoryRepository) List(ctx context.Context, tenantID, query, status, 
 		return nil, "", err
 	}
 	defer r.mu.runlock()
-	query, status = strings.ToLower(strings.TrimSpace(query)), strings.TrimSpace(status)
+	if err := appmodel.ValidateTenantID(tenantID); err != nil {
+		return nil, "", err
+	}
+	status = strings.TrimSpace(status)
+	if !validAppStatus(status) {
+		return nil, "", appmodel.ErrInvalid
+	}
+	query = strings.ToLower(strings.TrimSpace(query))
 	items := make([]*appmodel.App, 0)
 	for scope, value := range r.apps {
-		if scope.tenantID != tenantID || (status != "" && string(value.Status) != status) {
+		if scope.tenantID != tenantID {
+			continue
+		}
+		if value == nil || value.TenantID != scope.tenantID || value.AppID != scope.appID || value.Validate() != nil {
+			return nil, "", fmt.Errorf("%w: stored app is invalid", appmodel.ErrInvalid)
+		}
+		if status != "" && string(value.Status) != status {
 			continue
 		}
 		if query != "" && !strings.Contains(strings.ToLower(value.AppID+" "+value.AppKey+" "+value.DisplayName), query) {
@@ -58,7 +73,7 @@ func (r *InMemoryRepository) List(ctx context.Context, tenantID, query, status, 
 
 // ListRevisions returns revisions for one App using stable numeric ordering.
 func (r *InMemoryRepository) ListRevisions(ctx context.Context, tenantID, appID, query, status, cursor string, limit int) ([]*appmodel.Revision, string, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, "", err
 	}
 	if limit <= 0 {
@@ -75,11 +90,27 @@ func (r *InMemoryRepository) ListRevisions(ctx context.Context, tenantID, appID,
 		return nil, "", err
 	}
 	defer r.mu.runlock()
+	if err := appmodel.ValidateTenantID(tenantID); err != nil {
+		return nil, "", err
+	}
+	if err := appmodel.ValidateAppID(appID); err != nil {
+		return nil, "", err
+	}
+	status = strings.TrimSpace(status)
+	if !validRevisionStatus(status) {
+		return nil, "", appmodel.ErrInvalid
+	}
+	if _, err := r.getLocked(tenantID, appID); err != nil {
+		return nil, "", err
+	}
 	values := r.revisions[appScope{tenantID: tenantID, appID: appID}]
 	items := make([]*appmodel.Revision, 0, len(values))
 	status = strings.TrimSpace(status)
 	query = strings.ToLower(strings.TrimSpace(query))
 	for _, value := range values {
+		if value == nil || value.TenantID != tenantID || value.AppID != appID || value.Validate() != nil {
+			return nil, "", fmt.Errorf("%w: stored revision is invalid", appmodel.ErrInvalid)
+		}
 		if status != "" && string(value.State) != status {
 			continue
 		}
@@ -107,8 +138,11 @@ func decodeCursor(cursor string) (int, error) {
 	if cursor == "" {
 		return 0, nil
 	}
-	var offset int
-	if _, err := fmt.Sscanf(cursor, "%d", &offset); err != nil || offset < 0 {
+	if cursor != strings.TrimSpace(cursor) {
+		return 0, fmt.Errorf("invalid cursor")
+	}
+	offset, err := strconv.Atoi(cursor)
+	if err != nil || offset < 0 {
 		return 0, fmt.Errorf("invalid cursor")
 	}
 	return offset, nil
@@ -152,7 +186,7 @@ var _ appmodel.Repository = (*InMemoryRepository)(nil)
 
 // Create stores a new agent application in memory.
 func (r *InMemoryRepository) Create(ctx context.Context, input appmodel.CreateInput) (*appmodel.App, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, err
 	}
 	app, err := appmodel.NewApp(input)
@@ -183,7 +217,7 @@ func (r *InMemoryRepository) Create(ctx context.Context, input appmodel.CreateIn
 
 // Get loads an agent application within the requested tenant.
 func (r *InMemoryRepository) Get(ctx context.Context, tenantID, appID string) (*appmodel.App, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, err
 	}
 	if err := r.mu.rlock(ctx); err != nil {
@@ -202,7 +236,7 @@ func (r *InMemoryRepository) Get(ctx context.Context, tenantID, appID string) (*
 
 // UpdateMetadata applies an expected-version application metadata update.
 func (r *InMemoryRepository) UpdateMetadata(ctx context.Context, input appmodel.UpdateMetadataInput) (*appmodel.App, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, err
 	}
 	if err := r.mu.lock(ctx); err != nil {
@@ -230,7 +264,7 @@ func (r *InMemoryRepository) UpdateMetadata(ctx context.Context, input appmodel.
 
 // CreateDraft stores a draft revision for an agent application.
 func (r *InMemoryRepository) CreateDraft(ctx context.Context, input appmodel.CreateDraftInput) (*appmodel.Revision, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, err
 	}
 	if err := r.mu.lock(ctx); err != nil {
@@ -263,7 +297,7 @@ func (r *InMemoryRepository) CreateDraft(ctx context.Context, input appmodel.Cre
 
 // UpdateDraft applies an expected-version draft update in memory.
 func (r *InMemoryRepository) UpdateDraft(ctx context.Context, input appmodel.UpdateDraftInput) (*appmodel.Revision, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, err
 	}
 	if err := r.mu.lock(ctx); err != nil {
@@ -309,7 +343,7 @@ func (r *InMemoryRepository) UpdateDraft(ctx context.Context, input appmodel.Upd
 
 // GetRevision loads a specific in-memory application revision.
 func (r *InMemoryRepository) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (*appmodel.Revision, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, err
 	}
 	if err := r.mu.rlock(ctx); err != nil {
@@ -328,7 +362,7 @@ func (r *InMemoryRepository) GetRevision(ctx context.Context, tenantID, appID st
 
 // Publish makes a draft revision active in memory.
 func (r *InMemoryRepository) Publish(ctx context.Context, input appmodel.PublishInput) (*appmodel.App, *appmodel.Revision, appmodel.ChangeEvent, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, nil, appmodel.ChangeEvent{}, err
 	}
 	if err := validateChange(input.Metadata); err != nil {
@@ -388,7 +422,7 @@ func (r *InMemoryRepository) Publish(ctx context.Context, input appmodel.Publish
 
 // Rollback restores an earlier published revision in memory.
 func (r *InMemoryRepository) Rollback(ctx context.Context, input appmodel.RollbackInput) (*appmodel.App, appmodel.ChangeEvent, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
 	}
 	if err := validateChange(input.Metadata); err != nil {
@@ -437,7 +471,7 @@ func (r *InMemoryRepository) Rollback(ctx context.Context, input appmodel.Rollba
 // executions of one tenant-scoped App. Existing execution snapshots remain
 // unchanged.
 func (r *InMemoryRepository) SetCanary(ctx context.Context, input appmodel.SetCanaryInput) (*appmodel.App, appmodel.ChangeEvent, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
 	}
 	if err := validateChange(input.Metadata); err != nil {
@@ -511,7 +545,7 @@ func sameRevision(left, right *int64) bool {
 
 // TransitionStatus changes an application status with optimistic concurrency.
 func (r *InMemoryRepository) TransitionStatus(ctx context.Context, input appmodel.TransitionStatusInput) (*appmodel.App, appmodel.ChangeEvent, error) {
-	if err := checkContext(ctx); err != nil {
+	if err := r.check(ctx); err != nil {
 		return nil, appmodel.ChangeEvent{}, err
 	}
 	if err := validateChange(input.Metadata); err != nil {
@@ -557,9 +591,18 @@ func (r *InMemoryRepository) TransitionStatus(ctx context.Context, input appmode
 }
 
 func (r *InMemoryRepository) getLocked(tenantID, appID string) (*appmodel.App, error) {
+	if err := appmodel.ValidateTenantID(tenantID); err != nil {
+		return nil, err
+	}
+	if err := appmodel.ValidateAppID(appID); err != nil {
+		return nil, err
+	}
 	app, ok := r.apps[appScope{tenantID: tenantID, appID: appID}]
 	if !ok {
 		return nil, fmt.Errorf("%w: tenant %s app %s", appmodel.ErrNotFound, tenantID, appID)
+	}
+	if app == nil || app.Validate() != nil {
+		return nil, fmt.Errorf("%w: stored app is invalid", appmodel.ErrInvalid)
 	}
 	return app, nil
 }
@@ -586,6 +629,9 @@ func (r *InMemoryRepository) revisionLocked(tenantID, appID string, revision int
 	value, ok := r.revisions[scope][revision]
 	if !ok {
 		return nil, fmt.Errorf("%w: tenant %s app %s revision %d", appmodel.ErrNotFound, tenantID, appID, revision)
+	}
+	if value == nil || value.Validate() != nil {
+		return nil, fmt.Errorf("%w: stored revision is invalid", appmodel.ErrInvalid)
 	}
 	return value, nil
 }
@@ -638,10 +684,43 @@ func conflict(expected, actual int64) error {
 	return fmt.Errorf("%w: expected %d, got %d", appmodel.ErrConflict, expected, actual)
 }
 
+func (r *InMemoryRepository) check(ctx context.Context) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	if r == nil || r.apps == nil || r.byKey == nil || r.revisions == nil || r.next == nil {
+		return fmt.Errorf("%w: repository is unavailable", appmodel.ErrInvalid)
+	}
+	return nil
+}
+
+func validAppStatus(value string) bool {
+	switch value {
+	case "", string(appmodel.StatusDraft), string(appmodel.StatusActive), string(appmodel.StatusSuspended), string(appmodel.StatusDisabled):
+		return true
+	default:
+		return false
+	}
+}
+
+func validRevisionStatus(value string) bool {
+	return value == "" || value == string(appmodel.RevisionStateDraft) || value == string(appmodel.RevisionStatePublished)
+}
+
 func checkContext(ctx context.Context) error {
+	if nilvalue.Is(ctx) {
+		return fmt.Errorf("%w: context is required", appmodel.ErrInvalid)
+	}
+	done, err := nilvalue.ContextDone(ctx)
+	if err != nil {
+		if err == nilvalue.ErrInvalidContext {
+			return fmt.Errorf("%w: context is unavailable", appmodel.ErrInvalid)
+		}
+		return err
+	}
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-done:
+		return nilvalue.ContextErr(ctx)
 	default:
 		return nil
 	}

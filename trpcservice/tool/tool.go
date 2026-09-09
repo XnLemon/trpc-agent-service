@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/audit"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 var (
@@ -14,6 +16,14 @@ var (
 	ErrDenied = errors.New("tool denied")
 	// ErrApprovalRequired reports a tool request requiring approval.
 	ErrApprovalRequired = errors.New("tool approval required")
+	// ErrApprovalDenied reports a reviewer rejection or unavailable review.
+	ErrApprovalDenied = errors.New("tool approval denied")
+	// ErrToolBudgetExceeded reports a per-execution tool-call budget denial.
+	ErrToolBudgetExceeded = errors.New("tool call budget exceeded")
+	// ErrMCPExecutionUnavailable reports an unscoped MCP call.
+	ErrMCPExecutionUnavailable = errors.New("MCP execution context unavailable")
+	// ErrMCPInvalidArguments reports oversized or malformed MCP arguments.
+	ErrMCPInvalidArguments = errors.New("invalid MCP tool arguments")
 )
 
 // Decision records the tool admission result.
@@ -38,7 +48,7 @@ type Policy struct {
 // Decide evaluates and audits a tool request.
 func (p Policy) Decide(ctx context.Context, requestID, traceID, toolName string) (Decision, error) {
 	toolName = strings.TrimSpace(toolName)
-	if toolName == "" || len([]rune(toolName)) > 256 {
+	if !utf8.ValidString(toolName) || toolName == "" || strings.Contains(toolName, "://") || strings.IndexFunc(toolName, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 || len([]rune(toolName)) > 256 {
 		return "", audit.ErrInvalid
 	}
 	decision := Deny
@@ -62,11 +72,13 @@ func (p Policy) Decide(ctx context.Context, requestID, traceID, toolName string)
 	case ApprovalRequired:
 		eventType = audit.EventToolApprovalRequired
 	}
-	if auditErr := p.Recorder.Record(ctx, audit.Event{
-		EventType: eventType, RequestID: requestID, TraceID: traceID,
-		ToolName: toolName, Decision: audit.Decision(decision),
-	}); auditErr != nil {
-		return "", audit.ErrWriteFailed
+	if !nilvalue.Is(p.Recorder) {
+		if auditErr := p.Recorder.Record(ctx, audit.Event{
+			EventType: eventType, RequestID: requestID, TraceID: traceID,
+			ToolName: toolName, Decision: audit.Decision(decision),
+		}); auditErr != nil {
+			return "", audit.ErrWriteFailed
+		}
 	}
 	return decision, err
 }

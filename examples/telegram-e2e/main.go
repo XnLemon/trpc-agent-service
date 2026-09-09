@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/internal/nilvalue"
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 	channelsinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/channels/inmemory"
@@ -84,7 +85,7 @@ func run(ctx context.Context, lookup func(string) string, stdout io.Writer) erro
 }
 
 func runWithPreflight(ctx context.Context, lookup func(string) string, stdout io.Writer, prepare prepareBotFunc) error {
-	if ctx == nil || lookup == nil || stdout == nil {
+	if nilvalue.Is(ctx) || lookup == nil || stdout == nil {
 		return errConfiguration
 	}
 	if prepare == nil {
@@ -104,7 +105,7 @@ func runWithPreflight(ctx context.Context, lookup func(string) string, stdout io
 
 	receiver, err := prepare(runContext, configuration.botToken, configuration.pollTimeout, configuration.deleteWebhook, configuration.dropPendingUpdate)
 	if err != nil {
-		return classifyPreflightResult(ctx.Err(), runContext.Err(), err)
+		return classifyPreflightResult(nilvalue.ContextErr(ctx), nilvalue.ContextErr(runContext), err)
 	}
 	target, err := newTrustedTarget(strconv.FormatInt(receiver.ID, 10))
 	if err != nil {
@@ -113,7 +114,7 @@ func runWithPreflight(ctx context.Context, lookup func(string) string, stdout io
 	dispatcher := newDeterministicDispatcher(configuration.testMessage, reply)
 	adapter, err := telegramAdapter(runContext, configuration, target, dispatcher)
 	if err != nil {
-		return classifyPreflightResult(ctx.Err(), runContext.Err(), err)
+		return classifyPreflightResult(nilvalue.ContextErr(ctx), nilvalue.ContextErr(runContext), err)
 	}
 
 	runDone := make(chan error, 1)
@@ -127,20 +128,25 @@ func runWithPreflight(ctx context.Context, lookup func(string) string, stdout io
 	var result error
 	if configuration.senderBotToken != "" {
 		senderResult := runAutomatedSender(runContext, configuration.senderBotToken, configuration.pollTimeout, receiver, configuration.testMessage, reply, configuration.deleteWebhook, configuration.dropPendingUpdate)
-		result = classifyAutomatedSenderResult(ctx.Err(), runContext.Err(), senderResult)
+		result = classifyAutomatedSenderResult(nilvalue.ContextErr(ctx), nilvalue.ContextErr(runContext), senderResult)
 		cancel()
 		if stopErr := waitForAdapter(runDone); stopErr != nil && result == nil {
 			result = stopErr
 		}
 	} else {
-		select {
-		case err := <-runDone:
-			result = classifyManualRunResult(ctx.Err(), runContext.Err(), err)
-		case <-runContext.Done():
-			if stopErr := waitForAdapter(runDone); stopErr != nil {
-				result = stopErr
-			} else {
-				result = classifyManualRunResult(ctx.Err(), runContext.Err(), nil)
+		runDoneChannel, doneErr := nilvalue.ContextDone(runContext)
+		if doneErr != nil {
+			result = doneErr
+		} else {
+			select {
+			case err := <-runDone:
+				result = classifyManualRunResult(nilvalue.ContextErr(ctx), nilvalue.ContextErr(runContext), err)
+			case <-runDoneChannel:
+				if stopErr := waitForAdapter(runDone); stopErr != nil {
+					result = stopErr
+				} else {
+					result = classifyManualRunResult(nilvalue.ContextErr(ctx), nilvalue.ContextErr(runContext), nil)
+				}
 			}
 		}
 	}
@@ -440,10 +446,10 @@ func newDeterministicDispatcher(marker, reply string) *deterministicDispatcher {
 }
 
 func (dispatcher *deterministicDispatcher) Dispatch(ctx context.Context, request gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {
-	if dispatcher == nil || ctx == nil {
+	if dispatcher == nil || nilvalue.Is(ctx) {
 		return nil, errConfiguration
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	if request.Message.Content == dispatcher.marker {
@@ -517,6 +523,12 @@ func runSender(ctx context.Context, sender *bot.Bot, receiverUsername, marker st
 		waitForSender(senderDone)
 		return errSender
 	}
+	done, doneErr := nilvalue.ContextDone(ctx)
+	if doneErr != nil {
+		cancel()
+		waitForSender(senderDone)
+		return errSender
+	}
 	select {
 	case <-replyReceived:
 		cancel()
@@ -531,7 +543,7 @@ func runSender(ctx context.Context, sender *bot.Bot, receiverUsername, marker st
 	case <-senderDone:
 		cancel()
 		return errSenderStopped
-	case <-ctx.Done():
+	case <-done:
 		cancel()
 		waitForSender(senderDone)
 		return errSender

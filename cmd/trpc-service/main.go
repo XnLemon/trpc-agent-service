@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/migrations"
 	"github.com/XnLemon/trpc-agent-service/trpcservice"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/bootstrap"
@@ -129,7 +130,7 @@ func runInit(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 	if err != nil {
 		return err
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return bootstrap.ErrInvalidConfig
 	}
 	initContext := ctx
@@ -138,10 +139,15 @@ func runInit(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 		initContext, cancel = context.WithCancel(ctx)
 		defer cancel()
 		go func() {
+			done, doneErr := nilvalue.ContextDone(initContext)
+			if doneErr != nil {
+				cancel()
+				return
+			}
 			select {
 			case <-signals:
 				cancel()
-			case <-initContext.Done():
+			case <-done:
 			}
 		}()
 	}
@@ -187,7 +193,7 @@ func runDemo(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 	if dsn == "" {
 		return fmt.Errorf("%w: %s is required", bootstrap.ErrInvalidConfig, bootstrapPostgresDSN)
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return bootstrap.ErrInvalidConfig
 	}
 	demoContext := ctx
@@ -196,10 +202,15 @@ func runDemo(ctx context.Context, args []string, stdout, stderr io.Writer, signa
 		demoContext, cancel = context.WithCancel(ctx)
 		defer cancel()
 		go func() {
+			done, doneErr := nilvalue.ContextDone(demoContext)
+			if doneErr != nil {
+				cancel()
+				return
+			}
 			select {
 			case <-signals:
 				cancel()
-			case <-demoContext.Done():
+			case <-done:
 			}
 		}()
 	}
@@ -333,16 +344,28 @@ func newServiceHTTPServer(handler http.Handler, options serviceOptions) *http.Se
 }
 
 func runService(ctx context.Context, signals <-chan os.Signal, handler *gateway.HTTPHandler, shutdownTimeout time.Duration, serve func() error, shutdown func(context.Context) error) error {
-	if ctx == nil || serve == nil || shutdown == nil || shutdownTimeout <= 0 {
+	if nilvalue.Is(ctx) || serve == nil || shutdown == nil || shutdownTimeout <= 0 {
 		return errInvalidServiceSupervisorConfiguration
+	}
+	ctxDone, ctxDoneErr := nilvalue.ContextDone(ctx)
+	if ctxDoneErr != nil {
+		if errors.Is(ctxDoneErr, context.Canceled) || errors.Is(ctxDoneErr, context.DeadlineExceeded) {
+			return shutdownService(handler, shutdownTimeout, shutdown)
+		}
+		return ctxDoneErr
 	}
 	serveResult := make(chan error, 1)
 	go func() {
+		defer func() {
+			if recover() != nil {
+				serveResult <- errServiceServePanic
+			}
+		}()
 		serveResult <- serve()
 	}()
 	select {
 	case err := <-serveResult:
-		if ctx.Err() != nil {
+		if nilvalue.ContextErr(ctx) != nil {
 			return shutdownService(handler, shutdownTimeout, shutdown)
 		}
 		closeErr := closeGatewayHandler(handler)
@@ -353,12 +376,30 @@ func runService(ctx context.Context, signals <-chan os.Signal, handler *gateway.
 			return errors.Join(err, closeErr)
 		}
 		return err
-	case <-ctx.Done():
+	case <-ctxDone:
 		return shutdownService(handler, shutdownTimeout, shutdown)
 	case <-signals:
 		return shutdownService(handler, shutdownTimeout, shutdown)
 	}
 }
+
+var errServiceServePanic = errors.New("service serve failed")
+
+func callServiceShutdown(shutdown func(context.Context) error, ctx context.Context) (err error) {
+	if shutdown == nil || nilvalue.Is(ctx) {
+		return errInvalidServiceSupervisorConfiguration
+	}
+	defer func() {
+		if recover() != nil {
+			err = errServiceShutdownPanic
+		} else if nilvalue.Is(err) {
+			err = nil
+		}
+	}()
+	return shutdown(ctx)
+}
+
+var errServiceShutdownPanic = errors.New("service shutdown failed")
 
 func shutdownService(handler *gateway.HTTPHandler, timeout time.Duration, shutdown func(context.Context) error) error {
 	if handler != nil {
@@ -366,7 +407,7 @@ func shutdownService(handler *gateway.HTTPHandler, timeout time.Duration, shutdo
 	}
 	shutdownContext, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	shutdownErr := shutdown(shutdownContext)
+	shutdownErr := callServiceShutdown(shutdown, shutdownContext)
 	return errors.Join(shutdownErr, closeGatewayHandler(handler))
 }
 

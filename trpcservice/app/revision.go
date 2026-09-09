@@ -10,6 +10,9 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
+
+	skillsecurity "github.com/XnLemon/trpc-agent-service/trpcservice/skill"
 )
 
 // RevisionState distinguishes mutable draft content from immutable published
@@ -31,6 +34,12 @@ const (
 	KindLLM Kind = "llm"
 	// KindChain identifies a sequential composition of LLMAgent steps.
 	KindChain Kind = "chain"
+	// KindParallel identifies concurrently executed LLMAgent steps.
+	KindParallel Kind = "parallel"
+	// KindCycle identifies repeatedly executed LLMAgent steps.
+	KindCycle Kind = "cycle"
+	// KindGraph identifies an explicit graph of LLMAgent steps.
+	KindGraph Kind = "graph"
 )
 
 const (
@@ -40,6 +49,16 @@ const (
 	maxReferenceRunes   = 256
 	maxChainSteps       = 32
 )
+
+// SkillAuthorization is the published, secret-free identity and execution
+// policy for one Agent Skill.
+type SkillAuthorization = skillsecurity.Authorization
+
+// SkillExecutionPolicy is the bounded, deny-by-default execution policy for a
+// Skill. The current Agent adapter exposes knowledge-only Skill tools; the
+// policy is nevertheless sealed now so a future executor cannot widen access
+// at runtime.
+type SkillExecutionPolicy = skillsecurity.ExecutionPolicy
 
 // GenerationConfig is the provider-neutral subset materialized by the first
 // Agent App schema. Nil fields preserve provider defaults.
@@ -74,14 +93,24 @@ func (configuration *ChainConfiguration) Clone() *ChainConfiguration {
 	return &clone
 }
 
+// GuardrailPolicy contains revision-scoped guardrails that may be
+// materialized by a trusted runtime PluginFactory. Reviewers and other live
+// services are never stored in this policy.
+type GuardrailPolicy struct {
+	PromptInjection bool     `json:"prompt_injection,omitempty"`
+	UnsafeIntent    bool     `json:"unsafe_intent,omitempty"`
+	ApprovalTools   []string `json:"approval_tools,omitempty"`
+}
+
 // RuntimePolicy contains bounded execution controls captured by a published
 // revision. It does not carry contexts, timers, or runtime clients.
 type RuntimePolicy struct {
-	MaxLLMCalls             int  `json:"max_llm_calls"`
-	MaxToolCalls            int  `json:"max_tool_calls"`
-	EnableParallelTools     bool `json:"enable_parallel_tools"`
-	MaxParallelTools        int  `json:"max_parallel_tools"`
-	ExecutionTimeoutSeconds int  `json:"execution_timeout_seconds"`
+	MaxLLMCalls             int              `json:"max_llm_calls"`
+	MaxToolCalls            int              `json:"max_tool_calls"`
+	EnableParallelTools     bool             `json:"enable_parallel_tools"`
+	MaxParallelTools        int              `json:"max_parallel_tools"`
+	ExecutionTimeoutSeconds int              `json:"execution_timeout_seconds"`
+	Guardrail               *GuardrailPolicy `json:"guardrail,omitempty"`
 }
 
 // DefaultRuntimePolicy returns the materialized schema-v1 execution defaults.
@@ -102,38 +131,44 @@ type ToolAuthorization struct {
 
 // DraftConfiguration is the complete executable content of one revision.
 type DraftConfiguration struct {
-	Description       string
-	Instruction       string
-	GlobalInstruction string
-	ModelProfileID    string
-	Generation        GenerationConfig
-	Runtime           RuntimePolicy
-	Tools             []ToolAuthorization
-	Chain             *ChainConfiguration
+	Description         string
+	Instruction         string
+	GlobalInstruction   string
+	ModelProfileID      string
+	Generation          GenerationConfig
+	Runtime             RuntimePolicy
+	Tools               []ToolAuthorization
+	MCPBindings         []MCPBinding
+	Skills              []string             `json:"skills,omitempty"`
+	SkillAuthorizations []SkillAuthorization `json:"skill_authorizations,omitempty"`
+	Chain               *ChainConfiguration
 }
 
 // Revision is one tenant-scoped version of an Agent App definition.
 // Published revisions are immutable and content-addressed.
 type Revision struct {
-	TenantID          string
-	AppID             string
-	Revision          int64
-	State             RevisionState
-	DraftVersion      int64
-	Kind              Kind
-	SchemaVersion     int
-	Description       string
-	Instruction       string
-	GlobalInstruction string
-	ModelProfileID    string
-	Generation        GenerationConfig
-	Runtime           RuntimePolicy
-	Tools             []ToolAuthorization
-	Chain             *ChainConfiguration
-	ContentDigest     string
-	PublishedAt       *time.Time
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	TenantID            string
+	AppID               string
+	Revision            int64
+	State               RevisionState
+	DraftVersion        int64
+	Kind                Kind
+	SchemaVersion       int
+	Description         string
+	Instruction         string
+	GlobalInstruction   string
+	ModelProfileID      string
+	Generation          GenerationConfig
+	Runtime             RuntimePolicy
+	Tools               []ToolAuthorization
+	MCPBindings         []MCPBinding
+	Skills              []string
+	SkillAuthorizations []SkillAuthorization
+	Chain               *ChainConfiguration
+	ContentDigest       string
+	PublishedAt         *time.Time
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 }
 
 // CreateRevisionInput contains trusted identity and caller-selected content for
@@ -175,23 +210,26 @@ func NewRevision(input CreateRevisionInput) (*Revision, error) {
 	}
 	now := time.Now().UTC()
 	revision := &Revision{
-		TenantID:          input.TenantID,
-		AppID:             input.AppID,
-		Revision:          input.Revision,
-		State:             RevisionStateDraft,
-		DraftVersion:      1,
-		Kind:              kind,
-		SchemaVersion:     schemaVersion,
-		Description:       configuration.Description,
-		Instruction:       configuration.Instruction,
-		GlobalInstruction: configuration.GlobalInstruction,
-		ModelProfileID:    configuration.ModelProfileID,
-		Generation:        cloneGenerationConfig(configuration.Generation),
-		Runtime:           configuration.Runtime,
-		Tools:             cloneTools(configuration.Tools),
-		Chain:             configuration.Chain.Clone(),
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		TenantID:            input.TenantID,
+		AppID:               input.AppID,
+		Revision:            input.Revision,
+		State:               RevisionStateDraft,
+		DraftVersion:        1,
+		Kind:                kind,
+		SchemaVersion:       schemaVersion,
+		Description:         configuration.Description,
+		Instruction:         configuration.Instruction,
+		GlobalInstruction:   configuration.GlobalInstruction,
+		ModelProfileID:      configuration.ModelProfileID,
+		Generation:          cloneGenerationConfig(configuration.Generation),
+		Runtime:             cloneRuntimePolicy(configuration.Runtime),
+		Tools:               cloneTools(configuration.Tools),
+		MCPBindings:         cloneMCPBindings(configuration.MCPBindings),
+		Skills:              cloneStrings(configuration.Skills),
+		SkillAuthorizations: cloneSkillAuthorizations(configuration.SkillAuthorizations),
+		Chain:               configuration.Chain.Clone(),
+		CreatedAt:           now,
+		UpdatedAt:           now,
 	}
 	return revision, nil
 }
@@ -200,7 +238,11 @@ func NewRevision(input CreateRevisionInput) (*Revision, error) {
 func (r Revision) Clone() Revision {
 	clone := r
 	clone.Generation = cloneGenerationConfig(r.Generation)
+	clone.Runtime = cloneRuntimePolicy(r.Runtime)
 	clone.Tools = cloneTools(r.Tools)
+	clone.MCPBindings = cloneMCPBindings(r.MCPBindings)
+	clone.Skills = cloneStrings(r.Skills)
+	clone.SkillAuthorizations = cloneSkillAuthorizations(r.SkillAuthorizations)
 	clone.Chain = r.Chain.Clone()
 	clone.PublishedAt = cloneTime(r.PublishedAt)
 	return clone
@@ -209,14 +251,17 @@ func (r Revision) Clone() Revision {
 // Configuration returns a deep copy of the revision's executable definition.
 func (r Revision) Configuration() DraftConfiguration {
 	return DraftConfiguration{
-		Description:       r.Description,
-		Instruction:       r.Instruction,
-		GlobalInstruction: r.GlobalInstruction,
-		ModelProfileID:    r.ModelProfileID,
-		Generation:        cloneGenerationConfig(r.Generation),
-		Runtime:           r.Runtime,
-		Tools:             cloneTools(r.Tools),
-		Chain:             r.Chain.Clone(),
+		Description:         r.Description,
+		Instruction:         r.Instruction,
+		GlobalInstruction:   r.GlobalInstruction,
+		ModelProfileID:      r.ModelProfileID,
+		Generation:          cloneGenerationConfig(r.Generation),
+		Runtime:             cloneRuntimePolicy(r.Runtime),
+		Tools:               cloneTools(r.Tools),
+		MCPBindings:         cloneMCPBindings(r.MCPBindings),
+		Skills:              cloneStrings(r.Skills),
+		SkillAuthorizations: cloneSkillAuthorizations(r.SkillAuthorizations),
+		Chain:               r.Chain.Clone(),
 	}
 }
 
@@ -305,27 +350,33 @@ func (r Revision) ComputeContentDigest() (string, error) {
 		return "", err
 	}
 	payload := struct {
-		Kind              Kind                `json:"kind"`
-		SchemaVersion     int                 `json:"schema_version"`
-		Description       string              `json:"description"`
-		Instruction       string              `json:"instruction"`
-		GlobalInstruction string              `json:"global_instruction"`
-		ModelProfileID    string              `json:"model_profile_id"`
-		Generation        GenerationConfig    `json:"generation"`
-		Runtime           RuntimePolicy       `json:"runtime"`
-		Tools             []ToolAuthorization `json:"tools"`
-		Chain             *ChainConfiguration `json:"chain,omitempty"`
+		Kind                Kind                 `json:"kind"`
+		SchemaVersion       int                  `json:"schema_version"`
+		Description         string               `json:"description"`
+		Instruction         string               `json:"instruction"`
+		GlobalInstruction   string               `json:"global_instruction"`
+		ModelProfileID      string               `json:"model_profile_id"`
+		Generation          GenerationConfig     `json:"generation"`
+		Runtime             RuntimePolicy        `json:"runtime"`
+		Tools               []ToolAuthorization  `json:"tools"`
+		MCPBindings         []MCPBinding         `json:"mcp_bindings,omitempty"`
+		Skills              []string             `json:"skills,omitempty"`
+		SkillAuthorizations []SkillAuthorization `json:"skill_authorizations,omitempty"`
+		Chain               *ChainConfiguration  `json:"chain,omitempty"`
 	}{
-		Kind:              r.Kind,
-		SchemaVersion:     r.SchemaVersion,
-		Description:       configuration.Description,
-		Instruction:       configuration.Instruction,
-		GlobalInstruction: configuration.GlobalInstruction,
-		ModelProfileID:    configuration.ModelProfileID,
-		Generation:        cloneGenerationConfig(configuration.Generation),
-		Runtime:           configuration.Runtime,
-		Tools:             cloneTools(configuration.Tools),
-		Chain:             configuration.Chain.Clone(),
+		Kind:                r.Kind,
+		SchemaVersion:       r.SchemaVersion,
+		Description:         configuration.Description,
+		Instruction:         configuration.Instruction,
+		GlobalInstruction:   configuration.GlobalInstruction,
+		ModelProfileID:      configuration.ModelProfileID,
+		Generation:          cloneGenerationConfig(configuration.Generation),
+		Runtime:             cloneRuntimePolicy(configuration.Runtime),
+		Tools:               cloneTools(configuration.Tools),
+		MCPBindings:         cloneMCPBindings(configuration.MCPBindings),
+		Skills:              cloneStrings(configuration.Skills),
+		SkillAuthorizations: cloneSkillAuthorizations(configuration.SkillAuthorizations),
+		Chain:               configuration.Chain.Clone(),
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -370,11 +421,33 @@ func normalizeDraftConfiguration(configuration DraftConfiguration) (DraftConfigu
 	if normalized.Runtime == (RuntimePolicy{}) {
 		normalized.Runtime = DefaultRuntimePolicy()
 	}
+	normalized.Runtime = normalizeRuntimePolicy(normalized.Runtime)
 	tools, err := normalizeTools(configuration.Tools)
 	if err != nil {
 		return DraftConfiguration{}, err
 	}
 	normalized.Tools = tools
+	mcpBindings, err := normalizeMCPBindings(configuration.MCPBindings)
+	if err != nil {
+		return DraftConfiguration{}, err
+	}
+	normalized.MCPBindings = mcpBindings
+	skills, err := normalizeSkills(configuration.Skills)
+	if err != nil {
+		return DraftConfiguration{}, err
+	}
+	authorizations, err := normalizeSkillAuthorizations(skills, configuration.SkillAuthorizations)
+	if err != nil {
+		return DraftConfiguration{}, err
+	}
+	if len(skills) == 0 && len(authorizations) > 0 {
+		skills = make([]string, 0, len(authorizations))
+		for _, authorization := range authorizations {
+			skills = append(skills, authorization.Name)
+		}
+	}
+	normalized.Skills = skills
+	normalized.SkillAuthorizations = authorizations
 	chain, err := normalizeChainConfiguration(configuration.Chain)
 	if err != nil {
 		return DraftConfiguration{}, err
@@ -392,12 +465,15 @@ func validateRevisionDefinition(kind Kind, schemaVersion int, configuration Draf
 		if configuration.Chain != nil {
 			return fmt.Errorf("%w: LLM revision cannot contain chain configuration", ErrInvalid)
 		}
-	case KindChain:
+	case KindChain, KindParallel, KindCycle, KindGraph:
 		if err := validateChainConfiguration(configuration.Chain); err != nil {
 			return err
 		}
 	default:
 		return fmt.Errorf("%w: unsupported agent kind %q or schema version %d", ErrInvalid, kind, schemaVersion)
+	}
+	if !validRevisionText(configuration.Description) || !validRevisionText(configuration.Instruction) || !validRevisionText(configuration.GlobalInstruction) || !validRevisionText(configuration.ModelProfileID) {
+		return fmt.Errorf("%w: revision configuration contains invalid text", ErrInvalid)
 	}
 	if len([]rune(configuration.Description)) > 2000 {
 		return fmt.Errorf("%w: revision description must contain at most 2000 characters", ErrInvalid)
@@ -420,6 +496,16 @@ func validateRevisionDefinition(kind Kind, schemaVersion int, configuration Draf
 	if _, err := normalizeTools(configuration.Tools); err != nil {
 		return err
 	}
+	if _, err := normalizeMCPBindings(configuration.MCPBindings); err != nil {
+		return err
+	}
+	skills, err := normalizeSkills(configuration.Skills)
+	if err != nil {
+		return err
+	}
+	if _, err := normalizeSkillAuthorizations(skills, configuration.SkillAuthorizations); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -433,6 +519,9 @@ func normalizeChainConfiguration(configuration *ChainConfiguration) (*ChainConfi
 		step.Name = strings.TrimSpace(step.Name)
 		step.Instruction = strings.TrimSpace(step.Instruction)
 		step.GlobalInstruction = strings.TrimSpace(step.GlobalInstruction)
+		if !validRevisionText(step.Name) || !validRevisionText(step.Instruction) || !validRevisionText(step.GlobalInstruction) {
+			return nil, fmt.Errorf("%w: chain step contains invalid text", ErrInvalid)
+		}
 		if len([]rune(step.Name)) > maxReferenceRunes {
 			return nil, fmt.Errorf("%w: chain step name must contain at most %d characters", ErrInvalid, maxReferenceRunes)
 		}
@@ -455,6 +544,9 @@ func validateChainConfiguration(configuration *ChainConfiguration) error {
 	}
 	seen := make(map[string]struct{}, len(configuration.Steps))
 	for index, step := range configuration.Steps {
+		if !validRevisionText(step.Name) || !validRevisionText(step.Instruction) || !validRevisionText(step.GlobalInstruction) {
+			return fmt.Errorf("%w: chain step %d contains invalid text", ErrInvalid, index)
+		}
 		if n := len([]rune(step.Name)); n < 1 || n > maxReferenceRunes {
 			return fmt.Errorf("%w: chain step %d name must contain 1-%d characters", ErrInvalid, index, maxReferenceRunes)
 		}
@@ -510,7 +602,45 @@ func validateRuntimePolicy(policy RuntimePolicy) error {
 	if policy.ExecutionTimeoutSeconds < 1 || policy.ExecutionTimeoutSeconds > 3600 {
 		return fmt.Errorf("%w: execution timeout must be between 1 and 3600 seconds", ErrInvalid)
 	}
+	if err := validateGuardrailPolicy(policy.Guardrail); err != nil {
+		return err
+	}
 	return nil
+}
+
+func normalizeRuntimePolicy(policy RuntimePolicy) RuntimePolicy {
+	clone := policy
+	clone.Guardrail = cloneGuardrailPolicy(policy.Guardrail)
+	if clone.Guardrail != nil {
+		for index := range clone.Guardrail.ApprovalTools {
+			clone.Guardrail.ApprovalTools[index] = strings.TrimSpace(clone.Guardrail.ApprovalTools[index])
+		}
+		sort.Strings(clone.Guardrail.ApprovalTools)
+	}
+	return clone
+}
+
+func cloneRuntimePolicy(policy RuntimePolicy) RuntimePolicy {
+	return normalizeRuntimePolicy(policy)
+}
+
+func validateGuardrailPolicy(policy *GuardrailPolicy) error {
+	if policy == nil {
+		return nil
+	}
+	if _, err := normalizeSkills(policy.ApprovalTools); err != nil {
+		return fmt.Errorf("%w: guardrail approval tools: %v", ErrInvalid, err)
+	}
+	return nil
+}
+
+func cloneGuardrailPolicy(policy *GuardrailPolicy) *GuardrailPolicy {
+	if policy == nil {
+		return nil
+	}
+	clone := *policy
+	clone.ApprovalTools = cloneStrings(policy.ApprovalTools)
+	return &clone
 }
 
 func normalizeTools(tools []ToolAuthorization) ([]ToolAuthorization, error) {
@@ -521,6 +651,9 @@ func normalizeTools(tools []ToolAuthorization) ([]ToolAuthorization, error) {
 	seen := make(map[string]struct{}, len(normalized))
 	for i := range normalized {
 		normalized[i].ToolID = strings.TrimSpace(normalized[i].ToolID)
+		if !validRevisionText(normalized[i].ToolID) || strings.Contains(normalized[i].ToolID, "://") {
+			return nil, fmt.Errorf("%w: tool id is invalid", ErrInvalid)
+		}
 		if n := len([]rune(normalized[i].ToolID)); n < 1 || n > maxReferenceRunes {
 			return nil, fmt.Errorf("%w: tool id must contain 1-%d characters", ErrInvalid, maxReferenceRunes)
 		}
@@ -534,10 +667,10 @@ func normalizeTools(tools []ToolAuthorization) ([]ToolAuthorization, error) {
 }
 
 func sameDraftConfiguration(left, right DraftConfiguration) bool {
-	if left.Description != right.Description || left.Instruction != right.Instruction || left.GlobalInstruction != right.GlobalInstruction || left.ModelProfileID != right.ModelProfileID || left.Runtime != right.Runtime {
+	if left.Description != right.Description || left.Instruction != right.Instruction || left.GlobalInstruction != right.GlobalInstruction || left.ModelProfileID != right.ModelProfileID || !sameRuntimePolicy(left.Runtime, right.Runtime) {
 		return false
 	}
-	if !sameGenerationConfig(left.Generation, right.Generation) || len(left.Tools) != len(right.Tools) {
+	if !sameGenerationConfig(left.Generation, right.Generation) || len(left.Tools) != len(right.Tools) || !sameMCPBindings(left.MCPBindings, right.MCPBindings) || !sameStrings(left.Skills, right.Skills) || !sameSkillAuthorizations(left.SkillAuthorizations, right.SkillAuthorizations) {
 		return false
 	}
 	if !sameChainConfiguration(left.Chain, right.Chain) {
@@ -564,6 +697,16 @@ func sameChainConfiguration(left, right *ChainConfiguration) bool {
 		}
 	}
 	return true
+}
+
+func sameRuntimePolicy(left, right RuntimePolicy) bool {
+	if left.MaxLLMCalls != right.MaxLLMCalls || left.MaxToolCalls != right.MaxToolCalls || left.EnableParallelTools != right.EnableParallelTools || left.MaxParallelTools != right.MaxParallelTools || left.ExecutionTimeoutSeconds != right.ExecutionTimeoutSeconds {
+		return false
+	}
+	if left.Guardrail == nil || right.Guardrail == nil {
+		return left.Guardrail == nil && right.Guardrail == nil
+	}
+	return left.Guardrail.PromptInjection == right.Guardrail.PromptInjection && left.Guardrail.UnsafeIntent == right.Guardrail.UnsafeIntent && sameStrings(left.Guardrail.ApprovalTools, right.Guardrail.ApprovalTools)
 }
 
 func sameGenerationConfig(left, right GenerationConfig) bool {
@@ -621,6 +764,102 @@ func cloneTools(tools []ToolAuthorization) []ToolAuthorization {
 	clone := make([]ToolAuthorization, len(tools))
 	copy(clone, tools)
 	return clone
+}
+
+func cloneStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	clone := make([]string, len(values))
+	copy(clone, values)
+	return clone
+}
+
+func normalizeSkillAuthorizations(skills []string, values []SkillAuthorization) ([]SkillAuthorization, error) {
+	if len(values) == 0 {
+		if len(skills) > 0 {
+			return nil, fmt.Errorf("%w: every Skill requires a pinned authorization", ErrInvalid)
+		}
+		return []SkillAuthorization{}, nil
+	}
+	normalized := make([]SkillAuthorization, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		authorization, err := value.Normalize()
+		if err != nil {
+			return nil, fmt.Errorf("%w: Skill authorization: %v", ErrInvalid, err)
+		}
+		if _, exists := seen[authorization.Name]; exists {
+			return nil, fmt.Errorf("%w: duplicate Skill authorization %q", ErrInvalid, authorization.Name)
+		}
+		seen[authorization.Name] = struct{}{}
+		normalized = append(normalized, authorization)
+	}
+	sort.Slice(normalized, func(i, j int) bool { return normalized[i].Name < normalized[j].Name })
+	if len(skills) > 0 {
+		if len(skills) != len(normalized) {
+			return nil, fmt.Errorf("%w: Skills and SkillAuthorizations must contain the same names", ErrInvalid)
+		}
+		for index, name := range skills {
+			if normalized[index].Name != name {
+				return nil, fmt.Errorf("%w: Skill authorization does not match the allowlist", ErrInvalid)
+			}
+		}
+	}
+	return normalized, nil
+}
+
+func cloneSkillAuthorizations(values []SkillAuthorization) []SkillAuthorization {
+	if values == nil {
+		return nil
+	}
+	clone := make([]SkillAuthorization, len(values))
+	for index, value := range values {
+		clone[index] = value.Clone()
+	}
+	return clone
+}
+
+func sameSkillAuthorizations(left, right []SkillAuthorization) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !left[index].Equal(right[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeSkills(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return []string{}, nil
+	}
+	normalized := cloneStrings(values)
+	seen := make(map[string]struct{}, len(normalized))
+	for index := range normalized {
+		normalized[index] = strings.TrimSpace(normalized[index])
+		if !validRevisionText(normalized[index]) || strings.Contains(normalized[index], "://") {
+			return nil, fmt.Errorf("%w: skill or approval tool id is invalid", ErrInvalid)
+		}
+		if n := len([]rune(normalized[index])); n < 1 || n > maxReferenceRunes {
+			return nil, fmt.Errorf("%w: skill or approval tool id must contain 1-%d characters", ErrInvalid, maxReferenceRunes)
+		}
+		if strings.IndexFunc(normalized[index], unicode.IsControl) >= 0 {
+			return nil, fmt.Errorf("%w: skill or approval tool id contains a control character", ErrInvalid)
+		}
+		if _, exists := seen[normalized[index]]; exists {
+			return nil, fmt.Errorf("%w: duplicate skill or approval tool id %q", ErrInvalid, normalized[index])
+		}
+		seen[normalized[index]] = struct{}{}
+	}
+	sort.Strings(normalized)
+	return normalized, nil
+}
+
+func validRevisionText(value string) bool {
+	return utf8.ValidString(value) && strings.IndexFunc(value, unicode.IsControl) < 0
 }
 
 func cloneTime(value *time.Time) *time.Time {

@@ -520,6 +520,7 @@ func setEnvironmentBootstrapTestVariables(t *testing.T) {
 	t.Setenv(envAdminTenants, "*")
 	t.Setenv(envSubjectID, "service")
 	t.Setenv(envModelAPIKey, "test-secret")
+	t.Setenv(envKnowledgeEmbeddingAPIKey, "test-embedding-secret")
 	t.Setenv(envModelProvider, "openai")
 	t.Setenv(envModelNames, "gpt-4o-mini,custom.model")
 	t.Setenv(envModelEndpointHost, "api.openai.com,proxy.example")
@@ -969,6 +970,7 @@ func setRequiredEnvironment(t *testing.T) {
 	t.Setenv(envAdminToken, "admin-token")
 	t.Setenv(envAdminTenants, "*")
 	t.Setenv(envModelAPIKey, "model-secret")
+	t.Setenv(envKnowledgeEmbeddingAPIKey, "embedding-secret")
 	t.Setenv(envSessionBackend, "inmemory")
 }
 
@@ -980,6 +982,7 @@ func TestEnvironmentBootstrapPreservesCancellationAndRejectsBadLists(t *testing.
 	t.Setenv(envAdminToken, "admin-token")
 	t.Setenv(envAdminTenants, "*")
 	t.Setenv(envModelAPIKey, "test-secret")
+	t.Setenv(envKnowledgeEmbeddingAPIKey, "embedding-secret")
 	t.Setenv(envSessionBackend, "postgres")
 	t.Setenv(envModelNames, "gpt-4o-mini,,custom.model")
 	if _, err := loadEnvironment(); !errors.Is(err, ErrInvalidConfig) {
@@ -1243,6 +1246,10 @@ func TestNewFromEnvironmentBootstrapsMySQLWithSeparateMigrationAccount(t *testin
 		_ = migrationDB.Close()
 		t.Fatal(err)
 	}
+	// sqlmock tracks ExpectedClose per underlying driver connection. Keep the
+	// bootstrap probe deterministic while still exercising the monitored Ping
+	// path; production pools remain free to use their configured concurrency.
+	appDB.SetMaxOpenConns(1)
 	t.Cleanup(func() {
 		_ = migrationDB.Close()
 		_ = appDB.Close()
@@ -1532,6 +1539,7 @@ func TestNewFromEnvironmentBuildsRealGraphWhenDatabaseOpens(t *testing.T) {
 	t.Setenv(envAdminToken, "admin-token")
 	t.Setenv(envAdminTenants, "*")
 	t.Setenv(envModelAPIKey, "test-secret")
+	t.Setenv(envKnowledgeEmbeddingAPIKey, "embedding-secret")
 	t.Setenv(envSessionBackend, "postgres")
 
 	registerBootstrapPingDriver.Do(func() {

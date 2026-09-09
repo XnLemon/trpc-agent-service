@@ -43,6 +43,8 @@ func TestAgentRepositoryRejectsCancelledContextsBeforeStorage(t *testing.T) {
 
 func TestAgentRepositoryListBoundaryBranches(t *testing.T) {
 	ctx := context.Background()
+	const tenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	const appID = "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"
 	if _, _, err := NewAppRepository(nil).List(ctx, "tenant", "", "", "", 1); !errors.Is(err, ErrStorage) {
 		t.Fatalf("nil-storage List error = %v", err)
 	}
@@ -62,18 +64,18 @@ func TestAgentRepositoryListBoundaryBranches(t *testing.T) {
 			return err
 		}},
 		{"app query error", func(db *sql.DB, mock sqlmock.Sqlmock) error {
-			mock.ExpectQuery("FROM agent_app WHERE tenant_id").WithArgs("tenant").WillReturnError(errors.New("list query"))
-			_, _, err := NewAppRepository(db).List(ctx, "tenant", "", "", "", 1)
+			mock.ExpectQuery("FROM agent_app WHERE tenant_id").WithArgs(tenantID).WillReturnError(errors.New("list query"))
+			_, _, err := NewAppRepository(db).List(ctx, tenantID, "", "", "", 1)
 			return err
 		}},
 		{"revision query error", func(db *sql.DB, mock sqlmock.Sqlmock) error {
-			mock.ExpectQuery("SELECT revision FROM agent_app_revision").WithArgs("tenant", "app").WillReturnError(errors.New("list query"))
-			_, _, err := NewAppRepository(db).ListRevisions(ctx, "tenant", "app", "", "", "", 1)
+			mock.ExpectQuery("SELECT revision FROM agent_app_revision").WithArgs(tenantID, appID).WillReturnError(errors.New("list query"))
+			_, _, err := NewAppRepository(db).ListRevisions(ctx, tenantID, appID, "", "", "", 1)
 			return err
 		}},
 		{"app rows error", func(db *sql.DB, mock sqlmock.Sqlmock) error {
-			mock.ExpectQuery("FROM agent_app WHERE tenant_id").WithArgs("tenant").WillReturnRows(sqlmock.NewRows([]string{"app_id"}).AddRow("app").RowError(0, errors.New("rows")))
-			_, _, err := NewAppRepository(db).List(ctx, "tenant", "", "", "", 1)
+			mock.ExpectQuery("FROM agent_app WHERE tenant_id").WithArgs(tenantID).WillReturnRows(sqlmock.NewRows([]string{"app_id"}).AddRow(appID).RowError(0, errors.New("rows")))
+			_, _, err := NewAppRepository(db).List(ctx, tenantID, "", "", "", 1)
 			return err
 		}},
 	} {

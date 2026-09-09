@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
-	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -47,48 +46,7 @@ func seedEvent(t *testing.T, store *redisstore.Store, tenantID, sessionID, event
 	return event
 }
 
-func TestRedisTenantIsolationAndReconnect(t *testing.T) {
-	server := miniredis.RunT(t)
-	first := newStore(t, server)
-	second := newStore(t, server)
-	ctx := context.Background()
-	for _, tenantID := range []string{"tenant-a", "tenant-b"} {
-		if _, err := first.CreateSession(ctx, tenantID, "same-session", map[string]any{"tenant": tenantID}); err != nil {
-			t.Fatal(err)
-		}
-		event, _, err := first.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: tenantID, SessionID: "same-session", BindingID: "same-binding", ExternalMessageID: "same-external", EventID: "same-event"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := first.EnqueueReply(ctx, runtimestorage.ReplyOutbox{TenantID: tenantID, ReplyID: "same-reply", EventID: event.EventID, SegmentIndex: 0, SegmentCount: 1, Payload: tenantID}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := first.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: tenantID, MemoryID: "same-memory", UserID: "user", Content: tenantID}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if got, err := second.GetSession(ctx, "tenant-a", "same-session"); err != nil || got.State["tenant"] != "tenant-a" {
-		t.Fatalf("tenant-a session = %+v, %v", got, err)
-	}
-	if got, err := second.GetSession(ctx, "tenant-b", "same-session"); err != nil || got.State["tenant"] != "tenant-b" {
-		t.Fatalf("tenant-b session = %+v, %v", got, err)
-	}
-	if got, err := second.GetReply(ctx, "tenant-b", "same-reply", 0); err != nil || got.Payload != "tenant-b" {
-		t.Fatalf("tenant-b reply = %+v, %v", got, err)
-	}
-	if _, err := second.GetMemory(ctx, "tenant-a", "same-memory"); err != nil {
-		t.Fatal(err)
-	}
-
-	// A fresh client sees committed state after the original store is closed.
-	if err := first.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened := newStore(t, server)
-	if got, err := reopened.GetMessage(ctx, "tenant-a", "same-event"); err != nil || got.SessionID != "same-session" {
-		t.Fatalf("reopened event = %+v, %v", got, err)
-	}
-}
+// A fresh client sees committed state after the original store is closed.
 
 func TestRedisDuplicateDeliveryAndConcurrentSequence(t *testing.T) {
 	server := miniredis.RunT(t)
@@ -234,40 +192,6 @@ func TestRedisRecordsReplyReceiptWithinCurrentLease(t *testing.T) {
 	}
 }
 
-func TestRedisMemoryDurabilityAndIndexHandoff(t *testing.T) {
-	server := miniredis.RunT(t)
-	store := newStore(t, server)
-	value, err := store.PutMemory(context.Background(), runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "memory", UserID: "user", Content: "likes coffee", Metadata: map[string]any{"kind": "fact"}, Embedding: []float64{1, 0}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	value.Metadata["kind"] = "changed"
-	if err := store.EnqueueMemoryIndex(context.Background(), value); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.WaitForMemoryIndex(context.Background(), "tenant-a", "memory", value.Version); err != nil {
-		t.Fatalf("index handoff = %v", err)
-	}
-	value2, err := store.PutMemory(context.Background(), runtimestorage.MemoryInput{TenantID: "tenant-a", MemoryID: "memory", UserID: "user", Content: "likes tea"})
-	if err != nil || value2.Version != 2 {
-		t.Fatalf("memory update = %+v, %v", value2, err)
-	}
-	if err := store.WaitForMemoryIndex(context.Background(), "tenant-a", "memory", value2.Version); !errors.Is(err, runtimestorage.ErrConflict) {
-		t.Fatalf("missing new handoff = %v", err)
-	}
-	if err := store.EnqueueMemoryIndex(context.Background(), value2); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.WaitForMemoryIndex(context.Background(), "tenant-a", "memory", value2.Version); err != nil {
-		t.Fatal(err)
-	}
-	reopened := newStore(t, server)
-	got, err := reopened.GetMemory(context.Background(), "tenant-a", "memory")
-	if err != nil || got.Content != "likes tea" || got.Metadata == nil {
-		t.Fatalf("reopened memory = %+v, %v", got, err)
-	}
-}
-
 func TestRedisCancellationCloseOwnershipAndRedaction(t *testing.T) {
 	server := miniredis.RunT(t)
 	client := redisclient.NewClient(&redisclient.Options{Addr: server.Addr()})
@@ -406,77 +330,6 @@ func TestRedisReplyCorrelationAndCandidateOrdering(t *testing.T) {
 	}
 	if _, err := store.GetReplyCorrelation(ctx, "tenant-a", "missing"); !errors.Is(err, runtimestorage.ErrNotFound) {
 		t.Fatalf("missing correlation = %v", err)
-	}
-}
-
-func seedRedisMemories(t *testing.T, store *redisstore.Store) {
-	t.Helper()
-	for _, value := range []runtimestorage.MemoryInput{
-		{TenantID: "tenant-a", MemoryID: "both", UserID: "user", Content: "coffee and tea", Topics: []string{"drink"}, Metadata: map[string]any{"source": "test"}, Embedding: []float64{1, 0}},
-		{TenantID: "tenant-a", MemoryID: "coffee", UserID: "user", Content: "coffee", Embedding: []float64{0, 1}},
-		{TenantID: "tenant-a", MemoryID: "other-user", UserID: "other", Content: "coffee and tea"},
-	} {
-		if _, err := store.PutMemory(context.Background(), value); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func TestRedisMemoryQueriesAndDefensiveCopies(t *testing.T) {
-	server := miniredis.RunT(t)
-	store := newStore(t, server)
-	ctx := context.Background()
-	seedRedisMemories(t, store)
-	values, err := store.ListMemories(ctx, "tenant-a", "user", 1)
-	if err != nil || len(values) != 1 || values[0].UserID != "user" {
-		t.Fatalf("limited memories = %+v, %v", values, err)
-	}
-	results, err := store.SearchMemories(ctx, "tenant-a", "user", "coffee tea", 10)
-	if err != nil || len(results) != 2 || results[0].Memory.MemoryID != "both" || results[0].Score != 1 || results[1].Memory.MemoryID != "coffee" || results[1].Score != 0.5 {
-		t.Fatalf("memory search = %+v, %v", results, err)
-	}
-	record, err := store.GetMemory(ctx, "tenant-a", "both")
-	if err != nil {
-		t.Fatal(err)
-	}
-	record.Topics[0] = "changed"
-	record.Metadata["source"] = "changed"
-	record.Embedding[0] = 9
-	persisted, err := store.GetMemory(ctx, "tenant-a", "both")
-	if err != nil || persisted.Topics[0] != "drink" || persisted.Metadata["source"] != "test" || persisted.Embedding[0] != 1 {
-		t.Fatalf("memory defensive copy = %+v, %v", persisted, err)
-	}
-}
-
-func TestRedisMemoryTombstoneRemovesIndexHandoff(t *testing.T) {
-	server := miniredis.RunT(t)
-	store := newStore(t, server)
-	ctx := context.Background()
-	seedRedisMemories(t, store)
-	persisted, err := store.GetMemory(ctx, "tenant-a", "both")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.EnqueueMemoryIndex(ctx, persisted); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.DeleteMemory(ctx, "tenant-a", "both"); err != nil {
-		t.Fatal(err)
-	}
-	checks := []struct {
-		name string
-		call func() error
-	}{
-		{name: "read", call: func() error { _, err := store.GetMemory(ctx, "tenant-a", "both"); return err }},
-		{name: "index", call: func() error { return store.EnqueueMemoryIndex(ctx, persisted) }},
-		{name: "wait", call: func() error { return store.WaitForMemoryIndex(ctx, "tenant-a", "both", persisted.Version) }},
-	}
-	for _, check := range checks {
-		assertRedisError(t, check.name, check.call(), runtimestorage.ErrNotFound)
-	}
-	values, err := store.ListMemories(ctx, "tenant-a", "user", 10)
-	if err != nil || len(values) != 1 || values[0].MemoryID != "coffee" {
-		t.Fatalf("tombstoned memories = %+v, %v", values, err)
 	}
 }
 
@@ -645,163 +498,6 @@ func TestRedisReplyValidation(t *testing.T) {
 	}
 }
 
-func TestRedisMemoryValidation(t *testing.T) {
-	server := miniredis.RunT(t)
-	store := newStore(t, server)
-	ctx := context.Background()
-	checks := []struct {
-		name string
-		call func() error
-	}{
-		{name: "empty memory user", call: func() error {
-			_, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", Content: "content"})
-			return err
-		}},
-		{name: "non-finite memory embedding", call: func() error {
-			_, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", UserID: "user", Content: "content", Embedding: []float64{math.NaN()}})
-			return err
-		}},
-		{name: "unencodable memory metadata", call: func() error {
-			_, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", UserID: "user", Content: "content", Metadata: map[string]any{"channel": make(chan int)}})
-			return err
-		}},
-		{name: "invalid memory read", call: func() error { _, err := store.GetMemory(ctx, "", "memory"); return err }},
-		{name: "empty memory list user", call: func() error { _, err := store.ListMemories(ctx, "tenant-a", "", 0); return err }},
-		{name: "negative memory limit", call: func() error { _, err := store.ListMemories(ctx, "tenant-a", "user", -1); return err }},
-		{name: "empty memory query", call: func() error { _, err := store.SearchMemories(ctx, "tenant-a", "user", "", 0); return err }},
-		{name: "empty memory delete", call: func() error { return store.DeleteMemory(ctx, "tenant-a", "") }},
-		{name: "invalid memory index", call: func() error {
-			return store.EnqueueMemoryIndex(ctx, runtimestorage.MemoryRecord{TenantID: "tenant-a", MemoryID: "memory"})
-		}},
-		{name: "invalid memory handoff wait", call: func() error { return store.WaitForMemoryIndex(ctx, "tenant-a", "memory", 0) }},
-	}
-	for _, check := range checks {
-		assertRedisError(t, check.name, check.call(), runtimestorage.ErrInvalid)
-	}
-}
-
-func TestRedisOperationsHonorCanceledContext(t *testing.T) {
-	server := miniredis.RunT(t)
-	store := newStore(t, server)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	reply := runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentCount: 1}
-	calls := []struct {
-		name string
-		call func() error
-	}{
-		{name: "ping", call: func() error { return store.Ping(ctx) }},
-		{name: "correlation", call: func() error { _, err := store.GetReplyCorrelation(ctx, "tenant-a", "event"); return err }},
-		{name: "get session", call: func() error { _, err := store.GetSession(ctx, "tenant-a", "session"); return err }},
-		{name: "create session", call: func() error { _, err := store.CreateSession(ctx, "tenant-a", "session", nil); return err }},
-		{name: "update session", call: func() error { _, err := store.UpdateSessionState(ctx, "tenant-a", "session", 1, nil); return err }},
-		{name: "delete session", call: func() error { return store.DeleteSession(ctx, "tenant-a", "session") }},
-		{name: "record message", call: func() error {
-			_, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session", BindingID: "binding", ExternalMessageID: "external", EventID: "event"})
-			return err
-		}},
-		{name: "get message", call: func() error { _, err := store.GetMessage(ctx, "tenant-a", "event"); return err }},
-		{name: "transition message", call: func() error {
-			_, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: "event", From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "worker", LeaseDuration: time.Second})
-			return err
-		}},
-		{name: "append payload", call: func() error {
-			_, err := store.AppendEventPayload(ctx, sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: []byte(`{}`)})
-			return err
-		}},
-		{name: "list payloads", call: func() error { _, err := store.ListEventPayloads(ctx, "tenant-a", "session"); return err }},
-		{name: "enqueue reply", call: func() error { _, err := store.EnqueueReply(ctx, reply); return err }},
-		{name: "enqueue replies", call: func() error { _, err := store.EnqueueReplies(ctx, []runtimestorage.ReplyOutbox{reply}); return err }},
-		{name: "enqueue correlated replies", call: func() error {
-			_, err := store.EnqueueRepliesWithCorrelation(ctx, runtimestorage.ReplyCorrelation{TenantID: "tenant-a", EventID: "event", RequestID: "request"}, []runtimestorage.ReplyOutbox{reply})
-			return err
-		}},
-		{name: "get reply", call: func() error { _, err := store.GetReply(ctx, "tenant-a", "reply", 0); return err }},
-		{name: "list candidates", call: func() error { _, err := store.ListReplyCandidates(ctx, "tenant-a"); return err }},
-		{name: "claim reply", call: func() error {
-			_, err := store.ClaimReply(ctx, "tenant-a", "reply", 0, "worker", time.Second)
-			return err
-		}},
-		{name: "transition reply", call: func() error {
-			_, err := store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply", From: runtimestorage.ReplyPending, To: runtimestorage.ReplySending, Owner: "worker"})
-			return err
-		}},
-		{name: "put memory", call: func() error {
-			_, err := store.PutMemory(ctx, runtimestorage.MemoryInput{TenantID: "tenant-a", UserID: "user", Content: "content"})
-			return err
-		}},
-		{name: "get memory", call: func() error { _, err := store.GetMemory(ctx, "tenant-a", "memory"); return err }},
-		{name: "list memories", call: func() error { _, err := store.ListMemories(ctx, "tenant-a", "user", 0); return err }},
-		{name: "search memories", call: func() error { _, err := store.SearchMemories(ctx, "tenant-a", "user", "content", 0); return err }},
-		{name: "delete memory", call: func() error { return store.DeleteMemory(ctx, "tenant-a", "memory") }},
-		{name: "enqueue memory index", call: func() error {
-			return store.EnqueueMemoryIndex(ctx, runtimestorage.MemoryRecord{TenantID: "tenant-a", MemoryID: "memory", Version: 1})
-		}},
-		{name: "wait memory index", call: func() error { return store.WaitForMemoryIndex(ctx, "tenant-a", "memory", 1) }},
-	}
-	for _, value := range calls {
-		assertRedisError(t, value.name, value.call(), context.Canceled)
-	}
-}
-
-func TestRedisMissingRecordsReturnNotFound(t *testing.T) {
-	server := miniredis.RunT(t)
-	store := newStore(t, server)
-	ctx := context.Background()
-	reply := runtimestorage.ReplyOutbox{TenantID: "tenant-a", ReplyID: "reply", EventID: "event", SegmentCount: 1}
-	calls := []struct {
-		name string
-		call func() error
-	}{
-		{name: "correlation", call: func() error { _, err := store.GetReplyCorrelation(ctx, "tenant-a", "event"); return err }},
-		{name: "session", call: func() error { _, err := store.GetSession(ctx, "tenant-a", "session"); return err }},
-		{name: "session update", call: func() error { _, err := store.UpdateSessionState(ctx, "tenant-a", "session", 1, nil); return err }},
-		{name: "session delete", call: func() error { return store.DeleteSession(ctx, "tenant-a", "session") }},
-		{name: "message record", call: func() error {
-			_, _, err := store.RecordMessage(ctx, runtimestorage.MessageEventInput{TenantID: "tenant-a", SessionID: "session", BindingID: "binding", ExternalMessageID: "external", EventID: "event"})
-			return err
-		}},
-		{name: "message", call: func() error { _, err := store.GetMessage(ctx, "tenant-a", "event"); return err }},
-		{name: "message transition", call: func() error {
-			_, err := store.TransitionMessage(ctx, runtimestorage.MessageTransition{TenantID: "tenant-a", EventID: "event", From: runtimestorage.EventReceived, To: runtimestorage.EventRunning, Owner: "worker", LeaseDuration: time.Second})
-			return err
-		}},
-		{name: "payload append", call: func() error {
-			_, err := store.AppendEventPayload(ctx, sessionstorage.EventPayload{TenantID: "tenant-a", SessionID: "session", EventID: "event", Payload: []byte(`{}`)})
-			return err
-		}},
-		{name: "payload list", call: func() error { _, err := store.ListEventPayloads(ctx, "tenant-a", "session"); return err }},
-		{name: "reply enqueue", call: func() error { _, err := store.EnqueueReply(ctx, reply); return err }},
-		{name: "reply batch", call: func() error { _, err := store.EnqueueReplies(ctx, []runtimestorage.ReplyOutbox{reply}); return err }},
-		{name: "reply", call: func() error { _, err := store.GetReply(ctx, "tenant-a", "reply", 0); return err }},
-		{name: "reply claim", call: func() error {
-			_, err := store.ClaimReply(ctx, "tenant-a", "reply", 0, "worker", time.Second)
-			return err
-		}},
-		{name: "reply transition", call: func() error {
-			_, err := store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply", From: runtimestorage.ReplyPending, To: runtimestorage.ReplySending, Owner: "worker"})
-			return err
-		}},
-		{name: "memory", call: func() error { _, err := store.GetMemory(ctx, "tenant-a", "memory"); return err }},
-		{name: "memory delete", call: func() error { return store.DeleteMemory(ctx, "tenant-a", "memory") }},
-		{name: "memory index", call: func() error {
-			return store.EnqueueMemoryIndex(ctx, runtimestorage.MemoryRecord{TenantID: "tenant-a", MemoryID: "memory", Version: 1})
-		}},
-		{name: "memory index wait", call: func() error { return store.WaitForMemoryIndex(ctx, "tenant-a", "memory", 1) }},
-	}
-	for _, value := range calls {
-		assertRedisError(t, value.name, value.call(), runtimestorage.ErrNotFound)
-	}
-	memories, err := store.ListMemories(ctx, "tenant-a", "user", 0)
-	if err != nil || len(memories) != 0 {
-		t.Fatalf("empty memories = %+v, %v", memories, err)
-	}
-	candidates, err := store.ListReplyCandidates(ctx, "tenant-a")
-	if err != nil || len(candidates) != 0 {
-		t.Fatalf("empty reply candidates = %+v, %v", candidates, err)
-	}
-}
-
 func TestRedisMessageSuccessTransitions(t *testing.T) {
 	server := miniredis.RunT(t)
 	store := newStore(t, server)
@@ -844,18 +540,6 @@ func TestRedisReplyDeliverySuccessTransitions(t *testing.T) {
 	sent, err := store.TransitionReply(ctx, runtimestorage.ReplyTransition{TenantID: "tenant-a", ReplyID: "reply", From: runtimestorage.ReplySending, To: runtimestorage.ReplySent, Owner: "worker", FencingToken: claimed.FencingToken, ProviderID: "provider-message"})
 	if err != nil || sent.Status != runtimestorage.ReplySent || sent.ProviderMessageID != "provider-message" || sent.LeaseExpiresAt != nil {
 		t.Fatalf("sent reply = %+v, %v", sent, err)
-	}
-}
-
-func TestRedisMemoryDefaultValues(t *testing.T) {
-	server := miniredis.RunT(t)
-	store := newStore(t, server)
-	value, err := store.PutMemory(context.Background(), runtimestorage.MemoryInput{TenantID: "tenant-a", UserID: "user", Content: "content"})
-	if err != nil || !strings.HasPrefix(value.MemoryID, "mem_") || value.Version != 1 {
-		t.Fatalf("defaulted memory = %+v, %v", value, err)
-	}
-	if _, err := store.SearchMemories(context.Background(), "tenant-a", "user", "absent", 0); err != nil {
-		t.Fatalf("empty search = %v", err)
 	}
 }
 

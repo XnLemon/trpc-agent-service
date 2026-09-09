@@ -12,6 +12,8 @@ import (
 	"time"
 
 	driver "github.com/go-sql-driver/mysql"
+
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // ErrStorage is the stable error category returned for unexpected database
@@ -30,10 +32,10 @@ type Options struct {
 // Open creates and pings a MySQL database/sql pool. MySQL timestamps are
 // decoded as time.Time and the session uses UTC regardless of server defaults.
 func Open(ctx context.Context, dsn string, options Options) (*sql.DB, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, ErrStorage
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	dsn = normalizeDSN(dsn)
@@ -68,10 +70,10 @@ func Ping(ctx context.Context, db *sql.DB) error {
 	if db == nil {
 		return ErrStorage
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return ErrStorage
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	if err := db.PingContext(ctx); err != nil {
@@ -131,10 +133,10 @@ func Begin(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
 	if db == nil {
 		return nil, ErrStorage
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, ErrStorage
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
@@ -150,10 +152,10 @@ func BeginConn(ctx context.Context, conn *sql.Conn) (*sql.Tx, error) {
 	if conn == nil {
 		return nil, ErrStorage
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, ErrStorage
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
@@ -168,10 +170,10 @@ func AcquireLock(ctx context.Context, conn *sql.Conn, name string, timeoutSecond
 	if conn == nil || strings.TrimSpace(name) == "" {
 		return ErrStorage
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return ErrStorage
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	var acquired sql.NullInt64
@@ -190,7 +192,7 @@ func ReleaseLock(ctx context.Context, conn *sql.Conn, name string) error {
 	if conn == nil || strings.TrimSpace(name) == "" {
 		return ErrStorage
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return ErrStorage
 	}
 	var released sql.NullInt64
@@ -207,10 +209,10 @@ func ReleaseLock(ctx context.Context, conn *sql.Conn, name string) error {
 // exposing driver diagnostics. Bootstrap uses it to prove that migration and
 // application connections are not the same account.
 func CurrentUser(ctx context.Context, db *sql.DB) (string, error) {
-	if db == nil || ctx == nil {
+	if db == nil || nilvalue.Is(ctx) {
 		return "", ErrStorage
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return "", err
 	}
 	var user string
@@ -266,10 +268,10 @@ func verifyNoDirectRoutinePrivileges(ctx context.Context, db *sql.DB) error {
 // Bootstrap compares the migration and application sessions so a successful
 // migration can never be mistaken for readiness of a different database.
 func CurrentDatabase(ctx context.Context, db *sql.DB) (string, error) {
-	if db == nil || ctx == nil {
+	if db == nil || nilvalue.Is(ctx) {
 		return "", ErrStorage
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return "", err
 	}
 	var database sql.NullString
@@ -288,10 +290,10 @@ func CurrentDatabase(ctx context.Context, db *sql.DB) (string, error) {
 // allowed any global/schema/column grant, routine grant, role grant, grant
 // option, or table outside the selected control-plane database.
 func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
-	if db == nil || ctx == nil {
+	if db == nil || nilvalue.Is(ctx) {
 		return ErrStorage
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
 	if _, err := CurrentDatabase(ctx, db); err != nil {
@@ -325,7 +327,9 @@ func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
 			SELECT 'backend_profile_change_outbox' UNION ALL
 			SELECT 'agent_app_change_outbox' UNION ALL
 			SELECT 'channel_binding_change_outbox' UNION ALL
-			SELECT 'tenant_configuration_outbox'
+			SELECT 'tenant_configuration_outbox' UNION ALL
+			SELECT 'runtime_tool_invocation' UNION ALL
+			SELECT 'audit_event'
 		), required_privilege_types (privilege_type) AS (
 			SELECT 'SELECT' UNION ALL
 			SELECT 'INSERT' UNION ALL
@@ -334,6 +338,9 @@ func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
 		), required_privileges (table_name, privilege_type) AS (
 			SELECT allowed_tables.table_name, required_privilege_types.privilege_type
 			FROM allowed_tables CROSS JOIN required_privilege_types
+			WHERE allowed_tables.table_name <> 'audit_event'
+			UNION ALL SELECT 'audit_event', 'SELECT'
+			UNION ALL SELECT 'audit_event', 'INSERT'
 		), effective_table_privileges (table_schema, table_name, privilege_type, is_grantable) AS (
 			SELECT table_schema, table_name, privilege_type, is_grantable
 			FROM information_schema.table_privileges
@@ -356,6 +363,7 @@ func VerifyApplicationPrivileges(ctx context.Context, db *sql.DB) error {
 			WHERE table_schema <> DATABASE()
 			   OR table_name NOT IN (SELECT table_name FROM allowed_tables)
 			   OR privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
+			   OR (table_name = 'audit_event' AND privilege_type NOT IN ('SELECT', 'INSERT'))
 			   OR is_grantable <> 'NO'
 			UNION ALL
 			SELECT privilege_type FROM information_schema.column_privileges
@@ -401,11 +409,11 @@ func Commit(ctx context.Context, tx *sql.Tx) error {
 	if tx == nil {
 		return ErrStorage
 	}
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		Rollback(tx)
 		return ErrStorage
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		Rollback(tx)
 		return err
 	}
@@ -421,8 +429,8 @@ func MapError(ctx context.Context, err error, notFound, duplicate, conflict, inv
 	if err == nil {
 		return nil
 	}
-	if ctx != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
+	if !nilvalue.Is(ctx) {
+		if ctxErr := nilvalue.ContextErr(ctx); ctxErr != nil {
 			return ctxErr
 		}
 	}

@@ -4,9 +4,13 @@
 > 发布与回滚语义，以及供 Agent Factory 消费的一次执行快照。实现跟踪见
 > [Issue #17](https://github.com/XnLemon/trpc-agent-service/issues/17)。
 
-> 当前实现状态：schema v1 已支持 `llm` 和顺序 `chain` 两种 Agent kind；
-> `trpcservice/agent/factory.go` 通过 `kind + schema_version` 注册并构造对应 Agent。
-> Graph、Parallel、Cycle、租户级 Skill/MCP/Plugin/Guardrail 注册仍未实现。
+> 当前实现状态：schema v1 已支持 `llm`、顺序 `chain`、`parallel`、`cycle` 和 `graph` Agent kind；
+> `trpcservice/agent/factory.go` 通过 `kind + schema_version` 注册并构造对应上游 Agent。
+> Revision 已封存 MCP Binding 和带来源、版本、内容摘要、签名及执行资源策略的 Skill Authorization；
+> Skill Repository 只在固定 tenant/App/Revision、可信来源和验证后的清单下可见，当前 Runner 默认仅开放
+> knowledge-only Skill 工具，执行权限保持显式关闭。MCP ToolSet 与 Revision Guardrail 已接入默认
+> factory 的封存计划物化，但无声明的计划不会连接 MCP；真实外部 MCP/Guardrail provider 的 live E2E
+> 仍不属于本版验收范围。
 
 ## 目标与边界
 

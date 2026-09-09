@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -179,6 +180,9 @@ func (r *InMemoryRepository) UpdateConfiguration(ctx context.Context, input tena
 	if err := tenant.ValidateConfiguration(input.DisplayName, input.RateLimitRPM, input.MaxConcurrentExecutions, input.MonthlyTokenBudget, input.MonthlySpendLimitMinor, input.BillingCurrency, input.AuditRetentionDays, input.LogMaskingLevel, input.TraceSamplingRate); err != nil {
 		return nil, err
 	}
+	if err := tenant.ValidateDefaultReferences(input.DefaultAgentAppID, input.DefaultBackendProfileID); err != nil {
+		return nil, err
+	}
 	if err := r.lock(ctx); err != nil {
 		return nil, err
 	}
@@ -299,12 +303,19 @@ func cloneString(v *string) *string {
 }
 
 func checkContext(ctx context.Context) error {
-	if ctx == nil {
-		return nil
+	if nilvalue.Is(ctx) {
+		return tenant.ErrInvalid
+	}
+	done, err := nilvalue.ContextDone(ctx)
+	if err != nil {
+		if err == nilvalue.ErrInvalidContext {
+			return tenant.ErrInvalid
+		}
+		return err
 	}
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-done:
+		return nilvalue.ContextErr(ctx)
 	default:
 		return nil
 	}

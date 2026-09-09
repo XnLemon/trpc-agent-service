@@ -210,26 +210,21 @@ func TestRepositoryOperationsCancelWhileWaitingForLock(t *testing.T) {
 func TestRepositoryContextAndMissingIdentityBoundaries(t *testing.T) {
 	repository := NewRepository(inmemoryTestCatalog(t))
 	var nilContext context.Context
-	created, _, err := repository.Create(nilContext, inmemoryCreateInput("tenant-one", "nil-context"))
+	if _, _, err := repository.Create(nilContext, inmemoryCreateInput("tenant-one", "nil-context")); !errors.Is(err, modelprofile.ErrInvalid) {
+		t.Fatalf("nil-context Create error = %v", err)
+	}
+	if _, err := repository.Get(nilContext, "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV"); !errors.Is(err, modelprofile.ErrInvalid) {
+		t.Fatalf("nil-context Get error = %v", err)
+	}
+	if _, _, err := repository.UpdateConfiguration(nilContext, modelprofile.UpdateConfigurationInput{}); !errors.Is(err, modelprofile.ErrInvalid) {
+		t.Fatalf("nil-context Update error = %v", err)
+	}
+	if _, _, err := repository.TransitionStatus(nilContext, modelprofile.TransitionStatusInput{}); !errors.Is(err, modelprofile.ErrInvalid) {
+		t.Fatalf("nil-context Transition error = %v", err)
+	}
+	created, _, err := repository.Create(context.Background(), inmemoryCreateInput("tenant-one", "nil-context"))
 	if err != nil {
 		t.Fatal(err)
-	}
-	if fetched, err := repository.Get(nilContext, created.TenantID, created.ProfileID); err != nil || fetched == nil {
-		t.Fatalf("nil-context Get = %+v, %v", fetched, err)
-	}
-	updated, _, err := repository.UpdateConfiguration(nilContext, modelprofile.UpdateConfigurationInput{
-		TenantID: created.TenantID, ProfileID: created.ProfileID, ExpectedVersion: created.Version,
-		DisplayName: "Nil Context Updated", SchemaVersion: modelprofile.SchemaVersionV1,
-		Configuration: modelprofile.Configuration{Provider: "fake", Model: "deterministic"}, Metadata: inmemoryMetadata(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := repository.TransitionStatus(nilContext, modelprofile.TransitionStatusInput{
-		TenantID: updated.TenantID, ProfileID: updated.ProfileID, ExpectedVersion: updated.Version,
-		NextStatus: modelprofile.StatusActive, Metadata: inmemoryMetadata(),
-	}); !errors.Is(err, modelprofile.ErrInvalidTransition) {
-		t.Fatalf("same-status transition error = %v", err)
 	}
 	missingID := "mp_01ARZ3NDEKTSV4RRFFQ69G5FAV"
 	if _, _, err := repository.UpdateConfiguration(context.Background(), modelprofile.UpdateConfigurationInput{
@@ -248,8 +243,8 @@ func TestRepositoryContextAndMissingIdentityBoundaries(t *testing.T) {
 	if cloneProfile(nil) != nil {
 		t.Fatal("cloneProfile(nil) returned a value")
 	}
-	if checkContext(nilContext) != nil {
-		t.Fatal("nil context was rejected")
+	if !errors.Is(checkContext(nilContext), modelprofile.ErrInvalid) {
+		t.Fatalf("nil context error = %v", checkContext(nilContext))
 	}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -261,18 +256,16 @@ func TestRepositoryContextAndMissingIdentityBoundaries(t *testing.T) {
 func TestContextRWMutexDirectCancellationAndMisusePaths(t *testing.T) {
 	mutex := contextRWMutex{}
 	var nilContext context.Context
-	if err := mutex.lock(nilContext); err != nil {
-		t.Fatal(err)
+	if !errors.Is(mutex.lock(nilContext), modelprofile.ErrInvalid) {
+		t.Fatalf("nil context writer lock error = %v", mutex.lock(nilContext))
 	}
-	mutex.unlock()
-	if err := mutex.rlock(nilContext); err != nil {
-		t.Fatal(err)
+	if !errors.Is(mutex.rlock(nilContext), modelprofile.ErrInvalid) {
+		t.Fatalf("nil context reader lock error = %v", mutex.rlock(nilContext))
 	}
-	mutex.runlock()
 	closed := make(chan struct{})
 	close(closed)
-	if err := waitContext(nilContext, closed); err != nil {
-		t.Fatal(err)
+	if !errors.Is(waitContext(nilContext, closed), modelprofile.ErrInvalid) {
+		t.Fatalf("nil context wait error = %v", waitContext(nilContext, closed))
 	}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()

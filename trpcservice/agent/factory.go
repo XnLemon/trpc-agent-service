@@ -7,10 +7,18 @@ import (
 	"sync"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/chainagent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/cycleagent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/graphagent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/parallelagent"
+	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/graph"
+	"trpc.group/trpc-go/trpc-agent-go/knowledge"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/skill"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -30,10 +38,13 @@ var (
 // ModelOptions are shared callback/options hooks and are applied to every LLM
 // node created by a composite factory.
 type AgentBuildInput struct {
-	Definition   LLMAgentFactoryInput
-	Model        trpcmodel.Model
-	Tools        []trpctool.Tool
-	ModelOptions []llmagent.Option
+	Definition              LLMAgentFactoryInput
+	Model                   trpcmodel.Model
+	Tools                   []trpctool.Tool
+	ToolSets                []trpctool.ToolSet
+	Knowledge               knowledge.Knowledge
+	SkillRepositoryProvider skill.RepositoryProvider
+	ModelOptions            []llmagent.Option
 }
 
 // AgentFactory builds one concrete tRPC-Agent-Go Agent from a published
@@ -96,13 +107,16 @@ func (registry *AgentFactoryRegistry) Register(kind appmodel.Kind, schemaVersion
 
 // Build resolves and invokes the constructor for one published definition.
 func (registry *AgentFactoryRegistry) Build(ctx context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, fmt.Errorf("%w: context is required", ErrAgentFactory)
+	}
+	if err := agentContextErr(ctx); err != nil {
+		return nil, err
 	}
 	if input.Definition.Name == "" || input.Definition.Kind == "" || input.Definition.SchemaVersion < 1 {
 		return nil, fmt.Errorf("%w: complete Agent definition is required", ErrAgentFactory)
 	}
-	if input.Model == nil {
+	if isNilAgentValue(input.Model) {
 		return nil, fmt.Errorf("%w: model is required", ErrAgentFactory)
 	}
 	if registry == nil {
@@ -115,14 +129,66 @@ func (registry *AgentFactoryRegistry) Build(ctx context.Context, input AgentBuil
 	if factory == nil {
 		return nil, fmt.Errorf("%w: kind %q schema %d", ErrAgentFactoryNotFound, key.kind, key.schemaVersion)
 	}
-	built, err := factory(ctx, input)
+	built, err := callAgentFactory(ctx, factory, input)
 	if err != nil {
+		_ = closeBuiltAgent(built)
 		return nil, fmt.Errorf("%w: build %q: %w", ErrAgentFactory, key.kind, err)
 	}
-	if built == nil {
+	if isNilAgentValue(built) {
 		return nil, fmt.Errorf("%w: build %q returned nil Agent", ErrAgentFactory, key.kind)
 	}
+	if err := agentContextErr(ctx); err != nil {
+		_ = closeBuiltAgent(built)
+		return nil, err
+	}
 	return built, nil
+}
+
+func closeBuiltAgent(value trpcagent.Agent) (err error) {
+	if isNilAgentValue(value) {
+		return nil
+	}
+	closer, ok := value.(interface{ Close() error })
+	if !ok || isNilAgentValue(closer) {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrAgentFactory
+		}
+	}()
+	return closer.Close()
+}
+
+func callAgentFactory(ctx context.Context, factory AgentFactory, input AgentBuildInput) (built trpcagent.Agent, err error) {
+	if factory == nil {
+		return nil, ErrAgentFactoryNotFound
+	}
+	defer func() {
+		if recover() != nil {
+			built = nil
+			err = ErrAgentFactory
+		}
+	}()
+	return factory(ctx, input)
+}
+
+func isNilAgentValue(value any) bool { return nilvalue.Is(value) }
+
+// agentContextErr is the only context error accessor used by this package.
+// Context is an interface and typed-nil implementations are possible at
+// public boundaries, so Err must never be called before the nil check.
+func agentContextErr(ctx context.Context) error {
+	if isNilAgentValue(ctx) {
+		return ErrInvalid
+	}
+	if err := nilvalue.ContextErr(ctx); err != nil {
+		if err == nilvalue.ErrInvalidContext {
+			return ErrInvalid
+		}
+		return err
+	}
+	return nil
 }
 
 // DefaultAgentFactoryRegistry returns the built-in Agent kinds supported by
@@ -132,17 +198,151 @@ func DefaultAgentFactoryRegistry() *AgentFactoryRegistry {
 	registry, _ := NewAgentFactoryRegistry(
 		AgentFactoryRegistration{Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1, Factory: buildLLMAgent},
 		AgentFactoryRegistration{Kind: appmodel.KindChain, SchemaVersion: appmodel.SchemaVersionV1, Factory: buildChainAgent},
+		AgentFactoryRegistration{Kind: appmodel.KindParallel, SchemaVersion: appmodel.SchemaVersionV1, Factory: buildParallelAgent},
+		AgentFactoryRegistration{Kind: appmodel.KindCycle, SchemaVersion: appmodel.SchemaVersionV1, Factory: buildCycleAgent},
+		AgentFactoryRegistration{Kind: appmodel.KindGraph, SchemaVersion: appmodel.SchemaVersionV1, Factory: buildGraphAgent},
 	)
 	return registry
 }
 
 func buildLLMAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
-	options := llmAgentOptions(input.Definition, input.Model, input.Tools)
+	if err := validateSkillDefinition(input.Definition); err != nil {
+		return nil, err
+	}
+	if len(input.Definition.Skills) > 0 && isNilAgentValue(input.SkillRepositoryProvider) {
+		return nil, fmt.Errorf("%w: skill repository provider is required", ErrAgentFactory)
+	}
+	options := llmAgentOptionsWithSkillProvider(input.Definition, input.Model, input.Tools, input.SkillRepositoryProvider)
+	if len(input.ToolSets) > 0 {
+		options = append(options, llmagent.WithToolSets(input.ToolSets))
+	}
+	if !isNilAgentValue(input.Knowledge) {
+		options = append(options, llmagent.WithKnowledge(input.Knowledge))
+	}
 	options = append(options, input.ModelOptions...)
 	return llmagent.New(input.Definition.Name, options...), nil
 }
 
+func llmAgentOptionsWithSkillProvider(input LLMAgentFactoryInput, model trpcmodel.Model, tools []trpctool.Tool, provider skill.RepositoryProvider) []llmagent.Option {
+	options := llmAgentOptions(input, model, tools)
+	if len(input.Skills) == 0 {
+		return options
+	}
+	allowed := make(map[string]struct{}, len(input.Skills))
+	for _, name := range input.Skills {
+		allowed[name] = struct{}{}
+	}
+	options = append(options,
+		llmagent.WithSkillRepositoryProvider(provider),
+		llmagent.WithSkillScopeMode(skill.SkillScopeApp),
+		llmagent.WithSkillToolProfile(llmagent.SkillToolProfileKnowledgeOnly),
+		llmagent.WithMaxLoadedSkills(len(input.Skills)),
+		llmagent.WithMaxOverviewSkills(len(input.Skills)),
+		llmagent.WithSkillFilter(func(_ context.Context, summary skill.Summary) bool {
+			_, ok := allowed[summary.Name]
+			return ok
+		}),
+	)
+	return options
+}
+
 func buildChainAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
+	children, err := buildCompositeChildren(input)
+	if err != nil {
+		return nil, err
+	}
+	built := chainagent.New(input.Definition.Name, chainagent.WithSubAgents(children))
+	return isolateCompositeInvocation(built), nil
+}
+
+func buildParallelAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
+	children, err := buildCompositeChildren(input)
+	if err != nil {
+		return nil, err
+	}
+	built := parallelagent.New(input.Definition.Name, parallelagent.WithSubAgents(children))
+	return isolateCompositeInvocation(built), nil
+}
+
+func buildCycleAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
+	children, err := buildCompositeChildren(input)
+	if err != nil {
+		return nil, err
+	}
+	iterations := input.Definition.Runtime.MaxLLMCalls / len(children)
+	if iterations < 1 {
+		iterations = 1
+	}
+	built := cycleagent.New(input.Definition.Name, cycleagent.WithSubAgents(children), cycleagent.WithMaxIterations(iterations))
+	return isolateCompositeInvocation(built), nil
+}
+
+func buildGraphAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent, error) {
+	children, err := buildCompositeChildren(input)
+	if err != nil {
+		return nil, err
+	}
+	builder := graph.NewStateGraph(graph.MessagesStateSchema())
+	for index, child := range children {
+		name := child.Info().Name
+		builder.AddAgentNode(name)
+		if index == 0 {
+			builder.SetEntryPoint(name)
+		} else {
+			builder.AddEdge(children[index-1].Info().Name, name)
+		}
+	}
+	builder.SetFinishPoint(children[len(children)-1].Info().Name)
+	compiled, err := builder.Compile()
+	if err != nil {
+		return nil, fmt.Errorf("%w: compile graph: %v", ErrAgentFactory, err)
+	}
+	built, err := graphagent.New(input.Definition.Name, compiled, graphagent.WithSubAgents(children))
+	if err != nil {
+		return nil, err
+	}
+	return isolateCompositeInvocation(built), nil
+}
+
+// compositeInvocationAgent prevents upstream composite agents from mutating
+// the root Invocation while Runner diagnostics read it concurrently. View
+// preserves the invocation identity and services while isolating mutable
+// Agent/AgentName fields.
+type compositeInvocationAgent struct{ delegate trpcagent.Agent }
+
+func isolateCompositeInvocation(delegate trpcagent.Agent) trpcagent.Agent {
+	return compositeInvocationAgent{delegate: delegate}
+}
+
+func (agent compositeInvocationAgent) Run(ctx context.Context, invocation *trpcagent.Invocation) (<-chan *trpcevent.Event, error) {
+	return agent.delegate.Run(ctx, invocation.View())
+}
+
+func (agent compositeInvocationAgent) Tools() []trpctool.Tool { return agent.delegate.Tools() }
+func (agent compositeInvocationAgent) Info() trpcagent.Info   { return agent.delegate.Info() }
+func (agent compositeInvocationAgent) SubAgents() []trpcagent.Agent {
+	return agent.delegate.SubAgents()
+}
+func (agent compositeInvocationAgent) FindSubAgent(name string) trpcagent.Agent {
+	return agent.delegate.FindSubAgent(name)
+}
+
+func validateSkillDefinition(input LLMAgentFactoryInput) error {
+	if len(input.Skills) == 0 && len(input.SkillAuthorizations) == 0 {
+		return nil
+	}
+	if len(input.Skills) == 0 || len(input.Skills) != len(input.SkillAuthorizations) {
+		return fmt.Errorf("%w: every Skill requires a pinned authorization", ErrAgentFactory)
+	}
+	for index, name := range input.Skills {
+		if input.SkillAuthorizations[index].Name != name {
+			return fmt.Errorf("%w: Skill authorization does not match the allowlist", ErrAgentFactory)
+		}
+	}
+	return nil
+}
+
+func buildCompositeChildren(input AgentBuildInput) ([]trpcagent.Agent, error) {
 	configuration := input.Definition.Chain
 	if configuration == nil || len(configuration.Steps) < 2 {
 		return nil, fmt.Errorf("%w: chain requires at least two steps", ErrAgentFactory)
@@ -162,9 +362,21 @@ func buildChainAgent(_ context.Context, input AgentBuildInput) (trpcagent.Agent,
 		stepDefinition.Instruction = step.Instruction
 		stepDefinition.GlobalInstruction = step.GlobalInstruction
 		stepDefinition.Chain = nil
-		options := llmAgentOptions(stepDefinition, input.Model, input.Tools)
+		if err := validateSkillDefinition(stepDefinition); err != nil {
+			return nil, err
+		}
+		if len(stepDefinition.Skills) > 0 && isNilAgentValue(input.SkillRepositoryProvider) {
+			return nil, fmt.Errorf("%w: skill repository provider is required", ErrAgentFactory)
+		}
+		options := llmAgentOptionsWithSkillProvider(stepDefinition, input.Model, input.Tools, input.SkillRepositoryProvider)
+		if len(input.ToolSets) > 0 {
+			options = append(options, llmagent.WithToolSets(input.ToolSets))
+		}
+		if !isNilAgentValue(input.Knowledge) {
+			options = append(options, llmagent.WithKnowledge(input.Knowledge))
+		}
 		options = append(options, input.ModelOptions...)
 		children = append(children, llmagent.New(step.Name, options...))
 	}
-	return chainagent.New(input.Definition.Name, chainagent.WithSubAgents(children)), nil
+	return children, nil
 }

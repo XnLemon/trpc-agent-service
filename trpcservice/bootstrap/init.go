@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
 )
@@ -76,10 +77,10 @@ func (config InitConfig) Validate() error {
 // treated as already initialized. Multiple roots or a partial pair fail closed
 // because selecting an existing object would guess the operator's intent.
 func Initialize(ctx context.Context, db *sql.DB, config InitConfig) (InitResult, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return InitResult{}, ErrInvalidConfig
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return InitResult{}, err
 	}
 	if db == nil {
@@ -121,7 +122,7 @@ func completeInitialization(ctx context.Context, tx *sql.Tx, state initialState,
 	if state.apps[0].tenantID != state.tenants[0] {
 		return InitResult{}, initializationStateError(ErrInitializationAmbiguous)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return InitResult{}, err
 	}
 	return InitResult{TenantID: state.tenants[0], AppID: state.apps[0].appID}, nil
@@ -270,8 +271,8 @@ func mapInitializationDBError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
-	if ctx != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
+	if !nilvalue.Is(ctx) {
+		if ctxErr := nilvalue.ContextErr(ctx); ctxErr != nil {
 			return ctxErr
 		}
 	}

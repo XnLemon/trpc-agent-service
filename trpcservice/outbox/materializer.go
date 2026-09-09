@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/attachment"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
@@ -18,6 +19,7 @@ var ErrMaterialization = errors.New("reply materialization failed")
 // defaultSegmentRunes is deliberately conservative: 512 Unicode code points
 // fit within the 2048-byte text limit of currently supported IM providers.
 const defaultSegmentRunes = 512
+const maxMaterializedSegments = 1 << 20
 
 // Materializer turns one completed Runner reply into durable, idempotent
 // segments. It is deliberately independent of any channel SDK.
@@ -63,13 +65,19 @@ type ReplySegment struct {
 
 // NewMaterializer creates a reply materializer with a default segment size.
 func NewMaterializer(config MaterializerConfig) (*Materializer, error) {
-	if config.BatchStore == nil {
+	if nilvalue.Is(config.BatchStore) {
 		return nil, ErrInvalid
 	}
-	if config.SegmentSize <= 0 {
+	if config.SegmentSize < 0 {
+		return nil, ErrInvalid
+	}
+	if config.SegmentSize == 0 {
 		config.SegmentSize = defaultSegmentRunes
 	}
-	if config.Observability == nil {
+	if !validMaterializationID(config.Backend, false) {
+		return nil, ErrInvalid
+	}
+	if nilvalue.Is(config.Observability) {
 		config.Observability = observability.NewNoopProvider()
 	}
 	if config.Backend == "" {
@@ -81,14 +89,17 @@ func NewMaterializer(config MaterializerConfig) (*Materializer, error) {
 // Materialize writes all segments under the stable reply identity. A repeated
 // call is idempotent when the existing rows have the same event and payload.
 func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) (count int, err error) {
-	if m == nil || ctx == nil || runtimestorage.ValidateTenant(input.TenantID) != nil || input.EventID == "" || input.ReplyID == "" || runtimestorage.ValidateReplyTarget(input.ReplyTarget) != nil {
+	if m == nil || nilvalue.Is(ctx) || runtimestorage.ValidateTenant(input.TenantID) != nil || !validMaterializationID(input.EventID, true) || !validMaterializationID(input.ReplyID, true) || runtimestorage.ValidateReplyTarget(input.ReplyTarget) != nil {
+		return 0, ErrInvalid
+	}
+	if !runtimestorage.ValidateText(input.Payload, 4<<20, false) || !validMaterializationID(input.RequestID, false) || !validMaterializationID(input.TraceID, false) || !validMaterializationID(input.TraceParent, false) {
 		return 0, ErrInvalid
 	}
 	replies, err := m.buildReplies(input)
 	if err != nil {
 		return 0, ErrInvalid
 	}
-	if m.store == nil {
+	if nilvalue.Is(m.store) {
 		return 0, errors.Join(ErrMaterialization, runtimestorage.ErrInvalid)
 	}
 	batchStore := m.store
@@ -110,7 +121,7 @@ func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) 
 	}()
 	if input.RequestID != "" {
 		correlatedStore, correlated := m.store.(runtimestorage.ReplyBatchCorrelationEnqueuer)
-		if !correlated {
+		if !correlated || nilvalue.Is(correlatedStore) {
 			return 0, errors.Join(ErrMaterialization, runtimestorage.ErrInvalid)
 		}
 		traceParent := input.TraceParent
@@ -119,9 +130,17 @@ func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) 
 		} else {
 			traceParent = observability.TraceParentFromContext(observability.ContextWithTraceParent(context.Background(), traceParent))
 		}
-		_, err = correlatedStore.EnqueueRepliesWithCorrelation(operationCtx, runtimestorage.ReplyCorrelation{TenantID: input.TenantID, EventID: input.EventID, RequestID: input.RequestID, TraceID: input.TraceID, TraceParent: traceParent}, replies)
+		var stored []runtimestorage.ReplyOutbox
+		stored, err = callEnqueueRepliesWithCorrelation(correlatedStore, operationCtx, runtimestorage.ReplyCorrelation{TenantID: input.TenantID, EventID: input.EventID, RequestID: input.RequestID, TraceID: input.TraceID, TraceParent: traceParent}, replies)
+		if err == nil && !validMaterializedBatch(replies, stored) {
+			err = runtimestorage.ErrInvalid
+		}
 	} else {
-		_, err = batchStore.EnqueueReplies(operationCtx, replies)
+		var stored []runtimestorage.ReplyOutbox
+		stored, err = callEnqueueReplies(batchStore, operationCtx, replies)
+		if err == nil && !validMaterializedBatch(replies, stored) {
+			err = runtimestorage.ErrInvalid
+		}
 	}
 	if err != nil {
 		return 0, redactedMaterializationError(err)
@@ -130,9 +149,12 @@ func (m *Materializer) Materialize(ctx context.Context, input MaterializeInput) 
 }
 
 func (m *Materializer) buildReplies(input MaterializeInput) ([]runtimestorage.ReplyOutbox, error) {
+	if m == nil || m.segmentSize <= 0 {
+		return nil, ErrInvalid
+	}
 	if len(input.Segments) == 0 {
 		parts := splitRunes(input.Payload, m.segmentSize)
-		if len(parts) == 0 {
+		if len(parts) == 0 || len(parts) > maxMaterializedSegments {
 			return nil, ErrInvalid
 		}
 		return textReplies(input, parts), nil
@@ -142,6 +164,9 @@ func (m *Materializer) buildReplies(input MaterializeInput) ([]runtimestorage.Re
 	}
 	segments := make([]runtimestorage.ReplyOutbox, 0, len(input.Segments))
 	for _, segment := range input.Segments {
+		if !runtimestorage.ValidateText(segment.Payload, 4<<20, false) {
+			return nil, ErrInvalid
+		}
 		kind := segment.Kind
 		if kind == "" {
 			kind = runtimestorage.ReplyKindText
@@ -166,7 +191,7 @@ func (m *Materializer) buildReplies(input MaterializeInput) ([]runtimestorage.Re
 			ReplyTarget: input.ReplyTarget,
 		})
 	}
-	if len(segments) == 0 {
+	if len(segments) == 0 || len(segments) > maxMaterializedSegments {
 		return nil, ErrInvalid
 	}
 	for index := range segments {
@@ -190,6 +215,69 @@ func textReplies(input MaterializeInput, payloads []string) []runtimestorage.Rep
 // redactedMaterializationError keeps only stable, caller-actionable classes.
 // Storage adapters and provider fakes may return driver details, SQL text, or
 // credentials; those values must never cross the materialization boundary.
+func validMaterializationID(value string, required bool) bool {
+	if !runtimestorage.ValidateText(value, 256, required) {
+		return false
+	}
+	return value == "" || strings.TrimSpace(value) == value
+}
+
+func validMaterializedBatch(expected, actual []runtimestorage.ReplyOutbox) bool {
+	if len(expected) != len(actual) || len(expected) == 0 {
+		return false
+	}
+	byIndex := make(map[int]runtimestorage.ReplyOutbox, len(actual))
+	for _, value := range actual {
+		if value.Status != "" && value.Status != runtimestorage.ReplyPending {
+			return false
+		}
+		if _, exists := byIndex[value.SegmentIndex]; exists {
+			return false
+		}
+		byIndex[value.SegmentIndex] = value
+	}
+	for _, want := range expected {
+		got, ok := byIndex[want.SegmentIndex]
+		if !ok || got.TenantID != want.TenantID || got.ReplyID != want.ReplyID || got.EventID != want.EventID || got.SegmentCount != want.SegmentCount {
+			return false
+		}
+		wantNormalized, wantErr := runtimestorage.NormalizeReplyOutbox(want)
+		gotNormalized, gotErr := runtimestorage.NormalizeReplyOutbox(got)
+		if wantErr != nil || gotErr != nil || wantNormalized.Kind != gotNormalized.Kind || wantNormalized.Payload != gotNormalized.Payload || wantNormalized.Attachment != gotNormalized.Attachment || wantNormalized.Fallback != gotNormalized.Fallback || wantNormalized.ReplyTarget != gotNormalized.ReplyTarget {
+			return false
+		}
+	}
+	return true
+}
+
+func callEnqueueReplies(store runtimestorage.ReplyBatchEnqueuer, ctx context.Context, values []runtimestorage.ReplyOutbox) (result []runtimestorage.ReplyOutbox, err error) {
+	if nilvalue.Is(store) || nilvalue.Is(ctx) {
+		return nil, ErrMaterialization
+	}
+	defer func() {
+		if recover() != nil {
+			result, err = nil, ErrMaterialization
+		} else if nilvalue.Is(err) {
+			err = nil
+		}
+	}()
+	return store.EnqueueReplies(ctx, values)
+}
+
+func callEnqueueRepliesWithCorrelation(store runtimestorage.ReplyBatchCorrelationEnqueuer, ctx context.Context, correlation runtimestorage.ReplyCorrelation, values []runtimestorage.ReplyOutbox) (result []runtimestorage.ReplyOutbox, err error) {
+	if nilvalue.Is(store) || nilvalue.Is(ctx) {
+		return nil, ErrMaterialization
+	}
+	defer func() {
+		if recover() != nil {
+			result, err = nil, ErrMaterialization
+		} else if nilvalue.Is(err) {
+			err = nil
+		}
+	}()
+	return store.EnqueueRepliesWithCorrelation(ctx, correlation, values)
+}
+
 func redactedMaterializationError(err error) error {
 	if err == nil {
 		return nil
@@ -203,7 +291,7 @@ func redactedMaterializationError(err error) error {
 }
 
 func splitRunes(value string, size int) []string {
-	if strings.TrimSpace(value) == "" {
+	if size <= 0 || !runtimestorage.ValidateText(value, 4<<20, true) || strings.TrimSpace(value) == "" {
 		return nil
 	}
 	runes := []rune(value)

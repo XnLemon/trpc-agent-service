@@ -10,9 +10,71 @@ import (
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
+	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
+	artifactinmemory "trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
+	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/knowledge"
+	memoryinmemory "trpc.group/trpc-go/trpc-agent-go/memory/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/model"
-	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
+	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
+
+func TestNewRunnerWithConfigOwnsAndClosesToolSets(t *testing.T) {
+	input := runnerBuilderInputForTest(t)
+	input.Agent.Tools = nil
+	toolSet := &trackingToolSet{name: "test-set"}
+	runner, err := NewRunnerWithConfig(context.Background(), RunnerConfig{
+		Input: input, Sessions: sessioninmemory.NewSessionService(), ModelFactory: runnerBuilderModelFactory{}, ToolSets: []tool.ToolSet{toolSet},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if toolSet.initCalls != 1 || toolSet.closeCalls != 0 {
+		t.Fatalf("tool set lifecycle after build = init:%d close:%d", toolSet.initCalls, toolSet.closeCalls)
+	}
+	if err := runner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if toolSet.closeCalls != 1 {
+		t.Fatalf("tool set close calls = %d, want 1", toolSet.closeCalls)
+	}
+}
+
+func TestNewRunnerWithConfigClosesInitializedToolSetsOnLaterFailure(t *testing.T) {
+	input := runnerBuilderInputForTest(t)
+	input.Agent.Tools = nil
+	first := &trackingToolSet{name: "first"}
+	second := &trackingToolSet{name: "second", initErr: errors.New("mcp unavailable")}
+	_, err := NewRunnerWithConfig(context.Background(), RunnerConfig{
+		Input: input, Sessions: sessioninmemory.NewSessionService(), ModelFactory: runnerBuilderModelFactory{}, ToolSets: []tool.ToolSet{first, second},
+	})
+	if err == nil || !errors.Is(err, second.initErr) {
+		t.Fatalf("tool set initialization error = %v", err)
+	}
+	if first.closeCalls != 1 || second.closeCalls != 1 {
+		t.Fatalf("tool set cleanup = first:%d second:%d", first.closeCalls, second.closeCalls)
+	}
+}
+
+type trackingToolSet struct {
+	name       string
+	initErr    error
+	initCalls  int
+	closeCalls int
+}
+
+func (set *trackingToolSet) Init(context.Context) error {
+	set.initCalls++
+	return set.initErr
+}
+
+func (set *trackingToolSet) Tools(context.Context) []tool.Tool { return nil }
+func (set *trackingToolSet) Close() error {
+	set.closeCalls++
+	return nil
+}
+func (set *trackingToolSet) Name() string { return set.name }
 
 func TestNewRunnerWithConfigRejectsInvalidDependencies(t *testing.T) {
 	var nilContext context.Context
@@ -21,7 +83,7 @@ func TestNewRunnerWithConfigRejectsInvalidDependencies(t *testing.T) {
 		ctx    context.Context
 		config RunnerConfig
 	}{
-		{name: "nil context", ctx: nilContext, config: RunnerConfig{Sessions: inmemory.NewSessionService()}},
+		{name: "nil context", ctx: nilContext, config: RunnerConfig{Sessions: sessioninmemory.NewSessionService()}},
 		{name: "missing session capability", ctx: context.Background()},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -77,7 +139,7 @@ func TestNewRunnerWithConfigRejectsStorageMaterializationFailures(t *testing.T) 
 
 func TestNewRunnerWithConfigCleansUpAfterAssemblyFailure(t *testing.T) {
 	input := runnerBuilderInputForTest(t)
-	base := inmemory.NewSessionService()
+	base := sessioninmemory.NewSessionService()
 	tracked := &agentCloseTrackingSession{Service: base}
 	factory := storagefactory.StorageFactoryFunc(func(_ context.Context, value backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
 		return storagefactory.NewCapabilitySet(value.TenantID, map[backend.Capability]any{backend.CapabilitySession: tracked})
@@ -100,7 +162,7 @@ func TestNewRunnerWithConfigCoversModelToolTelemetryAndStorageBoundaries(t *test
 	input.Agent.Tools = nil
 
 	modelFailure := errors.New("model provider detail")
-	modelSessions := inmemory.NewSessionService()
+	modelSessions := sessioninmemory.NewSessionService()
 	t.Cleanup(func() { _ = modelSessions.Close() })
 	if _, err := NewRunnerWithConfig(context.Background(), RunnerConfig{Input: input, Sessions: modelSessions, ModelFactory: runnerBuilderModelFactory{err: modelFailure}}); err == nil {
 		// The adapter preserves the model runtime category rather than provider
@@ -110,14 +172,14 @@ func TestNewRunnerWithConfigCoversModelToolTelemetryAndStorageBoundaries(t *test
 
 	toolInput := input
 	toolInput.Agent.Tools = []appmodel.ToolAuthorization{{ToolID: "required-tool-not-installed", Required: true}}
-	toolSessions := inmemory.NewSessionService()
+	toolSessions := sessioninmemory.NewSessionService()
 	t.Cleanup(func() { _ = toolSessions.Close() })
 	_, err := NewRunnerWithConfig(context.Background(), RunnerConfig{Input: toolInput, Sessions: toolSessions, ModelFactory: runnerBuilderModelFactory{}})
 	if err == nil {
 		t.Fatal("required unavailable tool unexpectedly succeeded")
 	}
 
-	telemetrySessions := inmemory.NewSessionService()
+	telemetrySessions := sessioninmemory.NewSessionService()
 	runner, err := NewRunnerWithConfig(context.Background(), RunnerConfig{
 		Input: input, Sessions: telemetrySessions, ModelFactory: runnerBuilderModelFactory{}, Observability: observability.NewNoopProvider(),
 	})
@@ -128,7 +190,7 @@ func TestNewRunnerWithConfigCoversModelToolTelemetryAndStorageBoundaries(t *test
 		t.Fatal(err)
 	}
 
-	storageSessions := inmemory.NewSessionService()
+	storageSessions := sessioninmemory.NewSessionService()
 	storageFactory := storagefactory.StorageFactoryFunc(func(_ context.Context, value backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
 		return storagefactory.NewCapabilitySet(value.TenantID, map[backend.Capability]any{backend.CapabilitySession: storageSessions})
 	})
@@ -143,6 +205,71 @@ func TestNewRunnerWithConfigCoversModelToolTelemetryAndStorageBoundaries(t *test
 		t.Fatal(err)
 	}
 }
+
+func TestNewRunnerWithConfigInjectsNativeServices(t *testing.T) {
+	input := runnerBuilderInputForTest(t)
+	input.Agent.Tools = []appmodel.ToolAuthorization{{ToolID: "knowledge_search", Required: true}}
+	sessions := sessioninmemory.NewSessionService()
+	memories := memoryinmemory.NewMemoryService()
+	artifacts := artifactinmemory.NewService()
+	kb := knowledge.New()
+	factory := storagefactory.StorageFactoryFunc(func(_ context.Context, value backend.StorageFactoryInput) (*storagefactory.CapabilitySet, error) {
+		return storagefactory.NewCapabilitySet(value.TenantID, map[backend.Capability]any{
+			backend.CapabilitySession:   sessions,
+			backend.CapabilityMemory:    memories,
+			backend.CapabilityArtifact:  artifacts,
+			backend.CapabilityKnowledge: kb,
+		})
+	})
+	captured := make(chan *trpcagent.Invocation, 1)
+	registries, err := NewAgentFactoryRegistry(AgentFactoryRegistration{
+		Kind: appmodel.KindLLM, SchemaVersion: appmodel.SchemaVersionV1,
+		Factory: func(_ context.Context, build AgentBuildInput) (trpcagent.Agent, error) {
+			if build.Knowledge == nil {
+				t.Fatal("native Knowledge was not passed to the Agent factory")
+			}
+			if _, ok := build.Knowledge.(scopedKnowledge); !ok {
+				t.Fatalf("Knowledge was not wrapped with the app scope: %T", build.Knowledge)
+			}
+			return invocationCaptureAgent{captured: captured}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewRunnerWithConfig(context.Background(), RunnerConfig{
+		Input: input, ModelFactory: runnerBuilderModelFactory{}, StorageFactory: factory, AgentFactories: registries,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.Close()
+	events, err := runner.Run(context.Background(), "user", "session", model.NewUserMessage("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	invocation := <-captured
+	if invocation.MemoryService == nil || invocation.ArtifactService == nil {
+		t.Fatalf("native services missing from Invocation: memory=%T artifact=%T", invocation.MemoryService, invocation.ArtifactService)
+	}
+}
+
+type invocationCaptureAgent struct {
+	captured chan<- *trpcagent.Invocation
+}
+
+func (a invocationCaptureAgent) Run(_ context.Context, invocation *trpcagent.Invocation) (<-chan *trpcevent.Event, error) {
+	a.captured <- invocation
+	events := make(chan *trpcevent.Event)
+	close(events)
+	return events, nil
+}
+func (invocationCaptureAgent) Tools() []tool.Tool                  { return nil }
+func (invocationCaptureAgent) Info() trpcagent.Info                { return trpcagent.Info{Name: "capture"} }
+func (invocationCaptureAgent) SubAgents() []trpcagent.Agent        { return nil }
+func (invocationCaptureAgent) FindSubAgent(string) trpcagent.Agent { return nil }
 
 func runnerBuilderInputForTest(t *testing.T) RunnerInput {
 	t.Helper()
@@ -167,7 +294,7 @@ func runnerBuilderInputForTest(t *testing.T) RunnerInput {
 		Storage: backend.StorageFactoryInput{
 			TenantID: tenantRoot.TenantID, TenantVersion: tenantRoot.Version,
 			ProfileID: "bp_01ARZ3NDEKTSV4RRFFQ69G5FAV", ProfileVersion: 1,
-			ContentDigest: "backend-digest", SchemaVersion: 1,
+			ContentDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", SchemaVersion: 1,
 		},
 	}
 }

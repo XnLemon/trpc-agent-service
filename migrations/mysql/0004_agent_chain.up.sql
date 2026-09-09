@@ -4,4 +4,4 @@ ALTER TABLE agent_app_revision
 
 ALTER TABLE agent_app_revision
     ADD CONSTRAINT agent_revision_kind_ck
-    CHECK (agent_kind IN ('llm', 'chain'));
+    CHECK (agent_kind IN ('llm', 'chain', 'parallel', 'cycle', 'graph'));

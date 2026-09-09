@@ -17,10 +17,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
-	"github.com/google/uuid"
 	redisclient "github.com/redis/go-redis/v9"
 )
 
@@ -42,7 +42,7 @@ type Config struct {
 	PoolSize     int
 }
 
-// Store implements the tenant-scoped runtime capabilities and MemoryStore over Redis.
+// Store implements tenant-scoped session, message, and reply state over Redis.
 type Store struct {
 	client    redisclient.UniversalClient
 	keyPrefix string
@@ -52,20 +52,18 @@ type Store struct {
 }
 
 type state struct {
-	Version             int                                        `json:"version"`
-	Sessions            map[string]sessionstorage.Session          `json:"sessions,omitempty"`
-	Events              map[string]runtimestorage.MessageEvent     `json:"events,omitempty"`
-	Messages            map[string]string                          `json:"messages,omitempty"`
-	Histories           map[string][]sessionstorage.EventPayload   `json:"histories,omitempty"`
-	Replies             map[string]runtimestorage.ReplyOutbox      `json:"replies,omitempty"`
-	Correlations        map[string]runtimestorage.ReplyCorrelation `json:"correlations,omitempty"`
-	Memories            map[string]runtimestorage.MemoryRecord     `json:"memories,omitempty"`
-	MemoryIndexHandoffs map[string]int64                           `json:"memory_index_handoffs,omitempty"`
+	Version      int                                        `json:"version"`
+	Sessions     map[string]sessionstorage.Session          `json:"sessions,omitempty"`
+	Events       map[string]runtimestorage.MessageEvent     `json:"events,omitempty"`
+	Messages     map[string]string                          `json:"messages,omitempty"`
+	Histories    map[string][]sessionstorage.EventPayload   `json:"histories,omitempty"`
+	Replies      map[string]runtimestorage.ReplyOutbox      `json:"replies,omitempty"`
+	Correlations map[string]runtimestorage.ReplyCorrelation `json:"correlations,omitempty"`
 }
 
 // New creates a store using a caller-owned Redis client.
 func New(client redisclient.UniversalClient, keyPrefix string) (*Store, error) {
-	if client == nil {
+	if nilvalue.Is(client) {
 		return nil, runtimestorage.ErrInvalid
 	}
 	keyPrefix = strings.TrimSpace(keyPrefix)
@@ -78,10 +76,10 @@ func New(client redisclient.UniversalClient, keyPrefix string) (*Store, error) {
 // NewFromURL creates and pings a Redis client from a redis:// URL. The URL is
 // never included in returned errors or logs.
 func NewFromURL(ctx context.Context, rawURL string) (*Store, error) {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return nil, runtimestorage.ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	options, err := redisclient.ParseURL(strings.TrimSpace(rawURL))
@@ -105,10 +103,10 @@ func NewFromURL(ctx context.Context, rawURL string) (*Store, error) {
 // NewFromConfig creates and pings an owned client from explicit connection
 // settings. Password is accepted only as resolved runtime input.
 func NewFromConfig(ctx context.Context, config Config) (*Store, error) {
-	if ctx == nil || strings.TrimSpace(config.Addr) == "" || config.DB < 0 {
+	if nilvalue.Is(ctx) || strings.TrimSpace(config.Addr) == "" || config.DB < 0 {
 		return nil, runtimestorage.ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return nil, err
 	}
 	options := &redisclient.Options{Addr: strings.TrimSpace(config.Addr), Password: config.Password, DB: config.DB}
@@ -147,13 +145,13 @@ func (s *Store) Ping(ctx context.Context) error {
 }
 
 func (s *Store) check(ctx context.Context) error {
-	if ctx == nil {
+	if nilvalue.Is(ctx) {
 		return runtimestorage.ErrInvalid
 	}
-	if err := ctx.Err(); err != nil {
+	if err := nilvalue.ContextErr(ctx); err != nil {
 		return err
 	}
-	if s == nil || s.client == nil {
+	if s == nil || nilvalue.Is(s.client) {
 		return runtimestorage.ErrStorage
 	}
 	return nil
@@ -164,7 +162,7 @@ func (s *Store) key(tenantID string) string {
 }
 
 func emptyState() state {
-	return state{Version: stateVersion, Sessions: map[string]sessionstorage.Session{}, Events: map[string]runtimestorage.MessageEvent{}, Messages: map[string]string{}, Histories: map[string][]sessionstorage.EventPayload{}, Replies: map[string]runtimestorage.ReplyOutbox{}, Correlations: map[string]runtimestorage.ReplyCorrelation{}, Memories: map[string]runtimestorage.MemoryRecord{}, MemoryIndexHandoffs: map[string]int64{}}
+	return state{Version: stateVersion, Sessions: map[string]sessionstorage.Session{}, Events: map[string]runtimestorage.MessageEvent{}, Messages: map[string]string{}, Histories: map[string][]sessionstorage.EventPayload{}, Replies: map[string]runtimestorage.ReplyOutbox{}, Correlations: map[string]runtimestorage.ReplyCorrelation{}}
 }
 
 func normalizeState(value state) state {
@@ -188,12 +186,6 @@ func normalizeState(value state) state {
 	}
 	if value.Correlations == nil {
 		value.Correlations = map[string]runtimestorage.ReplyCorrelation{}
-	}
-	if value.Memories == nil {
-		value.Memories = map[string]runtimestorage.MemoryRecord{}
-	}
-	if value.MemoryIndexHandoffs == nil {
-		value.MemoryIndexHandoffs = map[string]int64{}
 	}
 	return value
 }
@@ -222,7 +214,7 @@ func (s *Store) mutate(ctx context.Context, tenantID string, fn func(*state) err
 	}
 	key := s.key(tenantID)
 	for attempt := 0; attempt < maxWatchRetries; attempt++ {
-		if err := ctx.Err(); err != nil {
+		if err := nilvalue.ContextErr(ctx); err != nil {
 			return err
 		}
 		err := s.client.Watch(ctx, func(tx *redisclient.Tx) error {
@@ -273,8 +265,8 @@ func mapRedisError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
-	if ctx != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
+	if !nilvalue.Is(ctx) {
+		if ctxErr := nilvalue.ContextErr(ctx); ctxErr != nil {
 			return ctxErr
 		}
 	}
@@ -342,17 +334,6 @@ func cloneReply(v runtimestorage.ReplyOutbox) runtimestorage.ReplyOutbox {
 	}
 	return v
 }
-func cloneMemory(v runtimestorage.MemoryRecord) runtimestorage.MemoryRecord {
-	v.Topics = append([]string(nil), v.Topics...)
-	v.Metadata = cloneMap(v.Metadata)
-	v.Embedding = append([]float64(nil), v.Embedding...)
-	if v.DeletedAt != nil {
-		x := *v.DeletedAt
-		v.DeletedAt = &x
-	}
-	return v
-}
-
 func jsonEqual(left, right []byte) bool {
 	var a, b any
 	return json.Unmarshal(left, &a) == nil && json.Unmarshal(right, &b) == nil && reflect.DeepEqual(a, b)
@@ -363,7 +344,7 @@ func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID strin
 	if err := s.check(ctx); err != nil {
 		return runtimestorage.ReplyCorrelation{}, err
 	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || eventID == "" {
+	if runtimestorage.ValidateTenant(tenantID) != nil || !validRuntimeIdentity(eventID, 256, true) {
 		return runtimestorage.ReplyCorrelation{}, runtimestorage.ErrInvalid
 	}
 	value, err := s.load(ctx, tenantID)
@@ -373,6 +354,9 @@ func (s *Store) GetReplyCorrelation(ctx context.Context, tenantID, eventID strin
 	result, ok := value.Correlations[eventID]
 	if !ok {
 		return runtimestorage.ReplyCorrelation{}, runtimestorage.ErrNotFound
+	}
+	if result.TenantID != tenantID || result.EventID != eventID || !validRuntimeIdentity(result.RequestID, 256, true) || !validRuntimeIdentity(result.TraceID, 256, false) {
+		return runtimestorage.ReplyCorrelation{}, runtimestorage.ErrStorage
 	}
 	result.TraceParent = observability.NormalizeTraceParent(result.TraceParent)
 	return result, nil
@@ -482,16 +466,40 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 	if err := s.check(ctx); err != nil {
 		return runtimestorage.MessageEvent{}, false, err
 	}
-	if runtimestorage.ValidateSession(input.TenantID, input.SessionID) != nil || input.BindingID == "" || input.ExternalMessageID == "" || input.EventID == "" || runtimestorage.ValidateReplyTarget(input.ReplyTarget) != nil || (input.ReplyTarget != (runtimestorage.ReplyTarget{}) && input.ReplyTarget.BindingID != input.BindingID) {
-		return runtimestorage.MessageEvent{}, false, runtimestorage.ErrInvalid
+	if err := runtimestorage.ValidateMessageEventInput(input); err != nil {
+		return runtimestorage.MessageEvent{}, false, err
 	}
 	var result runtimestorage.MessageEvent
 	duplicate := false
 	err := s.mutate(ctx, input.TenantID, func(value *state) error {
-		if id, ok := value.Messages[messageKey(input.BindingID, input.ExternalMessageID)]; ok {
-			result = cloneEvent(value.Events[id])
+		messageIndex := messageKey(input.BindingID, input.ExternalMessageID)
+		if id, ok := value.Messages[messageIndex]; ok {
+			existing, exists := value.Events[id]
+			if !exists {
+				return runtimestorage.ErrStorage
+			}
+			existing = cloneEvent(existing)
+			if err := runtimestorage.ValidateMessageEvent(existing); err != nil {
+				return runtimestorage.ErrStorage
+			}
+			if !runtimestorage.MessageEventMatchesInput(existing, input) {
+				return runtimestorage.ErrConflict
+			}
+			if existing.EventID != id || value.Messages[messageIndex] != existing.EventID {
+				return runtimestorage.ErrStorage
+			}
+			result = existing
 			duplicate = true
 			return nil
+		}
+		for id, existing := range value.Events {
+			if existing.BindingID != input.BindingID || existing.ExternalMessageID != input.ExternalMessageID {
+				continue
+			}
+			if err := runtimestorage.ValidateMessageEvent(existing); err != nil || id != existing.EventID || value.Messages[messageIndex] != id {
+				return runtimestorage.ErrStorage
+			}
+			return runtimestorage.ErrStorage
 		}
 		if _, ok := value.Events[input.EventID]; ok {
 			return runtimestorage.ErrDuplicate
@@ -509,11 +517,17 @@ func (s *Store) RecordMessage(ctx context.Context, input runtimestorage.MessageE
 		value.Messages[messageKey(input.BindingID, input.ExternalMessageID)] = input.EventID
 		return nil
 	})
+	if err == nil {
+		result = cloneEvent(result)
+		if validateErr := runtimestorage.ValidateMessageEvent(result); validateErr != nil {
+			return runtimestorage.MessageEvent{}, false, runtimestorage.ErrStorage
+		}
+	}
 	return result, duplicate, err
 }
 
 func validateMessageTransition(t runtimestorage.MessageTransition) error {
-	if runtimestorage.ValidateTenant(t.TenantID) != nil || t.EventID == "" || t.Owner == "" {
+	if runtimestorage.ValidateTenant(t.TenantID) != nil || !validRuntimeIdentity(t.EventID, 256, true) || !validRuntimeIdentity(t.Owner, 256, true) {
 		return runtimestorage.ErrInvalid
 	}
 	if !runtimestorage.ValidateMessageTransition(t.From, t.To) {
@@ -530,7 +544,7 @@ func (s *Store) GetMessage(ctx context.Context, tenantID, eventID string) (runti
 	if err := s.check(ctx); err != nil {
 		return runtimestorage.MessageEvent{}, err
 	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || eventID == "" {
+	if runtimestorage.ValidateTenant(tenantID) != nil || !validRuntimeIdentity(eventID, 256, true) {
 		return runtimestorage.MessageEvent{}, runtimestorage.ErrInvalid
 	}
 	value, err := s.load(ctx, tenantID)
@@ -541,7 +555,14 @@ func (s *Store) GetMessage(ctx context.Context, tenantID, eventID string) (runti
 	if !ok {
 		return runtimestorage.MessageEvent{}, runtimestorage.ErrNotFound
 	}
-	return cloneEvent(result), nil
+	if result.EventID != eventID {
+		return runtimestorage.MessageEvent{}, runtimestorage.ErrStorage
+	}
+	result = cloneEvent(result)
+	if err := runtimestorage.ValidateMessageEvent(result); err != nil {
+		return runtimestorage.MessageEvent{}, runtimestorage.ErrStorage
+	}
+	return result, nil
 }
 
 // TransitionMessage advances an inbound event through its fenced lifecycle.
@@ -557,6 +578,12 @@ func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage
 		current, ok := value.Events[transition.EventID]
 		if !ok {
 			return runtimestorage.ErrNotFound
+		}
+		if current.EventID != transition.EventID {
+			return runtimestorage.ErrStorage
+		}
+		if err := runtimestorage.ValidateMessageEvent(current); err != nil {
+			return runtimestorage.ErrStorage
 		}
 		if current.Status != transition.From {
 			return runtimestorage.ErrConflict
@@ -592,11 +619,21 @@ func (s *Store) TransitionMessage(ctx context.Context, transition runtimestorage
 		result = cloneEvent(current)
 		return nil
 	})
+	if err == nil {
+		result = cloneEvent(result)
+		if validateErr := runtimestorage.ValidateMessageEvent(result); validateErr != nil {
+			return runtimestorage.MessageEvent{}, runtimestorage.ErrStorage
+		}
+	}
 	return result, err
 }
 
+func validRuntimeIdentity(value string, max int, required bool) bool {
+	return runtimestorage.ValidateText(value, max, required) && strings.TrimSpace(value) == value && !strings.Contains(value, "://")
+}
+
 func validatePayload(value sessionstorage.EventPayload) error {
-	if runtimestorage.ValidateSession(value.TenantID, value.SessionID) != nil || value.EventID == "" || len(value.Payload) == 0 || !json.Valid(value.Payload) {
+	if runtimestorage.ValidateSession(value.TenantID, value.SessionID) != nil || !validRuntimeIdentity(value.EventID, 256, true) || len(value.Payload) == 0 || !json.Valid(value.Payload) {
 		return runtimestorage.ErrInvalid
 	}
 	return nil
@@ -659,12 +696,17 @@ func (s *Store) ListEventPayloads(ctx context.Context, tenantID, sessionID strin
 }
 
 func validateReplySegment(value runtimestorage.ReplyOutbox) error {
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.ReplyID == "" || value.EventID == "" || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil {
+	if runtimestorage.ValidateTenant(value.TenantID) != nil || !validRuntimeIdentity(value.ReplyID, 256, true) || !validRuntimeIdentity(value.EventID, 256, true) || value.SegmentIndex < 0 || value.SegmentCount <= value.SegmentIndex || !runtimestorage.ValidateText(value.Payload, 4<<20, false) || runtimestorage.ValidateReplyTarget(value.ReplyTarget) != nil {
 		return runtimestorage.ErrInvalid
 	}
 	return nil
 }
 func prepareReply(value runtimestorage.ReplyOutbox) (runtimestorage.ReplyOutbox, error) {
+	normalized, err := runtimestorage.NormalizeReplyOutbox(value)
+	if err != nil {
+		return runtimestorage.ReplyOutbox{}, err
+	}
+	value = normalized
 	if value.Status == "" {
 		value.Status = runtimestorage.ReplyPending
 	}
@@ -677,7 +719,14 @@ func prepareReply(value runtimestorage.ReplyOutbox) (runtimestorage.ReplyOutbox,
 	return value, nil
 }
 func sameReply(a, b runtimestorage.ReplyOutbox) bool {
-	return a.EventID == b.EventID && a.SegmentCount == b.SegmentCount && a.Payload == b.Payload && a.ReplyTarget == b.ReplyTarget
+	return a.EventID == b.EventID && a.SegmentCount == b.SegmentCount && a.Payload == b.Payload && replyKind(a) == replyKind(b) && a.Attachment == b.Attachment && a.Fallback == b.Fallback && a.ReplyTarget == b.ReplyTarget
+}
+
+func replyKind(value runtimestorage.ReplyOutbox) runtimestorage.ReplyKind {
+	if value.Kind == "" {
+		return runtimestorage.ReplyKindText
+	}
+	return runtimestorage.ReplyKind(strings.ToLower(strings.TrimSpace(string(value.Kind))))
 }
 
 // EnqueueReply materializes one pending reply segment.
@@ -697,6 +746,9 @@ func (s *Store) EnqueueReply(ctx context.Context, input runtimestorage.ReplyOutb
 		}
 		key := replyKey(value.ReplyID, value.SegmentIndex)
 		if existing, ok := current.Replies[key]; ok {
+			if err := runtimestorage.ValidateReplyOutbox(existing); err != nil || existing.ReplyID != value.ReplyID || existing.SegmentIndex != value.SegmentIndex {
+				return runtimestorage.ErrStorage
+			}
 			if !sameReply(existing, value) {
 				return runtimestorage.ErrConflict
 			}
@@ -815,7 +867,7 @@ func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment 
 	if err := s.check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || replyID == "" || segment < 0 {
+	if runtimestorage.ValidateTenant(tenantID) != nil || !validRuntimeIdentity(replyID, 256, true) || segment < 0 {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
 	}
 	value, err := s.load(ctx, tenantID)
@@ -825,6 +877,12 @@ func (s *Store) GetReply(ctx context.Context, tenantID, replyID string, segment 
 	result, ok := value.Replies[replyKey(replyID, segment)]
 	if !ok {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrNotFound
+	}
+	if err := runtimestorage.ValidateReplyOutbox(result); err != nil || result.ReplyID != replyID || result.SegmentIndex != segment {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrStorage
+	}
+	if event, exists := value.Events[result.EventID]; !exists || event.EventID != result.EventID || event.TenantID != tenantID || event.ReplyTarget != result.ReplyTarget || runtimestorage.ValidateMessageEvent(event) != nil {
+		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrStorage
 	}
 	return cloneReply(result), nil
 }
@@ -842,7 +900,14 @@ func (s *Store) ListReplyCandidates(ctx context.Context, tenantID string) ([]run
 		return nil, err
 	}
 	result := make([]runtimestorage.ReplyOutbox, 0, len(value.Replies))
-	for _, item := range value.Replies {
+	for key, item := range value.Replies {
+		if err := runtimestorage.ValidateReplyOutbox(item); err != nil || key != replyKey(item.ReplyID, item.SegmentIndex) {
+			return nil, runtimestorage.ErrStorage
+		}
+		event, exists := value.Events[item.EventID]
+		if !exists || event.EventID != item.EventID || event.TenantID != tenantID || event.ReplyTarget != item.ReplyTarget || runtimestorage.ValidateMessageEvent(event) != nil {
+			return nil, runtimestorage.ErrStorage
+		}
 		result = append(result, cloneReply(item))
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -859,7 +924,7 @@ func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segmen
 	if err := s.check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || replyID == "" || segment < 0 || owner == "" || duration <= 0 {
+	if runtimestorage.ValidateTenant(tenantID) != nil || !validRuntimeIdentity(replyID, 256, true) || segment < 0 || !validRuntimeIdentity(owner, 256, true) || duration <= 0 {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
 	}
 	var result runtimestorage.ReplyOutbox
@@ -867,6 +932,13 @@ func (s *Store) ClaimReply(ctx context.Context, tenantID, replyID string, segmen
 		current, ok := value.Replies[replyKey(replyID, segment)]
 		if !ok {
 			return runtimestorage.ErrNotFound
+		}
+		if err := runtimestorage.ValidateReplyOutbox(current); err != nil || current.ReplyID != replyID || current.SegmentIndex != segment {
+			return runtimestorage.ErrStorage
+		}
+		event, exists := value.Events[current.EventID]
+		if !exists || event.EventID != current.EventID || event.TenantID != tenantID || event.ReplyTarget != current.ReplyTarget || runtimestorage.ValidateMessageEvent(event) != nil {
+			return runtimestorage.ErrStorage
 		}
 		now := time.Now().UTC()
 		expired := current.Status == runtimestorage.ReplySending && current.LeaseExpiresAt != nil && !current.LeaseExpiresAt.After(now)
@@ -888,7 +960,7 @@ func (s *Store) RecordReplyReceipt(ctx context.Context, receipt runtimestorage.R
 	if err := s.check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
-	if runtimestorage.ValidateTenant(receipt.TenantID) != nil || receipt.ReplyID == "" || receipt.SegmentIndex < 0 || receipt.Owner == "" || receipt.FencingToken <= 0 || strings.TrimSpace(receipt.ProviderID) == "" {
+	if runtimestorage.ValidateTenant(receipt.TenantID) != nil || !validRuntimeIdentity(receipt.ReplyID, 256, true) || receipt.SegmentIndex < 0 || !validRuntimeIdentity(receipt.Owner, 256, true) || receipt.FencingToken <= 0 || !validRuntimeIdentity(receipt.ProviderID, 1024, true) {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
 	}
 	var result runtimestorage.ReplyOutbox
@@ -897,6 +969,13 @@ func (s *Store) RecordReplyReceipt(ctx context.Context, receipt runtimestorage.R
 		current, ok := value.Replies[key]
 		if !ok {
 			return runtimestorage.ErrNotFound
+		}
+		if err := runtimestorage.ValidateReplyOutbox(current); err != nil || current.ReplyID != receipt.ReplyID || current.SegmentIndex != receipt.SegmentIndex {
+			return runtimestorage.ErrStorage
+		}
+		event, exists := value.Events[current.EventID]
+		if !exists || event.EventID != current.EventID || event.TenantID != receipt.TenantID || event.ReplyTarget != current.ReplyTarget || runtimestorage.ValidateMessageEvent(event) != nil {
+			return runtimestorage.ErrStorage
 		}
 		now := time.Now().UTC()
 		if current.Status != runtimestorage.ReplySending || current.LeaseOwner != receipt.Owner || current.FencingToken != receipt.FencingToken || current.LeaseExpiresAt == nil || !current.LeaseExpiresAt.After(now) || current.ProviderMessageID != "" && current.ProviderMessageID != receipt.ProviderID {
@@ -918,7 +997,7 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 	if err := s.check(ctx); err != nil {
 		return runtimestorage.ReplyOutbox{}, err
 	}
-	if runtimestorage.ValidateTenant(transition.TenantID) != nil || transition.ReplyID == "" || transition.SegmentIndex < 0 || transition.Owner == "" {
+	if runtimestorage.ValidateTenant(transition.TenantID) != nil || !validRuntimeIdentity(transition.ReplyID, 256, true) || transition.SegmentIndex < 0 || !validRuntimeIdentity(transition.Owner, 256, true) || !validRuntimeIdentity(transition.ProviderID, 1024, false) || !validRuntimeIdentity(transition.ErrorClass, 128, false) {
 		return runtimestorage.ReplyOutbox{}, runtimestorage.ErrInvalid
 	}
 	if !runtimestorage.ValidateTransition(transition.From, transition.To) {
@@ -930,6 +1009,13 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 		current, ok := value.Replies[key]
 		if !ok {
 			return runtimestorage.ErrNotFound
+		}
+		if err := runtimestorage.ValidateReplyOutbox(current); err != nil || current.ReplyID != transition.ReplyID || current.SegmentIndex != transition.SegmentIndex {
+			return runtimestorage.ErrStorage
+		}
+		event, exists := value.Events[current.EventID]
+		if !exists || event.EventID != current.EventID || event.TenantID != transition.TenantID || event.ReplyTarget != current.ReplyTarget || runtimestorage.ValidateMessageEvent(event) != nil {
+			return runtimestorage.ErrStorage
 		}
 		now := time.Now().UTC()
 		if current.Status != transition.From || (current.LeaseOwner != "" && current.LeaseOwner != transition.Owner) || (transition.FencingToken != 0 && current.FencingToken != transition.FencingToken) || (current.Status == runtimestorage.ReplySending && (current.LeaseExpiresAt == nil || !current.LeaseExpiresAt.After(now))) {
@@ -959,207 +1045,14 @@ func (s *Store) TransitionReply(ctx context.Context, transition runtimestorage.R
 	return result, err
 }
 
-// PutMemory creates or updates one durable tenant-scoped memory record.
-func (s *Store) PutMemory(ctx context.Context, input runtimestorage.MemoryInput) (runtimestorage.MemoryRecord, error) {
-	if err := s.check(ctx); err != nil {
-		return runtimestorage.MemoryRecord{}, err
-	}
-	if runtimestorage.ValidateTenant(input.TenantID) != nil || !runtimestorage.ValidateText(input.UserID, 256, true) || !runtimestorage.ValidateText(input.Content, 0, true) || !runtimestorage.ValidateText(input.MemoryID, 256, false) || !runtimestorage.ValidateText(input.SessionID, 256, false) || !runtimestorage.ValidateEmbedding(input.Embedding) || (input.Metadata != nil && cloneMap(input.Metadata) == nil) {
-		return runtimestorage.MemoryRecord{}, runtimestorage.ErrInvalid
-	}
-	if input.MemoryID == "" {
-		input.MemoryID = "mem_" + uuid.NewString()
-	}
-	if input.Topics == nil {
-		input.Topics = []string{}
-	}
-	if input.Metadata == nil {
-		input.Metadata = map[string]any{}
-	}
-	if input.Embedding == nil {
-		input.Embedding = []float64{}
-	}
-	var result runtimestorage.MemoryRecord
-	err := s.mutate(ctx, input.TenantID, func(value *state) error {
-		now := time.Now().UTC()
-		current, ok := value.Memories[input.MemoryID]
-		if ok {
-			current.Content, current.Topics, current.Metadata, current.Embedding = input.Content, append([]string(nil), input.Topics...), cloneMap(input.Metadata), append([]float64(nil), input.Embedding...)
-			current.UserID, current.SessionID, current.Version, current.UpdatedAt, current.DeletedAt = input.UserID, input.SessionID, current.Version+1, now, nil
-			value.Memories[input.MemoryID] = current
-			result = cloneMemory(current)
-			return nil
-		}
-		current = runtimestorage.MemoryRecord{TenantID: input.TenantID, MemoryID: input.MemoryID, UserID: input.UserID, SessionID: input.SessionID, Content: input.Content, Topics: append([]string(nil), input.Topics...), Metadata: cloneMap(input.Metadata), Embedding: append([]float64(nil), input.Embedding...), Version: 1, CreatedAt: now, UpdatedAt: now}
-		value.Memories[input.MemoryID] = current
-		result = cloneMemory(current)
-		return nil
-	})
-	return result, err
-}
-
-// GetMemory returns one non-deleted tenant-scoped memory record.
-func (s *Store) GetMemory(ctx context.Context, tenantID, memoryID string) (runtimestorage.MemoryRecord, error) {
-	if err := s.check(ctx); err != nil {
-		return runtimestorage.MemoryRecord{}, err
-	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || memoryID == "" {
-		return runtimestorage.MemoryRecord{}, runtimestorage.ErrInvalid
-	}
-	value, err := s.load(ctx, tenantID)
-	if err != nil {
-		return runtimestorage.MemoryRecord{}, err
-	}
-	result, ok := value.Memories[memoryID]
-	if !ok || result.DeletedAt != nil {
-		return runtimestorage.MemoryRecord{}, runtimestorage.ErrNotFound
-	}
-	return cloneMemory(result), nil
-}
-
-// ListMemories returns a tenant user's non-deleted memories.
-func (s *Store) ListMemories(ctx context.Context, tenantID, userID string, limit int) ([]runtimestorage.MemoryRecord, error) {
-	if err := s.check(ctx); err != nil {
-		return nil, err
-	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || strings.TrimSpace(userID) == "" || limit < 0 {
-		return nil, runtimestorage.ErrInvalid
-	}
-	value, err := s.load(ctx, tenantID)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]runtimestorage.MemoryRecord, 0)
-	for _, item := range value.Memories {
-		if item.UserID == userID && item.DeletedAt == nil {
-			result = append(result, cloneMemory(item))
-		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].UpdatedAt.Equal(result[j].UpdatedAt) {
-			return result[i].MemoryID < result[j].MemoryID
-		}
-		return result[i].UpdatedAt.After(result[j].UpdatedAt)
-	})
-	if limit > 0 && len(result) > limit {
-		result = result[:limit]
-	}
-	return result, nil
-}
-
-// SearchMemories searches a tenant user's memory content by text terms.
-func (s *Store) SearchMemories(ctx context.Context, tenantID, userID, query string, limit int) ([]runtimestorage.MemorySearchResult, error) {
-	if err := s.check(ctx); err != nil {
-		return nil, err
-	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || strings.TrimSpace(userID) == "" || strings.TrimSpace(query) == "" || limit < 0 {
-		return nil, runtimestorage.ErrInvalid
-	}
-	terms := strings.Fields(strings.ToLower(query))
-	value, err := s.load(ctx, tenantID)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]runtimestorage.MemorySearchResult, 0)
-	for _, item := range value.Memories {
-		if item.UserID != userID || item.DeletedAt != nil {
-			continue
-		}
-		hits := 0
-		text := strings.ToLower(item.Content)
-		for _, term := range terms {
-			if strings.Contains(text, term) {
-				hits++
-			}
-		}
-		if hits > 0 {
-			result = append(result, runtimestorage.MemorySearchResult{Memory: cloneMemory(item), Score: float64(hits) / float64(len(terms))})
-		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Score == result[j].Score {
-			return result[i].Memory.MemoryID < result[j].Memory.MemoryID
-		}
-		return result[i].Score > result[j].Score
-	})
-	if limit > 0 && len(result) > limit {
-		result = result[:limit]
-	}
-	return result, nil
-}
-
-// DeleteMemory tombstones one tenant-scoped memory record.
-func (s *Store) DeleteMemory(ctx context.Context, tenantID, memoryID string) error {
-	if err := s.check(ctx); err != nil {
-		return err
-	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || memoryID == "" {
-		return runtimestorage.ErrInvalid
-	}
-	return s.mutate(ctx, tenantID, func(value *state) error {
-		current, ok := value.Memories[memoryID]
-		if !ok || current.DeletedAt != nil {
-			return runtimestorage.ErrNotFound
-		}
-		now := time.Now().UTC()
-		current.DeletedAt, current.UpdatedAt, current.Version = &now, now, current.Version+1
-		value.Memories[memoryID] = current
-		delete(value.MemoryIndexHandoffs, scopedKey(memoryID))
-		return nil
-	})
-}
-
-// EnqueueMemoryIndex records a durable index handoff for a memory version.
-func (s *Store) EnqueueMemoryIndex(ctx context.Context, value runtimestorage.MemoryRecord) error {
-	if err := s.check(ctx); err != nil {
-		return err
-	}
-	if runtimestorage.ValidateTenant(value.TenantID) != nil || value.MemoryID == "" || value.Version < 1 {
-		return runtimestorage.ErrInvalid
-	}
-	return s.mutate(ctx, value.TenantID, func(current *state) error {
-		stored, ok := current.Memories[value.MemoryID]
-		if !ok || stored.DeletedAt != nil {
-			return runtimestorage.ErrNotFound
-		}
-		if stored.Version != value.Version {
-			return runtimestorage.ErrConflict
-		}
-		current.MemoryIndexHandoffs[scopedKey(value.MemoryID)] = value.Version
-		return nil
-	})
-}
-
-// WaitForMemoryIndex verifies that a memory version has been handed off.
-func (s *Store) WaitForMemoryIndex(ctx context.Context, tenantID, memoryID string, version int64) error {
-	if err := s.check(ctx); err != nil {
-		return err
-	}
-	if runtimestorage.ValidateTenant(tenantID) != nil || memoryID == "" || version < 1 {
-		return runtimestorage.ErrInvalid
-	}
-	value, err := s.load(ctx, tenantID)
-	if err != nil {
-		return err
-	}
-	current, ok := value.Memories[memoryID]
-	if !ok || current.DeletedAt != nil {
-		return runtimestorage.ErrNotFound
-	}
-	if current.Version < version || value.MemoryIndexHandoffs[scopedKey(memoryID)] < version {
-		return runtimestorage.ErrConflict
-	}
-	return nil
-}
-
 // Close is idempotent. A caller-owned client remains open.
 func (s *Store) Close() error {
 	if s == nil {
 		return nil
 	}
 	s.closeOnce.Do(func() {
-		if s.owned {
-			if closer, ok := s.client.(interface{ Close() error }); ok {
+		if s.owned && !nilvalue.Is(s.client) {
+			if closer, ok := s.client.(interface{ Close() error }); ok && !nilvalue.Is(closer) {
 				s.closeErr = mapRedisError(context.Background(), closer.Close())
 			}
 		}
@@ -1171,7 +1064,6 @@ var _ sessionstorage.SessionStateStore = (*Store)(nil)
 var _ sessionstorage.EventHistoryStore = (*Store)(nil)
 var _ runtimestorage.MessageStore = (*Store)(nil)
 var _ runtimestorage.ReplyStore = (*Store)(nil)
-var _ runtimestorage.MemoryStore = (*Store)(nil)
 var _ runtimestorage.ReplyBatchEnqueuer = (*Store)(nil)
 var _ runtimestorage.ReplyBatchCorrelationEnqueuer = (*Store)(nil)
 var _ runtimestorage.ReplyCorrelationStore = (*Store)(nil)

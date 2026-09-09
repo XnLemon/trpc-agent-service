@@ -13,10 +13,14 @@ import (
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 )
 
 // List returns a stable page of Channel Bindings belonging to one tenant.
 func (r *ChannelRepository) List(ctx context.Context, tenantID, query, status, cursor string, limit int) ([]*channels.Binding, string, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, "", err
+	}
 	if r == nil || r.db == nil {
 		return nil, "", ErrStorage
 	}
@@ -115,9 +119,16 @@ func NewRepository(db *sql.DB) *ChannelRepository {
 	return &ChannelRepository{db: db, candidates: make(map[string]candidateRecord)}
 }
 
+func checkContext(ctx context.Context) error {
+	if nilvalue.Is(ctx) {
+		return ErrStorage
+	}
+	return nilvalue.ContextErr(ctx)
+}
+
 // Create persists a channel binding.
 func (r *ChannelRepository) Create(ctx context.Context, input channels.CreateInput) (*channels.Binding, channels.ChangeEvent, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, channels.ChangeEvent{}, err
 	}
 	if r == nil || r.db == nil {
@@ -171,7 +182,7 @@ func (r *ChannelRepository) Create(ctx context.Context, input channels.CreateInp
 
 // Get loads a channel binding within a tenant.
 func (r *ChannelRepository) Get(ctx context.Context, tenantID, bindingID string) (*channels.Binding, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	if r == nil || r.db == nil {
@@ -189,7 +200,7 @@ func (r *ChannelRepository) Get(ctx context.Context, tenantID, bindingID string)
 
 // UpdateConfiguration applies an expected-version binding update.
 func (r *ChannelRepository) UpdateConfiguration(ctx context.Context, input channels.UpdateConfigurationInput) (*channels.Binding, channels.ChangeEvent, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, channels.ChangeEvent{}, err
 	}
 	if r == nil || r.db == nil {
@@ -242,7 +253,7 @@ func (r *ChannelRepository) UpdateConfiguration(ctx context.Context, input chann
 
 // TransitionStatus changes a binding status with optimistic concurrency.
 func (r *ChannelRepository) TransitionStatus(ctx context.Context, input channels.TransitionStatusInput) (*channels.Binding, channels.ChangeEvent, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, channels.ChangeEvent{}, err
 	}
 	if r == nil || r.db == nil {
@@ -312,7 +323,7 @@ func (r *ChannelRepository) Disable(ctx context.Context, input channels.Transiti
 
 // LookupCandidates finds tenant bindings matching a verified route.
 func (r *ChannelRepository) LookupCandidates(ctx context.Context, channel channels.Channel, routeDigest string) ([]channels.CandidateBindingContext, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	if channel.Validate() != nil || channels.ValidatePublicRouteKeyDigest(routeDigest) != nil {
@@ -382,7 +393,7 @@ func (r *ChannelRepository) LookupCandidates(ctx context.Context, channel channe
 
 // ConsumeCandidate atomically consumes a one-time verified candidate.
 func (r *ChannelRepository) ConsumeCandidate(ctx context.Context, candidate channels.CandidateBindingContext) (*channels.Binding, error) {
-	if err := ctx.Err(); err != nil {
+	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	if r == nil || r.db == nil {

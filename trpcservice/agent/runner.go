@@ -8,12 +8,17 @@ import (
 
 	appmodel "github.com/XnLemon/trpc-agent-service/trpcservice/app"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/backend"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/internal/nilvalue"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/metrics"
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	runtimebudget "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/budget"
+	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
+	skillsecurity "github.com/XnLemon/trpc-agent-service/trpcservice/skill"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/tenant"
+	servicetool "github.com/XnLemon/trpc-agent-service/trpcservice/tool"
+	"github.com/google/uuid"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
@@ -60,17 +65,21 @@ type UsageObserver func(context.Context, runtimebudget.Usage)
 
 // WithUsageObserver attaches per-execution usage accounting to a context.
 func WithUsageObserver(ctx context.Context, observer UsageObserver) context.Context {
-	if ctx == nil || observer == nil {
+	if isNilAgentValue(ctx) || observer == nil {
 		return ctx
 	}
 	return context.WithValue(ctx, usageObserverContextKey{}, observer)
 }
 
 func usageObserverFromContext(ctx context.Context) UsageObserver {
-	if ctx == nil {
+	if isNilAgentValue(ctx) {
 		return nil
 	}
-	observer, _ := ctx.Value(usageObserverContextKey{}).(UsageObserver)
+	raw, err := nilvalue.ContextValue(ctx, usageObserverContextKey{})
+	if err != nil {
+		return nil
+	}
+	observer, _ := raw.(UsageObserver)
 	return observer
 }
 
@@ -115,22 +124,36 @@ func (state *callbackState) finish(err error) {
 			_ = state.catalog.Tokens(state.ctx, int64(usage.PromptTokens), labels)
 			_ = state.catalog.Tokens(state.ctx, int64(usage.CompletionTokens), labels)
 			if observer := usageObserverFromContext(state.ctx); observer != nil {
-				observer(state.ctx, runtimebudget.Usage{InputTokens: int64(usage.PromptTokens), OutputTokens: int64(usage.CompletionTokens)})
+				safeUsageObserver(observer, state.ctx, runtimebudget.Usage{InputTokens: int64(usage.PromptTokens), OutputTokens: int64(usage.CompletionTokens)})
 			}
 		}
 		if state.finishSpan != nil {
-			state.finishSpan(err)
+			safeFinishSpan(state.finishSpan, err)
 		}
 		_ = state.catalog.Operation(state.ctx, state.started, state.labels, err)
 	})
 }
 
 func stateFromContext(ctx context.Context) *callbackState {
-	if ctx == nil {
+	if isNilAgentValue(ctx) {
 		return nil
 	}
-	state, _ := ctx.Value(callbackStateKey{}).(*callbackState)
+	raw, err := nilvalue.ContextValue(ctx, callbackStateKey{})
+	if err != nil {
+		return nil
+	}
+	state, _ := raw.(*callbackState)
 	return state
+}
+
+func safeUsageObserver(observer UsageObserver, ctx context.Context, usage runtimebudget.Usage) {
+	defer func() { _ = recover() }()
+	observer(ctx, usage)
+}
+
+func safeFinishSpan(finish func(error), err error) {
+	defer func() { _ = recover() }()
+	finish(err)
 }
 
 func isTerminalModelResponse(response *trpcmodel.Response) bool {
@@ -159,7 +182,7 @@ var errModelResponse = errors.New("model response error")
 type telemetryModel struct{ delegate trpcmodel.Model }
 
 func wrapTelemetryModel(delegate trpcmodel.Model) trpcmodel.Model {
-	if delegate == nil {
+	if isNilAgentValue(delegate) {
 		return nil
 	}
 	if iter, ok := delegate.(trpcmodel.IterModel); ok {
@@ -168,10 +191,31 @@ func wrapTelemetryModel(delegate trpcmodel.Model) trpcmodel.Model {
 	return telemetryModel{delegate: delegate}
 }
 
-func (model telemetryModel) Info() trpcmodel.Info { return model.delegate.Info() }
+func (model telemetryModel) Info() (info trpcmodel.Info) {
+	defer func() {
+		if recover() != nil {
+			info = trpcmodel.Info{}
+		}
+	}()
+	if isNilAgentValue(model.delegate) {
+		return trpcmodel.Info{}
+	}
+	return model.delegate.Info()
+}
 
-func (model telemetryModel) GenerateContent(ctx context.Context, request *trpcmodel.Request) (<-chan *trpcmodel.Response, error) {
-	responses, err := model.delegate.GenerateContent(ctx, request)
+func (model telemetryModel) GenerateContent(ctx context.Context, request *trpcmodel.Request) (responses <-chan *trpcmodel.Response, err error) {
+	if isNilAgentValue(ctx) || isNilAgentValue(model.delegate) {
+		return nil, errModelResponse
+	}
+	if contextErr := agentContextErr(ctx); contextErr != nil {
+		return nil, contextErr
+	}
+	defer func() {
+		if recover() != nil {
+			responses, err = nil, errModelResponse
+		}
+	}()
+	responses, err = model.delegate.GenerateContent(ctx, request)
 	state := stateFromContext(ctx)
 	if err != nil {
 		state.finish(err)
@@ -181,18 +225,29 @@ func (model telemetryModel) GenerateContent(ctx context.Context, request *trpcmo
 		state.finish(errModelResponseIncomplete)
 		return nil, errModelResponseIncomplete
 	}
+	done, contextErr := nilvalue.ContextDone(ctx)
+	if contextErr != nil {
+		state.finish(contextErr)
+		return nil, contextErr
+	}
+	source := responses
 	out := make(chan *trpcmodel.Response)
 	go func() {
 		defer close(out)
 		terminal := false
+		defer func() {
+			if recover() != nil && !terminal {
+				state.finish(errModelResponse)
+			}
+		}()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-done:
 				if !terminal {
-					state.finish(ctx.Err())
+					state.finish(agentContextErr(ctx))
 				}
 				return
-			case response, ok := <-responses:
+			case response, ok := <-source:
 				if !ok {
 					if !terminal {
 						state.finish(errModelResponseIncomplete)
@@ -208,9 +263,9 @@ func (model telemetryModel) GenerateContent(ctx context.Context, request *trpcmo
 				}
 				select {
 				case out <- response:
-				case <-ctx.Done():
+				case <-done:
 					if !terminal {
-						state.finish(ctx.Err())
+						state.finish(agentContextErr(ctx))
 					}
 					return
 				}
@@ -225,7 +280,15 @@ type telemetryIterModel struct {
 	iter trpcmodel.IterModel
 }
 
-func (model telemetryIterModel) GenerateContentIter(ctx context.Context, request *trpcmodel.Request) (trpcmodel.Seq[*trpcmodel.Response], error) {
+func (model telemetryIterModel) GenerateContentIter(ctx context.Context, request *trpcmodel.Request) (sequence trpcmodel.Seq[*trpcmodel.Response], err error) {
+	if isNilAgentValue(ctx) || isNilAgentValue(model.iter) {
+		return nil, errModelResponse
+	}
+	defer func() {
+		if recover() != nil {
+			sequence, err = nil, errModelResponse
+		}
+	}()
 	seq, err := model.iter.GenerateContentIter(ctx, request)
 	state := stateFromContext(ctx)
 	if err != nil {
@@ -237,8 +300,20 @@ func (model telemetryIterModel) GenerateContentIter(ctx context.Context, request
 		return nil, errModelResponseIncomplete
 	}
 	return func(yield func(*trpcmodel.Response) bool) {
+		if yield == nil {
+			state.finish(errModelResponse)
+			return
+		}
 		terminal := false
+		defer func() {
+			if recover() != nil && !terminal {
+				state.finish(errModelResponse)
+			}
+		}()
 		seq(func(response *trpcmodel.Response) bool {
+			if agentContextErr(ctx) != nil {
+				return false
+			}
 			if response != nil {
 				state.observe(response)
 				if isTerminalModelResponse(response) {
@@ -249,7 +324,7 @@ func (model telemetryIterModel) GenerateContentIter(ctx context.Context, request
 			return yield(response)
 		})
 		if !terminal {
-			if err := ctx.Err(); err != nil {
+			if err := agentContextErr(ctx); err != nil {
 				state.finish(err)
 			} else {
 				state.finish(errModelResponseIncomplete)
@@ -262,11 +337,20 @@ type modelRetryBinder interface {
 	WithModelRetryCallbacks(context.Context, func(context.Context, *trpcmodel.Request) (context.Context, *trpcmodel.Response, error), func(context.Context, *trpcmodel.Request, *trpcmodel.Response) (context.Context, error)) context.Context
 }
 
-func (model telemetryModel) WithModelRetryCallbacks(ctx context.Context, before func(context.Context, *trpcmodel.Request) (context.Context, *trpcmodel.Response, error), after func(context.Context, *trpcmodel.Request, *trpcmodel.Response) (context.Context, error)) context.Context {
-	binder, ok := model.delegate.(modelRetryBinder)
-	if !ok {
+func (model telemetryModel) WithModelRetryCallbacks(ctx context.Context, before func(context.Context, *trpcmodel.Request) (context.Context, *trpcmodel.Response, error), after func(context.Context, *trpcmodel.Request, *trpcmodel.Response) (context.Context, error)) (result context.Context) {
+	if isNilAgentValue(ctx) {
 		return ctx
 	}
+	binder, ok := model.delegate.(modelRetryBinder)
+	if !ok || isNilAgentValue(binder) {
+		return ctx
+	}
+	result = ctx
+	defer func() {
+		if recover() != nil || isNilAgentValue(result) {
+			result = ctx
+		}
+	}()
 	return binder.WithModelRetryCallbacks(ctx, before, after)
 }
 
@@ -333,23 +417,191 @@ func telemetryOptions(provider observability.Provider, providerName, modelFamily
 // boundary. Caller-provided options are applied first; the fixed policy is
 // appended last so an execution cannot silently extend its control-plane limits.
 type policyRunner struct {
-	delegate     trpcrunner.Runner
-	capabilities *storagefactory.CapabilitySet
-	runOptions   []trpcagent.RunOption
+	delegate        trpcrunner.Runner
+	capabilities    *storagefactory.CapabilitySet
+	toolSets        []trpctool.ToolSet
+	runOptions      []trpcagent.RunOption
+	tenantID        string
+	appID           string
+	revision        int64
+	toolInvocations runtimestorage.ToolInvocationStore
+	closeOnce       sync.Once
+	closeErr        error
 }
 
-func (runner *policyRunner) Run(ctx context.Context, userID, sessionID string, message trpcmodel.Message, options ...trpcagent.RunOption) (<-chan *trpcevent.Event, error) {
-	allOptions := make([]trpcagent.RunOption, 0, len(options)+len(runner.runOptions))
+func (runner *policyRunner) Run(ctx context.Context, userID, sessionID string, message trpcmodel.Message, options ...trpcagent.RunOption) (events <-chan *trpcevent.Event, err error) {
+	defer func() {
+		if recover() != nil {
+			events = nil
+			err = ErrInvalid
+		}
+	}()
+	if runner == nil || isNilAgentValue(runner.delegate) || isNilAgentValue(ctx) {
+		return nil, ErrInvalid
+	}
+	if contextErr := agentContextErr(ctx); contextErr != nil {
+		return nil, contextErr
+	}
+	runCtx := ctx
+	metadata, metadataPresent := executionMetadataValue(ctx)
+	if metadataPresent {
+		if !validExecutionMetadata(metadata) {
+			return nil, ErrInvalid
+		}
+		if metadata.TenantID != runner.tenantID || metadata.AppID != runner.appID || metadata.Revision != runner.revision || metadata.UserID != userID || metadata.SessionID != sessionID {
+			return nil, ErrKnowledgeScope
+		}
+		if metadata.RequestID == "" {
+			metadata.RequestID = "runner-" + uuid.NewString()
+			runCtx = WithExecutionMetadata(ctx, metadata)
+		}
+	} else {
+		// Direct Runner callers (for example a trusted queue worker) do not
+		// pass through Gateway. Install the same immutable scope here rather
+		// than allowing a context-aware capability to run without a request
+		// boundary. A partially populated caller context is only a correlation
+		// source; its tenant, app, user, and session values cannot retarget the
+		// fixed Runner.
+		requestID := "runner-" + uuid.NewString()
+		traceID := ""
+		eventID := requestID
+		if execution, executionErr := servicetool.ExecutionContextFromContext(ctx); executionErr == nil {
+			if execution.TenantID != runner.tenantID || (execution.AppID != "" && execution.AppID != runner.appID) || (execution.UserID != "" && execution.UserID != userID) || (execution.SessionID != "" && execution.SessionID != sessionID) {
+				return nil, ErrKnowledgeScope
+			}
+			traceID = execution.TraceID
+			if execution.EventID != "" {
+				eventID = execution.EventID
+			}
+		}
+		if userID == "" {
+			userID = "runner-user"
+		}
+		if sessionID == "" {
+			sessionID = "runner-session"
+		}
+		metadata = ExecutionMetadata{
+			TenantID: runner.tenantID, AppID: runner.appID, Revision: runner.revision,
+			PrincipalKind: "runner", PrincipalID: "runner", UserID: userID,
+			SessionID: sessionID, EventID: eventID, RequestID: requestID, TraceID: traceID,
+		}
+		runCtx = WithExecutionMetadata(ctx, metadata)
+	}
+	boundSkillContext := skillsecurity.WithScope(runCtx, skillsecurity.Scope{TenantID: runner.tenantID, AppID: runner.appID, Revision: runner.revision})
+	if isNilAgentValue(boundSkillContext) {
+		return nil, ErrInvalid
+	}
+	runCtx = boundSkillContext
+	// Gateway already installs a complete tool context. Direct Runner callers
+	// receive one here as well, and the cached Runner's fixed ledger replaces
+	// any caller-supplied store so app scope cannot be retargeted through a
+	// context value. Inspect the raw value so malformed cross-scope fields are
+	// rejected rather than mistaken for an absent context.
+	execution, executionPresent := servicetool.RawExecutionContextFromContext(runCtx)
+	if executionPresent {
+		if !servicetool.ValidExecutionContextIdentity(execution) {
+			return nil, ErrInvalid
+		}
+		if (execution.TenantID != "" && execution.TenantID != runner.tenantID) || (execution.AppID != "" && execution.AppID != runner.appID) || (execution.UserID != "" && execution.UserID != metadata.UserID) || (execution.SessionID != "" && execution.SessionID != metadata.SessionID) || (metadataPresent && execution.RequestID != "" && execution.RequestID != metadata.RequestID) {
+			return nil, ErrKnowledgeScope
+		}
+		if metadataPresent && metadata.EventID != "" {
+			if execution.EventID != "" && execution.EventID != metadata.EventID {
+				return nil, ErrKnowledgeScope
+			}
+			execution.EventID = metadata.EventID
+		} else if !metadataPresent {
+			if execution.EventID == "" {
+				execution.EventID = metadata.RequestID
+			}
+			metadata.EventID = execution.EventID
+			runCtx = WithExecutionMetadata(runCtx, metadata)
+		} else if execution.EventID == "" {
+			execution.EventID = metadata.RequestID
+		}
+		execution.TenantID = metadata.TenantID
+		execution.AppID = metadata.AppID
+		execution.UserID = metadata.UserID
+		execution.SessionID = metadata.SessionID
+		execution.RequestID = metadata.RequestID
+		execution.TraceID = metadata.TraceID
+		execution.ToolInvocations = runner.toolInvocations
+		runCtx = servicetool.WithExecutionContext(runCtx, execution)
+	} else if !isNilAgentValue(runner.toolInvocations) {
+		eventID := metadata.EventID
+		if eventID == "" {
+			eventID = metadata.RequestID
+		}
+		runCtx = servicetool.WithExecutionContext(runCtx, servicetool.ExecutionContext{
+			TenantID: metadata.TenantID, AppID: metadata.AppID, UserID: metadata.UserID,
+			SessionID: metadata.SessionID, EventID: eventID, RequestID: metadata.RequestID,
+			TraceID: metadata.TraceID, ToolInvocations: runner.toolInvocations,
+		})
+	}
+	allOptions := make([]trpcagent.RunOption, 0, len(options)+len(runner.runOptions)+2)
 	allOptions = append(allOptions, options...)
 	allOptions = append(allOptions, runner.runOptions...)
-	return runner.delegate.Run(ctx, userID, sessionID, message, allOptions...)
+	// Both request correlation and AppName are immutable platform fields.
+	// Append them after caller options so native RunOptions cannot retarget
+	// audit/ledger identity or Memory/Artifact namespaces.
+	allOptions = append(allOptions, trpcagent.WithRequestID(metadata.RequestID), trpcagent.WithAppName(runner.appID))
+	return callDelegateRun(runCtx, runner.delegate, userID, sessionID, message, allOptions...)
+}
+
+func callDelegateRun(ctx context.Context, delegate trpcrunner.Runner, userID, sessionID string, message trpcmodel.Message, options ...trpcagent.RunOption) (events <-chan *trpcevent.Event, err error) {
+	if isNilAgentValue(ctx) || isNilAgentValue(delegate) {
+		return nil, ErrInvalid
+	}
+	if contextErr := agentContextErr(ctx); contextErr != nil {
+		return nil, contextErr
+	}
+	defer func() {
+		if recover() != nil {
+			events = nil
+			err = ErrInvalid
+		}
+	}()
+	return delegate.Run(ctx, userID, sessionID, message, options...)
 }
 
 func (runner *policyRunner) Close() error {
 	if runner == nil {
 		return nil
 	}
-	return errors.Join(runner.delegate.Close(), runner.capabilities.Close())
+	runner.closeOnce.Do(func() {
+		if !isNilAgentValue(runner.delegate) {
+			runner.closeErr = errors.Join(runner.closeErr, closeAgentRunner(runner.delegate))
+		}
+		if runner.capabilities != nil {
+			runner.closeErr = errors.Join(runner.closeErr, closeCapabilitySet(runner.capabilities))
+		}
+		runner.closeErr = errors.Join(runner.closeErr, closeToolSets(runner.toolSets))
+	})
+	return runner.closeErr
+}
+
+func closeCapabilitySet(set *storagefactory.CapabilitySet) (err error) {
+	if set == nil {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			err = errors.New("agent capability close failed")
+		}
+	}()
+	return set.Close()
+}
+
+func closeAgentRunner(runner trpcrunner.Runner) (err error) {
+	if isNilAgentValue(runner) {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			err = errors.New("agent runner close failed")
+		}
+	}()
+	return runner.Close()
 }
 
 func toTRPCGenerationConfig(configuration appmodel.GenerationConfig) trpcmodel.GenerationConfig {

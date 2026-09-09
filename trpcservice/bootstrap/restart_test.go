@@ -64,6 +64,7 @@ func setRestartBootstrapEnvironment(t *testing.T, dsn string) {
 	t.Setenv(envAdminToken, "admin-token")
 	t.Setenv(envAdminTenants, "*")
 	t.Setenv(envModelAPIKey, "restart-test-secret")
+	t.Setenv(envKnowledgeEmbeddingAPIKey, "restart-embedding-secret")
 	t.Setenv(envSessionBackend, "postgres")
 }
 
