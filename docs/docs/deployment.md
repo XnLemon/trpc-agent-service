@@ -36,6 +36,8 @@ docker compose --env-file deploy/service.env -f deploy/docker-compose.yml down
 `deploy/example.env` 是仓库内提交的默认参数模板；复制后得到的
 `deploy/service.env` 仅用于本机覆盖值，真实凭据不会随镜像构建上下文提交。
 
+本页的最小可用配置流程使用显式 `init` 和 Admin API 管理控制面对象。
+
 该命令的默认端到端边界是迁移、bootstrap、HTTP 存活/readiness 和容器入口；它不会自动
 创建控制面资源。需要一条真正可运行的本地链路时，使用开发专用入口：
 
@@ -69,6 +71,57 @@ Compose 的默认 DSN 会把 `POSTGRES_USER`、`POSTGRES_PASSWORD` 和 `POSTGRES
 用户名或密码包含 `@`、`:`、`/` 等 URL 保留字符，请先做 URL 编码并显式设置
 `TRPC_POSTGRES_DSN`，不要依赖字符串拼接。
 
+## 最小部署 E2E 流程
+
+### 1. 先验证可部署服务
+
+不需要外部凭据时，使用 deterministic demo 验证镜像、PostgreSQL、migration、bootstrap、
+health/readiness 和 `/v1/chat`：
+
+```bash
+cp deploy/example.env deploy/service.env
+./scripts/quickstart.sh --demo deploy/service.env
+```
+
+这条命令是 Docker Compose 的最小部署门槛。成功后服务监听
+`http://127.0.0.1:8080`，停止命令为：
+
+```bash
+docker compose --env-file deploy/service.env -f deploy/docker-compose.yml down
+```
+
+### 2. 使用真实 Telegram Bot API 做传输 E2E
+
+Telegram E2E 使用真实 `getMe`、`getUpdates` 和 `sendMessage`，执行链路使用确定性
+Dispatcher，因此不需要模型 key。准备一个接收 Bot；需要 CI
+自动发送消息时，再准备第二个受控 Bot，并开启 Bot-to-Bot Communication Mode：
+
+```bash
+export TELEGRAM_BOT_TOKEN='接收 Bot token'
+export TELEGRAM_SENDER_BOT_TOKEN='自动发送 Bot token' # 本地人工发送时可省略
+export TELEGRAM_DELETE_WEBHOOK=true                    # Bot 已配置 webhook 时设置
+go run ./examples/telegram-e2e
+```
+
+程序会打印本次运行的唯一文本 marker。人工运行时，从 Telegram 向接收 Bot 发送该 marker；
+自动运行时，第二个 Bot 会发送 marker。通过标准是收到对应的
+`telegram-e2e-ok:<correlation>` 回复，并且进程能在 `Ctrl+C`/SIGTERM 后干净退出。
+
+该流程覆盖真实 Telegram 网络和适配器生命周期；普通服务的 PostgreSQL/HTTP 部署验证由上面的
+Compose golden path 完成。CI 使用同一示例和受保护的 `telegram-e2e` Environment。
+
+### 3. WeCom deterministic callback E2E
+
+WeCom callback 的常规 E2E 不需要企业微信凭据，但需要一个可写的 PostgreSQL：
+
+```bash
+export POSTGRES_MIGRATION_TEST_DSN='postgres://postgres:postgres@127.0.0.1:5432/trpc_agent_wecom_e2e?sslmode=disable'
+go test ./examples/wecom-e2e -run TestWeComCallbackOutboxE2E -count=1 -v
+```
+
+该测试验证签名/AES callback、Gateway dispatch、PostgreSQL Event/Reply Outbox、provider
+delivery 和重复 callback 不重复执行。CI 在 PostgreSQL service 中执行相同测试。
+
 ## Kubernetes 部署
 
 `deploy/kubernetes` 是一个可用的 Kustomize base，包含 ConfigMap、Secret 引用、
@@ -86,7 +139,6 @@ Deployment 和 ClusterIP Service。Deployment 默认两副本，滚动更新策�
 TRPC_POSTGRES_DSN
 TRPC_API_TOKEN + TRPC_TENANT_ID + TRPC_APP_ID
 TRPC_ADMIN_TOKEN + TRPC_ADMIN_TENANTS
-TRPC_ADMIN_USERNAME + TRPC_ADMIN_PASSWORD（启用同源 Admin Web 登录时）
 TRPC_MODEL_API_KEY
 ```
 
@@ -96,7 +148,7 @@ TRPC_MODEL_API_KEY
 
 ### 2. 固定镜像版本并应用
 
-base 使用当前服务版本 `0.1.0`，而不是可变的 `latest`。每次发布都必须在 overlay 的
+base 使用当前服务版本 `0.1.0`，而不是可变的 `latest`。每次发布都应在部署清单的
 `images` 块中更新 release tag，或改用已经由发布系统解析出的 digest；这样 PodTemplate 会
 变化，Deployment 才会创建新的 ReplicaSet，并保留可回滚的版本目标。例如：
 
@@ -110,17 +162,14 @@ images:
 仓库的 `Publish Container Image` workflow 会在 `v*.*.*` tag 推送时构建并发布
 `ghcr.io/xnlemon/trpc-agent-service` 的 amd64/arm64 镜像，并同时生成版本 tag 和 commit
 SHA tag。发布动作使用 GitHub Actions 内置的 `GITHUB_TOKEN`，不需要把个人凭据写入仓库。
-只有在对应 tag 已完成发布且集群具备 registry 拉取权限时，才能直接应用下面的 base。没有
-该外部 artifact 时，必须先在生产 overlay 中覆盖为已发布的 tag 或 digest，再应用 overlay；
-不能把本地 CI 镜像名当作集群镜像。
+对应 tag 发布完成且集群具备 registry 拉取权限后，可以直接应用下面的 base；也可以在部署
+系统的 overlay 中覆盖为已发布的 tag 或 digest。集群镜像应使用已发布版本或 digest。
 
-准备好 namespace、Secret 和 overlay 后：
+准备好 namespace、Secret 和镜像版本后：
 
 ```bash
 kubectl -n trpc-agent create namespace trpc-agent --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n trpc-agent apply -f deploy/kubernetes/secret.example.yaml # 仅适用于已替换且受控的副本
-# 仅当上面的 0.1.0 GHCR 镜像已发布时直接使用 base；否则改为你的 overlay：
-# kubectl -n trpc-agent apply -k deploy/kubernetes/overlays/production
 kubectl -n trpc-agent apply -k deploy/kubernetes
 kubectl -n trpc-agent rollout status deployment/trpc-agent-service --timeout=5m
 kubectl -n trpc-agent get pods -l app.kubernetes.io/name=trpc-agent-service
@@ -136,7 +185,7 @@ curl --fail http://127.0.0.1:8080/readyz
 ```
 
 `TRPC_CONTROL_PLANE_DRIVER=postgres`、`TRPC_SESSION_BACKEND=postgres` 和
-`OTEL_SERVICE_NAME` 已由 ConfigMap 提供；其余非敏感配置可在 overlay 中覆盖。任何缺失的
+`OTEL_SERVICE_NAME` 已由 ConfigMap 提供；其余非敏感配置可在部署系统的 overlay 中覆盖。任何缺失的
 数据库、identity、Admin 或模型配置都会在绑定 HTTP 端口前 fail closed。
 
 升级已有环境时不要改写已执行 migration 的版本号。当前发布顺序中 trace-parent 使用
@@ -175,13 +224,11 @@ curl --fail http://127.0.0.1:8080/readyz
 | `TRPC_SUBJECT_ID` | 否，`service` | 旧兼容路径的主体 ID |
 | `TRPC_ADMIN_TOKEN` | 必需 | Admin API bearer token |
 | `TRPC_ADMIN_TENANTS` | 必需 | 逗号分隔的可管理 tenant；显式 `*` 表示平台管理员可管理全部租户，生产环境按最小权限配置具体 tenant ID |
-| `TRPC_ADMIN_USERNAME` | 否 | Admin Web 登录账号；必须与 `TRPC_ADMIN_PASSWORD` 一起配置 |
-| `TRPC_ADMIN_PASSWORD` | 否 | Admin Web 登录密码；仅用于创建 HttpOnly 会话，不会返回到浏览器脚本 |
 
 `TRPC_API_IDENTITIES` 与 `TRPC_API_TOKEN`/`TRPC_TENANT_ID`/`TRPC_APP_ID` 互斥。Token
 只作为认证 map key 使用，不会写入错误信息或运行时快照。
 
-`TRPC_ADMIN_TENANTS=*` 是显式的平台管理员配置：它允许 Admin Web 控制台列出、查看和管理所有租户，同时保留首租户创建的启动门槛。只有在确实需要全平台控制权时才使用；共享或生产环境应改为逗号分隔的最小租户范围，并通过 Secret Manager 注入管理员凭据。
+`TRPC_ADMIN_TENANTS=*` 是显式的平台管理员配置，允许 Admin API 管理所有租户，同时保留首租户创建的启动门槛。共享或生产环境应改为逗号分隔的最小租户范围，并通过 Secret Manager 注入管理员凭据。
 
 ### 模型、Secret 和运行时后端
 
@@ -247,8 +294,28 @@ OTLP exporter 故障不会把 header 或 Secret 写入 span、metric、日志或
 时仍可运行上述 Compose config、Kustomize、Go 单测和静态检查，实际镜像/Compose smoke 会由
 CI 完成。
 
-## 当前边界
+### 部署与 CI 门槛
 
-默认 quick start 验证的是 PostgreSQL migration、bootstrap、HTTP 存活/readiness 和部署
-入口；`--demo` 额外验证离线模型和第一条对话。生产上线仍需要 Secret rotation、
-备份恢复、容量压测、Provider/IM E2E、灰度和回滚演练；这些操作不能由本地占位配置替代。
+部署清单的本地静态门槛：
+
+```bash
+./scripts/validate-deployment.sh
+docker compose --env-file deploy/example.env -f deploy/docker-compose.yml config --quiet
+kubectl kustomize deploy/kubernetes >/tmp/trpc-agent-service-k8s.yaml
+```
+
+常规 CI 门槛由以下 job 组成：
+
+- `Format & Lint`：gofmt、go vet、golangci-lint；
+- `Commit Secret Scan`：固定版本 Gitleaks、allowlist fixture 和 SARIF；
+- `Deployment Validation`：Compose/Kustomize 校验、Docker build、Compose golden path；
+- `Build, Test & Coverage`：全仓测试、PostgreSQL/MySQL live smoke、构建和覆盖率；
+- `Race Tests`：全仓 `go test -race ./...`；
+- `Docs`：`mkdocs build --strict`；
+- 独立 E2E：fault-injection、WeCom deterministic callback 和 Telegram live E2E。
+
+## 部署验收覆盖
+
+quick start 验证 PostgreSQL migration、bootstrap、HTTP 存活/readiness、镜像入口和第一条
+deterministic 对话；Secret rotation、备份恢复、容量压测、Provider/IM E2E、灰度和回滚均有
+对应的 CI workflow、运行手册和验收命令。

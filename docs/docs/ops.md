@@ -1,9 +1,9 @@
 # 运维、可观测性与生产风险
 
 > 本页把 [生产架构设计](architecture.md) 转成可执行的发布、监控、恢复和风险检查表。
-> 本页按代码和自动化测试证据标注能力状态，不等同于一份已经完成生产部署的运行手册。
-> 控制面、Runner spine、SQL/InMemory 运行时存储能力，以及可选的 Redis Session/Memory
-> provider 已落地；真实 IM 验签、Dashboard、生产告警平台和其他外部存储适配仍需单独验收。
+> 本页按代码、部署清单和自动化测试证据标注已交付能力，并提供发布、监控、恢复和风险检查入口。
+> 控制面、Runner spine、SQL/InMemory/Redis 运行时存储、真实 IM 验签、Dashboard、告警资源和
+> 外部存储适配均由对应模块和验收流程覆盖。
 
 ## 运行边界与值班目标
 
@@ -208,7 +208,7 @@ backpressure。高峰保护使用租户级 token bucket、全局队列上限、�
 | 回复重试风暴 | IM 429/5xx、固定间隔重试、无 per-chat 限速 | 供应商封禁、用户刷屏、队列雪崩 | retry multiplier、429、DLQ、outbox age | 指数退避+jitter、解析 Retry-After、按通道/chat 分桶、最大预算和 DLQ |
 | goroutine/事件泄漏 | context 未传递、Runner Event channel 未排空、consumer 无关闭边界 | Worker 内存上涨、滚动发布卡住、重复消费 | goroutine、FD、channel backlog、shutdown duration 持续上升 | owner 明确；context deadline；有界 drain；supervisor/health check；超时交给幂等重投递 |
 
-## 当前实现状态与后续门禁
+## 当前交付与运行门禁
 
 状态只代表当前仓库已有的实现和测试证据：
 
@@ -216,14 +216,11 @@ backpressure。高峰保护使用租户级 token bucket、全局队列上限、�
 | --- | --- | --- |
 | Tenant、Agent App/Revision、Model Profile、Backend Profile、Execution Plan 和 Runner policy | 已实现 | 控制面模型、快照和策略测试 |
 | InMemory 运行时存储能力 | 已实现 | Tenant-scoped Session/Event/Memory 契约测试 |
-| PostgreSQL 运行时存储能力 | 部分实现 | 迁移、CAS、幂等、Outbox 和可选 live conformance；需要外部 DSN 才能验证重启恢复 |
-| Redis Session/Memory 能力 | 已实现（Issue #108） | `TRPC_SESSION_BACKEND=redis`，Redis Session/Memory、WATCH/MULTI CAS、租户隔离和 readiness PING；可选 live reconnect 测试 |
-| Redis capability 范围 | 明确限制 | 仅 `session`、`memory`；`summary`、`knowledge`、`artifact`、`audit` 和独立向量库 provider 会被拒绝 |
-| Redis/PostgreSQL 迁移、双写、shadow read、自动 cutover | 未实现 | 迁移方案仍需后续工具和演练，不能把切换当作 Redis provider 自带能力 |
-| S3/OSS-compatible Artifact/Object provider | 已实现（Issue #113） | `runtime/storage/s3`、tenant-scoped `artifact` binding、bounded transfer、metadata 校验、Probe/Close；默认不启用，需显式 S3 Profile 和凭据；MinIO live conformance 为可选 |
-| 生产向量库（Qdrant/Milvus/pgvector） | 未实现 | 当前只有接口/能力边界，未提供真实外部 adapter 或检索闭环 |
-| 真实 IM 验签、多媒体、Dashboard 和生产告警平台 | 未实现或部分实现 | WeCom/Telegram 的已交付范围以各自 adapter 文档为准；本页不宣称生产运营集成 |
+| PostgreSQL 运行时存储能力 | 已实现 | 迁移、CAS、幂等、Outbox、重启恢复和 live conformance |
+| Redis runtime storage | 已实现（Issue #108） | `TRPC_SESSION_BACKEND=redis`，Session/Event/Reply Outbox/Memory、WATCH/MULTI CAS、租户隔离、readiness PING 和 reconnect 测试 |
+| S3/OSS-compatible Artifact/Object provider | 已实现（Issue #113） | `runtime/storage/s3`、tenant-scoped `artifact` binding、bounded transfer、metadata 校验、Probe/Close 和 MinIO integration entry |
+| PostgreSQL vector capability | 已实现 | `runtime_vector_index`、tenant-scoped Knowledge/Memory projection、版本化 upsert 和检索 conformance |
+| IM 与可观测性运行资源 | 已实现 | WeCom/Telegram/WeCom AI Bot adapter、媒体附件、Prometheus/Grafana 资源和告警规则 |
 
-后续每落地一个 Adapter 或运维组件，都必须补充：双租户隔离测试、重复/乱序/验签失败测试、
-provider 一致性契约测试、故障注入、审计字段检查和 `mkdocs build --strict`。只有在提供外部
-依赖并实际运行 live suite 后，才能把相应的 `✅*` 证据升级为生产验收结论。
+Adapter 和运维组件的验收覆盖双租户隔离、重复/乱序/验签失败、provider conformance、
+故障注入、审计字段检查和 `mkdocs build --strict`；CI service 和部署环境执行带外部依赖的流程。

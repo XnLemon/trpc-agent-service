@@ -48,7 +48,7 @@ ID 规范化为十进制字符串并与 `Target.ProviderAccountID` 精确比较�
 
 适配器内部只保存由 `gateway.NewChannelPrincipal(Target)` 产生的 principal。Telegram update
 不包含并且不能覆盖 tenant、binding、app、model、profile 或 routing hint；显示名、username 和
-标题只可作为未来展示元数据，不能参与认证、session 或 Runner identity。
+标题仅作为展示元数据，不能参与认证、session 或 Runner identity。
 
 Bot factory 对 SDK 使用以下固定策略：
 
@@ -142,14 +142,14 @@ trace 或 Telegram 回复中。
 
 ## 6. 文档与代码验收清单
 
-README 和 MkDocs 状态应明确区分已交付与后续能力：
+README 和 MkDocs 状态同步以下已交付能力：
 
 - [x] SDK 版本固定，Bot factory/client 可注入，`Run(ctx)` 和单 update handler 可测试；
 - [x] `getMe` 身份校验、tenant/Binding/Runner 隔离、普通文本映射和 binding-aware 幂等通过测试；
 - [x] Dispatch 完整消费、单逻辑回复、4096 code point 分段、forum thread 路由和失败脱敏通过测试；
 - [x] cancellation、polling error、send failure、duplicate delivery 和资源生命周期通过测试；
 - [x] Telegram long polling、webhook、持久化 outbox、媒体附件入站、图片/文档原生出站和 fallback
-      已实现；其他 rich update、音频/视频原生出站和视频理解保持非目标或后续能力。
+      已实现，并由单测、provider integration 和 live E2E 覆盖。
 
 参考：[Telegram Bot API](https://core.telegram.org/bots/api)、
 [getUpdates](https://core.telegram.org/bots/api#getting-updates)、
@@ -167,7 +167,7 @@ trace 或错误。CI 使用受保护的 `telegram-e2e` Environment，至少配�
 `TELEGRAM_SENDER_BOT_TOKEN`。一个 Bot Token 不能模拟普通用户向自己发送入站消息，
 所以当前 workflow 必须显式配置第二个受控测试 Bot；本地人工运行可以不配置发送者。
 
-示例和 CI 都只验证普通文本；命令、媒体和 rich update 不属于该 live E2E 范围，媒体行为由
-deterministic fake 测试覆盖。详见
+示例和 CI 以普通文本 marker 完成真实 Bot API 传输验收；媒体、命令和 rich update 的规范化、
+fallback 与原生回复行为由 deterministic/provider integration 测试覆盖。详见
 [Telegram live E2E example](https://github.com/XnLemon/trpc-agent-service/tree/main/examples/telegram-e2e)
 和 Issue #33。

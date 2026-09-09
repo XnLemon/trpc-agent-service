@@ -1,6 +1,8 @@
 # Issue #41：可重启控制面与 Admin API
 
-> 本页是 Issue [#41](https://github.com/XnLemon/trpc-agent-service/issues/41) 的文档先行契约。它承接 PostgreSQL 控制面实现（Issue #37 / PR #38），先固定真实启动、readiness、管理 API 和重启恢复边界，再进入代码实现。
+> 本页是 Issue [#41](https://github.com/XnLemon/trpc-agent-service/issues/41) 的交付契约。它承接 PostgreSQL 控制面实现（Issue #37 / PR #38），记录真实启动、readiness、管理 API 和重启恢复证据。
+
+当前页面同步记录已完成的 bootstrap、readiness、Admin API、持久化 Session 和重启恢复验收。
 
 ## 目标与边界
 
@@ -21,19 +23,20 @@ PostgreSQL
 - Admin API 通过受认证、受租户约束的 HTTP 操作管理控制面；
 - 所有写入继续使用现有 Repository 的乐观锁、状态迁移、发布和 secret-free 约束。
 
-本 Issue 不实现 Session/Event/Memory/Summary 持久化、Redis/向量库/对象存储、真实 KMS/Vault、分布式幂等、Outbox 消费队列、无状态 Worker 扩展或新的 IM 通道。
+Session/Event/Memory/Summary 持久化、Redis/S3 runtime、Secret Resolver、Outbox 消费队列和
+Channel runtime 由对应模块接入 bootstrap；本页固定服务级装配、认证和恢复边界。
 
-## 当前状态与交付边界
+## 已完成能力与交付证据
 
 | 能力 | 当前基线 | Issue #41 交付 |
 | --- | --- | --- |
 | PostgreSQL migration | 已实现并合入 | 复用，不重做 schema |
 | SQL Tenant/App/Model/Backend/Binding Repository | 已实现并合入 | 复用既有契约 |
-| 显式 bootstrap graph | bootstrap.New / NewFromEnvironment 已实现 | 补齐服务级验收和重启证明 |
+| 显式 bootstrap graph | bootstrap.New / NewFromEnvironment 已实现 | 服务级启动、readiness 和双进程重启恢复验收 |
 | HTTP Gateway / readiness | 已有真实 Dispatcher、Registry 和数据库 ping gate | 保持 503/200 和摘流语义 |
-| Admin API | 尚未实现 | 新增最小控制面 HTTP API |
-| Session | 当前为 InMemory capability | 保持现状，明确不是本 Issue 目标 |
-| 重启恢复 E2E | Repository 有持久化测试，完整 fresh bootstrap 链路尚缺 | 新增跨生命周期验证 |
+| Admin API | 已实现 | 受认证、受租户约束的控制面 HTTP API |
+| Session | 已实现 | 按显式配置装配 InMemory/PostgreSQL/Redis capability |
+| 重启恢复 E2E | 已实现 | 独立 Bootstrap 读取同一 PostgreSQL 数据并恢复运行时对象 |
 
 ## Bootstrap 契约
 
@@ -164,7 +167,11 @@ POST   /admin/v1/tenants/{tenant_id}/apps/{app_id}/rollback
 
 ## 重启恢复时序
 
-完整验收必须证明“同一 PostgreSQL 数据 + 两次独立 Bootstrap”而非仅测试 Repository。生产 Bootstrap 是 migration 唯一 owner：先取得 advisory lock，再按文件名顺序执行 0001_control_plane.up.sql、0002_control_plane_repository_functions.up.sql，在 schema_migrations 写入版本；重复启动只验证已应用版本，版本缺失、超前或内容 digest 不一致均失败。迁移事务失败时不构造可接流量的 Runtime。
+完整验收验证“同一 PostgreSQL 数据 + 两次独立 Bootstrap”，而非仅测试 Repository。生产
+Bootstrap 是 migration 唯一 owner：先取得 advisory lock，再由 `migrations.Apply` 按文件名
+顺序执行从 `0001_control_plane.up.sql` 至 `0017_agent_chain.up.sql` 的嵌入式序列，并在
+`schema_migrations` 写入版本；重复启动验证已应用版本，版本缺失、超前或内容 digest 不一致均失败。
+迁移事务失败时不构造可接流量的 Runtime。
 
 ~~~text
 Process A
