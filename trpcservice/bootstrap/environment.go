@@ -16,6 +16,8 @@ import (
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
+	runtimequeue "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue"
+	runtimequeuepostgres "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/queue/postgres"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
@@ -228,6 +230,8 @@ func environmentAdminAuthenticator(config environmentConfig) (admin.Authenticato
 // NewFromEnvironment assembles the production bootstrap graph from explicit
 // process configuration. It fails before binding an HTTP server when the
 // durable control plane or required credentials are not configured.
+//
+//nolint:gocyclo // Environment assembly intentionally keeps startup ownership and cleanup in one boundary.
 func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	if ctx == nil {
 		return nil, ErrInvalidConfig
@@ -312,13 +316,44 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: environment registries: %v", ErrInvalidConfig, err)
 	}
-	aiBotFactories, aiBotBindingIDs, err := environmentWeComAIBotComponents(environmentWeComAIBotDependencies{
-		ctx: ctx, config: config, channels: channelRepo, tenants: tenantRepo, apps: appRepo,
+	modelRepo := environmentModelRepository(config, db, modelCatalog)
+	backendRepo := environmentBackendRepository(config, db, backendCatalog)
+	tenantRuntime, err := environmentTenantRuntimeForStores(environmentTenantRuntimeOptions{
+		config: config, delegateSessions: delegateSessions, runtimeStores: runtimeStores,
+		secretRegistry: secretRegistry, modelRegistry: modelRegistry, backendRegistry: backendRegistry,
+		controlPlane: &environmentTenantRuntimeDependencies{
+			tenants: tenantRepo, apps: appRepo, models: modelRepo, backends: backendRepo,
+			modelCatalog: modelCatalog, backendCatalog: backendCatalog, secrets: secretRegistry,
+		},
 	})
 	if err != nil {
 		_ = delegateSessions.Close()
 		_ = runtimeStores.Close()
 		_ = db.Close()
+		return nil, fmt.Errorf("%w: tenant runtime: %v", ErrInvalidConfig, err)
+	}
+	var executionQueueStore runtimequeue.Store
+	closeEnvironmentResources := func() {
+		if executionQueueStore != nil {
+			_ = executionQueueStore.Close()
+		}
+		_ = tenantRuntime.Close()
+		_ = delegateSessions.Close()
+		_ = runtimeStores.Close()
+		_ = db.Close()
+	}
+	if config.driver == ControlPlaneDriverPostgres {
+		executionQueueStore, err = runtimequeuepostgres.New(db)
+		if err != nil {
+			closeEnvironmentResources()
+			return nil, fmt.Errorf("%w: execution queue: %v", ErrInvalidConfig, err)
+		}
+	}
+	aiBotFactories, aiBotBindingIDs, err := environmentWeComAIBotComponents(environmentWeComAIBotDependencies{
+		ctx: ctx, config: config, channels: channelRepo, tenants: tenantRepo, apps: appRepo,
+	})
+	if err != nil {
+		closeEnvironmentResources()
 		return nil, fmt.Errorf("%w: wecom ai bot components: %v", ErrInvalidConfig, err)
 	}
 	workerFactory := environmentOutboxWorkerFactory(environmentOutboxWorkerDependencies{
@@ -327,9 +362,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	})
 	storageFactory, err := storagefactory.NewRegistryStorageFactory(backendRegistry, secretRegistry)
 	if err != nil {
-		_ = delegateSessions.Close()
-		_ = runtimeStores.Close()
-		_ = db.Close()
+		closeEnvironmentResources()
 		return nil, fmt.Errorf("%w: storage factory: %v", ErrInvalidConfig, err)
 	}
 	graph, err := NewWithDatabase(ctx, db, Config{
@@ -338,7 +371,11 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		Observability:       config.telemetry,
 		Tenants:             tenantRepo,
 		Apps:                appRepo,
+		Models:              modelRepo,
+		Backends:            backendRepo,
 		Channels:            channelRepo,
+		TenantRuntime:       tenantRuntime,
+		ExecutionQueueStore: executionQueueStore,
 		ModelCatalog:        modelCatalog,
 		BackendCatalog:      backendCatalog,
 		SecretResolver:      secretRegistry,
@@ -366,13 +403,11 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		Migrate:          applyMigrations,
 		VerifyMigrations: verifyMigrations,
 		CloseDependencies: func() error {
-			return errors.Join(delegateSessions.Close(), runtimeStores.Close())
+			return errors.Join(tenantRuntime.Close(), delegateSessions.Close(), runtimeStores.Close())
 		},
 	})
 	if err != nil {
-		_ = delegateSessions.Close()
-		_ = runtimeStores.Close()
-		_ = db.Close()
+		closeEnvironmentResources()
 		return nil, err
 	}
 	telemetryOwned = false

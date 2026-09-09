@@ -75,17 +75,30 @@ func (s *Store) Claim(ctx context.Context, tenantID, owner string, lease time.Du
 	if owner == "" || lease <= 0 {
 		return queue.Task{}, queue.ErrInvalid
 	}
-	milliseconds := lease.Milliseconds()
-	if lease%time.Millisecond != 0 {
-		milliseconds++
-	}
-	if milliseconds == 0 {
-		milliseconds = 1
-	}
+	milliseconds := leaseMilliseconds(lease)
 	var value queue.Task
 	err := s.db.QueryRowContext(ctx, "WITH candidate AS (SELECT tenant_id,task_id FROM public.runtime_execution_queue WHERE ($1='' OR tenant_id=$1) AND ((status IN ('queued','retryable') AND next_attempt_at<=now()) OR (status='leased' AND lease_expires_at<=now())) ORDER BY created_at,task_id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE public.runtime_execution_queue q SET status='leased',attempts=q.attempts+1,fencing_token=q.fencing_token+1,lease_owner=$2,lease_expires_at=now()+($3 * interval '1 millisecond'),updated_at=now() FROM candidate c WHERE q.tenant_id=c.tenant_id AND q.task_id=c.task_id RETURNING "+columns, tenantID, owner, milliseconds).Scan(args(&value)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return queue.Task{}, queue.ErrNotFound
+	}
+	return value, err
+}
+
+// Renew extends the current lease without changing its fencing token.
+func (s *Store) Renew(ctx context.Context, tenantID, taskID, owner string, fence int64, lease time.Duration) (queue.Task, error) {
+	if err := check(ctx); err != nil {
+		return queue.Task{}, err
+	}
+	if tenantID == "" || taskID == "" || owner == "" || fence <= 0 || lease <= 0 {
+		return queue.Task{}, queue.ErrInvalid
+	}
+	var value queue.Task
+	err := s.db.QueryRowContext(ctx, "UPDATE public.runtime_execution_queue SET lease_expires_at=now()+($5 * interval '1 millisecond'),updated_at=now() WHERE tenant_id=$1 AND task_id=$2 AND status='leased' AND lease_owner=$3 AND fencing_token=$4 AND lease_expires_at>now() RETURNING "+columns, tenantID, taskID, owner, fence, leaseMilliseconds(lease)).Scan(args(&value)...)
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, lookupErr := s.Get(ctx, tenantID, taskID); lookupErr != nil {
+			return queue.Task{}, lookupErr
+		}
+		return queue.Task{}, queue.ErrConflict
 	}
 	return value, err
 }
@@ -132,6 +145,17 @@ func (s *Store) transition(ctx context.Context, tenantID, taskID, owner string, 
 // Close leaves the caller-owned database open.
 func (s *Store) Close() error { return nil }
 
+func leaseMilliseconds(lease time.Duration) int64 {
+	milliseconds := lease.Milliseconds()
+	if lease%time.Millisecond != 0 {
+		milliseconds++
+	}
+	if milliseconds == 0 {
+		milliseconds = 1
+	}
+	return milliseconds
+}
+
 func check(ctx context.Context) error {
 	if ctx == nil {
 		return queue.ErrInvalid
@@ -144,3 +168,4 @@ func args(value *queue.Task) []any {
 }
 
 var _ queue.Store = (*Store)(nil)
+var _ queue.LeaseRenewer = (*Store)(nil)

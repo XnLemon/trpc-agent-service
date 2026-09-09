@@ -216,6 +216,10 @@ func (config *environmentConfig) loadModel() error {
 		if err != nil {
 			return err
 		}
+		// An optional global key is a deliberate bootstrap fallback for
+		// tenants created after startup. Per-tenant mappings still take
+		// precedence whenever they contain the requested tenant.
+		config.modelAPIKey = strings.TrimSpace(os.Getenv(envModelAPIKey))
 		for _, identity := range config.apiIdentities {
 			if config.modelAPIKeys[identity.TenantID] == "" {
 				return fmt.Errorf("%w: %s has no key for tenant", ErrInvalidConfig, envModelAPIKeys)

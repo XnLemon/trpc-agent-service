@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,6 +20,12 @@ var (
 	ErrConflict = errors.New("queue task lease conflict")
 	// ErrClosed reports use of a closed queue backend.
 	ErrClosed = errors.New("queue is closed")
+	// ErrWorkerShutdown identifies cancellation caused by an owned Worker
+	// stopping. Durable handlers should leave their domain state recoverable.
+	ErrWorkerShutdown = errors.New("execution worker is shutting down")
+	// ErrLeaseLost identifies cancellation after a Worker can no longer renew
+	// the queue lease. The task must remain eligible for another owner.
+	ErrLeaseLost = errors.New("execution queue lease was lost")
 )
 
 // Status is the durable execution task lifecycle state.
@@ -73,12 +80,24 @@ type Store interface {
 	Close() error
 }
 
+// LeaseRenewer is the optional queue capability used by Worker to keep a
+// long-running task fenced to its current owner. Stores that do not implement
+// it still retain lease-expiry recovery through Claim.
+type LeaseRenewer interface {
+	Renew(context.Context, string, string, string, int64, time.Duration) (Task, error)
+}
+
 // Handler executes one task. Returning RetryableError makes the worker retry
-// until MaxAttempts is reached; other errors are dead-lettered immediately.
+// until MaxAttempts is reached, unless the error was marked RetryForever;
+// other errors are dead-lettered immediately.
 type Handler func(context.Context, Task) error
 
 // RetryableError marks a handler failure eligible for another attempt.
-type RetryableError struct{ Cause error }
+type RetryableError struct {
+	Cause        error
+	retryAt      time.Time
+	retryForever bool
+}
 
 func (e *RetryableError) Error() string {
 	if e == nil || e.Cause == nil {
@@ -102,35 +121,55 @@ func Retry(err error) error {
 	return &RetryableError{Cause: err}
 }
 
+// RetryForever keeps a task retryable beyond the configured attempt limit.
+// It is reserved for ownership interruptions such as Worker shutdown or lease
+// loss, where dead-lettering would strand accepted durable work.
+func RetryForever(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &RetryableError{Cause: err, retryForever: true}
+}
+
+// RetryForeverAt keeps a task retryable and delays its next attempt until at.
+func RetryForeverAt(err error, at time.Time) error {
+	if err == nil {
+		return nil
+	}
+	return &RetryableError{Cause: err, retryAt: at, retryForever: true}
+}
+
 // Config configures a Worker lifecycle and retry policy.
 type Config struct {
-	Store         Store
-	Handler       Handler
-	TenantID      string
-	Owner         string
-	LeaseDuration time.Duration
-	PollInterval  time.Duration
-	MaxAttempts   int
-	BackoffBase   time.Duration
-	BackoffMax    time.Duration
+	Store              Store
+	Handler            Handler
+	TenantID           string
+	Owner              string
+	LeaseDuration      time.Duration
+	LeaseRenewInterval time.Duration
+	PollInterval       time.Duration
+	MaxAttempts        int
+	BackoffBase        time.Duration
+	BackoffMax         time.Duration
 }
 
 // Worker owns one queue consumption loop and its handler leases.
 type Worker struct {
-	store         Store
-	handler       Handler
-	tenantID      string
-	owner         string
-	leaseDuration time.Duration
-	pollInterval  time.Duration
-	maxAttempts   int
-	backoffBase   time.Duration
-	backoffMax    time.Duration
-	mu            sync.Mutex
-	cancel        context.CancelFunc
-	done          chan struct{}
-	started       bool
-	closed        bool
+	store              Store
+	handler            Handler
+	tenantID           string
+	owner              string
+	leaseDuration      time.Duration
+	leaseRenewInterval time.Duration
+	pollInterval       time.Duration
+	maxAttempts        int
+	backoffBase        time.Duration
+	backoffMax         time.Duration
+	mu                 sync.Mutex
+	cancel             context.CancelCauseFunc
+	done               chan struct{}
+	started            bool
+	closed             bool
 }
 
 // New validates configuration and creates a Worker.
@@ -153,7 +192,19 @@ func New(config Config) (*Worker, error) {
 	if config.BackoffMax < config.BackoffBase {
 		return nil, ErrInvalid
 	}
-	return &Worker{store: config.Store, handler: config.Handler, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, pollInterval: config.PollInterval, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, done: make(chan struct{})}, nil
+	if config.LeaseRenewInterval < 0 {
+		return nil, ErrInvalid
+	}
+	if config.LeaseRenewInterval == 0 {
+		config.LeaseRenewInterval = config.LeaseDuration / 3
+		if config.LeaseRenewInterval <= 0 {
+			config.LeaseRenewInterval = config.LeaseDuration
+		}
+	}
+	if config.LeaseRenewInterval >= config.LeaseDuration {
+		return nil, ErrInvalid
+	}
+	return &Worker{store: config.Store, handler: config.Handler, tenantID: config.TenantID, owner: config.Owner, leaseDuration: config.LeaseDuration, leaseRenewInterval: config.LeaseRenewInterval, pollInterval: config.PollInterval, maxAttempts: config.MaxAttempts, backoffBase: config.BackoffBase, backoffMax: config.BackoffMax, done: make(chan struct{})}, nil
 }
 
 // RunOnce claims and processes at most one task. It returns false when no task
@@ -182,21 +233,85 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		}
 		return false, err
 	}
-	err = w.handler(ctx, cloneTask(task))
+	err = w.handle(ctx, task)
 	if err == nil {
 		_, completeErr := w.store.Complete(ctx, task.TenantID, task.TaskID, w.owner, task.FencingToken)
 		return true, completeErr
 	}
 	class := errorClass(err)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isRetryable(err) {
-		if task.Attempts < w.maxAttempts {
+		if task.Attempts < w.maxAttempts || retryForever(err) {
 			due := time.Now().UTC().Add(w.backoff(task.Attempts))
+			if retryAt, ok := retryAt(err); ok {
+				due = retryAt
+			}
 			_, retryErr := w.store.Retry(context.Background(), task.TenantID, task.TaskID, w.owner, task.FencingToken, due, class)
 			return true, retryErr
 		}
 	}
 	_, failErr := w.store.Fail(context.Background(), task.TenantID, task.TaskID, w.owner, task.FencingToken, class)
 	return true, failErr
+}
+
+func (w *Worker) handle(ctx context.Context, task Task) error {
+	handlerCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+
+	renewer, canRenew := w.store.(LeaseRenewer)
+	stopRenewal := make(chan struct{})
+	renewalDone := make(chan struct{})
+	renewalErr := make(chan error, 1)
+	var handlerFinished atomic.Bool
+	var cancelRenewal context.CancelFunc
+	if canRenew {
+		renewContext, stopRenewContext := context.WithCancel(ctx)
+		cancelRenewal = stopRenewContext
+		go func() {
+			defer close(renewalDone)
+			ticker := time.NewTicker(w.leaseRenewInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopRenewal:
+					return
+				case <-ticker.C:
+					if handlerFinished.Load() {
+						return
+					}
+					_, err := renewer.Renew(renewContext, task.TenantID, task.TaskID, w.owner, task.FencingToken, w.leaseDuration)
+					if err == nil || handlerFinished.Load() {
+						continue
+					}
+					select {
+					case renewalErr <- err:
+					default:
+					}
+					cancel(ErrLeaseLost)
+					return
+				}
+			}
+		}()
+	}
+	err := w.handler(handlerCtx, cloneTask(task))
+	handlerFinished.Store(true)
+	close(stopRenewal)
+	if cancelRenewal != nil {
+		cancelRenewal()
+	}
+	if canRenew {
+		<-renewalDone
+	}
+	if cause := WorkerCancellationCause(handlerCtx); cause != nil {
+		return RetryForever(cause)
+	}
+	if err == nil {
+		select {
+		case renewErr := <-renewalErr:
+			return Retry(renewErr)
+		default:
+		}
+	}
+	return err
 }
 
 // Start starts one owned run loop. Calling Start twice is an error.
@@ -209,7 +324,8 @@ func (w *Worker) Start(ctx context.Context) error {
 	if w.closed || w.started {
 		return ErrClosed
 	}
-	workerCtx, cancel := context.WithCancel(ctx)
+	workerCtx := context.WithValue(ctx, workerContextKey{}, true)
+	workerCtx, cancel := context.WithCancelCause(workerCtx)
 	w.cancel = cancel
 	w.started = true
 	go func() {
@@ -251,7 +367,7 @@ func (w *Worker) Close() error {
 	started := w.started
 	w.mu.Unlock()
 	if cancel != nil {
-		cancel()
+		cancel(ErrWorkerShutdown)
 	}
 	if started {
 		<-w.done
@@ -278,6 +394,19 @@ func isRetryable(err error) bool {
 	return errors.As(err, &value)
 }
 
+func retryForever(err error) bool {
+	var value *RetryableError
+	return errors.As(err, &value) && value.retryForever
+}
+
+func retryAt(err error) (time.Time, bool) {
+	var value *RetryableError
+	if !errors.As(err, &value) || value.retryAt.IsZero() {
+		return time.Time{}, false
+	}
+	return value.retryAt, true
+}
+
 func errorClass(err error) string {
 	if err == nil {
 		return ""
@@ -295,6 +424,28 @@ func errorClass(err error) string {
 // storing a context in Worker. A worker normally uses a tenant-specific Store
 // view; an unscoped view may use the empty hint to claim any tenant.
 type tenantContextKey struct{}
+
+type workerContextKey struct{}
+
+// WorkerCancellationCause reports an ownership interruption carried by a
+// Worker handler context. Ordinary caller cancellation is intentionally not
+// classified as a Worker interruption.
+func WorkerCancellationCause(ctx context.Context) error {
+	if ctx == nil || ctx.Err() == nil {
+		return nil
+	}
+	cause := context.Cause(ctx)
+	if errors.Is(cause, ErrLeaseLost) {
+		return ErrLeaseLost
+	}
+	if errors.Is(cause, ErrWorkerShutdown) {
+		return ErrWorkerShutdown
+	}
+	if ctx.Value(workerContextKey{}) != nil && errors.Is(cause, context.Canceled) {
+		return ErrWorkerShutdown
+	}
+	return nil
+}
 
 // WithTenant scopes a shared Store claim to one tenant for a single call.
 func WithTenant(ctx context.Context, tenantID string) context.Context {
@@ -444,6 +595,34 @@ func (s *MemoryStore) Claim(ctx context.Context, tenantID, owner string, leaseDu
 	return cloneTask(task), nil
 }
 
+// Renew extends the current lease without changing its fencing token.
+func (s *MemoryStore) Renew(ctx context.Context, tenantID, taskID, owner string, fence int64, leaseDuration time.Duration) (Task, error) {
+	if err := contextErr(ctx); err != nil {
+		return Task{}, err
+	}
+	if tenantID == "" || taskID == "" || owner == "" || fence <= 0 || leaseDuration <= 0 {
+		return Task{}, ErrInvalid
+	}
+	s.backend.mu.Lock()
+	defer s.backend.mu.Unlock()
+	if s.backend.closed {
+		return Task{}, ErrClosed
+	}
+	key := tenantID + "\x00" + taskID
+	task, ok := s.backend.tasks[key]
+	if !ok {
+		return Task{}, ErrNotFound
+	}
+	now := time.Now().UTC()
+	if task.Status != StatusLeased || task.LeaseOwner != owner || task.FencingToken != fence || task.LeaseExpiresAt == nil || !task.LeaseExpiresAt.After(now) {
+		return Task{}, ErrConflict
+	}
+	expires := now.Add(leaseDuration)
+	task.LeaseExpiresAt, task.UpdatedAt = &expires, now
+	s.backend.tasks[key] = task
+	return cloneTask(task), nil
+}
+
 // Complete commits a successful task under the current lease fence.
 func (s *MemoryStore) Complete(ctx context.Context, tenantID, taskID, owner string, fence int64) (Task, error) {
 	return s.transition(ctx, tenantID, taskID, owner, fence, StatusCompleted, "", time.Time{})
@@ -507,6 +686,7 @@ func contextErr(ctx context.Context) error {
 }
 
 var _ Store = (*MemoryStore)(nil)
+var _ LeaseRenewer = (*MemoryStore)(nil)
 
 // FormatTaskKey is useful to adapters that need a stable composite key.
 func FormatTaskKey(tenantID, taskID string) string { return fmt.Sprintf("%s:%s", tenantID, taskID) }

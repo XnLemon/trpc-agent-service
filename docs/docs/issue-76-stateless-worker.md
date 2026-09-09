@@ -3,8 +3,10 @@
 本页是 Issue #76 的 docs-first 合约和实现 ledger。目标是让 Gateway 只负责鉴权、
 限流和投递，Worker 只消费不可变执行任务；所有跨节点状态都落在共享的耐久后端。
 本 Issue 不改变已有运行时存储能力/Reply Outbox 状态机，也不把 InMemory 声称为生产
-耐久存储。`runtime/queue` 是可注入的异步执行边界；当前同步 Gateway 不会隐式把请求
-改成排队语义，Bootstrap 只在显式提供 Worker 时接管其生命周期。
+耐久存储。`runtime/queue` 是可注入的异步执行边界；当 Bootstrap 收到
+`ExecutionQueueStore` 时，会自动创建并接管 Agent Worker。PostgreSQL 环境入口默认接通
+这个路径，Telegram 和企业微信入站会先返回 accepted，再由 Worker 执行；没有提供 queue
+store 的显式本地/测试图仍保留同步 Dispatch 语义。
 
 ## 边界与角色
 
@@ -37,6 +39,8 @@ Gateway 不保存 session 粘性，也不能由请求体选择租户；它把已
   `ErrConflict`。
 - `Claim` 原子地选择 `queued`、到期 `leased` 或 `retryable` 任务，递增
   `fencing_token`，设置 `lease_owner` 和 `lease_expires_at`。
+- `Renew` 在长执行期间延长当前 owner + fence 的 lease，不改变 fencing token；不支持
+  续期的 Store 仍可依靠 lease 到期恢复。
 - `Complete`、`Retry`、`Fail` 必须携带 owner + fence；过期或旧 fence 返回
   `ErrConflict`，不能覆盖新 Worker 的结果。
 - 重试由 `NextAttemptAt` 和有限的指数退避驱动；不可重试错误或超过上限进入
@@ -94,7 +98,7 @@ ETag，元数据事务仍由 SQL 负责。迁移工具不会把 secret、原始�
 
 | 项目 | 阶段 | 证据 | 状态 |
 | --- | --- | --- | --- |
-| 无状态 Gateway/Worker 角色和共享后端边界 | 文档/组合入口 | 本页角色、Bootstrap 可选 Worker | ✅ |
+| 无状态 Gateway/Worker 角色和共享后端边界 | 文档/组合入口 | 本页角色、Bootstrap 自动创建 Worker | ✅ |
 | Durable queue lease/fencing/retry/shutdown | 代码 | `runtime/queue` 契约与测试 | ✅ |
 | 可恢复的迁移阶段状态 | 代码 | `internal/migration.StateStore` 与重建测试 | ✅ |
 | copy、dual-write、catch-up、checksum 工具 | 代码 | 迁移报告和阶段测试 | ✅ |

@@ -277,9 +277,24 @@ func TestDispatcherMapsEventsAndPropagatesIdentityAndRequestID(t *testing.T) {
 		t.Fatalf("event correlation = %+v", events)
 	}
 	captured.mu.Lock()
-	defer captured.mu.Unlock()
 	if captured.userID == "" || captured.sessionID == "" || captured.message.Content != "hello" || captured.requestID != requestID {
+		captured.mu.Unlock()
 		t.Fatalf("captured Runner call user=%q session=%q content=%q request=%q", captured.userID, captured.sessionID, captured.message.Content, captured.requestID)
+	}
+	captured.mu.Unlock()
+	accepted := make(chan struct{}, 1)
+	acceptedStream, err := dispatcher.Dispatch(context.Background(), DispatchRequest{
+		Principal: principal, Accepted: accepted, RequestID: "accepted-request",
+		Message: InboundMessage{Content: "hello", ExternalUserID: "external-user", ConversationKind: channels.ConversationDirect, ExternalPeerID: "external-peer"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = collectDispatchEvents(acceptedStream)
+	select {
+	case <-accepted:
+	default:
+		t.Fatal("synchronous dispatch did not signal acceptance after handoff reservation")
 	}
 }
 

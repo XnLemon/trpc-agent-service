@@ -399,6 +399,82 @@ func TestHandleUpdateMapsPrivateTextAndAggregatesDispatchEvents(t *testing.T) {
 	assertPrivateReply(t, sent, aw.events)
 }
 
+func TestHandleUpdateUsesDurableEnqueueAndReplaysAccepted(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "async", "12345")
+	dispatcher := &asyncDispatchStub{ready: true}
+	client := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
+	adapter := newTestAdapter(t, target, dispatcher, client)
+	auditWriter := &telegramAuditWriter{}
+	adapter.audit = audit.NewRecorder(auditWriter, target.TenantID)
+	update := textUpdate(71, models.ChatTypePrivate, 100, 42, "queued", 0)
+
+	if err := adapter.HandleUpdate(context.Background(), update); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(dispatcher.enqueued()); got != 1 {
+		t.Fatalf("enqueue calls=%d, want 1", got)
+	}
+	if got := len(dispatcher.requests()); got != 0 {
+		t.Fatalf("synchronous dispatch calls=%d, want 0", got)
+	}
+	if got := len(client.sent()); got != 0 {
+		t.Fatalf("accepted update sent %d immediate replies", got)
+	}
+	if got := len(auditWriter.events); got != 1 || auditWriter.events[0].EventType != audit.EventIMIngressAccepted {
+		t.Fatalf("accepted audit events=%+v", auditWriter.events)
+	}
+
+	if err := adapter.HandleUpdate(context.Background(), update); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(dispatcher.enqueued()); got != 1 {
+		t.Fatalf("replay enqueued %d tasks, want 1", got)
+	}
+
+	failingDispatcher := &asyncDispatchStub{ready: true, enqueueErr: errors.New("queue unavailable")}
+	failingClient := &fakeBot{me: &models.User{ID: 12345, IsBot: true}}
+	failingTarget := newTrustedTarget(t, channels.ChannelTelegram, "async-failure", "12345")
+	failingAdapter := newTestAdapter(t, failingTarget, failingDispatcher, failingClient)
+	failingWriter := &telegramAuditWriter{}
+	failingAdapter.audit = audit.NewRecorder(failingWriter, failingTarget.TenantID)
+	if err := failingAdapter.HandleUpdate(context.Background(), textUpdate(72, models.ChatTypePrivate, 100, 42, "rejected", 0)); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("enqueue failure err=%v", err)
+	}
+	if len(failingWriter.events) != 0 {
+		t.Fatalf("enqueue failure wrote accepted audit: %+v", failingWriter.events)
+	}
+	if sent := failingClient.sent(); len(sent) != 1 || sent[0].Text != failureReply {
+		t.Fatalf("enqueue failure reply=%+v", sent)
+	}
+}
+
+func TestHandleUpdateDurableEnqueueFailureBranches(t *testing.T) {
+	target := newTrustedTarget(t, channels.ChannelTelegram, "async-error-branches", "12345")
+	canceledDispatcher := &asyncDispatchStub{ready: true, enqueueErr: context.Canceled}
+	canceledAdapter := newTestAdapter(t, target, canceledDispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
+	canceledAdapter.audit = audit.NewRecorder(&telegramAuditWriter{}, target.TenantID)
+	if err := canceledAdapter.HandleUpdate(context.Background(), textUpdate(73, models.ChatTypePrivate, 100, 42, "canceled", 0)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled enqueue error = %v", err)
+	}
+
+	failingDispatcher := &asyncDispatchStub{ready: true, enqueueErr: errors.New("queue unavailable")}
+	failingClient := &fakeBot{me: &models.User{ID: 12345, IsBot: true}, sendErr: errors.New("send unavailable")}
+	failingTarget := newTrustedTarget(t, channels.ChannelTelegram, "async-send-error", "12345")
+	failingAdapter := newTestAdapter(t, failingTarget, failingDispatcher, failingClient)
+	failingAdapter.audit = audit.NewRecorder(&telegramAuditWriter{}, failingTarget.TenantID)
+	if err := failingAdapter.HandleUpdate(context.Background(), textUpdate(74, models.ChatTypePrivate, 100, 42, "rejected", 0)); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("enqueue/send failure error = %v", err)
+	}
+
+	auditDispatcher := &asyncDispatchStub{ready: true}
+	auditTarget := newTrustedTarget(t, channels.ChannelTelegram, "async-audit-error", "12345")
+	auditAdapter := newTestAdapter(t, auditTarget, auditDispatcher, &fakeBot{me: &models.User{ID: 12345, IsBot: true}})
+	auditAdapter.audit = audit.NewRecorder(&telegramAuditWriter{alwaysFail: true}, auditTarget.TenantID)
+	if err := auditAdapter.HandleUpdate(context.Background(), textUpdate(75, models.ChatTypePrivate, 100, 42, "audit failure", 0)); !errors.Is(err, ErrDispatch) {
+		t.Fatalf("accepted audit failure error = %v", err)
+	}
+}
+
 func assertPrivateInboundRequest(t *testing.T, target channels.RoutingTarget, request gateway.DispatchRequest, contextValue any, key contextKey) {
 	t.Helper()
 	if request.Principal.Kind() != gateway.PrincipalChannel || request.Principal.TenantID() != target.TenantID || request.Principal.AppID() != target.AppID {
@@ -1089,6 +1165,33 @@ type dispatchStub struct {
 	events       []gateway.DispatchEvent
 	err          error
 	stream       func(context.Context, gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error)
+}
+
+type asyncDispatchStub struct {
+	dispatchStub
+	ready       bool
+	enqueueErr  error
+	enqueueList []gateway.DispatchRequest
+}
+
+func (stub *asyncDispatchStub) AsyncDispatchReady() bool {
+	return stub.ready
+}
+
+func (stub *asyncDispatchStub) Enqueue(_ context.Context, request gateway.DispatchRequest) (gateway.EnqueueResult, error) {
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	stub.enqueueList = append(stub.enqueueList, request)
+	if stub.enqueueErr != nil {
+		return gateway.EnqueueResult{}, stub.enqueueErr
+	}
+	return gateway.EnqueueResult{TaskID: "task"}, nil
+}
+
+func (stub *asyncDispatchStub) enqueued() []gateway.DispatchRequest {
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	return append([]gateway.DispatchRequest(nil), stub.enqueueList...)
 }
 
 func (stub *dispatchStub) Dispatch(ctx context.Context, request gateway.DispatchRequest) (<-chan gateway.DispatchEvent, error) {

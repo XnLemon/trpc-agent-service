@@ -1151,6 +1151,26 @@ func TestHandlerAcknowledgesCompletedAndDuplicateDispatch(t *testing.T) {
 	}
 }
 
+func TestHandlerUsesDurableAsyncEnqueueWhenReady(t *testing.T) {
+	dispatcher := &asyncCallbackDispatchStub{callbackDispatchStub: callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)}}
+	handler := newCallbackTestHandler(t, dispatcher)
+	defer func() { _ = handler.Close() }()
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, callbackTestRequest(t, "async-message", "async-user", "hello"))
+	if response.Code != http.StatusOK || response.Body.String() != "success" {
+		t.Fatalf("async callback response = %d %q", response.Code, response.Body.String())
+	}
+	select {
+	case request := <-dispatcher.requests:
+		if request.Accepted == nil || request.Message.Content != "hello" {
+			t.Fatalf("async enqueue request = %+v", request)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("callback did not reach asynchronous enqueue")
+	}
+}
+
 func TestHandlerRejectsInvalidChallengeAndMessageShape(t *testing.T) {
 	handler := newCallbackTestHandler(t, &callbackDispatchStub{requests: make(chan gateway.DispatchRequest, 1)})
 	defer func() { _ = handler.Close() }()
@@ -1593,6 +1613,20 @@ func TestHandlerDrainsStreamAndRejectsCryptographicBoundaryFailures(t *testing.T
 type callbackDispatchStub struct {
 	requests chan gateway.DispatchRequest
 	canceled chan struct{}
+}
+
+type asyncCallbackDispatchStub struct {
+	callbackDispatchStub
+}
+
+func (*asyncCallbackDispatchStub) AsyncDispatchReady() bool { return true }
+
+func (stub *asyncCallbackDispatchStub) Enqueue(_ context.Context, request gateway.DispatchRequest) (gateway.EnqueueResult, error) {
+	stub.requests <- request
+	if request.Accepted != nil {
+		request.Accepted <- struct{}{}
+	}
+	return gateway.EnqueueResult{TaskID: "async-task"}, nil
 }
 
 type signalingAuditWriter struct {
