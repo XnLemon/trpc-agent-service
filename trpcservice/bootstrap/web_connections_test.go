@@ -51,6 +51,7 @@ func TestNewWebChannelConnectionsValidatesDependencies(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // Covers the complete connection replacement and shutdown lifecycle.
 func TestWebChannelConnectionsConnectListReplaceAndDisconnect(t *testing.T) {
 	connections, root, secrets := newWebConnectionsFixture(t)
 	var adapters []*webConnectionAdapter
@@ -263,7 +264,7 @@ func TestWebChannelConnectionsReturnsFailureWhenReplacingConnectionCannotStop(t 
 }
 
 func TestWebChannelConnectionHelpersAndCredentialScope(t *testing.T) {
-	const credentialTenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	const credentialTenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAV" // #nosec G101 -- deterministic tenant ID for secret-scope isolation, not credential material.
 	ready := newWebConnectionAdapter(channels.ChannelTelegram, "helper")
 	if !adapterReady(ready) || conversationURL(ready) != "https://t.me/helper" {
 		t.Fatalf("adapter helper values: ready=%v url=%q", adapterReady(ready), conversationURL(ready))

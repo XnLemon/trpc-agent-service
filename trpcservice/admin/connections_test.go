@@ -11,6 +11,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/channels"
 )
 
+//nolint:gocyclo // Covers the complete HTTP route validation and forwarding contract.
 func TestAdminConnectionsRoutesValidateAndForwardRequests(t *testing.T) {
 	if _, _, err := (&Handler{}).connections(httptest.NewRequest(http.MethodGet, "/", nil), Principal{}, "tenant", nil); !errors.Is(err, ErrConnectionUnavailable) {
 		t.Fatalf("missing connection service error = %v", err)
