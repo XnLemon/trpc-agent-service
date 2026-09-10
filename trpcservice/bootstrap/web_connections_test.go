@@ -217,6 +217,9 @@ func TestWebChannelConnectionsCoversSetupFailureCleanup(t *testing.T) {
 		{name: "binding activation failure", setup: func(connections *webChannelConnections, _ *tenant.Tenant) {
 			connections.bindings = webChannelRepository{Repository: connections.bindings, activateErr: errors.New("activate failed")}
 		}, want: admin.ErrConnectionFailed},
+		{name: "target resolution failure", setup: func(connections *webChannelConnections, _ *tenant.Tenant) {
+			connections.candidates = webCandidateRepository{CandidateConsumer: connections.candidates}
+		}, want: admin.ErrAgentNotReady},
 		{name: "nil adapter", setup: func(connections *webChannelConnections, _ *tenant.Tenant) {
 			connections.adapterFactory = func(context.Context, channels.RoutingTarget, string) (channels.PollingAdapter, error) {
 				return nil, nil
@@ -275,6 +278,12 @@ func TestWebChannelConnectionHelpersAndCredentialScope(t *testing.T) {
 	}
 	if adapterReady(noReadyAdapter{}) != true {
 		t.Fatal("adapter without Ready should be ready")
+	}
+	done := make(chan struct{})
+	close(done)
+	snapshot := (webChannelConnection{binding: &channels.Binding{BindingID: "binding", Channel: channels.ChannelTelegram, ProviderAccountID: "123"}, adapter: ready, url: "https://t.me/helper", done: done}).snapshot()
+	if snapshot.Ready {
+		t.Fatal("completed adapter was reported ready")
 	}
 
 	secrets := modelruntime.NewSecretRegistry()
@@ -502,6 +511,14 @@ type webChannelRepository struct {
 	channels.Repository
 	createErr   error
 	activateErr error
+}
+
+type webCandidateRepository struct {
+	channels.CandidateConsumer
+}
+
+func (repository webCandidateRepository) Get(context.Context, string, string) (*channels.Binding, error) {
+	return nil, nil
 }
 
 func (repository webChannelRepository) Create(ctx context.Context, input channels.CreateInput) (*channels.Binding, channels.ChangeEvent, error) {

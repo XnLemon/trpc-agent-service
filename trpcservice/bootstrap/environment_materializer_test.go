@@ -235,6 +235,65 @@ func TestEnvironmentTenantMaterializerUsesControlPlaneAndFailsClosed(t *testing.
 	}
 }
 
+func TestEnvironmentTenantMaterializerRejectsIncompleteControlPlaneState(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(environmentMaterializerControlPlaneFixture)
+	}{
+		{name: "tenant missing", mutate: func(fixture environmentMaterializerControlPlaneFixture) {
+			fixture.dependencies.tenants = environmentMaterializerTenantRepository{}
+		}},
+		{name: "tenant missing default app", mutate: func(fixture environmentMaterializerControlPlaneFixture) {
+			root := fixture.root.Clone()
+			root.DefaultAgentAppID = nil
+			fixture.dependencies.tenants = environmentMaterializerTenantRepository{value: &root}
+		}},
+		{name: "tenant missing default backend", mutate: func(fixture environmentMaterializerControlPlaneFixture) {
+			root := fixture.root.Clone()
+			root.DefaultBackendProfileID = nil
+			fixture.dependencies.tenants = environmentMaterializerTenantRepository{value: &root}
+		}},
+		{name: "app missing", mutate: func(fixture environmentMaterializerControlPlaneFixture) {
+			fixture.dependencies.apps = environmentMaterializerAppRepository{revision: fixture.dependencies.apps.(environmentMaterializerAppRepository).revision}
+		}},
+		{name: "app suspended", mutate: func(fixture environmentMaterializerControlPlaneFixture) {
+			app := fixture.dependencies.apps.(environmentMaterializerAppRepository).app.Clone()
+			app.Status = appmodel.StatusSuspended
+			fixture.dependencies.apps = environmentMaterializerAppRepository{app: &app, revision: fixture.dependencies.apps.(environmentMaterializerAppRepository).revision}
+		}},
+		{name: "app missing current revision", mutate: func(fixture environmentMaterializerControlPlaneFixture) {
+			app := fixture.dependencies.apps.(environmentMaterializerAppRepository).app.Clone()
+			app.CurrentRevision = nil
+			fixture.dependencies.apps = environmentMaterializerAppRepository{app: &app, revision: fixture.dependencies.apps.(environmentMaterializerAppRepository).revision}
+		}},
+		{name: "revision missing", mutate: func(fixture environmentMaterializerControlPlaneFixture) {
+			fixture.dependencies.apps = environmentMaterializerAppRepository{app: fixture.dependencies.apps.(environmentMaterializerAppRepository).app}
+		}},
+		{name: "model missing", mutate: func(fixture environmentMaterializerControlPlaneFixture) {
+			fixture.dependencies.models = environmentMaterializerModelRepository{}
+		}},
+		{name: "backend missing", mutate: func(fixture environmentMaterializerControlPlaneFixture) {
+			fixture.dependencies.backends = environmentMaterializerBackendRepository{}
+		}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newEnvironmentMaterializerControlPlaneFixture(t)
+			test.mutate(fixture)
+			options := newEnvironmentMaterializerOptions(t, fixture.store)
+			options.config = environmentConfig{runtimeStorage: "inmemory", modelAPIKey: "fallback-key", secretRef: fixture.model.Configuration.SecretRef, modelProvider: defaultModelProvider}
+			options.controlPlane = fixture.dependencies
+			materialize, err := newEnvironmentTenantMaterializer(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := materialize(context.Background(), fixture.root.TenantID); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("materialization error = %v, want ErrInvalidConfig", err)
+			}
+		})
+	}
+}
+
 func newEnvironmentMaterializerFixture(t *testing.T) (environmentTenantRuntimeOptions, *tenant.Tenant, *modelprofile.Profile, *backend.Profile) {
 	t.Helper()
 	modelCatalog, err := modelprofile.NewProviderCatalog(modelprofile.ProviderSpec{Provider: "fake", Models: []string{"web-model"}, EndpointPolicy: modelprofile.FieldForbidden, SecretRefPolicy: modelprofile.FieldRequired})

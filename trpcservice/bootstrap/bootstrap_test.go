@@ -81,6 +81,24 @@ func TestNewBuildsRealGraphAndGatesReadiness(t *testing.T) {
 	}
 }
 
+func TestBootstrapWiresOptionalWebConnections(t *testing.T) {
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	config.SecretResolver = modelruntime.NewSecretRegistry()
+	config.AdminAuthenticator, _ = admin.NewStaticAuthenticator("admin", []string{"*"})
+	config.EnableWebConnections = true
+	graph, err := New(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graph.connections == nil || graph.connectionsClose == nil {
+		t.Fatal("optional web connections were not wired into the runtime")
+	}
+	if err := graph.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBootstrapServesConcurrentTenantsWithIndependentProviders(t *testing.T) {
 	modelCatalog, err := modelprofile.NewProviderCatalog(modelprofile.ProviderSpec{
 		Provider: "fake", Models: []string{"model-one", "model-two"},
@@ -433,6 +451,23 @@ func TestBootstrapRoutesAdminCacheInvalidationsToRuntimeRegistry(t *testing.T) {
 		{TenantID: tenantID, BindingID: "binding-1", Kind: admin.CacheInvalidationBinding},
 	} {
 		invalidateRuntimeCache(graph.Registry, change)
+	}
+}
+
+func TestBootstrapRoutesTenantRuntimeInvalidation(t *testing.T) {
+	config, closeDependencies := testConfig(t)
+	defer closeDependencies()
+	graph, err := New(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = graph.Close() }()
+
+	const tenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	invalidator := &bootstrapTenantRuntimeInvalidator{}
+	invalidateRuntimeCacheWithTenant(graph.Registry, invalidator, admin.CacheInvalidation{TenantID: tenantID, Kind: admin.CacheInvalidationTenant})
+	if invalidator.tenantID != tenantID {
+		t.Fatalf("invalidated tenant = %q, want %q", invalidator.tenantID, tenantID)
 	}
 }
 
@@ -1839,6 +1874,18 @@ func (p bootstrapStaticProvider) Reconcile(context.Context, runtimestorage.Reply
 }
 
 type candidateOnly struct{ channels.CandidateConsumer }
+
+type bootstrapTenantRuntimeInvalidator struct {
+	tenantID string
+}
+
+func (invalidator *bootstrapTenantRuntimeInvalidator) Ensure(context.Context, string) error {
+	return nil
+}
+
+func (invalidator *bootstrapTenantRuntimeInvalidator) InvalidateTenant(tenantID string) {
+	invalidator.tenantID = tenantID
+}
 
 func createBootstrapTenantExecutionState(
 	t *testing.T,
