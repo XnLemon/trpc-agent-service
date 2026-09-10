@@ -27,6 +27,7 @@
   限流、幂等和服务生命周期契约。
 - [Telegram 长轮询 Adapter](telegram.md)：Issue #31 的交付契约，固定单 Binding、Bot
   身份校验、普通文本映射、Dispatch 聚合回复和生命周期边界。
+- [多租户多 Agent Telegram / WeCom 验收链路](multitenant-telegram-acceptance.md)：从 Compose 启动、WebUI 配置、双 Bot 连接到跨租户真实会话和故障定位。
 - [企业微信自建应用 Channel Adapter](wecom.md)：Issue #60/#98 的契约，固定 callback
   验签/AES 解密、可信 Binding 路由、文本/媒体入站和可靠回复边界。
 - [Telegram live E2E 示例](https://github.com/XnLemon/trpc-agent-service/tree/main/examples/telegram-e2e)：
@@ -90,6 +91,7 @@ cd trpc-agent-service
 - [数据模型](data-model.md) — 核心表结构、Session/Event/Memory/Summary/Audit 和租户约束
 - [Channel Binding](channel-binding.md) — 租户级通道绑定、候选发现与可信入站路由
 - [Telegram 长轮询 Adapter](telegram.md) — 单 Binding Telegram long polling、文本映射与安全边界
+- [多租户多 Agent Telegram / WeCom 验收链路](multitenant-telegram-acceptance.md) — 两租户、两 Agent、双渠道真实对话验收操作单
 - [企业微信自建应用 Channel Adapter](wecom.md) — 自建应用 callback、文本/媒体入站与回复 Outbox
 - [企业微信 AI Bot 长连接](wecom-aibot.md) — `wecom_aibot` WebSocket、认证、重连与流式回复
 - [Gateway、Execution Plan 与 HTTP/SSE](gateway.md) — 可信主体、固定执行计划、Runner Registry、

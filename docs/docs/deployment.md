@@ -148,7 +148,7 @@ TRPC_MODEL_API_KEY
 
 ### 2. 固定镜像版本并应用
 
-base 使用当前服务版本 `0.1.0`，而不是可变的 `latest`。每次发布都应在部署清单的
+base 使用当前服务版本 `0.1.1`，而不是可变的 `latest`。每次发布都应在部署清单的
 `images` 块中更新 release tag，或改用已经由发布系统解析出的 digest；这样 PodTemplate 会
 变化，Deployment 才会创建新的 ReplicaSet，并保留可回滚的版本目标。例如：
 

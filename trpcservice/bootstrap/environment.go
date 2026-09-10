@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/XnLemon/trpc-agent-service/migrations"
@@ -16,6 +18,7 @@ import (
 	modelprofile "github.com/XnLemon/trpc-agent-service/trpcservice/model"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/observability"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/outbox"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/runtime"
 	runtimestorage "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage"
 	storagefactory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/factory"
 	runtimestorageinmemory "github.com/XnLemon/trpc-agent-service/trpcservice/runtime/storage/inmemory"
@@ -23,6 +26,7 @@ import (
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/mysql"
 	"github.com/XnLemon/trpc-agent-service/trpcservice/storage/postgres"
 	sessionstorage "github.com/XnLemon/trpc-agent-service/trpcservice/storage/session"
+	"github.com/XnLemon/trpc-agent-service/trpcservice/web"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
@@ -93,8 +97,16 @@ const (
 	// #nosec G101 -- symbolic secret reference, not secret material.
 	defaultModelSecretRef = "env/trpc-model-api-key"
 	defaultSubjectID      = "service"
+	defaultWebRoot        = "/app/web"
 	maxRedisDB            = 1 << 15
 )
+
+func environmentWebRoot() string {
+	if root := strings.TrimSpace(os.Getenv("TRPC_WEB_ROOT")); root != "" {
+		return root
+	}
+	return defaultWebRoot
+}
 
 var (
 	openEnvironmentDatabase                         = postgres.Open
@@ -228,6 +240,8 @@ func environmentAdminAuthenticator(config environmentConfig) (admin.Authenticato
 // NewFromEnvironment assembles the production bootstrap graph from explicit
 // process configuration. It fails before binding an HTTP server when the
 // durable control plane or required credentials are not configured.
+//
+//nolint:gocyclo // Bootstrap coordinates independent control-plane and runtime dependencies.
 func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	if ctx == nil {
 		return nil, ErrInvalidConfig
@@ -312,10 +326,27 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: environment registries: %v", ErrInvalidConfig, err)
 	}
+	modelRepository := environmentModelRepository(config, db, modelCatalog)
+	backendRepository := environmentBackendRepository(config, db, backendCatalog)
+	// Tenant runtime is lazy: tenants created through Admin after startup are
+	// materialized on their first request and can execute without a restart.
+	tenantMaterializer, materializerErr := newEnvironmentTenantMaterializer(environmentTenantRuntimeOptions{
+		config: config, delegateSessions: delegateSessions, runtimeStores: runtimeStores,
+		secretRegistry: secretRegistry, modelRegistry: modelRegistry, backendRegistry: backendRegistry,
+		controlPlane: &environmentTenantRuntimeDependencies{tenants: tenantRepo, apps: appRepo, models: modelRepository, backends: backendRepository, modelCatalog: modelCatalog, backendCatalog: backendCatalog, secrets: secretRegistry},
+	})
+	if materializerErr != nil {
+		return nil, materializerErr
+	}
+	tenantRuntime, materializerErr := runtime.NewTenantRuntimeRegistry(tenantMaterializer)
+	if materializerErr != nil {
+		return nil, materializerErr
+	}
 	aiBotFactories, aiBotBindingIDs, err := environmentWeComAIBotComponents(environmentWeComAIBotDependencies{
 		ctx: ctx, config: config, channels: channelRepo, tenants: tenantRepo, apps: appRepo,
 	})
 	if err != nil {
+		_ = tenantRuntime.Close()
 		_ = delegateSessions.Close()
 		_ = runtimeStores.Close()
 		_ = db.Close()
@@ -323,42 +354,46 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 	}
 	workerFactory := environmentOutboxWorkerFactory(environmentOutboxWorkerDependencies{
 		config: config, replyStore: replyStore, messageStore: messageStore, deliveryStore: deliveryStore, auditWriter: auditWriter,
-		legacy: wecomProvider, aiBotBindings: aiBotBindingIDs,
+		legacy: wecomProvider, aiBotBindings: aiBotBindingIDs, bindings: channelRepo,
 	})
 	storageFactory, err := storagefactory.NewRegistryStorageFactory(backendRegistry, secretRegistry)
 	if err != nil {
+		_ = tenantRuntime.Close()
 		_ = delegateSessions.Close()
 		_ = runtimeStores.Close()
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: storage factory: %v", ErrInvalidConfig, err)
 	}
 	graph, err := NewWithDatabase(ctx, db, Config{
-		OwnDB:               true,
-		ControlPlaneDriver:  config.driver,
-		Observability:       config.telemetry,
-		Tenants:             tenantRepo,
-		Apps:                appRepo,
-		Channels:            channelRepo,
-		ModelCatalog:        modelCatalog,
-		BackendCatalog:      backendCatalog,
-		SecretResolver:      secretRegistry,
-		ModelFactory:        modelRegistry,
-		StorageFactory:      storageFactory,
-		Sessions:            delegateSessions,
-		SessionStore:        runtimeStore,
-		EventHistoryStore:   runtimeStore,
-		MessageStore:        runtimeStore,
-		ReplyBatchStore:     replyBatchStore,
-		Attachments:         attachments,
-		AttachmentStore:     attachmentStore,
-		RuntimeTenantID:     "",
-		Authenticator:       authenticator,
-		AdminAuthenticator:  adminAuthenticator,
-		WeComHandlerFactory: wecomFactory,
-		WeComAIBotFactories: aiBotFactories,
-		OutboxWorkerFactory: workerFactory,
-		OutboxPollInterval:  time.Second,
-		AuditWriter:         auditWriter,
+		OwnDB:                true,
+		ControlPlaneDriver:   config.driver,
+		Observability:        config.telemetry,
+		Tenants:              tenantRepo,
+		Apps:                 appRepo,
+		Channels:             channelRepo,
+		ModelCatalog:         modelCatalog,
+		BackendCatalog:       backendCatalog,
+		SecretResolver:       secretRegistry,
+		TenantRuntime:        tenantRuntime,
+		ModelFactory:         modelRegistry,
+		StorageFactory:       storageFactory,
+		Sessions:             delegateSessions,
+		SessionStore:         runtimeStore,
+		EventHistoryStore:    runtimeStore,
+		MessageStore:         runtimeStore,
+		ReplyBatchStore:      replyBatchStore,
+		Attachments:          attachments,
+		AttachmentStore:      attachmentStore,
+		RuntimeTenantID:      "",
+		Authenticator:        authenticator,
+		AdminAuthenticator:   adminAuthenticator,
+		EnableWebConnections: true,
+		HTTP:                 gateway.HTTPConfig{Web: web.NewHandler(environmentWebRoot())},
+		WeComHandlerFactory:  wecomFactory,
+		WeComAIBotFactories:  aiBotFactories,
+		OutboxWorkerFactory:  workerFactory,
+		OutboxPollInterval:   time.Second,
+		AuditWriter:          auditWriter,
 		Ping: func(pingContext context.Context) error {
 			pinger, _ := runtimeStore.(interface{ Ping(context.Context) error })
 			return environmentPing(pingContext, config.driver, db, pinger)
@@ -366,7 +401,7 @@ func NewFromEnvironment(ctx context.Context) (*Runtime, error) {
 		Migrate:          applyMigrations,
 		VerifyMigrations: verifyMigrations,
 		CloseDependencies: func() error {
-			return errors.Join(delegateSessions.Close(), runtimeStores.Close())
+			return errors.Join(tenantRuntime.Close(), delegateSessions.Close(), runtimeStores.Close())
 		},
 	})
 	if err != nil {

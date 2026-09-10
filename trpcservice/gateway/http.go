@@ -36,6 +36,7 @@ type HTTPConfig struct {
 	Admin          http.Handler
 	AdminAuth      http.Handler
 	WeCom          http.Handler
+	Web            http.Handler
 	Ready          func() bool
 	Limiter        *TenantLimiter
 	Idempotency    *IdempotencyStore
@@ -51,6 +52,7 @@ type HTTPHandler struct {
 	admin          http.Handler
 	adminAuth      http.Handler
 	wecom          http.Handler
+	web            http.Handler
 	ready          func() bool
 	limiter        *TenantLimiter
 	idempotency    *IdempotencyStore
@@ -115,6 +117,7 @@ func NewHTTPHandler(config HTTPConfig) (*HTTPHandler, error) {
 		admin:        config.Admin,
 		adminAuth:    config.AdminAuth,
 		wecom:        config.WeCom,
+		web:          config.Web,
 		maxBodyBytes: config.MaxBodyBytes, requestTimeout: config.RequestTimeout,
 		telemetry: config.Observability, metrics: metrics.New(config.Observability),
 		limiter: config.Limiter, idempotency: config.Idempotency,
@@ -231,6 +234,10 @@ func (handler *HTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.
 	case "/v1/chat/stream":
 		handler.chat(writer, request, true)
 	default:
+		if handler.web != nil && request.URL.Path != "/v1" && !strings.HasPrefix(request.URL.Path, "/v1/") && request.URL.Path != "/admin" && !strings.HasPrefix(request.URL.Path, "/admin/") {
+			handler.web.ServeHTTP(writer, request)
+			return
+		}
 		handler.writeError(writer, request, http.StatusNotFound, "not found", "", "")
 	}
 }

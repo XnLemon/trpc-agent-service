@@ -41,6 +41,8 @@ type Config struct {
 	// It is intentionally best-effort during shutdown: a closed runtime cannot
 	// admit a new execution with a stale Runner.
 	CacheInvalidator CacheInvalidator
+	// Connections owns live, tenant-scoped channel sessions.
+	Connections ChannelConnections
 }
 
 // CacheInvalidator receives the smallest control-plane scope whose future
@@ -110,6 +112,7 @@ func NewHandler(config Config) (*Handler, error) {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	requestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
 	if requestID == "" {
 		requestID = uuid.NewString()
@@ -359,23 +362,27 @@ func (h *Handler) tenants(ctx context.Context, r *http.Request, p Principal) (in
 			if err != nil {
 				return 0, nil, err
 			}
-			if !allowed {
+			if allowed {
+				return http.StatusCreated, created, nil
+			}
+			// The first-tenant gate only protects an empty control plane. Once
+			// an initial tenant exists, a global platform admin may create
+			// additional tenants through the regular repository path.
+		}
+		if _, ok := h.config.Tenants.(firstTenantCreator); !ok {
+			h.firstTenantMu.Lock()
+			defer h.firstTenantMu.Unlock()
+			counter, counterOK := h.config.Tenants.(tenantCounter)
+			if !counterOK {
 				return 0, nil, ErrForbidden
 			}
-			return http.StatusCreated, created, nil
-		}
-		h.firstTenantMu.Lock()
-		defer h.firstTenantMu.Unlock()
-		counter, ok := h.config.Tenants.(tenantCounter)
-		if !ok {
-			return 0, nil, ErrForbidden
-		}
-		count, err := counter.Count(ctx)
-		if err != nil {
-			return 0, nil, err
-		}
-		if count > 0 {
-			return 0, nil, ErrForbidden
+			count, err := counter.Count(ctx)
+			if err != nil {
+				return 0, nil, err
+			}
+			if count > 0 {
+				return 0, nil, ErrForbidden
+			}
 		}
 	}
 	created, err := h.config.Tenants.Create(ctx, input)
@@ -408,6 +415,8 @@ func (h *Handler) tenantRoute(ctx context.Context, r *http.Request, p Principal,
 		}
 	}
 	switch parts[1] {
+	case "connections":
+		return h.connections(r, p, tenantID, parts[2:])
 	case "status":
 		if len(parts) != 2 || r.Method != http.MethodPost {
 			return 0, nil, errNotFound
@@ -912,6 +921,12 @@ func mapError(err error) (int, string) {
 	switch {
 	case errors.Is(err, errInvalidRequest):
 		return http.StatusBadRequest, "invalid_request"
+	case errors.Is(err, ErrConnectionUnavailable):
+		return http.StatusServiceUnavailable, "connections_unavailable"
+	case errors.Is(err, ErrAgentNotReady):
+		return http.StatusConflict, "agent_not_ready"
+	case errors.Is(err, ErrConnectionFailed):
+		return http.StatusBadGateway, "connection_failed"
 	case errors.Is(err, ErrUnauthenticated):
 		return http.StatusUnauthorized, "unauthorized"
 	case errors.Is(err, ErrForbidden):

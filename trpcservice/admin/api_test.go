@@ -114,6 +114,29 @@ func TestAdminMapsMySQLStorageFailureToServiceUnavailable(t *testing.T) {
 	}
 }
 
+func TestAdminConnectionsRouteUsesNoStoreAndMapsServiceErrors(t *testing.T) {
+	handler, _ := testHandler(t)
+	service := &adminConnectionsStub{list: []Connection{{BindingID: "binding", Channel: channels.ChannelTelegram, BotID: "123", Ready: true}}}
+	handler.config.Connections = service
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/tenants/tenant-a/connections", nil)
+	request.Header.Set("Authorization", "Bearer admin-token")
+	request.Header.Set("X-Request-ID", "request-connections")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" || service.listTenant != "tenant-a" {
+		t.Fatalf("connection route = status:%d cache:%q tenant:%q body:%s", response.Code, response.Header().Get("Cache-Control"), service.listTenant, response.Body.String())
+	}
+
+	service.listErr = ErrConnectionUnavailable
+	response = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/admin/v1/tenants/tenant-a/connections", nil)
+	request.Header.Set("Authorization", "Bearer admin-token")
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "connections_unavailable") {
+		t.Fatalf("connection unavailable route = status:%d body:%s", response.Code, response.Body.String())
+	}
+}
+
 func testHandler(t *testing.T) (*Handler, *StaticAuthenticator) {
 	t.Helper()
 	modelCatalog, err := modelprofile.NewProviderCatalog(modelprofile.ProviderSpec{Provider: "openai", Models: []string{"gpt-4o-mini"}, EndpointPolicy: modelprofile.FieldOptional, EndpointSchemes: []string{"https"}, EndpointHosts: []string{"api.openai.com"}, SecretRefPolicy: modelprofile.FieldRequired})
@@ -780,6 +803,7 @@ func TestAdminErrorMappingCategories(t *testing.T) {
 		err    error
 		status int
 	}{
+		{ErrConnectionUnavailable, http.StatusServiceUnavailable}, {ErrAgentNotReady, http.StatusConflict}, {ErrConnectionFailed, http.StatusBadGateway},
 		{ErrUnauthenticated, http.StatusUnauthorized}, {ErrForbidden, http.StatusForbidden}, {errNotFound, http.StatusNotFound},
 		{tenant.ErrConflict, http.StatusConflict}, {appmodel.ErrConflict, http.StatusConflict}, {modelprofile.ErrConflict, http.StatusConflict},
 		{backend.ErrConflict, http.StatusConflict}, {channels.ErrConflict, http.StatusConflict}, {postgres.ErrStorage, http.StatusServiceUnavailable},

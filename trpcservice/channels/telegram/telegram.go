@@ -272,6 +272,7 @@ type Config struct {
 // existing Gateway contracts. It does not create or cache a Runner directly.
 type Adapter struct {
 	client             BotClient
+	username           string
 	dispatcher         gateway.DispatchService
 	principal          gateway.Principal
 	target             channels.RoutingTarget
@@ -421,7 +422,32 @@ func (adapter *Adapter) verifyIdentity(ctx context.Context, providerAccountID st
 		adapter.report(ErrorOperationInitialization, ErrBotIdentityMismatch)
 		return ErrBotIdentityMismatch
 	}
+	adapter.mu.Lock()
+	adapter.username = strings.TrimSpace(me.Username)
+	adapter.mu.Unlock()
 	return nil
+}
+
+// Username returns the provider handle returned by Telegram during identity
+// verification. It is used only to build the operator's first-chat link.
+func (adapter *Adapter) Username() string {
+	if adapter == nil {
+		return ""
+	}
+	adapter.mu.RLock()
+	defer adapter.mu.RUnlock()
+	return adapter.username
+}
+
+// Ready reports whether the adapter has an authenticated Bot client and has
+// not been closed.
+func (adapter *Adapter) Ready() bool {
+	if adapter == nil {
+		return false
+	}
+	adapter.mu.RLock()
+	defer adapter.mu.RUnlock()
+	return adapter.client != nil && !adapter.closed
 }
 
 // Run starts blocking Telegram long polling and returns after ctx is canceled

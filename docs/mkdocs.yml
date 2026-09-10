@@ -44,6 +44,7 @@ nav:
       - "Issue #82 Agent App Registry and Tenant Canary": issue-82-agent-app-registry.md
       - Gateway、Execution Plan 与 HTTP/SSE: gateway.md
       - Telegram 长轮询 Adapter: telegram.md
+      - 多租户多 Agent Telegram / WeCom 验收链路: multitenant-telegram-acceptance.md
       - 企业微信自建应用 Channel Adapter: wecom.md
       - 企业微信 AI Bot 长连接: wecom-aibot.md
       - "Issue #77 Channel Capabilities": issue-77-channel-capabilities.md
